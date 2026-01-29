@@ -35,6 +35,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# Vector database
+chromadb = "2.3"
+
 # Tree-sitter for AST parsing
 tree-sitter = "0.24"
 tree-sitter-rust = "0.23"

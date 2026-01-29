@@ -9,9 +9,9 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use codesearch::{
-    DeleteRepositoryUseCase, EmbeddingService, IndexRepositoryUseCase, InMemoryEmbeddingStorage,
-    ListRepositoriesUseCase, MockEmbeddingService, OrtEmbeddingService, SearchCodeUseCase,
-    SearchQuery, SqliteStorage, TreeSitterParser,
+    ChromaEmbeddingStorage, DeleteRepositoryUseCase, EmbeddingRepository, EmbeddingService,
+    IndexRepositoryUseCase, InMemoryEmbeddingStorage, ListRepositoriesUseCase, MockEmbeddingService,
+    OrtEmbeddingService, SearchCodeUseCase, SearchQuery, SqliteStorage, TreeSitterParser,
 };
 
 /// CodeSearch - Semantic code search powered by embeddings
@@ -34,6 +34,18 @@ struct Cli {
     /// HuggingFace model ID for embeddings (default: sentence-transformers/all-MiniLM-L6-v2)
     #[arg(long, global = true)]
     model: Option<String>,
+
+    /// ChromaDB server URL (default: http://localhost:8000)
+    #[arg(long, global = true, default_value = "http://localhost:8000")]
+    chroma_url: String,
+
+    /// ChromaDB collection name (default: codesearch)
+    #[arg(long, global = true, default_value = "codesearch")]
+    chroma_collection: String,
+
+    /// Use in-memory storage instead of ChromaDB (for testing without ChromaDB server)
+    #[arg(long, global = true)]
+    memory_storage: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -115,7 +127,33 @@ async fn main() -> Result<()> {
         info!("Initializing ONNX embedding service...");
         Arc::new(OrtEmbeddingService::new(cli.model.as_deref())?)
     };
-    let embedding_repo = Arc::new(InMemoryEmbeddingStorage::new(sqlite.clone()));
+
+    // Initialize embedding repository (ChromaDB or in-memory fallback)
+    let embedding_repo: Arc<dyn EmbeddingRepository> = if cli.memory_storage {
+        info!("Using in-memory embedding storage");
+        Arc::new(InMemoryEmbeddingStorage::new(sqlite.clone()))
+    } else {
+        match ChromaEmbeddingStorage::new(
+            &cli.chroma_url,
+            &cli.chroma_collection,
+            sqlite.clone(),
+        )
+        .await
+        {
+            Ok(chroma) => {
+                info!("Connected to ChromaDB at {}", cli.chroma_url);
+                Arc::new(chroma)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to connect to ChromaDB ({}): {}. Falling back to in-memory storage.",
+                    cli.chroma_url,
+                    e
+                );
+                Arc::new(InMemoryEmbeddingStorage::new(sqlite.clone()))
+            }
+        }
+    };
 
     match cli.command {
         Commands::Index { path, name } => {
