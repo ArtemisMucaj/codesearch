@@ -70,6 +70,7 @@ pub enum NodeType {
     Module,
     Constant,
     TypeDef,
+    Interface,
     Block,
 }
 
@@ -85,6 +86,7 @@ impl NodeType {
             NodeType::Module => "module",
             NodeType::Constant => "constant",
             NodeType::TypeDef => "typedef",
+            NodeType::Interface => "interface",
             NodeType::Block => "block",
         }
     }

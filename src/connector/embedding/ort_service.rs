@@ -33,7 +33,9 @@ impl OrtEmbeddingService {
         info!("Initializing ORT embedding service with model: {}", model_id);
 
         // Download model files from HuggingFace
-        let api = hf_hub::api::sync::Api::new()
+        let api = hf_hub::api::sync::ApiBuilder::new()
+            .with_progress(true)
+            .build()
             .map_err(|e| DomainError::internal(format!("Failed to create HF API: {}", e)))?;
 
         let repo = api.model(model_id.to_string());

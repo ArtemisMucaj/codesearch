@@ -57,12 +57,24 @@ impl TreeSitterParser {
                 (class_definition name: (identifier) @name) @class
                 "#
             }
-            Language::JavaScript | Language::TypeScript => {
+            Language::JavaScript => {
                 r#"
                 (function_declaration name: (identifier) @name) @function
                 (class_declaration name: (identifier) @name) @class
                 (method_definition name: (property_identifier) @name) @function
                 (arrow_function) @function
+                "#
+            }
+            Language::TypeScript => {
+                r#"
+                (function_declaration name: (identifier) @name) @function
+                (class_declaration name: (type_identifier) @name) @class
+                (method_definition name: (property_identifier) @name) @function
+                (arrow_function) @function
+                (interface_declaration name: (type_identifier) @name) @interface
+                (type_alias_declaration name: (type_identifier) @name) @typedef
+                (export_statement (interface_declaration name: (type_identifier) @name)) @interface
+                (export_statement (type_alias_declaration name: (type_identifier) @name)) @typedef
                 "#
             }
             Language::Go => {
@@ -87,6 +99,7 @@ impl TreeSitterParser {
             "module" => NodeType::Module,
             "constant" => NodeType::Constant,
             "typedef" => NodeType::TypeDef,
+            "interface" => NodeType::Interface,
             _ => NodeType::Block,
         }
     }

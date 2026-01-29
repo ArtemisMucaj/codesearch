@@ -391,6 +391,7 @@ fn parse_node_type(s: &str) -> NodeType {
         "module" => NodeType::Module,
         "constant" => NodeType::Constant,
         "typedef" => NodeType::TypeDef,
+        "interface" => NodeType::Interface,
         _ => NodeType::Block,
     }
 }

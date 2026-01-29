@@ -60,7 +60,7 @@ rand = "0.8"
 # Embeddings (ONNX Runtime + HuggingFace tokenizers)
 ort = { version = "2.0.0-rc.9", features = ["ndarray"] }
 tokenizers = "0.21"
-hf-hub = "0.3"
+hf-hub = "0.4"
 ndarray = "0.16"
 
 [dev-dependencies]
