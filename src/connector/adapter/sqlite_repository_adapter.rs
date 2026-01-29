@@ -6,13 +6,14 @@ use rusqlite::{params, Connection};
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::domain::{DomainError, Repository, RepositoryRepository};
+use crate::application::RepositoryRepository;
+use crate::domain::{DomainError, Repository};
 
-pub struct SqliteStorage {
+pub struct SqliteRepositoryAdapter {
     conn: Arc<Mutex<Connection>>,
 }
 
-impl SqliteStorage {
+impl SqliteRepositoryAdapter {
     pub fn new(db_path: &Path) -> Result<Self, DomainError> {
         let conn = Connection::open(db_path)
             .map_err(|e| DomainError::storage(format!("Failed to open database: {}", e)))?;
@@ -70,7 +71,7 @@ impl SqliteStorage {
 }
 
 #[async_trait]
-impl RepositoryRepository for SqliteStorage {
+impl RepositoryRepository for SqliteRepositoryAdapter {
     async fn save(&self, repository: &Repository) -> Result<(), DomainError> {
         let conn = self.conn.lock().await;
 
@@ -78,9 +79,13 @@ impl RepositoryRepository for SqliteStorage {
             r#"INSERT OR REPLACE INTO repositories (id, name, path, created_at, updated_at, chunk_count, file_count)
                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
             params![
-                repository.id, repository.name, repository.path,
-                repository.created_at, repository.updated_at,
-                repository.chunk_count, repository.file_count,
+                repository.id(),
+                repository.name(),
+                repository.path(),
+                repository.created_at(),
+                repository.updated_at(),
+                repository.chunk_count(),
+                repository.file_count(),
             ],
         )
         .map_err(|e| DomainError::storage(format!("Failed to save repository: {}", e)))?;
@@ -97,15 +102,15 @@ impl RepositoryRepository for SqliteStorage {
 
         let result = stmt
             .query_row(params![id], |row| {
-                Ok(Repository {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    path: row.get(2)?,
-                    created_at: row.get(3)?,
-                    updated_at: row.get(4)?,
-                    chunk_count: row.get(5)?,
-                    file_count: row.get(6)?,
-                })
+                Ok(Repository::reconstitute(
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
             })
             .ok();
 
@@ -120,15 +125,15 @@ impl RepositoryRepository for SqliteStorage {
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
         let result = stmt.query_row(params![path], |row| {
-            Ok(Repository {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                path: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-                chunk_count: row.get(5)?,
-                file_count: row.get(6)?,
-            })
+            Ok(Repository::reconstitute(
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
         }).ok();
 
         Ok(result)
@@ -143,15 +148,15 @@ impl RepositoryRepository for SqliteStorage {
 
         let rows = stmt
             .query_map([], |row| {
-                Ok(Repository {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    path: row.get(2)?,
-                    created_at: row.get(3)?,
-                    updated_at: row.get(4)?,
-                    chunk_count: row.get(5)?,
-                    file_count: row.get(6)?,
-                })
+                Ok(Repository::reconstitute(
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
             })
             .map_err(|e| DomainError::storage(format!("Failed to query repositories: {}", e)))?;
 

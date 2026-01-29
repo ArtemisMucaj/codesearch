@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use crate::domain::{DomainError, Repository, RepositoryRepository};
+use crate::application::RepositoryRepository;
+use crate::domain::{DomainError, Repository};
 
 pub struct ListRepositoriesUseCase {
     repository_repo: Arc<dyn RepositoryRepository>,

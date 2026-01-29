@@ -5,14 +5,15 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::domain::{CodeChunk, DomainError, Embedding, SearchQuery, SearchResult, VectorRepository};
+use crate::application::VectorRepository;
+use crate::domain::{CodeChunk, DomainError, Embedding, SearchQuery, SearchResult};
 
-pub struct InMemoryVectorStorage {
+pub struct InMemoryVectorRepository {
     chunks: Arc<Mutex<HashMap<String, CodeChunk>>>,
     embeddings: Arc<Mutex<HashMap<String, Embedding>>>,
 }
 
-impl InMemoryVectorStorage {
+impl InMemoryVectorRepository {
     pub fn new() -> Self {
         Self {
             chunks: Arc::new(Mutex::new(HashMap::new())),
@@ -21,8 +22,14 @@ impl InMemoryVectorStorage {
     }
 }
 
+impl Default for InMemoryVectorRepository {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
-impl VectorRepository for InMemoryVectorStorage {
+impl VectorRepository for InMemoryVectorRepository {
     async fn save_batch(
         &self,
         chunks: &[CodeChunk],
@@ -32,11 +39,11 @@ impl VectorRepository for InMemoryVectorStorage {
         let mut embedding_store = self.embeddings.lock().await;
 
         for chunk in chunks {
-            chunk_store.insert(chunk.id.clone(), chunk.clone());
+            chunk_store.insert(chunk.id().to_string(), chunk.clone());
         }
 
         for embedding in embeddings {
-            embedding_store.insert(embedding.chunk_id.clone(), embedding.clone());
+            embedding_store.insert(embedding.chunk_id().to_string(), embedding.clone());
         }
 
         debug!("Saved {} chunks and {} embeddings to memory", chunks.len(), embeddings.len());
@@ -57,8 +64,8 @@ impl VectorRepository for InMemoryVectorStorage {
 
         let ids: Vec<String> = chunk_store
             .values()
-            .filter(|chunk| chunk.repository_id == repository_id)
-            .map(|chunk| chunk.id.clone())
+            .filter(|chunk| chunk.repository_id() == repository_id)
+            .map(|chunk| chunk.id().to_string())
             .collect();
 
         for id in ids {
@@ -79,8 +86,8 @@ impl VectorRepository for InMemoryVectorStorage {
             let mut scored: Vec<(String, f32)> = embeddings
                 .values()
                 .map(|embedding| {
-                    let score = cosine_similarity(query_embedding, &embedding.vector);
-                    (embedding.chunk_id.clone(), score)
+                    let score = cosine_similarity(query_embedding, embedding.vector());
+                    (embedding.chunk_id().to_string(), score)
                 })
                 .collect();
 
@@ -92,11 +99,11 @@ impl VectorRepository for InMemoryVectorStorage {
         let mut results = Vec::new();
 
         for (chunk_id, score) in scored_ids {
-            if results.len() >= query.limit {
+            if results.len() >= query.limit() {
                 break;
             }
 
-            if let Some(min_score) = query.min_score {
+            if let Some(min_score) = query.min_score() {
                 if score < min_score {
                     continue;
                 }
@@ -107,20 +114,20 @@ impl VectorRepository for InMemoryVectorStorage {
                 None => continue,
             };
 
-            if let Some(ref languages) = query.languages {
-                if !languages.iter().any(|l| l == chunk.language.as_str()) {
+            if let Some(languages) = query.languages() {
+                if !languages.iter().any(|l| l == chunk.language().as_str()) {
                     continue;
                 }
             }
 
-            if let Some(ref node_types) = query.node_types {
-                if !node_types.iter().any(|t| t == chunk.node_type.as_str()) {
+            if let Some(node_types) = query.node_types() {
+                if !node_types.iter().any(|t| t == chunk.node_type().as_str()) {
                     continue;
                 }
             }
 
-            if let Some(ref repo_ids) = query.repository_ids {
-                if !repo_ids.contains(&chunk.repository_id) {
+            if let Some(repo_ids) = query.repository_ids() {
+                if !repo_ids.contains(&chunk.repository_id().to_string()) {
                     continue;
                 }
             }

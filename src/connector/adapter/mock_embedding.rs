@@ -5,30 +5,31 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use tracing::debug;
 
-use crate::domain::{CodeChunk, DomainError, Embedding, EmbeddingConfig, EmbeddingService};
+use crate::application::EmbeddingService;
+use crate::domain::{CodeChunk, DomainError, Embedding, EmbeddingConfig};
 
-pub struct MockEmbeddingService {
+pub struct MockEmbedding {
     config: EmbeddingConfig,
 }
 
-impl MockEmbeddingService {
+impl MockEmbedding {
     pub fn new() -> Self {
         Self {
-            config: EmbeddingConfig {
-                model_name: "mock-embedding".to_string(),
-                dimensions: 384,
-                max_sequence_length: 512,
-            },
+            config: EmbeddingConfig::new(
+                "mock-embedding".to_string(),
+                384,
+                512,
+            ),
         }
     }
 
     pub fn with_dimensions(dimensions: usize) -> Self {
         Self {
-            config: EmbeddingConfig {
-                model_name: "mock-embedding".to_string(),
+            config: EmbeddingConfig::new(
+                "mock-embedding".to_string(),
                 dimensions,
-                max_sequence_length: 512,
-            },
+                512,
+            ),
         }
     }
 
@@ -38,7 +39,7 @@ impl MockEmbeddingService {
         let seed = hasher.finish();
 
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-        let mut vector: Vec<f32> = (0..self.config.dimensions)
+        let mut vector: Vec<f32> = (0..self.config.dimensions())
             .map(|_| rng.gen_range(-1.0..1.0))
             .collect();
 
@@ -55,39 +56,39 @@ impl MockEmbeddingService {
     fn prepare_text(chunk: &CodeChunk) -> String {
         let mut text = String::new();
 
-        if let Some(ref name) = chunk.symbol_name {
+        if let Some(name) = chunk.symbol_name() {
             text.push_str(&format!("{} ", name));
         }
 
-        text.push_str(&format!("[{}] ", chunk.node_type));
-        text.push_str(&chunk.content);
+        text.push_str(&format!("[{}] ", chunk.node_type()));
+        text.push_str(chunk.content());
 
         text
     }
 }
 
-impl Default for MockEmbeddingService {
+impl Default for MockEmbedding {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl EmbeddingService for MockEmbeddingService {
+impl EmbeddingService for MockEmbedding {
     async fn embed_chunk(&self, chunk: &CodeChunk) -> Result<Embedding, DomainError> {
         let text = Self::prepare_text(chunk);
         let vector = self.generate_embedding(&text);
 
         debug!(
             "Generated mock embedding for chunk {} with {} dimensions",
-            chunk.id,
+            chunk.id(),
             vector.len()
         );
 
         Ok(Embedding::new(
-            chunk.id.clone(),
+            chunk.id().to_string(),
             vector,
-            self.config.model_name.clone(),
+            self.config.model_name().to_string(),
         ))
     }
 
@@ -97,7 +98,7 @@ impl EmbeddingService for MockEmbeddingService {
             .map(|chunk| {
                 let text = Self::prepare_text(chunk);
                 let vector = self.generate_embedding(&text);
-                Embedding::new(chunk.id.clone(), vector, self.config.model_name.clone())
+                Embedding::new(chunk.id().to_string(), vector, self.config.model_name().to_string())
             })
             .collect();
 
@@ -121,7 +122,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_embedding_consistency() {
-        let service = MockEmbeddingService::new();
+        let service = MockEmbedding::new();
 
         let embedding1 = service.embed_query("hello world").await.unwrap();
         let embedding2 = service.embed_query("hello world").await.unwrap();
@@ -131,7 +132,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_embedding_dimensions() {
-        let service = MockEmbeddingService::with_dimensions(128);
+        let service = MockEmbedding::with_dimensions(128);
 
         let embedding = service.embed_query("test").await.unwrap();
 
@@ -140,7 +141,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_embedding_normalized() {
-        let service = MockEmbeddingService::new();
+        let service = MockEmbedding::new();
 
         let embedding = service.embed_query("test").await.unwrap();
         let magnitude: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();

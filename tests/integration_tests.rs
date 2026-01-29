@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
 use codesearch::{
-    CodeChunk, IndexRepositoryUseCase, InMemoryVectorStorage, Language, ListRepositoriesUseCase,
-    MockEmbeddingService, NodeType, ParserService, SearchCodeUseCase, SearchQuery, SqliteStorage,
-    TreeSitterParser,
+    CodeChunk, IndexRepositoryUseCase, InMemoryVectorRepository, Language, ListRepositoriesUseCase,
+    MockEmbedding, NodeType, ParserService, SearchCodeUseCase, SearchQuery, 
+    SqliteRepositoryAdapter, TreeSitterParser,
 };
 use tempfile::tempdir;
 
 async fn setup_test_env() -> TestEnv {
-    let sqlite = Arc::new(SqliteStorage::in_memory().expect("Failed to create SQLite"));
-    let vector_repo = Arc::new(InMemoryVectorStorage::new());
+    let sqlite = Arc::new(SqliteRepositoryAdapter::in_memory().expect("Failed to create SQLite"));
+    let vector_repo = Arc::new(InMemoryVectorRepository::new());
     let parser = Arc::new(TreeSitterParser::new());
 
     TestEnv {
@@ -20,9 +20,9 @@ async fn setup_test_env() -> TestEnv {
 }
 
 struct TestEnv {
-    sqlite: Arc<SqliteStorage>,
+    sqlite: Arc<SqliteRepositoryAdapter>,
     #[allow(dead_code)]
-    vector_repo: Arc<InMemoryVectorStorage>,
+    vector_repo: Arc<InMemoryVectorRepository>,
     #[allow(dead_code)]
     parser: Arc<TreeSitterParser>,
 }
@@ -86,7 +86,7 @@ class StringHelper:
 
     let class_chunks: Vec<_> = chunks
         .iter()
-        .filter(|c| c.node_type == NodeType::Class)
+        .filter(|c| c.node_type() == NodeType::Class)
         .collect();
 
     assert_eq!(class_chunks.len(), 2, "Should extract 2 classes");
@@ -100,14 +100,14 @@ async fn test_search_query_builder() {
         .with_languages(vec!["rust".to_string(), "python".to_string()])
         .with_repositories(vec!["repo1".to_string()]);
 
-    assert_eq!(query.query, "test query");
-    assert_eq!(query.limit, 20);
-    assert_eq!(query.min_score, Some(0.5));
+    assert_eq!(query.query(), "test query");
+    assert_eq!(query.limit(), 20);
+    assert_eq!(query.min_score(), Some(0.5));
     assert_eq!(
-        query.languages,
-        Some(vec!["rust".to_string(), "python".to_string()])
+        query.languages(),
+        Some(["rust".to_string(), "python".to_string()].as_slice())
     );
-    assert_eq!(query.repository_ids, Some(vec!["repo1".to_string()]));
+    assert_eq!(query.repository_ids(), Some(["repo1".to_string()].as_slice()));
 }
 
 #[tokio::test]
@@ -135,19 +135,19 @@ async fn test_code_chunk_creation() {
     )
     .with_symbol_name("main");
 
-    assert_eq!(chunk.file_path, "src/main.rs");
-    assert_eq!(chunk.symbol_name, Some("main".to_string()));
-    assert_eq!(chunk.language, Language::Rust);
-    assert_eq!(chunk.node_type, NodeType::Function);
+    assert_eq!(chunk.file_path(), "src/main.rs");
+    assert_eq!(chunk.symbol_name(), Some("main"));
+    assert_eq!(chunk.language(), Language::Rust);
+    assert_eq!(chunk.node_type(), NodeType::Function);
     assert_eq!(chunk.location(), "src/main.rs:1-1");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_vector_store_returns_chunk_documents() {
-    let sqlite = Arc::new(SqliteStorage::in_memory().expect("Failed to create SQLite"));
-    let vector_repo = Arc::new(InMemoryVectorStorage::new());
+    let sqlite = Arc::new(SqliteRepositoryAdapter::in_memory().expect("Failed to create SQLite"));
+    let vector_repo = Arc::new(InMemoryVectorRepository::new());
     let parser = Arc::new(TreeSitterParser::new());
-    let embedding_service = Arc::new(MockEmbeddingService::new());
+    let embedding_service = Arc::new(MockEmbedding::new());
 
     let temp_dir = tempdir().expect("Failed to create temp directory");
     let src_dir = temp_dir.path().join("src");
@@ -180,7 +180,7 @@ pub fn add(a: i32, b: i32) -> i32 {
 
     assert!(!results.is_empty(), "Should find at least one result");
     assert!(
-        results[0].chunk.content.contains("pub fn add"),
+        results[0].chunk().content().contains("pub fn add"),
         "Top result should return chunk document content"
     );
 }
@@ -207,7 +207,7 @@ pub fn subtract(a: i32, b: i32) -> i32 {
     )
     .expect("Failed to write test file");
 
-    let embedding_service = Arc::new(MockEmbeddingService::new());
+    let embedding_service = Arc::new(MockEmbedding::new());
 
     let index_use_case = IndexRepositoryUseCase::new(
         env.sqlite.clone(),
@@ -221,8 +221,8 @@ pub fn subtract(a: i32, b: i32) -> i32 {
         .await
         .expect("Indexing failed");
 
-    assert!(repository.file_count > 0, "Should have indexed at least one file");
-    assert!(repository.chunk_count > 0, "Should have indexed at least one chunk");
+    assert!(repository.file_count() > 0, "Should have indexed at least one file");
+    assert!(repository.chunk_count() > 0, "Should have indexed at least one chunk");
 
     let search_use_case = SearchCodeUseCase::new(env.vector_repo.clone(), embedding_service);
 
@@ -230,5 +230,5 @@ pub fn subtract(a: i32, b: i32) -> i32 {
     let results = search_use_case.execute(query).await.expect("Search failed");
 
     assert!(!results.is_empty(), "Should find at least one result");
-    assert!(results[0].score > 0.0, "Top result should have positive score");
+    assert!(results[0].score() > 0.0, "Top result should have positive score");
 }

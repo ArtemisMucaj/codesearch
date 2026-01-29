@@ -4,10 +4,8 @@ use std::sync::Arc;
 use ignore::WalkBuilder;
 use tracing::{debug, info, warn};
 
-use crate::domain::{
-    DomainError, EmbeddingService, Language, ParserService, Repository, RepositoryRepository,
-    VectorRepository,
-};
+use crate::application::{EmbeddingService, ParserService, RepositoryRepository, VectorRepository};
+use crate::domain::{DomainError, Language, Repository};
 
 pub struct IndexRepositoryUseCase {
     repository_repo: Arc<dyn RepositoryRepository>,
@@ -41,8 +39,8 @@ impl IndexRepositoryUseCase {
 
         if let Some(existing) = self.repository_repo.find_by_path(&path_str).await? {
             info!("Repository already indexed, re-indexing: {}", path_str);
-            self.vector_repo.delete_by_repository(&existing.id).await?;
-            self.repository_repo.delete(&existing.id).await?;
+            self.vector_repo.delete_by_repository(existing.id()).await?;
+            self.repository_repo.delete(existing.id()).await?;
         }
 
         let repo_name = name
@@ -100,7 +98,7 @@ impl IndexRepositoryUseCase {
 
             let chunks = match self
                 .parser_service
-                .parse_file(&content, &relative_path, language, &repository.id)
+                .parse_file(&content, &relative_path, language, repository.id())
                 .await
             {
                 Ok(c) => c,
@@ -131,13 +129,13 @@ impl IndexRepositoryUseCase {
         }
 
         self.repository_repo
-            .update_stats(&repository.id, chunk_count, file_count)
+            .update_stats(repository.id(), chunk_count, file_count)
             .await?;
 
         info!("Indexing complete: {} files, {} chunks", file_count, chunk_count);
 
         self.repository_repo
-            .find_by_id(&repository.id)
+            .find_by_id(repository.id())
             .await?
             .ok_or_else(|| DomainError::internal("Repository not found after indexing"))
     }

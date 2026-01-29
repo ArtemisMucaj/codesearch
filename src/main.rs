@@ -7,9 +7,10 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use codesearch::{
-    ChromaEmbeddingStorage, DeleteRepositoryUseCase, EmbeddingService, IndexRepositoryUseCase,
-    InMemoryVectorStorage, ListRepositoriesUseCase, MockEmbeddingService, OrtEmbeddingService,
-    SearchCodeUseCase, SearchQuery, SqliteStorage, TreeSitterParser, VectorRepository,
+    ChromaVectorRepository, DeleteRepositoryUseCase, EmbeddingService, IndexRepositoryUseCase,
+    InMemoryVectorRepository, ListRepositoriesUseCase, MockEmbedding, OrtEmbedding,
+    SearchCodeUseCase, SearchQuery, SqliteRepositoryAdapter, TreeSitterParser, 
+    VectorRepository,
 };
 
 #[derive(Parser)]
@@ -90,22 +91,22 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&data_dir)?;
 
     let db_path = PathBuf::from(&data_dir).join("codesearch.db");
-    let sqlite = Arc::new(SqliteStorage::new(&db_path)?);
+    let sqlite = Arc::new(SqliteRepositoryAdapter::new(&db_path)?);
 
     let parser = Arc::new(TreeSitterParser::new());
     let embedding_service: Arc<dyn EmbeddingService> = if cli.mock_embeddings {
         info!("Using mock embedding service");
-        Arc::new(MockEmbeddingService::new())
+        Arc::new(MockEmbedding::new())
     } else {
         info!("Initializing ONNX embedding service...");
-        Arc::new(OrtEmbeddingService::new(cli.model.as_deref())?)
+        Arc::new(OrtEmbedding::new(cli.model.as_deref())?)
     };
 
     let vector_repo: Arc<dyn VectorRepository> = if cli.memory_storage {
         info!("Using in-memory vector storage");
-        Arc::new(InMemoryVectorStorage::new())
+        Arc::new(InMemoryVectorRepository::new())
     } else {
-        match ChromaEmbeddingStorage::new(&cli.chroma_url, &cli.chroma_collection).await {
+        match ChromaVectorRepository::new(&cli.chroma_url, &cli.chroma_collection).await {
             Ok(chroma) => {
                 info!("Connected to ChromaDB at {}", cli.chroma_url);
                 Arc::new(chroma)
@@ -116,7 +117,7 @@ async fn main() -> Result<()> {
                     cli.chroma_url,
                     e
                 );
-                Arc::new(InMemoryVectorStorage::new())
+                Arc::new(InMemoryVectorRepository::new())
             }
         }
     };
@@ -133,7 +134,7 @@ async fn main() -> Result<()> {
             let repo = use_case.execute(&path, name.as_deref()).await?;
             println!(
                 "Successfully indexed repository: {} ({} files, {} chunks)",
-                repo.name, repo.file_count, repo.chunk_count
+                repo.name(), repo.file_count(), repo.chunk_count()
             );
         }
 
@@ -171,17 +172,17 @@ async fn main() -> Result<()> {
                     println!(
                         "{}. {} (score: {:.3})",
                         i + 1,
-                        result.chunk.location(),
-                        result.score
+                        result.chunk().location(),
+                        result.score()
                     );
 
-                    if let Some(ref name) = result.chunk.symbol_name {
-                        println!("   Symbol: {} ({})", name, result.chunk.node_type);
+                    if let Some(name) = result.chunk().symbol_name() {
+                        println!("   Symbol: {} ({})", name, result.chunk().node_type());
                     }
 
                     let preview: String = result
-                        .chunk
-                        .content
+                        .chunk()
+                        .content()
                         .lines()
                         .take(3)
                         .map(|l| format!("   | {}", l))
@@ -202,9 +203,9 @@ async fn main() -> Result<()> {
             } else {
                 println!("Indexed repositories:\n");
                 for repo in repos {
-                    println!("  {} ({})", repo.name, repo.id);
-                    println!("    Path: {}", repo.path);
-                    println!("    Files: {}, Chunks: {}", repo.file_count, repo.chunk_count);
+                    println!("  {} ({})", repo.name(), repo.id());
+                    println!("    Path: {}", repo.path());
+                    println!("    Files: {}, Chunks: {}", repo.file_count(), repo.chunk_count());
                     println!();
                 }
             }
@@ -228,8 +229,8 @@ async fn main() -> Result<()> {
             let repos = list_use_case.execute().await?;
 
             let total_repos = repos.len();
-            let total_files: u64 = repos.iter().map(|r| r.file_count).sum();
-            let total_chunks: u64 = repos.iter().map(|r| r.chunk_count).sum();
+            let total_files: u64 = repos.iter().map(|r| r.file_count()).sum();
+            let total_chunks: u64 = repos.iter().map(|r| r.chunk_count()).sum();
 
             println!("CodeSearch Statistics");
             println!("=====================");

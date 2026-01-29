@@ -9,19 +9,20 @@ use ort::{
 use tokenizers::Tokenizer;
 use tracing::{debug, info};
 
-use crate::domain::{CodeChunk, DomainError, Embedding, EmbeddingConfig, EmbeddingService};
+use crate::application::EmbeddingService;
+use crate::domain::{CodeChunk, DomainError, Embedding, EmbeddingConfig};
 
 const DEFAULT_MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
 const DEFAULT_DIMENSIONS: usize = 384;
 const DEFAULT_MAX_SEQ_LENGTH: usize = 256;
 
-pub struct OrtEmbeddingService {
+pub struct OrtEmbedding {
     session: Arc<Mutex<Session>>,
     tokenizer: Arc<Tokenizer>,
     config: EmbeddingConfig,
 }
 
-impl OrtEmbeddingService {
+impl OrtEmbedding {
     pub fn new(model_id: Option<&str>) -> Result<Self, DomainError> {
         let model_id = model_id.unwrap_or(DEFAULT_MODEL_ID);
         info!("Initializing ORT embedding service with model: {}", model_id);
@@ -62,11 +63,11 @@ impl OrtEmbeddingService {
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| DomainError::internal(format!("Failed to load tokenizer: {}", e)))?;
 
-        let config = EmbeddingConfig {
-            model_name: model_name.to_string(),
-            dimensions: DEFAULT_DIMENSIONS,
-            max_sequence_length: DEFAULT_MAX_SEQ_LENGTH,
-        };
+        let config = EmbeddingConfig::new(
+            model_name.to_string(),
+            DEFAULT_DIMENSIONS,
+            DEFAULT_MAX_SEQ_LENGTH,
+        );
 
         Ok(Self {
             session: Arc::new(Mutex::new(session)),
@@ -91,7 +92,7 @@ impl OrtEmbeddingService {
             .map(|e| e.get_ids().len())
             .max()
             .unwrap_or(0)
-            .min(self.config.max_sequence_length);
+            .min(self.config.max_sequence_length());
 
         let mut input_ids: Vec<i64> = Vec::with_capacity(batch_size * max_len);
         let mut attention_mask: Vec<i64> = Vec::with_capacity(batch_size * max_len);
@@ -109,9 +110,9 @@ impl OrtEmbeddingService {
             token_type_ids.extend(type_ids[..len].iter().map(|&x| x as i64));
 
             let padding = max_len - len;
-            input_ids.extend(std::iter::repeat(0i64).take(padding));
-            attention_mask.extend(std::iter::repeat(0i64).take(padding));
-            token_type_ids.extend(std::iter::repeat(0i64).take(padding));
+            input_ids.extend(std::iter::repeat_n(0i64, padding));
+            attention_mask.extend(std::iter::repeat_n(0i64, padding));
+            token_type_ids.extend(std::iter::repeat_n(0i64, padding));
         }
 
         let shape = [batch_size, max_len];
@@ -161,9 +162,9 @@ impl OrtEmbeddingService {
                     for j in 0..seq_len.min(max_len) {
                         let mask_val = if j < mask.len() { mask[j] as f32 } else { 0.0 };
                         if mask_val > 0.0 {
-                            for k in 0..hidden_size {
+                            for (k, emb_k) in embedding.iter_mut().enumerate().take(hidden_size) {
                                 let idx = i * seq_len * hidden_size + j * hidden_size + k;
-                                embedding[k] += data[idx] * mask_val;
+                                *emb_k += data[idx] * mask_val;
                             }
                             count += mask_val;
                         }
@@ -216,15 +217,15 @@ impl OrtEmbeddingService {
 }
 
 #[async_trait]
-impl EmbeddingService for OrtEmbeddingService {
+impl EmbeddingService for OrtEmbedding {
     async fn embed_chunk(&self, chunk: &CodeChunk) -> Result<Embedding, DomainError> {
-        let text = format!("{} {}", chunk.symbol_name.as_deref().unwrap_or(""), chunk.content);
+        let text = format!("{} {}", chunk.symbol_name().unwrap_or(""), chunk.content());
         let vectors = self.embed_texts(&[&text])?;
 
         Ok(Embedding::new(
-            chunk.id.clone(),
+            chunk.id().to_string(),
             vectors.into_iter().next().unwrap_or_default(),
-            self.config.model_name.clone(),
+            self.config.model_name().to_string(),
         ))
     }
 
@@ -239,7 +240,7 @@ impl EmbeddingService for OrtEmbeddingService {
         for batch in chunks.chunks(BATCH_SIZE) {
             let texts: Vec<String> = batch
                 .iter()
-                .map(|c| format!("{} {}", c.symbol_name.as_deref().unwrap_or(""), c.content))
+                .map(|c| format!("{} {}", c.symbol_name().unwrap_or(""), c.content()))
                 .collect();
             let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
 
@@ -247,9 +248,9 @@ impl EmbeddingService for OrtEmbeddingService {
 
             for (chunk, vector) in batch.iter().zip(vectors) {
                 all_embeddings.push(Embedding::new(
-                    chunk.id.clone(),
+                    chunk.id().to_string(),
                     vector,
-                    self.config.model_name.clone(),
+                    self.config.model_name().to_string(),
                 ));
             }
         }
@@ -277,7 +278,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "Requires model download"]
     async fn test_ort_embedding_service() {
-        let service = OrtEmbeddingService::new(None).expect("Failed to create service");
+        let service = OrtEmbedding::new(None).expect("Failed to create service");
 
         let embedding = service.embed_query("fn main() { println!(\"Hello\"); }").await.unwrap();
 

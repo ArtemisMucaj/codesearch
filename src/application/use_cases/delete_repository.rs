@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use crate::domain::{DomainError, RepositoryRepository, VectorRepository};
+use crate::application::{RepositoryRepository, VectorRepository};
+use crate::domain::DomainError;
 
 pub struct DeleteRepositoryUseCase {
     repository_repo: Arc<dyn RepositoryRepository>,
@@ -28,7 +29,7 @@ impl DeleteRepositoryUseCase {
             .await?
             .ok_or_else(|| DomainError::not_found(format!("Repository not found: {}", id)))?;
 
-        info!("Deleting repository: {} ({})", repo.name, repo.path);
+        info!("Deleting repository: {} ({})", repo.name(), repo.path());
 
         self.vector_repo.delete_by_repository(id).await?;
         self.repository_repo.delete(id).await?;
@@ -50,6 +51,6 @@ impl DeleteRepositoryUseCase {
             .await?
             .ok_or_else(|| DomainError::not_found(format!("Repository not found at path: {}", path)))?;
 
-        self.execute(&repo.id).await
+        self.execute(repo.id()).await
     }
 }

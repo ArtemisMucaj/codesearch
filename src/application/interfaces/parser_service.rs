@@ -2,6 +2,7 @@ use async_trait::async_trait;
 
 use crate::domain::{CodeChunk, DomainError, Language};
 
+/// Parses source code into semantic chunks.
 #[async_trait]
 pub trait ParserService: Send + Sync {
     async fn parse_file(

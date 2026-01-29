@@ -44,7 +44,27 @@ impl DomainError {
         Self::NotFound(msg.into())
     }
 
+    pub fn already_exists(msg: impl Into<String>) -> Self {
+        Self::AlreadyExists(msg.into())
+    }
+
+    pub fn invalid_input(msg: impl Into<String>) -> Self {
+        Self::InvalidInput(msg.into())
+    }
+
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
+    }
+
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::NotFound(_))
+    }
+
+    pub fn is_already_exists(&self) -> bool {
+        matches!(self, Self::AlreadyExists(_))
+    }
+
+    pub fn is_storage_error(&self) -> bool {
+        matches!(self, Self::StorageError(_))
     }
 }

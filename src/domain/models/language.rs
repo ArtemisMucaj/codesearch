@@ -31,6 +31,17 @@ impl Language {
             .unwrap_or(Language::Unknown)
     }
 
+    pub fn parse(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "rust" => Language::Rust,
+            "python" => Language::Python,
+            "javascript" => Language::JavaScript,
+            "typescript" => Language::TypeScript,
+            "go" => Language::Go,
+            _ => Language::Unknown,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Language::Rust => "rust",
@@ -40,6 +51,53 @@ impl Language {
             Language::Go => "go",
             Language::Unknown => "unknown",
         }
+    }
+
+    pub fn is_known(&self) -> bool {
+        !matches!(self, Language::Unknown)
+    }
+
+    pub fn primary_extension(&self) -> &'static str {
+        match self {
+            Language::Rust => "rs",
+            Language::Python => "py",
+            Language::JavaScript => "js",
+            Language::TypeScript => "ts",
+            Language::Go => "go",
+            Language::Unknown => "",
+        }
+    }
+
+    pub fn extensions(&self) -> &'static [&'static str] {
+        match self {
+            Language::Rust => &["rs"],
+            Language::Python => &["py"],
+            Language::JavaScript => &["js", "jsx", "mjs", "cjs"],
+            Language::TypeScript => &["ts", "tsx"],
+            Language::Go => &["go"],
+            Language::Unknown => &[],
+        }
+    }
+
+    pub fn uses_braces(&self) -> bool {
+        matches!(
+            self,
+            Language::Rust | Language::JavaScript | Language::TypeScript | Language::Go
+        )
+    }
+
+    pub fn is_statically_typed(&self) -> bool {
+        matches!(self, Language::Rust | Language::TypeScript | Language::Go)
+    }
+
+    pub fn all_supported() -> Vec<Language> {
+        vec![
+            Language::Rust,
+            Language::Python,
+            Language::JavaScript,
+            Language::TypeScript,
+            Language::Go,
+        ]
     }
 }
 
@@ -73,5 +131,36 @@ mod tests {
             Language::from_path(Path::new("script.py")),
             Language::Python
         );
+    }
+
+    #[test]
+    fn test_language_from_str() {
+        assert_eq!(Language::parse("rust"), Language::Rust);
+        assert_eq!(Language::parse("PYTHON"), Language::Python);
+        assert_eq!(Language::parse("unknown_lang"), Language::Unknown);
+    }
+
+    #[test]
+    fn test_is_known() {
+        assert!(Language::Rust.is_known());
+        assert!(Language::Python.is_known());
+        assert!(!Language::Unknown.is_known());
+    }
+
+    #[test]
+    fn test_extensions() {
+        assert_eq!(
+            Language::JavaScript.extensions(),
+            &["js", "jsx", "mjs", "cjs"]
+        );
+        assert_eq!(Language::Rust.extensions(), &["rs"]);
+    }
+
+    #[test]
+    fn test_all_supported() {
+        let supported = Language::all_supported();
+        assert!(supported.contains(&Language::Rust));
+        assert!(supported.contains(&Language::Python));
+        assert!(!supported.contains(&Language::Unknown));
     }
 }

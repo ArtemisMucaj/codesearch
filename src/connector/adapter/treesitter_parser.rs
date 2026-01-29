@@ -3,7 +3,8 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 use tracing::debug;
 
-use crate::domain::{CodeChunk, DomainError, Language, NodeType, ParserService};
+use crate::application::ParserService;
+use crate::domain::{CodeChunk, DomainError, Language, NodeType};
 
 pub struct TreeSitterParser {
     supported_languages: Vec<Language>,

@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use tracing::{debug, info};
 
-use crate::domain::{DomainError, EmbeddingService, SearchQuery, SearchResult, VectorRepository};
+use crate::application::{EmbeddingService, VectorRepository};
+use crate::domain::{DomainError, SearchQuery, SearchResult};
 
 pub struct SearchCodeUseCase {
     vector_repo: Arc<dyn VectorRepository>,
@@ -21,9 +22,9 @@ impl SearchCodeUseCase {
     }
 
     pub async fn execute(&self, query: SearchQuery) -> Result<Vec<SearchResult>, DomainError> {
-        info!("Searching for: {}", query.query);
+        info!("Searching for: {}", query.query());
 
-        let query_embedding = self.embedding_service.embed_query(&query.query).await?;
+        let query_embedding = self.embedding_service.embed_query(query.query()).await?;
 
         debug!(
             "Generated query embedding with {} dimensions",

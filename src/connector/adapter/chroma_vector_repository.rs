@@ -8,18 +8,16 @@ use serde_json::Map;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
-use crate::domain::{
-    CodeChunk, DomainError, Embedding, Language, NodeType, SearchQuery, SearchResult,
-    VectorRepository,
-};
+use crate::application::VectorRepository;
+use crate::domain::{CodeChunk, DomainError, Embedding, SearchQuery, SearchResult};
 
-pub struct ChromaEmbeddingStorage {
+pub struct ChromaVectorRepository {
     #[allow(dead_code)]
     client: ChromaClient,
     collection: Arc<Mutex<ChromaCollection>>,
 }
 
-impl ChromaEmbeddingStorage {
+impl ChromaVectorRepository {
     pub async fn new(
         url: &str,
         collection_name: &str,
@@ -59,33 +57,33 @@ impl ChromaEmbeddingStorage {
         map.insert("model".to_string(), serde_json::Value::String(model.to_string()));
         map.insert(
             "file_path".to_string(),
-            serde_json::Value::String(chunk.file_path.clone()),
+            serde_json::Value::String(chunk.file_path().to_string()),
         );
         map.insert(
             "start_line".to_string(),
-            serde_json::Value::Number((chunk.start_line as u64).into()),
+            serde_json::Value::Number((chunk.start_line() as u64).into()),
         );
         map.insert(
             "end_line".to_string(),
-            serde_json::Value::Number((chunk.end_line as u64).into()),
+            serde_json::Value::Number((chunk.end_line() as u64).into()),
         );
         map.insert(
             "language".to_string(),
-            serde_json::Value::String(chunk.language.as_str().to_string()),
+            serde_json::Value::String(chunk.language().as_str().to_string()),
         );
         map.insert(
             "node_type".to_string(),
-            serde_json::Value::String(chunk.node_type.as_str().to_string()),
+            serde_json::Value::String(chunk.node_type().as_str().to_string()),
         );
         map.insert(
             "repository_id".to_string(),
-            serde_json::Value::String(chunk.repository_id.clone()),
+            serde_json::Value::String(chunk.repository_id().to_string()),
         );
-        if let Some(ref name) = chunk.symbol_name {
-            map.insert("symbol_name".to_string(), serde_json::Value::String(name.clone()));
+        if let Some(name) = chunk.symbol_name() {
+            map.insert("symbol_name".to_string(), serde_json::Value::String(name.to_string()));
         }
-        if let Some(ref parent) = chunk.parent_symbol {
-            map.insert("parent_symbol".to_string(), serde_json::Value::String(parent.clone()));
+        if let Some(parent) = chunk.parent_symbol() {
+            map.insert("parent_symbol".to_string(), serde_json::Value::String(parent.to_string()));
         }
         map
     }
@@ -108,47 +106,42 @@ impl ChromaEmbeddingStorage {
             .get("end_line")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| DomainError::internal("Missing end_line metadata"))? as u32;
-        let language = metadata
+        let language_str = metadata
             .get("language")
             .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let node_type = metadata
+            .unwrap_or("unknown");
+        let node_type_str = metadata
             .get("node_type")
             .and_then(|v| v.as_str())
-            .unwrap_or("block")
-            .to_string();
+            .unwrap_or("block");
         let repository_id = metadata
             .get("repository_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| DomainError::internal("Missing repository_id metadata"))?
             .to_string();
 
-        let chunk = CodeChunk {
-            id: id.to_string(),
+        let language = crate::domain::Language::parse(language_str);
+        let node_type = crate::domain::NodeType::parse(node_type_str);
+
+        let chunk = CodeChunk::reconstitute(
+            id.to_string(),
             file_path,
             content,
             start_line,
             end_line,
-            language: parse_language(&language),
-            node_type: parse_node_type(&node_type),
-            symbol_name: metadata
-                .get("symbol_name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            parent_symbol: metadata
-                .get("parent_symbol")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
+            language,
+            node_type,
+            metadata.get("symbol_name").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            metadata.get("parent_symbol").and_then(|v| v.as_str()).map(|s| s.to_string()),
             repository_id,
-        };
+        );
 
         Ok(chunk)
     }
 }
 
 #[async_trait]
-impl VectorRepository for ChromaEmbeddingStorage {
+impl VectorRepository for ChromaVectorRepository {
     async fn save_batch(
         &self,
         chunks: &[CodeChunk],
@@ -166,13 +159,13 @@ impl VectorRepository for ChromaEmbeddingStorage {
 
         let collection = self.collection.lock().await;
 
-        let ids: Vec<&str> = chunks.iter().map(|chunk| chunk.id.as_str()).collect();
-        let documents: Vec<&str> = chunks.iter().map(|chunk| chunk.content.as_str()).collect();
-        let vectors: Vec<Vec<f32>> = embeddings.iter().map(|e| e.vector.clone()).collect();
+        let ids: Vec<&str> = chunks.iter().map(|chunk| chunk.id()).collect();
+        let documents: Vec<&str> = chunks.iter().map(|chunk| chunk.content()).collect();
+        let vectors: Vec<Vec<f32>> = embeddings.iter().map(|e| e.vector().to_vec()).collect();
         let metadatas: Vec<Map<String, serde_json::Value>> = chunks
             .iter()
             .zip(embeddings.iter())
-            .map(|(chunk, embedding)| Self::create_metadata(chunk, &embedding.model))
+            .map(|(chunk, embedding)| Self::create_metadata(chunk, embedding.model()))
             .collect();
 
         let entries = CollectionEntries {
@@ -240,7 +233,7 @@ impl VectorRepository for ChromaEmbeddingStorage {
             query_embeddings: Some(vec![query_embedding.to_vec()]),
             where_metadata: None,
             where_document: None,
-            n_results: Some(query.limit * 2),
+            n_results: Some(query.limit() * 2),
             include: Some(vec!["distances", "metadatas", "documents"]),
         };
 
@@ -272,7 +265,7 @@ impl VectorRepository for ChromaEmbeddingStorage {
         {
             let score = 1.0 / (1.0 + distance);
 
-            if let Some(min_score) = query.min_score {
+            if let Some(min_score) = query.min_score() {
                 if score < min_score {
                     continue;
                 }
@@ -285,27 +278,27 @@ impl VectorRepository for ChromaEmbeddingStorage {
 
             let chunk = Self::chunk_from_metadata(&chunk_id, document, &metadata)?;
 
-            if let Some(ref languages) = query.languages {
-                if !languages.iter().any(|l| l == chunk.language.as_str()) {
+            if let Some(languages) = query.languages() {
+                if !languages.iter().any(|l| l == chunk.language().as_str()) {
                     continue;
                 }
             }
 
-            if let Some(ref node_types) = query.node_types {
-                if !node_types.iter().any(|t| t == chunk.node_type.as_str()) {
+            if let Some(node_types) = query.node_types() {
+                if !node_types.iter().any(|t| t == chunk.node_type().as_str()) {
                     continue;
                 }
             }
 
-            if let Some(ref repo_ids) = query.repository_ids {
-                if !repo_ids.contains(&chunk.repository_id) {
+            if let Some(repo_ids) = query.repository_ids() {
+                if !repo_ids.contains(&chunk.repository_id().to_string()) {
                     continue;
                 }
             }
 
             search_results.push(SearchResult::new(chunk, score));
 
-            if search_results.len() >= query.limit {
+            if search_results.len() >= query.limit() {
                 break;
             }
         }
@@ -320,33 +313,6 @@ impl VectorRepository for ChromaEmbeddingStorage {
             .await
             .map_err(|e| DomainError::internal(format!("Failed to count chunks: {}", e)))?;
         Ok(result as u64)
-    }
-}
-
-fn parse_language(s: &str) -> Language {
-    match s {
-        "rust" => Language::Rust,
-        "python" => Language::Python,
-        "javascript" => Language::JavaScript,
-        "typescript" => Language::TypeScript,
-        "go" => Language::Go,
-        _ => Language::Unknown,
-    }
-}
-
-fn parse_node_type(s: &str) -> NodeType {
-    match s {
-        "function" => NodeType::Function,
-        "class" => NodeType::Class,
-        "struct" => NodeType::Struct,
-        "enum" => NodeType::Enum,
-        "trait" => NodeType::Trait,
-        "impl" => NodeType::Impl,
-        "module" => NodeType::Module,
-        "constant" => NodeType::Constant,
-        "typedef" => NodeType::TypeDef,
-        "interface" => NodeType::Interface,
-        _ => NodeType::Block,
     }
 }
 
@@ -368,17 +334,17 @@ mod tests {
         )
         .with_symbol_name("add");
 
-        let embedding = Embedding::new(chunk.id.clone(), vec![0.0; 3], "mock".to_string());
-        let metadata = ChromaEmbeddingStorage::create_metadata(&chunk, &embedding.model);
-        let rebuilt = ChromaEmbeddingStorage::chunk_from_metadata(
-            &chunk.id,
-            chunk.content.clone(),
+        let embedding = Embedding::new(chunk.id().to_string(), vec![0.0; 3], "mock".to_string());
+        let metadata = ChromaVectorRepository::create_metadata(&chunk, embedding.model());
+        let rebuilt = ChromaVectorRepository::chunk_from_metadata(
+            chunk.id(),
+            chunk.content().to_string(),
             &metadata,
         )
         .expect("chunk rebuild should succeed");
 
-        assert_eq!(rebuilt.file_path, chunk.file_path);
-        assert_eq!(rebuilt.language, chunk.language);
-        assert_eq!(rebuilt.node_type, chunk.node_type);
+        assert_eq!(rebuilt.file_path(), chunk.file_path());
+        assert_eq!(rebuilt.language(), chunk.language());
+        assert_eq!(rebuilt.node_type(), chunk.node_type());
     }
 }
