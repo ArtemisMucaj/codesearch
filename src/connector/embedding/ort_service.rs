@@ -1,0 +1,323 @@
+//! ONNX Runtime-based embedding service using HuggingFace models.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use ndarray::{Array1, Array2, Axis};
+use ort::{GraphOptimizationLevel, Session};
+use tokenizers::Tokenizer;
+use tracing::{debug, info};
+
+use crate::domain::{CodeChunk, DomainError, Embedding, EmbeddingConfig, EmbeddingService};
+
+/// Default model to use for code embeddings.
+/// all-MiniLM-L6-v2 is a good general-purpose model with 384 dimensions.
+const DEFAULT_MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
+const DEFAULT_DIMENSIONS: usize = 384;
+const DEFAULT_MAX_SEQ_LENGTH: usize = 256;
+
+/// Embedding service using ONNX Runtime for inference.
+pub struct OrtEmbeddingService {
+    session: Arc<Session>,
+    tokenizer: Arc<Tokenizer>,
+    config: EmbeddingConfig,
+}
+
+impl OrtEmbeddingService {
+    /// Create a new ORT embedding service by downloading model from HuggingFace.
+    pub fn new(model_id: Option<&str>) -> Result<Self, DomainError> {
+        let model_id = model_id.unwrap_or(DEFAULT_MODEL_ID);
+        info!("Initializing ORT embedding service with model: {}", model_id);
+
+        // Download model files from HuggingFace
+        let api = hf_hub::api::sync::Api::new()
+            .map_err(|e| DomainError::internal(format!("Failed to create HF API: {}", e)))?;
+
+        let repo = api.model(model_id.to_string());
+
+        // Download tokenizer
+        let tokenizer_path = repo
+            .get("tokenizer.json")
+            .map_err(|e| DomainError::internal(format!("Failed to download tokenizer: {}", e)))?;
+
+        // Download ONNX model
+        let model_path = repo
+            .get("model.onnx")
+            .or_else(|_| repo.get("onnx/model.onnx"))
+            .map_err(|e| DomainError::internal(format!("Failed to download ONNX model: {}", e)))?;
+
+        Self::from_paths(model_path, tokenizer_path, model_id)
+    }
+
+    /// Create from local file paths.
+    pub fn from_paths(
+        model_path: PathBuf,
+        tokenizer_path: PathBuf,
+        model_name: &str,
+    ) -> Result<Self, DomainError> {
+        info!("Loading ONNX model from: {:?}", model_path);
+
+        // Initialize ONNX Runtime session
+        let session = Session::builder()
+            .map_err(|e| DomainError::internal(format!("Failed to create session builder: {}", e)))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| DomainError::internal(format!("Failed to set optimization level: {}", e)))?
+            .commit_from_file(&model_path)
+            .map_err(|e| DomainError::internal(format!("Failed to load ONNX model: {}", e)))?;
+
+        // Load tokenizer
+        let tokenizer = Tokenizer::from_file(&tokenizer_path)
+            .map_err(|e| DomainError::internal(format!("Failed to load tokenizer: {}", e)))?;
+
+        let config = EmbeddingConfig {
+            model_name: model_name.to_string(),
+            dimensions: DEFAULT_DIMENSIONS,
+            max_sequence_length: DEFAULT_MAX_SEQ_LENGTH,
+        };
+
+        Ok(Self {
+            session: Arc::new(session),
+            tokenizer: Arc::new(tokenizer),
+            config,
+        })
+    }
+
+    /// Generate embeddings for a batch of texts.
+    fn embed_texts(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, DomainError> {
+        if texts.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Tokenize all texts
+        let encodings = self
+            .tokenizer
+            .encode_batch(texts.to_vec(), true)
+            .map_err(|e| DomainError::internal(format!("Tokenization failed: {}", e)))?;
+
+        let batch_size = encodings.len();
+        let max_len = encodings
+            .iter()
+            .map(|e| e.get_ids().len())
+            .max()
+            .unwrap_or(0)
+            .min(self.config.max_sequence_length);
+
+        // Prepare input tensors
+        let mut input_ids: Vec<i64> = Vec::with_capacity(batch_size * max_len);
+        let mut attention_mask: Vec<i64> = Vec::with_capacity(batch_size * max_len);
+        let mut token_type_ids: Vec<i64> = Vec::with_capacity(batch_size * max_len);
+
+        for encoding in &encodings {
+            let ids = encoding.get_ids();
+            let mask = encoding.get_attention_mask();
+            let type_ids = encoding.get_type_ids();
+
+            let len = ids.len().min(max_len);
+
+            // Add actual tokens
+            input_ids.extend(ids[..len].iter().map(|&x| x as i64));
+            attention_mask.extend(mask[..len].iter().map(|&x| x as i64));
+            token_type_ids.extend(type_ids[..len].iter().map(|&x| x as i64));
+
+            // Pad to max_len
+            let padding = max_len - len;
+            input_ids.extend(std::iter::repeat(0i64).take(padding));
+            attention_mask.extend(std::iter::repeat(0i64).take(padding));
+            token_type_ids.extend(std::iter::repeat(0i64).take(padding));
+        }
+
+        // Create ndarray tensors
+        let input_ids = Array2::from_shape_vec((batch_size, max_len), input_ids)
+            .map_err(|e| DomainError::internal(format!("Failed to create input_ids tensor: {}", e)))?;
+        let attention_mask = Array2::from_shape_vec((batch_size, max_len), attention_mask)
+            .map_err(|e| DomainError::internal(format!("Failed to create attention_mask tensor: {}", e)))?;
+        let token_type_ids = Array2::from_shape_vec((batch_size, max_len), token_type_ids)
+            .map_err(|e| DomainError::internal(format!("Failed to create token_type_ids tensor: {}", e)))?;
+
+        // Run inference
+        let outputs = self
+            .session
+            .run(ort::inputs![
+                "input_ids" => input_ids.view(),
+                "attention_mask" => attention_mask.view(),
+                "token_type_ids" => token_type_ids.view(),
+            ].map_err(|e| DomainError::internal(format!("Failed to create inputs: {}", e)))?)
+            .map_err(|e| DomainError::internal(format!("Inference failed: {}", e)))?;
+
+        // Extract embeddings from output
+        // Most sentence-transformers models output shape (batch_size, seq_len, hidden_size)
+        // We need to mean pool over the sequence dimension
+        let output_tensor = outputs
+            .get("last_hidden_state")
+            .or_else(|| outputs.get("sentence_embedding"))
+            .or_else(|| outputs.iter().next().map(|(_, v)| v))
+            .ok_or_else(|| DomainError::internal("No output tensor found"))?;
+
+        let output_array = output_tensor
+            .try_extract_tensor::<f32>()
+            .map_err(|e| DomainError::internal(format!("Failed to extract output tensor: {}", e)))?;
+
+        let shape = output_array.shape();
+        debug!("Output tensor shape: {:?}", shape);
+
+        let embeddings = if shape.len() == 3 {
+            // Shape: (batch_size, seq_len, hidden_size) - need to mean pool
+            let attention_mask_f32: Array2<f32> = Array2::from_shape_vec(
+                (batch_size, max_len),
+                encodings
+                    .iter()
+                    .flat_map(|e| {
+                        let mask = e.get_attention_mask();
+                        let len = mask.len().min(max_len);
+                        let mut result: Vec<f32> = mask[..len].iter().map(|&x| x as f32).collect();
+                        result.extend(std::iter::repeat(0.0f32).take(max_len - len));
+                        result
+                    })
+                    .collect(),
+            )
+            .map_err(|e| DomainError::internal(format!("Failed to create attention mask: {}", e)))?;
+
+            // Mean pooling with attention mask
+            let output_view = output_array.view();
+            let hidden_size = shape[2];
+
+            (0..batch_size)
+                .map(|i| {
+                    let mut embedding = vec![0.0f32; hidden_size];
+                    let mut count = 0.0f32;
+
+                    for j in 0..max_len {
+                        let mask_val = attention_mask_f32[[i, j]];
+                        if mask_val > 0.0 {
+                            for k in 0..hidden_size {
+                                embedding[k] += output_view[[i, j, k]] * mask_val;
+                            }
+                            count += mask_val;
+                        }
+                    }
+
+                    if count > 0.0 {
+                        for v in &mut embedding {
+                            *v /= count;
+                        }
+                    }
+
+                    // L2 normalize
+                    let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if norm > 0.0 {
+                        for v in &mut embedding {
+                            *v /= norm;
+                        }
+                    }
+
+                    embedding
+                })
+                .collect()
+        } else if shape.len() == 2 {
+            // Shape: (batch_size, hidden_size) - already pooled
+            (0..batch_size)
+                .map(|i| {
+                    let mut embedding: Vec<f32> = (0..shape[1])
+                        .map(|j| output_array[[i, j]])
+                        .collect();
+
+                    // L2 normalize
+                    let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if norm > 0.0 {
+                        for v in &mut embedding {
+                            *v /= norm;
+                        }
+                    }
+
+                    embedding
+                })
+                .collect()
+        } else {
+            return Err(DomainError::internal(format!(
+                "Unexpected output tensor shape: {:?}",
+                shape
+            )));
+        };
+
+        Ok(embeddings)
+    }
+}
+
+#[async_trait]
+impl EmbeddingService for OrtEmbeddingService {
+    async fn embed_chunk(&self, chunk: &CodeChunk) -> Result<Embedding, DomainError> {
+        let text = format!("{} {}", chunk.name, chunk.content);
+        let vectors = self.embed_texts(&[&text])?;
+
+        Ok(Embedding::new(
+            chunk.id.clone(),
+            vectors.into_iter().next().unwrap_or_default(),
+            self.config.model_name.clone(),
+        ))
+    }
+
+    async fn embed_chunks(&self, chunks: &[CodeChunk]) -> Result<Vec<Embedding>, DomainError> {
+        if chunks.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Process in batches to avoid OOM
+        const BATCH_SIZE: usize = 32;
+        let mut all_embeddings = Vec::with_capacity(chunks.len());
+
+        for batch in chunks.chunks(BATCH_SIZE) {
+            let texts: Vec<String> = batch
+                .iter()
+                .map(|c| format!("{} {}", c.name, c.content))
+                .collect();
+            let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+
+            let vectors = self.embed_texts(&text_refs)?;
+
+            for (chunk, vector) in batch.iter().zip(vectors) {
+                all_embeddings.push(Embedding::new(
+                    chunk.id.clone(),
+                    vector,
+                    self.config.model_name.clone(),
+                ));
+            }
+        }
+
+        Ok(all_embeddings)
+    }
+
+    async fn embed_query(&self, query: &str) -> Result<Vec<f32>, DomainError> {
+        let vectors = self.embed_texts(&[query])?;
+        vectors
+            .into_iter()
+            .next()
+            .ok_or_else(|| DomainError::internal("Failed to generate query embedding"))
+    }
+
+    fn config(&self) -> &EmbeddingConfig {
+        &self.config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Note: These tests require network access to download the model
+    // Run with: cargo test --features "ort-test" -- --ignored
+
+    #[tokio::test]
+    #[ignore = "Requires model download"]
+    async fn test_ort_embedding_service() {
+        let service = OrtEmbeddingService::new(None).expect("Failed to create service");
+
+        let embedding = service.embed_query("fn main() { println!(\"Hello\"); }").await.unwrap();
+
+        assert_eq!(embedding.len(), DEFAULT_DIMENSIONS);
+
+        // Check it's normalized
+        let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 0.01);
+    }
+}

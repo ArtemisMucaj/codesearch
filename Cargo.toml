@@ -57,6 +57,12 @@ uuid = { version = "1.6", features = ["v4"] }
 # Random number generation (for mock embeddings)
 rand = "0.8"
 
+# Embeddings (ONNX Runtime + HuggingFace tokenizers)
+ort = "2.0.0-rc.9"
+tokenizers = "0.21"
+hf-hub = "0.3"
+ndarray = "0.16"
+
 [profile.release]
 lto = true
 codegen-units = 1

@@ -9,9 +9,9 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use codesearch::{
-    DeleteRepositoryUseCase, IndexRepositoryUseCase, InMemoryEmbeddingStorage,
-    ListRepositoriesUseCase, MockEmbeddingService, SearchCodeUseCase, SearchQuery, SqliteStorage,
-    TreeSitterParser,
+    DeleteRepositoryUseCase, EmbeddingService, IndexRepositoryUseCase, InMemoryEmbeddingStorage,
+    ListRepositoriesUseCase, MockEmbeddingService, OrtEmbeddingService, SearchCodeUseCase,
+    SearchQuery, SqliteStorage, TreeSitterParser,
 };
 
 /// CodeSearch - Semantic code search powered by embeddings
@@ -26,6 +26,14 @@ struct Cli {
     /// Path to the data directory
     #[arg(short, long, global = true, default_value = "~/.codesearch")]
     data_dir: String,
+
+    /// Use mock embeddings instead of real ONNX model (faster, for testing)
+    #[arg(long, global = true)]
+    mock_embeddings: bool,
+
+    /// HuggingFace model ID for embeddings (default: sentence-transformers/all-MiniLM-L6-v2)
+    #[arg(long, global = true)]
+    model: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -100,13 +108,17 @@ async fn main() -> Result<()> {
 
     // Initialize services
     let parser = Arc::new(TreeSitterParser::new());
-    let embedding_service = Arc::new(MockEmbeddingService::new());
+    let embedding_service: Arc<dyn EmbeddingService> = if cli.mock_embeddings {
+        info!("Using mock embedding service");
+        Arc::new(MockEmbeddingService::new())
+    } else {
+        info!("Initializing ONNX embedding service...");
+        Arc::new(OrtEmbeddingService::new(cli.model.as_deref())?)
+    };
     let embedding_repo = Arc::new(InMemoryEmbeddingStorage::new(sqlite.clone()));
 
     match cli.command {
         Commands::Index { path, name } => {
-            info!("Initializing embedding service...");
-
             let use_case = IndexRepositoryUseCase::new(
                 sqlite.clone(),
                 sqlite.clone(),
