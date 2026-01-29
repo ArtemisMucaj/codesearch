@@ -1,0 +1,35 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local data
+.codesearch/
+*.db
+
+# Binary output (except .gitkeep)
+/bin/*
+!/bin/.gitkeep
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# Test coverage
+*.profraw
+*.profdata
+coverage/
