@@ -58,10 +58,13 @@ uuid = { version = "1.6", features = ["v4"] }
 rand = "0.8"
 
 # Embeddings (ONNX Runtime + HuggingFace tokenizers)
-ort = "2.0.0-rc.9"
+ort = { version = "2.0.0-rc.9", features = ["ndarray"] }
 tokenizers = "0.21"
 hf-hub = "0.3"
 ndarray = "0.16"
+
+[dev-dependencies]
+tempfile = "3.10"
 
 [profile.release]
 lto = true

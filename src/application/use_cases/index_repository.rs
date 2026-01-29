@@ -96,7 +96,7 @@ impl IndexRepositoryUseCase {
 
             debug!("Processing file: {}", relative_path);
 
-            let content = match std::fs::read_to_string(entry_path) {
+            let content = match tokio::fs::read_to_string(entry_path).await {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("Failed to read file {}: {}", relative_path, e);

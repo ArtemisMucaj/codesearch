@@ -95,14 +95,14 @@ impl EmbeddingRepository for InMemoryEmbeddingStorage {
             if let Some(chunk) = self.chunk_repo.find_by_id(&chunk_id).await? {
                 // Apply language filter
                 if let Some(ref languages) = query.languages {
-                    if !languages.contains(&chunk.language.as_str().to_string()) {
+                    if !languages.iter().any(|l| l == chunk.language.as_str()) {
                         continue;
                     }
                 }
 
                 // Apply node type filter
                 if let Some(ref node_types) = query.node_types {
-                    if !node_types.contains(&chunk.node_type.as_str().to_string()) {
+                    if !node_types.iter().any(|t| t == chunk.node_type.as_str()) {
                         continue;
                     }
                 }

@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use tracing::info;
@@ -43,9 +44,15 @@ impl DeleteRepositoryUseCase {
     }
 
     pub async fn delete_by_path(&self, path: &str) -> Result<(), DomainError> {
+        // Canonicalize path to match how paths are stored during indexing
+        let canonical_path = Path::new(path)
+            .canonicalize()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string());
+
         let repo = self
             .repository_repo
-            .find_by_path(path)
+            .find_by_path(&canonical_path)
             .await?
             .ok_or_else(|| DomainError::not_found(format!("Repository not found at path: {}", path)))?;
 

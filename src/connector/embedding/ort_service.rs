@@ -1,11 +1,13 @@
 //! ONNX Runtime-based embedding service using HuggingFace models.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ndarray::{Array1, Array2, Axis};
-use ort::{GraphOptimizationLevel, Session};
+use ort::{
+    session::{builder::GraphOptimizationLevel, Session},
+    value::Tensor,
+};
 use tokenizers::Tokenizer;
 use tracing::{debug, info};
 
@@ -19,7 +21,7 @@ const DEFAULT_MAX_SEQ_LENGTH: usize = 256;
 
 /// Embedding service using ONNX Runtime for inference.
 pub struct OrtEmbeddingService {
-    session: Arc<Session>,
+    session: Arc<Mutex<Session>>,
     tokenizer: Arc<Tokenizer>,
     config: EmbeddingConfig,
 }
@@ -77,7 +79,7 @@ impl OrtEmbeddingService {
         };
 
         Ok(Self {
-            session: Arc::new(session),
+            session: Arc::new(Mutex::new(session)),
             tokenizer: Arc::new(tokenizer),
             config,
         })
@@ -127,71 +129,61 @@ impl OrtEmbeddingService {
             token_type_ids.extend(std::iter::repeat(0i64).take(padding));
         }
 
-        // Create ndarray tensors
-        let input_ids = Array2::from_shape_vec((batch_size, max_len), input_ids)
+        // Create tensors using (shape, data) tuples
+        let shape = [batch_size, max_len];
+        let input_ids_tensor = Tensor::from_array((shape, input_ids))
             .map_err(|e| DomainError::internal(format!("Failed to create input_ids tensor: {}", e)))?;
-        let attention_mask = Array2::from_shape_vec((batch_size, max_len), attention_mask)
+        let attention_mask_tensor = Tensor::from_array((shape, attention_mask))
             .map_err(|e| DomainError::internal(format!("Failed to create attention_mask tensor: {}", e)))?;
-        let token_type_ids = Array2::from_shape_vec((batch_size, max_len), token_type_ids)
+        let token_type_ids_tensor = Tensor::from_array((shape, token_type_ids))
             .map_err(|e| DomainError::internal(format!("Failed to create token_type_ids tensor: {}", e)))?;
 
-        // Run inference
-        let outputs = self
+        let mut session = self
             .session
+            .lock()
+            .map_err(|e| DomainError::internal(format!("Failed to lock session: {}", e)))?;
+
+        let outputs = session
             .run(ort::inputs![
-                "input_ids" => input_ids.view(),
-                "attention_mask" => attention_mask.view(),
-                "token_type_ids" => token_type_ids.view(),
-            ].map_err(|e| DomainError::internal(format!("Failed to create inputs: {}", e)))?)
+                "input_ids" => input_ids_tensor,
+                "attention_mask" => attention_mask_tensor,
+                "token_type_ids" => token_type_ids_tensor,
+            ])
             .map_err(|e| DomainError::internal(format!("Inference failed: {}", e)))?;
 
         // Extract embeddings from output
         // Most sentence-transformers models output shape (batch_size, seq_len, hidden_size)
         // We need to mean pool over the sequence dimension
-        let output_tensor = outputs
-            .get("last_hidden_state")
-            .or_else(|| outputs.get("sentence_embedding"))
-            .or_else(|| outputs.iter().next().map(|(_, v)| v))
+        let output_value = outputs
+            .iter()
+            .next()
+            .map(|(_, v)| v)
             .ok_or_else(|| DomainError::internal("No output tensor found"))?;
 
-        let output_array = output_tensor
+        let (shape, data) = output_value
             .try_extract_tensor::<f32>()
             .map_err(|e| DomainError::internal(format!("Failed to extract output tensor: {}", e)))?;
 
-        let shape = output_array.shape();
+        let shape: Vec<usize> = shape.iter().map(|&x| x as usize).collect();
         debug!("Output tensor shape: {:?}", shape);
 
         let embeddings = if shape.len() == 3 {
             // Shape: (batch_size, seq_len, hidden_size) - need to mean pool
-            let attention_mask_f32: Array2<f32> = Array2::from_shape_vec(
-                (batch_size, max_len),
-                encodings
-                    .iter()
-                    .flat_map(|e| {
-                        let mask = e.get_attention_mask();
-                        let len = mask.len().min(max_len);
-                        let mut result: Vec<f32> = mask[..len].iter().map(|&x| x as f32).collect();
-                        result.extend(std::iter::repeat(0.0f32).take(max_len - len));
-                        result
-                    })
-                    .collect(),
-            )
-            .map_err(|e| DomainError::internal(format!("Failed to create attention mask: {}", e)))?;
-
-            // Mean pooling with attention mask
-            let output_view = output_array.view();
             let hidden_size = shape[2];
+            let seq_len = shape[1];
 
             (0..batch_size)
                 .map(|i| {
                     let mut embedding = vec![0.0f32; hidden_size];
                     let mut count = 0.0f32;
 
-                    for j in 0..max_len {
-                        let mask_val = attention_mask_f32[[i, j]];
+                    let mask = encodings[i].get_attention_mask();
+                    for j in 0..seq_len.min(max_len) {
+                        let mask_val = if j < mask.len() { mask[j] as f32 } else { 0.0 };
                         if mask_val > 0.0 {
                             for k in 0..hidden_size {
-                                embedding[k] += output_view[[i, j, k]] * mask_val;
+                                let idx = i * seq_len * hidden_size + j * hidden_size + k;
+                                embedding[k] += data[idx] * mask_val;
                             }
                             count += mask_val;
                         }
@@ -216,10 +208,12 @@ impl OrtEmbeddingService {
                 .collect()
         } else if shape.len() == 2 {
             // Shape: (batch_size, hidden_size) - already pooled
+            let hidden_size = shape[1];
+
             (0..batch_size)
                 .map(|i| {
-                    let mut embedding: Vec<f32> = (0..shape[1])
-                        .map(|j| output_array[[i, j]])
+                    let mut embedding: Vec<f32> = (0..hidden_size)
+                        .map(|j| data[i * hidden_size + j])
                         .collect();
 
                     // L2 normalize
@@ -247,7 +241,7 @@ impl OrtEmbeddingService {
 #[async_trait]
 impl EmbeddingService for OrtEmbeddingService {
     async fn embed_chunk(&self, chunk: &CodeChunk) -> Result<Embedding, DomainError> {
-        let text = format!("{} {}", chunk.name, chunk.content);
+        let text = format!("{} {}", chunk.symbol_name.as_deref().unwrap_or(""), chunk.content);
         let vectors = self.embed_texts(&[&text])?;
 
         Ok(Embedding::new(
@@ -269,7 +263,7 @@ impl EmbeddingService for OrtEmbeddingService {
         for batch in chunks.chunks(BATCH_SIZE) {
             let texts: Vec<String> = batch
                 .iter()
-                .map(|c| format!("{} {}", c.name, c.content))
+                .map(|c| format!("{} {}", c.symbol_name.as_deref().unwrap_or(""), c.content))
                 .collect();
             let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
 

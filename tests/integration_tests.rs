@@ -5,9 +5,11 @@
 use std::sync::Arc;
 
 use codesearch::{
-    CodeChunk, InMemoryEmbeddingStorage, Language, ListRepositoriesUseCase, NodeType, ParserService,
-    SearchQuery, SqliteStorage, TreeSitterParser,
+    CodeChunk, IndexRepositoryUseCase, InMemoryEmbeddingStorage, Language, ListRepositoriesUseCase,
+    MockEmbeddingService, NodeType, ParserService, SearchCodeUseCase, SearchQuery, SqliteStorage,
+    TreeSitterParser,
 };
+use tempfile::tempdir;
 
 /// Create an in-memory test environment.
 async fn setup_test_env() -> TestEnv {
@@ -143,4 +145,59 @@ async fn test_code_chunk_creation() {
     assert_eq!(chunk.language, Language::Rust);
     assert_eq!(chunk.node_type, NodeType::Function);
     assert_eq!(chunk.location(), "src/main.rs:1-1");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_end_to_end_index_and_search() {
+    let env = setup_test_env().await;
+
+    // Create a temp directory with a small Rust project
+    let temp_dir = tempdir().expect("Failed to create temp directory");
+    let src_dir = temp_dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("Failed to create src directory");
+
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        r#"
+/// Adds two numbers together.
+pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+/// Subtracts two numbers.
+pub fn subtract(a: i32, b: i32) -> i32 {
+    a - b
+}
+"#,
+    )
+    .expect("Failed to write test file");
+
+    // Set up services
+    let embedding_service = Arc::new(MockEmbeddingService::new());
+
+    let index_use_case = IndexRepositoryUseCase::new(
+        env.sqlite.clone(),
+        env.sqlite.clone(),
+        env.embedding_repo.clone(),
+        env.parser.clone(),
+        embedding_service.clone(),
+    );
+
+    // Index the repository
+    let repository = index_use_case
+        .execute(temp_dir.path().to_str().unwrap(), Some("test-repo"))
+        .await
+        .expect("Indexing failed");
+
+    assert!(repository.file_count > 0, "Should have indexed at least one file");
+    assert!(repository.chunk_count > 0, "Should have indexed at least one chunk");
+
+    // Search for code
+    let search_use_case = SearchCodeUseCase::new(env.embedding_repo.clone(), embedding_service);
+
+    let query = SearchQuery::new("function that adds numbers").with_limit(5);
+    let results = search_use_case.execute(query).await.expect("Search failed");
+
+    assert!(!results.is_empty(), "Should find at least one result");
+    assert!(results[0].score > 0.0, "Top result should have positive score");
 }
