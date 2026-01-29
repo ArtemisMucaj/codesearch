@@ -70,7 +70,7 @@ impl IndexRepositoryUseCase {
         let mut chunk_count = 0u64;
 
         let walker = WalkBuilder::new(&absolute_path)
-            .hidden(false)
+            .hidden(true)
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)

@@ -11,7 +11,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/codesearch/codesearch
+git clone https://github.com/ArtemisMucaj/codesearch
 cd codesearch
 
 # Build in release mode
@@ -21,7 +21,7 @@ cargo build --release
 cp target/release/codesearch bin/
 
 # Or install system-wide
-cargo install --path crates/cli
+cargo install --path .
 ```
 
 ### Start ChromaDB (Optional)

@@ -68,24 +68,29 @@ impl EmbeddingRepository for InMemoryEmbeddingStorage {
         query_embedding: &[f32],
         query: &SearchQuery,
     ) -> Result<Vec<SearchResult>, DomainError> {
-        let embeddings = self.embeddings.lock().await;
+        // Collect results and release lock before any awaits
+        let results: Vec<(String, f32)> = {
+            let embeddings = self.embeddings.lock().await;
+            let mut results: Vec<(String, f32)> = embeddings
+                .values()
+                .map(|e| {
+                    let score = cosine_similarity(query_embedding, &e.vector);
+                    (e.chunk_id.clone(), score)
+                })
+                .collect();
 
-        let mut results: Vec<(String, f32)> = embeddings
-            .values()
-            .map(|e| {
-                let score = cosine_similarity(query_embedding, &e.vector);
-                (e.chunk_id.clone(), score)
-            })
-            .collect();
-
-        // Sort by score descending
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        // Take top results
-        results.truncate(query.limit);
+            // Sort by score descending
+            results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            results
+        }; // Lock released here
 
         let mut search_results = Vec::new();
         for (chunk_id, score) in results {
+            // Stop if we have enough results
+            if search_results.len() >= query.limit {
+                break;
+            }
+
             if let Some(min_score) = query.min_score {
                 if score < min_score {
                     continue;

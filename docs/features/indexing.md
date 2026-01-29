@@ -30,7 +30,7 @@ Files are filtered by:
 
 Tree-sitter parses each file and extracts semantic chunks:
 
-```
+```text
 Source File
      │
      ▼
@@ -88,13 +88,13 @@ let embedding = model.embed(text);  // 384 dimensions
 
 Data is stored in two locations:
 
-**SQLite (Metadata)**
+#### SQLite (Metadata)
 - Repository information
 - Code chunks with full content
 - File paths, line numbers
 - Language and node type
 
-**ChromaDB (Vectors)**
+#### ChromaDB (Vectors)
 - Embedding vectors
 - Chunk IDs for lookup
 

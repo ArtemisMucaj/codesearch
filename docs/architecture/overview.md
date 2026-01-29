@@ -4,7 +4,7 @@ CodeSearch follows Domain-Driven Design (DDD) principles with a clean separation
 
 ## Layer Structure
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │                         CLI                              │
 │              (User Interface Layer)                      │
@@ -79,7 +79,7 @@ Implements external integrations:
 
 ### Indexing Flow
 
-```
+```text
 Repository Path
       │
       ▼
@@ -108,7 +108,7 @@ Repository Path
 
 ### Search Flow
 
-```
+```text
 Query String
       │
       ▼

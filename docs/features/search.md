@@ -6,7 +6,7 @@ CodeSearch uses semantic similarity to find relevant code. Unlike keyword search
 
 ## How It Works
 
-```
+```text
 Query: "function to validate email addresses"
                     │
                     ▼
@@ -76,7 +76,7 @@ codesearch search "authentication" --repository abc123
 
 ## Search Result Format
 
-```
+```text
 Found 3 results:
 
 1. src/auth/validator.rs:42-58 (score: 0.847)
