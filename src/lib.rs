@@ -8,7 +8,7 @@ pub use application::{
 };
 
 pub use connector::{
-    ChromaVectorRepository, InMemoryVectorRepository, MockEmbedding, 
+    ChromaVectorRepository, InMemoryVectorRepository, LanceDbVectorRepository, MockEmbedding,
     OrtEmbedding, SqliteRepositoryAdapter, TreeSitterParser,
 };
 

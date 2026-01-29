@@ -9,6 +9,7 @@ pub enum Language {
     JavaScript,
     TypeScript,
     Go,
+    Php,
     Unknown,
 }
 
@@ -20,6 +21,7 @@ impl Language {
             "js" | "jsx" | "mjs" | "cjs" => Language::JavaScript,
             "ts" | "tsx" => Language::TypeScript,
             "go" => Language::Go,
+            "php" => Language::Php,
             _ => Language::Unknown,
         }
     }
@@ -38,6 +40,7 @@ impl Language {
             "javascript" => Language::JavaScript,
             "typescript" => Language::TypeScript,
             "go" => Language::Go,
+            "php" => Language::Php,
             _ => Language::Unknown,
         }
     }
@@ -49,6 +52,7 @@ impl Language {
             Language::JavaScript => "javascript",
             Language::TypeScript => "typescript",
             Language::Go => "go",
+            Language::Php => "php",
             Language::Unknown => "unknown",
         }
     }
@@ -64,6 +68,7 @@ impl Language {
             Language::JavaScript => "js",
             Language::TypeScript => "ts",
             Language::Go => "go",
+            Language::Php => "php",
             Language::Unknown => "",
         }
     }
@@ -75,6 +80,7 @@ impl Language {
             Language::JavaScript => &["js", "jsx", "mjs", "cjs"],
             Language::TypeScript => &["ts", "tsx"],
             Language::Go => &["go"],
+            Language::Php => &["php"],
             Language::Unknown => &[],
         }
     }
@@ -82,7 +88,7 @@ impl Language {
     pub fn uses_braces(&self) -> bool {
         matches!(
             self,
-            Language::Rust | Language::JavaScript | Language::TypeScript | Language::Go
+            Language::Rust | Language::JavaScript | Language::TypeScript | Language::Go | Language::Php
         )
     }
 
@@ -97,6 +103,7 @@ impl Language {
             Language::JavaScript,
             Language::TypeScript,
             Language::Go,
+            Language::Php,
         ]
     }
 }

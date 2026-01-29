@@ -3,13 +3,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::info;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use codesearch::{
     ChromaVectorRepository, DeleteRepositoryUseCase, EmbeddingService, IndexRepositoryUseCase,
-    InMemoryVectorRepository, ListRepositoriesUseCase, MockEmbedding, OrtEmbedding,
-    SearchCodeUseCase, SearchQuery, SqliteRepositoryAdapter, TreeSitterParser, 
+    InMemoryVectorRepository, LanceDbVectorRepository, ListRepositoriesUseCase, MockEmbedding,
+    OrtEmbedding, SearchCodeUseCase, SearchQuery, SqliteRepositoryAdapter, TreeSitterParser,
     VectorRepository,
 };
 
@@ -37,6 +37,9 @@ struct Cli {
 
     #[arg(long, global = true)]
     memory_storage: bool,
+
+    #[arg(long, global = true, default_value = "lancedb", value_parser = ["lancedb", "chromadb"])]
+    vector_backend: String,
 
     #[command(subcommand)]
     command: Commands,
@@ -80,17 +83,29 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let level = if cli.verbose { Level::DEBUG } else { Level::INFO };
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(level)
-        .with_target(false)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)?;
+    // Configure logging with proper filters
+    // By default: only show warnings from dependencies, info from codesearch
+    // With -v: debug from codesearch, warnings from dependencies
+    let env_filter = if cli.verbose {
+        EnvFilter::try_from_default_env()
+            .or_else(|_| EnvFilter::try_new("codesearch=debug,warn"))
+            .unwrap_or_else(|_| EnvFilter::new("warn"))
+    } else {
+        EnvFilter::try_from_default_env()
+            .or_else(|_| EnvFilter::try_new("codesearch=info,warn"))
+            .unwrap_or_else(|_| EnvFilter::new("warn"))
+    };
 
-    let data_dir = expand_tilde(&cli.data_dir);
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt::layer().with_target(false))
+        .init();
+
+    let data_dir_str = expand_tilde(&cli.data_dir);
+    let data_dir = PathBuf::from(&data_dir_str);
     std::fs::create_dir_all(&data_dir)?;
 
-    let db_path = PathBuf::from(&data_dir).join("codesearch.db");
+    let db_path = data_dir.join("codesearch.db");
     let sqlite = Arc::new(SqliteRepositoryAdapter::new(&db_path)?);
 
     let parser = Arc::new(TreeSitterParser::new());
@@ -106,17 +121,40 @@ async fn main() -> Result<()> {
         info!("Using in-memory vector storage");
         Arc::new(InMemoryVectorRepository::new())
     } else {
-        match ChromaVectorRepository::new(&cli.chroma_url, &cli.chroma_collection).await {
-            Ok(chroma) => {
-                info!("Connected to ChromaDB at {}", cli.chroma_url);
-                Arc::new(chroma)
+        match cli.vector_backend.as_str() {
+            "lancedb" => {
+                match LanceDbVectorRepository::new(&data_dir, "code_chunks").await {
+                    Ok(lancedb) => {
+                        info!("Initialized LanceDB vector storage at {}/lancedb", data_dir_str);
+                        Arc::new(lancedb)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to initialize LanceDB: {}. Falling back to in-memory storage.",
+                            e
+                        );
+                        Arc::new(InMemoryVectorRepository::new())
+                    }
+                }
             }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to connect to ChromaDB ({}): {}. Falling back to in-memory storage.",
-                    cli.chroma_url,
-                    e
-                );
+            "chromadb" => {
+                match ChromaVectorRepository::new(&cli.chroma_url, &cli.chroma_collection).await {
+                    Ok(chroma) => {
+                        info!("Connected to ChromaDB at {}", cli.chroma_url);
+                        Arc::new(chroma)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to connect to ChromaDB ({}): {}. Falling back to in-memory storage.",
+                            cli.chroma_url,
+                            e
+                        );
+                        Arc::new(InMemoryVectorRepository::new())
+                    }
+                }
+            }
+            _ => {
+                tracing::warn!("Invalid vector backend: {}. Using in-memory storage.", cli.vector_backend);
                 Arc::new(InMemoryVectorRepository::new())
             }
         }
@@ -241,7 +279,7 @@ async fn main() -> Result<()> {
             println!("Repositories: {}", total_repos);
             println!("Total Files:  {}", total_files);
             println!("Total Chunks: {}", total_chunks);
-            println!("Data Dir:     {}", data_dir);
+            println!("Data Dir:     {}", data_dir_str);
         }
     }
 

@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 use tracing::debug;
+use tree_sitter_php;
 
 use crate::application::ParserService;
 use crate::domain::{CodeChunk, DomainError, Language, NodeType};
@@ -19,6 +20,7 @@ impl TreeSitterParser {
                 Language::JavaScript,
                 Language::TypeScript,
                 Language::Go,
+                Language::Php,
             ],
         }
     }
@@ -30,6 +32,7 @@ impl TreeSitterParser {
             Language::JavaScript => Some(tree_sitter_javascript::LANGUAGE.into()),
             Language::TypeScript => Some(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
             Language::Go => Some(tree_sitter_go::LANGUAGE.into()),
+            Language::Php => Some(tree_sitter_php::LANGUAGE_PHP.into()),
             Language::Unknown => None,
         }
     }
@@ -80,6 +83,13 @@ impl TreeSitterParser {
                 (function_declaration name: (identifier) @name) @function
                 (method_declaration name: (field_identifier) @name) @function
                 (type_declaration (type_spec name: (type_identifier) @name)) @struct
+                "#
+            }
+            Language::Php => {
+                r#"
+                (function_definition name: (name) @name) @function
+                (method_declaration name: (name) @name) @function
+                (class_declaration name: (name) @name) @class
                 "#
             }
             Language::Unknown => "",
@@ -242,6 +252,29 @@ class Calculator:
 
         let chunks = parser
             .parse_file(content, "calc.py", Language::Python, "test-repo")
+            .await
+            .unwrap();
+
+        assert!(!chunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_parse_php_class() {
+        let parser = TreeSitterParser::new();
+        let content = r#"<?php
+class Calculator {
+    public function add($a, $b) {
+        return $a + $b;
+    }
+
+    public function subtract($a, $b) {
+        return $a - $b;
+    }
+}
+"#;
+
+        let chunks = parser
+            .parse_file(content, "calc.php", Language::Php, "test-repo")
             .await
             .unwrap();
 

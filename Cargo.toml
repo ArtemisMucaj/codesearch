@@ -17,7 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.35", features = ["macros", "rt-multi-thread", "sync"] }
 async-trait = "0.1"
 
 # Serialization
@@ -37,14 +37,27 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Vector database
 chromadb = "2.3"
+lancedb = "0.23.1"
+
+# Static linking for lzma (transitive dependency of lancedb)
+# Ensures portability across systems without system lzma installed
+lzma-sys = { version = "*", features = ["static"] }
+
+# Async utilities
+futures = "0.3"
+
+# Arrow for LanceDB data manipulation
+arrow-array = "56"
+arrow-schema = "56"
 
 # Tree-sitter for AST parsing
-tree-sitter = "0.24"
+tree-sitter = "0.26"
 tree-sitter-rust = "0.23"
 tree-sitter-python = "0.23"
 tree-sitter-javascript = "0.23"
 tree-sitter-typescript = "0.23"
-tree-sitter-go = "0.23"
+tree-sitter-go = "0.25"
+tree-sitter-php = "0.24"
 streaming-iterator = "0.1"
 
 # CLI
@@ -70,6 +83,9 @@ ndarray = "0.16"
 tempfile = "3.10"
 
 [profile.release]
-lto = true
+lto = "fat"
 codegen-units = 1
 strip = true
+opt-level = "z"     # Optimize for size instead of speed
+panic = "abort"     # Remove unwinding code
+debug = false       # Remove debug symbols (already stripped but this helps)
