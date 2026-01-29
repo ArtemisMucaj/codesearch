@@ -4,11 +4,11 @@ A semantic code search tool that indexes code repositories using embeddings and 
 
 ## Features
 
-- **Semantic Search**: Uses ML embeddings to find semantically similar code
-- **AST-Aware**: Parses code using tree-sitter for structure-aware indexing
-- **Multi-Language Support**: Supports Rust, Python, JavaScript, TypeScript, Go
-- **Persistent Storage**: ChromaDB for embeddings, SQLite for AST metadata
-- **Fast Indexing**: Efficient incremental indexing of large codebases
+- **Semantic search**: uses ML embeddings to find semantically similar code
+- **AST-aware**: parses code using tree-sitter for structure-aware indexing
+- **Multi-language support**: supports Rust, Python, JavaScript, TypeScript, Go
+- **Persistent storage**: ChromaDB for embeddings, SQLite for AST metadata
+- **Fast indexing**: efficient incremental indexing of large codebases
 
 ## Architecture
 
@@ -16,10 +16,10 @@ This project follows Domain-Driven Design (DDD) principles:
 
 ```
 crates/
-├── domain/        # Core business logic, models, and repository traits
-├── application/   # Use cases and orchestration layer
-├── connector/     # External integrations (ChromaDB, SQLite, embeddings)
-└── cli/           # Command-line interface
+├── domain/
+|── application/
+├── connector/
+└── cli/
 ```
 
 ## Installation
@@ -70,4 +70,3 @@ cargo clippy
 ## License
 
 MIT License
->>>>>>> a67fae0 (Add semantic code search tool with DDD architecture)
