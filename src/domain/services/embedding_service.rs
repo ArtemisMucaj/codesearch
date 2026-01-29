@@ -2,7 +2,6 @@ use async_trait::async_trait;
 
 use crate::domain::{CodeChunk, DomainError, Embedding, EmbeddingConfig};
 
-/// Trait for generating embeddings from code chunks.
 #[async_trait]
 pub trait EmbeddingService: Send + Sync {
     async fn embed_chunk(&self, chunk: &CodeChunk) -> Result<Embedding, DomainError>;

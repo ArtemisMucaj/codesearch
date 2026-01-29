@@ -2,21 +2,20 @@ use std::sync::Arc;
 
 use tracing::{debug, info};
 
-use crate::domain::{DomainError, EmbeddingRepository, EmbeddingService, SearchQuery, SearchResult};
+use crate::domain::{DomainError, EmbeddingService, SearchQuery, SearchResult, VectorRepository};
 
-/// Use case for searching code using semantic similarity.
 pub struct SearchCodeUseCase {
-    embedding_repo: Arc<dyn EmbeddingRepository>,
+    vector_repo: Arc<dyn VectorRepository>,
     embedding_service: Arc<dyn EmbeddingService>,
 }
 
 impl SearchCodeUseCase {
     pub fn new(
-        embedding_repo: Arc<dyn EmbeddingRepository>,
+        vector_repo: Arc<dyn VectorRepository>,
         embedding_service: Arc<dyn EmbeddingService>,
     ) -> Self {
         Self {
-            embedding_repo,
+            vector_repo,
             embedding_service,
         }
     }
@@ -31,7 +30,7 @@ impl SearchCodeUseCase {
             query_embedding.len()
         );
 
-        let results = self.embedding_repo.search(&query_embedding, &query).await?;
+        let results = self.vector_repo.search(&query_embedding, &query).await?;
 
         info!("Found {} results", results.len());
 

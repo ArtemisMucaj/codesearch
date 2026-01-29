@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use crate::domain::{DomainError, Repository, RepositoryRepository};
 
-/// Use case for listing all indexed repositories.
 pub struct ListRepositoriesUseCase {
     repository_repo: Arc<dyn RepositoryRepository>,
 }

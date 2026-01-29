@@ -3,25 +3,21 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use crate::domain::{ChunkRepository, DomainError, EmbeddingRepository, RepositoryRepository};
+use crate::domain::{DomainError, RepositoryRepository, VectorRepository};
 
-/// Use case for deleting an indexed repository.
 pub struct DeleteRepositoryUseCase {
     repository_repo: Arc<dyn RepositoryRepository>,
-    chunk_repo: Arc<dyn ChunkRepository>,
-    embedding_repo: Arc<dyn EmbeddingRepository>,
+    vector_repo: Arc<dyn VectorRepository>,
 }
 
 impl DeleteRepositoryUseCase {
     pub fn new(
         repository_repo: Arc<dyn RepositoryRepository>,
-        chunk_repo: Arc<dyn ChunkRepository>,
-        embedding_repo: Arc<dyn EmbeddingRepository>,
+        vector_repo: Arc<dyn VectorRepository>,
     ) -> Self {
         Self {
             repository_repo,
-            chunk_repo,
-            embedding_repo,
+            vector_repo,
         }
     }
 
@@ -34,8 +30,7 @@ impl DeleteRepositoryUseCase {
 
         info!("Deleting repository: {} ({})", repo.name, repo.path);
 
-        self.embedding_repo.delete_by_repository(id).await?;
-        self.chunk_repo.delete_by_repository(id).await?;
+        self.vector_repo.delete_by_repository(id).await?;
         self.repository_repo.delete(id).await?;
 
         info!("Repository deleted successfully");
@@ -44,7 +39,6 @@ impl DeleteRepositoryUseCase {
     }
 
     pub async fn delete_by_path(&self, path: &str) -> Result<(), DomainError> {
-        // Canonicalize path to match how paths are stored during indexing
         let canonical_path = Path::new(path)
             .canonicalize()
             .map(|p| p.to_string_lossy().to_string())

@@ -2,7 +2,6 @@ use async_trait::async_trait;
 
 use crate::domain::{DomainError, Repository};
 
-/// Repository trait for code repository metadata persistence.
 #[async_trait]
 pub trait RepositoryRepository: Send + Sync {
     async fn save(&self, repository: &Repository) -> Result<(), DomainError>;

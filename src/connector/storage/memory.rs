@@ -1,5 +1,3 @@
-//! In-memory embedding storage.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -7,59 +5,67 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::domain::{
-    ChunkRepository, DomainError, Embedding, EmbeddingRepository, SearchQuery, SearchResult,
-};
+use crate::domain::{CodeChunk, DomainError, Embedding, SearchQuery, SearchResult, VectorRepository};
 
-/// In-memory embedding storage for testing and development.
-pub struct InMemoryEmbeddingStorage {
+pub struct InMemoryVectorStorage {
+    chunks: Arc<Mutex<HashMap<String, CodeChunk>>>,
     embeddings: Arc<Mutex<HashMap<String, Embedding>>>,
-    chunk_repo: Arc<dyn ChunkRepository>,
 }
 
-impl InMemoryEmbeddingStorage {
-    pub fn new(chunk_repo: Arc<dyn ChunkRepository>) -> Self {
+impl InMemoryVectorStorage {
+    pub fn new() -> Self {
         Self {
+            chunks: Arc::new(Mutex::new(HashMap::new())),
             embeddings: Arc::new(Mutex::new(HashMap::new())),
-            chunk_repo,
         }
     }
 }
 
 #[async_trait]
-impl EmbeddingRepository for InMemoryEmbeddingStorage {
-    async fn save(&self, embedding: &Embedding) -> Result<(), DomainError> {
-        let mut embeddings = self.embeddings.lock().await;
-        embeddings.insert(embedding.chunk_id.clone(), embedding.clone());
-        Ok(())
-    }
+impl VectorRepository for InMemoryVectorStorage {
+    async fn save_batch(
+        &self,
+        chunks: &[CodeChunk],
+        embeddings: &[Embedding],
+    ) -> Result<(), DomainError> {
+        let mut chunk_store = self.chunks.lock().await;
+        let mut embedding_store = self.embeddings.lock().await;
 
-    async fn save_batch(&self, embeddings: &[Embedding]) -> Result<(), DomainError> {
-        let mut storage = self.embeddings.lock().await;
-        for embedding in embeddings {
-            storage.insert(embedding.chunk_id.clone(), embedding.clone());
+        for chunk in chunks {
+            chunk_store.insert(chunk.id.clone(), chunk.clone());
         }
-        debug!("Saved {} embeddings to memory", embeddings.len());
-        Ok(())
-    }
 
-    async fn find_by_chunk_id(&self, chunk_id: &str) -> Result<Option<Embedding>, DomainError> {
-        let embeddings = self.embeddings.lock().await;
-        Ok(embeddings.get(chunk_id).cloned())
+        for embedding in embeddings {
+            embedding_store.insert(embedding.chunk_id.clone(), embedding.clone());
+        }
+
+        debug!("Saved {} chunks and {} embeddings to memory", chunks.len(), embeddings.len());
+        Ok(())
     }
 
     async fn delete(&self, chunk_id: &str) -> Result<(), DomainError> {
-        let mut embeddings = self.embeddings.lock().await;
-        embeddings.remove(chunk_id);
+        let mut chunk_store = self.chunks.lock().await;
+        let mut embedding_store = self.embeddings.lock().await;
+        chunk_store.remove(chunk_id);
+        embedding_store.remove(chunk_id);
         Ok(())
     }
 
     async fn delete_by_repository(&self, repository_id: &str) -> Result<(), DomainError> {
-        let chunks = self.chunk_repo.find_by_repository(repository_id).await?;
-        let mut embeddings = self.embeddings.lock().await;
-        for chunk in chunks {
-            embeddings.remove(&chunk.id);
+        let mut chunk_store = self.chunks.lock().await;
+        let mut embedding_store = self.embeddings.lock().await;
+
+        let ids: Vec<String> = chunk_store
+            .values()
+            .filter(|chunk| chunk.repository_id == repository_id)
+            .map(|chunk| chunk.id.clone())
+            .collect();
+
+        for id in ids {
+            chunk_store.remove(&id);
+            embedding_store.remove(&id);
         }
+
         Ok(())
     }
 
@@ -68,26 +74,25 @@ impl EmbeddingRepository for InMemoryEmbeddingStorage {
         query_embedding: &[f32],
         query: &SearchQuery,
     ) -> Result<Vec<SearchResult>, DomainError> {
-        // Collect results and release lock before any awaits
-        let results: Vec<(String, f32)> = {
+        let scored_ids: Vec<(String, f32)> = {
             let embeddings = self.embeddings.lock().await;
-            let mut results: Vec<(String, f32)> = embeddings
+            let mut scored: Vec<(String, f32)> = embeddings
                 .values()
-                .map(|e| {
-                    let score = cosine_similarity(query_embedding, &e.vector);
-                    (e.chunk_id.clone(), score)
+                .map(|embedding| {
+                    let score = cosine_similarity(query_embedding, &embedding.vector);
+                    (embedding.chunk_id.clone(), score)
                 })
                 .collect();
 
-            // Sort by score descending
-            results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            results
-        }; // Lock released here
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scored
+        };
 
-        let mut search_results = Vec::new();
-        for (chunk_id, score) in results {
-            // Stop if we have enough results
-            if search_results.len() >= query.limit {
+        let chunk_store = self.chunks.lock().await;
+        let mut results = Vec::new();
+
+        for (chunk_id, score) in scored_ids {
+            if results.len() >= query.limit {
                 break;
             }
 
@@ -97,42 +102,41 @@ impl EmbeddingRepository for InMemoryEmbeddingStorage {
                 }
             }
 
-            if let Some(chunk) = self.chunk_repo.find_by_id(&chunk_id).await? {
-                // Apply language filter
-                if let Some(ref languages) = query.languages {
-                    if !languages.iter().any(|l| l == chunk.language.as_str()) {
-                        continue;
-                    }
-                }
+            let chunk = match chunk_store.get(&chunk_id) {
+                Some(chunk) => chunk.clone(),
+                None => continue,
+            };
 
-                // Apply node type filter
-                if let Some(ref node_types) = query.node_types {
-                    if !node_types.iter().any(|t| t == chunk.node_type.as_str()) {
-                        continue;
-                    }
+            if let Some(ref languages) = query.languages {
+                if !languages.iter().any(|l| l == chunk.language.as_str()) {
+                    continue;
                 }
-
-                // Apply repository filter
-                if let Some(ref repo_ids) = query.repository_ids {
-                    if !repo_ids.contains(&chunk.repository_id) {
-                        continue;
-                    }
-                }
-
-                search_results.push(SearchResult::new(chunk, score));
             }
+
+            if let Some(ref node_types) = query.node_types {
+                if !node_types.iter().any(|t| t == chunk.node_type.as_str()) {
+                    continue;
+                }
+            }
+
+            if let Some(ref repo_ids) = query.repository_ids {
+                if !repo_ids.contains(&chunk.repository_id) {
+                    continue;
+                }
+            }
+
+            results.push(SearchResult::new(chunk, score));
         }
 
-        Ok(search_results)
+        Ok(results)
     }
 
     async fn count(&self) -> Result<u64, DomainError> {
-        let embeddings = self.embeddings.lock().await;
-        Ok(embeddings.len() as u64)
+        let chunks = self.chunks.lock().await;
+        Ok(chunks.len() as u64)
     }
 }
 
-/// Calculate cosine similarity between two vectors.
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() {
         return 0.0;

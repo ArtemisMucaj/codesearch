@@ -102,7 +102,7 @@ Repository Path
       ▼                  ▼
 ┌─────────────┐    ┌─────────────┐
 │   SQLite    │    │  ChromaDB   │
-│ (metadata)  │    │ (vectors)   │
+│ (repos)     │    │ (docs+vecs) │
 └─────────────┘    └─────────────┘
 ```
 
@@ -125,8 +125,8 @@ Query String
       │
       ▼
 ┌─────────────┐
-│   Fetch     │ ─── SQLite (full chunk data)
-│  Metadata   │
+│   Fetch     │ ─── ChromaDB (documents + metadata)
+│  Results    │
 └─────────────┘
       │
       ▼

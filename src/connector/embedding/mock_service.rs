@@ -1,5 +1,3 @@
-//! Mock embedding service for development and testing.
-
 use async_trait::async_trait;
 use rand::SeedableRng;
 use rand::Rng;
@@ -9,7 +7,6 @@ use tracing::debug;
 
 use crate::domain::{CodeChunk, DomainError, Embedding, EmbeddingConfig, EmbeddingService};
 
-/// Mock embedding service that generates deterministic embeddings based on text hashing.
 pub struct MockEmbeddingService {
     config: EmbeddingConfig,
 }
@@ -45,7 +42,6 @@ impl MockEmbeddingService {
             .map(|_| rng.gen_range(-1.0..1.0))
             .collect();
 
-        // Normalize the vector
         let magnitude: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
         if magnitude > 0.0 {
             for x in &mut vector {

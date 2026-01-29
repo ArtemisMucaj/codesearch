@@ -1,3 +1,0 @@
-# This directory is for compiled binaries.
-# Run `cargo build --release` and copy the binary here:
-# cp target/release/codesearch bin/

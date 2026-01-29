@@ -1,5 +1,3 @@
-//! Use cases implementing the application's business operations.
-
 mod index_repository;
 mod search_code;
 mod list_repositories;

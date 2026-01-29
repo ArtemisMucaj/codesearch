@@ -1,25 +1,20 @@
-//! Integration tests for CodeSearch.
-//!
-//! These tests verify the end-to-end functionality of the system.
-
 use std::sync::Arc;
 
 use codesearch::{
-    CodeChunk, IndexRepositoryUseCase, InMemoryEmbeddingStorage, Language, ListRepositoriesUseCase,
+    CodeChunk, IndexRepositoryUseCase, InMemoryVectorStorage, Language, ListRepositoriesUseCase,
     MockEmbeddingService, NodeType, ParserService, SearchCodeUseCase, SearchQuery, SqliteStorage,
     TreeSitterParser,
 };
 use tempfile::tempdir;
 
-/// Create an in-memory test environment.
 async fn setup_test_env() -> TestEnv {
     let sqlite = Arc::new(SqliteStorage::in_memory().expect("Failed to create SQLite"));
-    let embedding_repo = Arc::new(InMemoryEmbeddingStorage::new(sqlite.clone()));
+    let vector_repo = Arc::new(InMemoryVectorStorage::new());
     let parser = Arc::new(TreeSitterParser::new());
 
     TestEnv {
         sqlite,
-        embedding_repo,
+        vector_repo,
         parser,
     }
 }
@@ -27,7 +22,7 @@ async fn setup_test_env() -> TestEnv {
 struct TestEnv {
     sqlite: Arc<SqliteStorage>,
     #[allow(dead_code)]
-    embedding_repo: Arc<InMemoryEmbeddingStorage>,
+    vector_repo: Arc<InMemoryVectorStorage>,
     #[allow(dead_code)]
     parser: Arc<TreeSitterParser>,
 }
@@ -148,10 +143,52 @@ async fn test_code_chunk_creation() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_vector_store_returns_chunk_documents() {
+    let sqlite = Arc::new(SqliteStorage::in_memory().expect("Failed to create SQLite"));
+    let vector_repo = Arc::new(InMemoryVectorStorage::new());
+    let parser = Arc::new(TreeSitterParser::new());
+    let embedding_service = Arc::new(MockEmbeddingService::new());
+
+    let temp_dir = tempdir().expect("Failed to create temp directory");
+    let src_dir = temp_dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("Failed to create src directory");
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        r#"
+pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+"#,
+    )
+    .expect("Failed to write test file");
+
+    let index_use_case = IndexRepositoryUseCase::new(
+        sqlite.clone(),
+        vector_repo.clone(),
+        parser,
+        embedding_service.clone(),
+    );
+
+    index_use_case
+        .execute(temp_dir.path().to_str().unwrap(), Some("test-repo"))
+        .await
+        .expect("Indexing failed");
+
+    let search_use_case = SearchCodeUseCase::new(vector_repo, embedding_service);
+    let query = SearchQuery::new("function that adds numbers").with_limit(3);
+    let results = search_use_case.execute(query).await.expect("Search failed");
+
+    assert!(!results.is_empty(), "Should find at least one result");
+    assert!(
+        results[0].chunk.content.contains("pub fn add"),
+        "Top result should return chunk document content"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_end_to_end_index_and_search() {
     let env = setup_test_env().await;
 
-    // Create a temp directory with a small Rust project
     let temp_dir = tempdir().expect("Failed to create temp directory");
     let src_dir = temp_dir.path().join("src");
     std::fs::create_dir_all(&src_dir).expect("Failed to create src directory");
@@ -159,12 +196,10 @@ async fn test_end_to_end_index_and_search() {
     std::fs::write(
         src_dir.join("lib.rs"),
         r#"
-/// Adds two numbers together.
 pub fn add(a: i32, b: i32) -> i32 {
     a + b
 }
 
-/// Subtracts two numbers.
 pub fn subtract(a: i32, b: i32) -> i32 {
     a - b
 }
@@ -172,18 +207,15 @@ pub fn subtract(a: i32, b: i32) -> i32 {
     )
     .expect("Failed to write test file");
 
-    // Set up services
     let embedding_service = Arc::new(MockEmbeddingService::new());
 
     let index_use_case = IndexRepositoryUseCase::new(
         env.sqlite.clone(),
-        env.sqlite.clone(),
-        env.embedding_repo.clone(),
+        env.vector_repo.clone(),
         env.parser.clone(),
         embedding_service.clone(),
     );
 
-    // Index the repository
     let repository = index_use_case
         .execute(temp_dir.path().to_str().unwrap(), Some("test-repo"))
         .await
@@ -192,8 +224,7 @@ pub fn subtract(a: i32, b: i32) -> i32 {
     assert!(repository.file_count > 0, "Should have indexed at least one file");
     assert!(repository.chunk_count > 0, "Should have indexed at least one chunk");
 
-    // Search for code
-    let search_use_case = SearchCodeUseCase::new(env.embedding_repo.clone(), embedding_service);
+    let search_use_case = SearchCodeUseCase::new(env.vector_repo.clone(), embedding_service);
 
     let query = SearchQuery::new("function that adds numbers").with_limit(5);
     let results = search_use_case.execute(query).await.expect("Search failed");

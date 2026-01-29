@@ -5,15 +5,13 @@ use ignore::WalkBuilder;
 use tracing::{debug, info, warn};
 
 use crate::domain::{
-    ChunkRepository, DomainError, EmbeddingRepository, EmbeddingService, Language, ParserService,
-    Repository, RepositoryRepository,
+    DomainError, EmbeddingService, Language, ParserService, Repository, RepositoryRepository,
+    VectorRepository,
 };
 
-/// Use case for indexing a code repository.
 pub struct IndexRepositoryUseCase {
     repository_repo: Arc<dyn RepositoryRepository>,
-    chunk_repo: Arc<dyn ChunkRepository>,
-    embedding_repo: Arc<dyn EmbeddingRepository>,
+    vector_repo: Arc<dyn VectorRepository>,
     parser_service: Arc<dyn ParserService>,
     embedding_service: Arc<dyn EmbeddingService>,
 }
@@ -21,15 +19,13 @@ pub struct IndexRepositoryUseCase {
 impl IndexRepositoryUseCase {
     pub fn new(
         repository_repo: Arc<dyn RepositoryRepository>,
-        chunk_repo: Arc<dyn ChunkRepository>,
-        embedding_repo: Arc<dyn EmbeddingRepository>,
+        vector_repo: Arc<dyn VectorRepository>,
         parser_service: Arc<dyn ParserService>,
         embedding_service: Arc<dyn EmbeddingService>,
     ) -> Self {
         Self {
             repository_repo,
-            chunk_repo,
-            embedding_repo,
+            vector_repo,
             parser_service,
             embedding_service,
         }
@@ -43,11 +39,9 @@ impl IndexRepositoryUseCase {
 
         let path_str = absolute_path.to_string_lossy().to_string();
 
-        // Check if repository already exists
         if let Some(existing) = self.repository_repo.find_by_path(&path_str).await? {
             info!("Repository already indexed, re-indexing: {}", path_str);
-            self.embedding_repo.delete_by_repository(&existing.id).await?;
-            self.chunk_repo.delete_by_repository(&existing.id).await?;
+            self.vector_repo.delete_by_repository(&existing.id).await?;
             self.repository_repo.delete(&existing.id).await?;
         }
 
@@ -128,8 +122,7 @@ impl IndexRepositoryUseCase {
                 }
             };
 
-            self.chunk_repo.save_batch(&chunks).await?;
-            self.embedding_repo.save_batch(&embeddings).await?;
+            self.vector_repo.save_batch(&chunks, &embeddings).await?;
 
             file_count += 1;
             chunk_count += chunks.len() as u64;

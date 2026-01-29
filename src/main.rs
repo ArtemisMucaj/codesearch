@@ -1,5 +1,3 @@
-//! CodeSearch CLI - Semantic code search tool.
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,41 +7,33 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use codesearch::{
-    ChromaEmbeddingStorage, DeleteRepositoryUseCase, EmbeddingRepository, EmbeddingService,
-    IndexRepositoryUseCase, InMemoryEmbeddingStorage, ListRepositoriesUseCase, MockEmbeddingService,
-    OrtEmbeddingService, SearchCodeUseCase, SearchQuery, SqliteStorage, TreeSitterParser,
+    ChromaEmbeddingStorage, DeleteRepositoryUseCase, EmbeddingService, IndexRepositoryUseCase,
+    InMemoryVectorStorage, ListRepositoriesUseCase, MockEmbeddingService, OrtEmbeddingService,
+    SearchCodeUseCase, SearchQuery, SqliteStorage, TreeSitterParser, VectorRepository,
 };
 
-/// CodeSearch - Semantic code search powered by embeddings
 #[derive(Parser)]
 #[command(name = "codesearch")]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// Enable verbose logging
     #[arg(short, long, global = true)]
     verbose: bool,
 
-    /// Path to the data directory
     #[arg(short, long, global = true, default_value = "~/.codesearch")]
     data_dir: String,
 
-    /// Use mock embeddings instead of real ONNX model (faster, for testing)
     #[arg(long, global = true)]
     mock_embeddings: bool,
 
-    /// HuggingFace model ID for embeddings (default: sentence-transformers/all-MiniLM-L6-v2)
     #[arg(long, global = true)]
     model: Option<String>,
 
-    /// ChromaDB server URL (default: http://localhost:8000)
     #[arg(long, global = true, default_value = "http://localhost:8000")]
     chroma_url: String,
 
-    /// ChromaDB collection name (default: codesearch)
     #[arg(long, global = true, default_value = "codesearch")]
     chroma_collection: String,
 
-    /// Use in-memory storage instead of ChromaDB (for testing without ChromaDB server)
     #[arg(long, global = true)]
     memory_storage: bool,
 
@@ -53,48 +43,35 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Index a code repository
     Index {
-        /// Path to the repository to index
         path: String,
 
-        /// Optional name for the repository
         #[arg(short, long)]
         name: Option<String>,
     },
 
-    /// Search for code
     Search {
-        /// The search query
         query: String,
 
-        /// Maximum number of results
         #[arg(short, long, default_value = "10")]
         limit: usize,
 
-        /// Minimum similarity score (0.0 to 1.0)
         #[arg(short, long)]
         min_score: Option<f32>,
 
-        /// Filter by language
         #[arg(short = 'L', long)]
         language: Option<Vec<String>>,
 
-        /// Filter by repository ID
         #[arg(short, long)]
         repository: Option<Vec<String>>,
     },
 
-    /// List indexed repositories
     List,
 
-    /// Delete an indexed repository
     Delete {
-        /// Repository ID or path to delete
         id_or_path: String,
     },
 
-    /// Show statistics
     Stats,
 }
 
@@ -102,7 +79,6 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Setup logging
     let level = if cli.verbose { Level::DEBUG } else { Level::INFO };
     let subscriber = FmtSubscriber::builder()
         .with_max_level(level)
@@ -110,15 +86,12 @@ async fn main() -> Result<()> {
         .finish();
     tracing::subscriber::set_global_default(subscriber)?;
 
-    // Expand data directory path
     let data_dir = expand_tilde(&cli.data_dir);
     std::fs::create_dir_all(&data_dir)?;
 
-    // Initialize storage
     let db_path = PathBuf::from(&data_dir).join("codesearch.db");
     let sqlite = Arc::new(SqliteStorage::new(&db_path)?);
 
-    // Initialize services
     let parser = Arc::new(TreeSitterParser::new());
     let embedding_service: Arc<dyn EmbeddingService> = if cli.mock_embeddings {
         info!("Using mock embedding service");
@@ -128,18 +101,11 @@ async fn main() -> Result<()> {
         Arc::new(OrtEmbeddingService::new(cli.model.as_deref())?)
     };
 
-    // Initialize embedding repository (ChromaDB or in-memory fallback)
-    let embedding_repo: Arc<dyn EmbeddingRepository> = if cli.memory_storage {
-        info!("Using in-memory embedding storage");
-        Arc::new(InMemoryEmbeddingStorage::new(sqlite.clone()))
+    let vector_repo: Arc<dyn VectorRepository> = if cli.memory_storage {
+        info!("Using in-memory vector storage");
+        Arc::new(InMemoryVectorStorage::new())
     } else {
-        match ChromaEmbeddingStorage::new(
-            &cli.chroma_url,
-            &cli.chroma_collection,
-            sqlite.clone(),
-        )
-        .await
-        {
+        match ChromaEmbeddingStorage::new(&cli.chroma_url, &cli.chroma_collection).await {
             Ok(chroma) => {
                 info!("Connected to ChromaDB at {}", cli.chroma_url);
                 Arc::new(chroma)
@@ -150,7 +116,7 @@ async fn main() -> Result<()> {
                     cli.chroma_url,
                     e
                 );
-                Arc::new(InMemoryEmbeddingStorage::new(sqlite.clone()))
+                Arc::new(InMemoryVectorStorage::new())
             }
         }
     };
@@ -159,8 +125,7 @@ async fn main() -> Result<()> {
         Commands::Index { path, name } => {
             let use_case = IndexRepositoryUseCase::new(
                 sqlite.clone(),
-                sqlite.clone(),
-                embedding_repo,
+                vector_repo,
                 parser,
                 embedding_service,
             );
@@ -179,7 +144,7 @@ async fn main() -> Result<()> {
             language,
             repository,
         } => {
-            let use_case = SearchCodeUseCase::new(embedding_repo, embedding_service);
+            let use_case = SearchCodeUseCase::new(vector_repo, embedding_service);
 
             let mut search_query = SearchQuery::new(&query).with_limit(limit);
 
@@ -246,8 +211,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Delete { id_or_path } => {
-            let use_case =
-                DeleteRepositoryUseCase::new(sqlite.clone(), sqlite.clone(), embedding_repo);
+            let use_case = DeleteRepositoryUseCase::new(sqlite.clone(), vector_repo);
 
             let result = use_case.execute(&id_or_path).await;
             match result {
@@ -279,7 +243,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Expand ~ to home directory.
 fn expand_tilde(path: &str) -> String {
     if path.starts_with("~/") {
         if let Some(home) = std::env::var_os("HOME") {

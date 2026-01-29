@@ -1,5 +1,3 @@
-//! ONNX Runtime-based embedding service using HuggingFace models.
-
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -13,13 +11,10 @@ use tracing::{debug, info};
 
 use crate::domain::{CodeChunk, DomainError, Embedding, EmbeddingConfig, EmbeddingService};
 
-/// Default model to use for code embeddings.
-/// all-MiniLM-L6-v2 is a good general-purpose model with 384 dimensions.
 const DEFAULT_MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
 const DEFAULT_DIMENSIONS: usize = 384;
 const DEFAULT_MAX_SEQ_LENGTH: usize = 256;
 
-/// Embedding service using ONNX Runtime for inference.
 pub struct OrtEmbeddingService {
     session: Arc<Mutex<Session>>,
     tokenizer: Arc<Tokenizer>,
@@ -27,12 +22,10 @@ pub struct OrtEmbeddingService {
 }
 
 impl OrtEmbeddingService {
-    /// Create a new ORT embedding service by downloading model from HuggingFace.
     pub fn new(model_id: Option<&str>) -> Result<Self, DomainError> {
         let model_id = model_id.unwrap_or(DEFAULT_MODEL_ID);
         info!("Initializing ORT embedding service with model: {}", model_id);
 
-        // Download model files from HuggingFace
         let api = hf_hub::api::sync::ApiBuilder::new()
             .with_progress(true)
             .build()
@@ -40,12 +33,10 @@ impl OrtEmbeddingService {
 
         let repo = api.model(model_id.to_string());
 
-        // Download tokenizer
         let tokenizer_path = repo
             .get("tokenizer.json")
             .map_err(|e| DomainError::internal(format!("Failed to download tokenizer: {}", e)))?;
 
-        // Download ONNX model
         let model_path = repo
             .get("model.onnx")
             .or_else(|_| repo.get("onnx/model.onnx"))
@@ -54,7 +45,6 @@ impl OrtEmbeddingService {
         Self::from_paths(model_path, tokenizer_path, model_id)
     }
 
-    /// Create from local file paths.
     pub fn from_paths(
         model_path: PathBuf,
         tokenizer_path: PathBuf,
@@ -62,7 +52,6 @@ impl OrtEmbeddingService {
     ) -> Result<Self, DomainError> {
         info!("Loading ONNX model from: {:?}", model_path);
 
-        // Initialize ONNX Runtime session
         let session = Session::builder()
             .map_err(|e| DomainError::internal(format!("Failed to create session builder: {}", e)))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
@@ -70,7 +59,6 @@ impl OrtEmbeddingService {
             .commit_from_file(&model_path)
             .map_err(|e| DomainError::internal(format!("Failed to load ONNX model: {}", e)))?;
 
-        // Load tokenizer
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| DomainError::internal(format!("Failed to load tokenizer: {}", e)))?;
 
@@ -87,13 +75,11 @@ impl OrtEmbeddingService {
         })
     }
 
-    /// Generate embeddings for a batch of texts.
     fn embed_texts(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, DomainError> {
         if texts.is_empty() {
             return Ok(vec![]);
         }
 
-        // Tokenize all texts
         let encodings = self
             .tokenizer
             .encode_batch(texts.to_vec(), true)
@@ -107,7 +93,6 @@ impl OrtEmbeddingService {
             .unwrap_or(0)
             .min(self.config.max_sequence_length);
 
-        // Prepare input tensors
         let mut input_ids: Vec<i64> = Vec::with_capacity(batch_size * max_len);
         let mut attention_mask: Vec<i64> = Vec::with_capacity(batch_size * max_len);
         let mut token_type_ids: Vec<i64> = Vec::with_capacity(batch_size * max_len);
@@ -119,19 +104,16 @@ impl OrtEmbeddingService {
 
             let len = ids.len().min(max_len);
 
-            // Add actual tokens
             input_ids.extend(ids[..len].iter().map(|&x| x as i64));
             attention_mask.extend(mask[..len].iter().map(|&x| x as i64));
             token_type_ids.extend(type_ids[..len].iter().map(|&x| x as i64));
 
-            // Pad to max_len
             let padding = max_len - len;
             input_ids.extend(std::iter::repeat(0i64).take(padding));
             attention_mask.extend(std::iter::repeat(0i64).take(padding));
             token_type_ids.extend(std::iter::repeat(0i64).take(padding));
         }
 
-        // Create tensors using (shape, data) tuples
         let shape = [batch_size, max_len];
         let input_ids_tensor = Tensor::from_array((shape, input_ids))
             .map_err(|e| DomainError::internal(format!("Failed to create input_ids tensor: {}", e)))?;
@@ -153,9 +135,6 @@ impl OrtEmbeddingService {
             ])
             .map_err(|e| DomainError::internal(format!("Inference failed: {}", e)))?;
 
-        // Extract embeddings from output
-        // Most sentence-transformers models output shape (batch_size, seq_len, hidden_size)
-        // We need to mean pool over the sequence dimension
         let output_value = outputs
             .iter()
             .next()
@@ -170,7 +149,6 @@ impl OrtEmbeddingService {
         debug!("Output tensor shape: {:?}", shape);
 
         let embeddings = if shape.len() == 3 {
-            // Shape: (batch_size, seq_len, hidden_size) - need to mean pool
             let hidden_size = shape[2];
             let seq_len = shape[1];
 
@@ -197,7 +175,6 @@ impl OrtEmbeddingService {
                         }
                     }
 
-                    // L2 normalize
                     let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
                     if norm > 0.0 {
                         for v in &mut embedding {
@@ -209,7 +186,6 @@ impl OrtEmbeddingService {
                 })
                 .collect()
         } else if shape.len() == 2 {
-            // Shape: (batch_size, hidden_size) - already pooled
             let hidden_size = shape[1];
 
             (0..batch_size)
@@ -218,7 +194,6 @@ impl OrtEmbeddingService {
                         .map(|j| data[i * hidden_size + j])
                         .collect();
 
-                    // L2 normalize
                     let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
                     if norm > 0.0 {
                         for v in &mut embedding {
@@ -258,7 +233,6 @@ impl EmbeddingService for OrtEmbeddingService {
             return Ok(vec![]);
         }
 
-        // Process in batches to avoid OOM
         const BATCH_SIZE: usize = 32;
         let mut all_embeddings = Vec::with_capacity(chunks.len());
 
@@ -300,9 +274,6 @@ impl EmbeddingService for OrtEmbeddingService {
 mod tests {
     use super::*;
 
-    // Note: These tests require network access to download the model
-    // Run with: cargo test --features "ort-test" -- --ignored
-
     #[tokio::test]
     #[ignore = "Requires model download"]
     async fn test_ort_embedding_service() {
@@ -312,7 +283,6 @@ mod tests {
 
         assert_eq!(embedding.len(), DEFAULT_DIMENSIONS);
 
-        // Check it's normalized
         let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 0.01);
     }

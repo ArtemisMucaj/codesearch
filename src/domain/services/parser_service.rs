@@ -2,7 +2,6 @@ use async_trait::async_trait;
 
 use crate::domain::{CodeChunk, DomainError, Language};
 
-/// Trait for parsing source code into indexable chunks.
 #[async_trait]
 pub trait ParserService: Send + Sync {
     async fn parse_file(

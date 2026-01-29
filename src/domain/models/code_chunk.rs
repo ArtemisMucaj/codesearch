@@ -3,7 +3,6 @@ use uuid::Uuid;
 
 use super::Language;
 
-/// Represents a chunk of code extracted from a source file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeChunk {
     pub id: String,
@@ -57,7 +56,6 @@ impl CodeChunk {
     }
 }
 
-/// Types of AST nodes that can be indexed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeType {

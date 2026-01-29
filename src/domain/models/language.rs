@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Supported programming languages for parsing and indexing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
@@ -14,7 +13,6 @@ pub enum Language {
 }
 
 impl Language {
-    /// Detect language from file extension.
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_lowercase().as_str() {
             "rs" => Language::Rust,
@@ -26,7 +24,6 @@ impl Language {
         }
     }
 
-    /// Detect language from file path.
     pub fn from_path(path: &Path) -> Self {
         path.extension()
             .and_then(|ext| ext.to_str())
@@ -34,7 +31,6 @@ impl Language {
             .unwrap_or(Language::Unknown)
     }
 
-    /// Get the language name as a string.
     pub fn as_str(&self) -> &'static str {
         match self {
             Language::Rust => "rust",

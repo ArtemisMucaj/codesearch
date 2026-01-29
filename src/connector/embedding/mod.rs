@@ -1,5 +1,3 @@
-//! Embedding generation implementations.
-
 mod mock_service;
 mod ort_service;
 

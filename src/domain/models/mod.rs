@@ -1,5 +1,3 @@
-//! Domain models representing core business entities.
-
 mod code_chunk;
 mod embedding;
 mod language;

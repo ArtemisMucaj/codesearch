@@ -1,5 +1,3 @@
-//! SQLite-based storage for code chunks and repository metadata.
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -8,11 +6,8 @@ use rusqlite::{params, Connection};
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::domain::{
-    ChunkRepository, CodeChunk, DomainError, Language, NodeType, Repository, RepositoryRepository,
-};
+use crate::domain::{DomainError, Repository, RepositoryRepository};
 
-/// SQLite-based storage.
 pub struct SqliteStorage {
     conn: Arc<Mutex<Connection>>,
 }
@@ -65,23 +60,6 @@ impl SqliteStorage {
                 file_count INTEGER DEFAULT 0
             );
 
-            CREATE TABLE IF NOT EXISTS code_chunks (
-                id TEXT PRIMARY KEY,
-                file_path TEXT NOT NULL,
-                content TEXT NOT NULL,
-                start_line INTEGER NOT NULL,
-                end_line INTEGER NOT NULL,
-                language TEXT NOT NULL,
-                node_type TEXT NOT NULL,
-                symbol_name TEXT,
-                parent_symbol TEXT,
-                repository_id TEXT NOT NULL,
-                FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_chunks_repository ON code_chunks(repository_id);
-            CREATE INDEX IF NOT EXISTS idx_chunks_file ON code_chunks(file_path);
-            CREATE INDEX IF NOT EXISTS idx_chunks_language ON code_chunks(language);
             "#,
         )
         .map_err(|e| DomainError::storage(format!("Failed to initialize schema: {}", e)))?;
@@ -206,192 +184,5 @@ impl RepositoryRepository for SqliteStorage {
         .map_err(|e| DomainError::storage(format!("Failed to update repository stats: {}", e)))?;
 
         Ok(())
-    }
-}
-
-#[async_trait]
-impl ChunkRepository for SqliteStorage {
-    async fn save(&self, chunk: &CodeChunk) -> Result<(), DomainError> {
-        let conn = self.conn.lock().await;
-
-        conn.execute(
-            r#"INSERT OR REPLACE INTO code_chunks
-               (id, file_path, content, start_line, end_line, language, node_type, symbol_name, parent_symbol, repository_id)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
-            params![
-                chunk.id, chunk.file_path, chunk.content,
-                chunk.start_line, chunk.end_line,
-                chunk.language.as_str(), chunk.node_type.as_str(),
-                chunk.symbol_name, chunk.parent_symbol, chunk.repository_id,
-            ],
-        )
-        .map_err(|e| DomainError::storage(format!("Failed to save chunk: {}", e)))?;
-
-        Ok(())
-    }
-
-    async fn save_batch(&self, chunks: &[CodeChunk]) -> Result<(), DomainError> {
-        let conn = self.conn.lock().await;
-
-        let tx = conn.unchecked_transaction()
-            .map_err(|e| DomainError::storage(format!("Failed to start transaction: {}", e)))?;
-
-        {
-            let mut stmt = tx.prepare(
-                r#"INSERT OR REPLACE INTO code_chunks
-                   (id, file_path, content, start_line, end_line, language, node_type, symbol_name, parent_symbol, repository_id)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
-            ).map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
-
-            for chunk in chunks {
-                stmt.execute(params![
-                    chunk.id, chunk.file_path, chunk.content,
-                    chunk.start_line, chunk.end_line,
-                    chunk.language.as_str(), chunk.node_type.as_str(),
-                    chunk.symbol_name, chunk.parent_symbol, chunk.repository_id,
-                ]).map_err(|e| DomainError::storage(format!("Failed to insert chunk: {}", e)))?;
-            }
-        }
-
-        tx.commit().map_err(|e| DomainError::storage(format!("Failed to commit transaction: {}", e)))?;
-
-        Ok(())
-    }
-
-    async fn find_by_id(&self, id: &str) -> Result<Option<CodeChunk>, DomainError> {
-        let conn = self.conn.lock().await;
-
-        let mut stmt = conn.prepare(
-            r#"SELECT id, file_path, content, start_line, end_line, language, node_type, symbol_name, parent_symbol, repository_id
-               FROM code_chunks WHERE id = ?1"#,
-        ).map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
-
-        let result = stmt.query_row(params![id], |row| {
-            Ok(CodeChunk {
-                id: row.get(0)?,
-                file_path: row.get(1)?,
-                content: row.get(2)?,
-                start_line: row.get(3)?,
-                end_line: row.get(4)?,
-                language: parse_language(row.get::<_, String>(5)?.as_str()),
-                node_type: parse_node_type(row.get::<_, String>(6)?.as_str()),
-                symbol_name: row.get(7)?,
-                parent_symbol: row.get(8)?,
-                repository_id: row.get(9)?,
-            })
-        }).ok();
-
-        Ok(result)
-    }
-
-    async fn find_by_file(&self, file_path: &str) -> Result<Vec<CodeChunk>, DomainError> {
-        let conn = self.conn.lock().await;
-        query_chunks(&conn, "SELECT id, file_path, content, start_line, end_line, language, node_type, symbol_name, parent_symbol, repository_id FROM code_chunks WHERE file_path = ?1", params![file_path])
-    }
-
-    async fn find_by_repository(&self, repository_id: &str) -> Result<Vec<CodeChunk>, DomainError> {
-        let conn = self.conn.lock().await;
-        query_chunks(&conn, "SELECT id, file_path, content, start_line, end_line, language, node_type, symbol_name, parent_symbol, repository_id FROM code_chunks WHERE repository_id = ?1", params![repository_id])
-    }
-
-    async fn find_by_language(&self, language: Language) -> Result<Vec<CodeChunk>, DomainError> {
-        let conn = self.conn.lock().await;
-        query_chunks(&conn, "SELECT id, file_path, content, start_line, end_line, language, node_type, symbol_name, parent_symbol, repository_id FROM code_chunks WHERE language = ?1", params![language.as_str()])
-    }
-
-    async fn find_by_node_type(&self, node_type: NodeType) -> Result<Vec<CodeChunk>, DomainError> {
-        let conn = self.conn.lock().await;
-        query_chunks(&conn, "SELECT id, file_path, content, start_line, end_line, language, node_type, symbol_name, parent_symbol, repository_id FROM code_chunks WHERE node_type = ?1", params![node_type.as_str()])
-    }
-
-    async fn delete(&self, id: &str) -> Result<(), DomainError> {
-        let conn = self.conn.lock().await;
-        conn.execute("DELETE FROM code_chunks WHERE id = ?1", params![id])
-            .map_err(|e| DomainError::storage(format!("Failed to delete chunk: {}", e)))?;
-        Ok(())
-    }
-
-    async fn delete_by_repository(&self, repository_id: &str) -> Result<(), DomainError> {
-        let conn = self.conn.lock().await;
-        conn.execute("DELETE FROM code_chunks WHERE repository_id = ?1", params![repository_id])
-            .map_err(|e| DomainError::storage(format!("Failed to delete chunks: {}", e)))?;
-        Ok(())
-    }
-
-    async fn delete_by_file(&self, file_path: &str) -> Result<(), DomainError> {
-        let conn = self.conn.lock().await;
-        conn.execute("DELETE FROM code_chunks WHERE file_path = ?1", params![file_path])
-            .map_err(|e| DomainError::storage(format!("Failed to delete chunks: {}", e)))?;
-        Ok(())
-    }
-
-    async fn count(&self) -> Result<u64, DomainError> {
-        let conn = self.conn.lock().await;
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM code_chunks", [], |row| row.get(0))
-            .map_err(|e| DomainError::storage(format!("Failed to count chunks: {}", e)))?;
-        Ok(count as u64)
-    }
-
-    async fn count_by_repository(&self, repository_id: &str) -> Result<u64, DomainError> {
-        let conn = self.conn.lock().await;
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM code_chunks WHERE repository_id = ?1", params![repository_id], |row| row.get(0))
-            .map_err(|e| DomainError::storage(format!("Failed to count chunks: {}", e)))?;
-        Ok(count as u64)
-    }
-}
-
-fn query_chunks(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> Result<Vec<CodeChunk>, DomainError> {
-    let mut stmt = conn.prepare(sql)
-        .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
-
-    let rows = stmt.query_map(params, |row| {
-        Ok(CodeChunk {
-            id: row.get(0)?,
-            file_path: row.get(1)?,
-            content: row.get(2)?,
-            start_line: row.get(3)?,
-            end_line: row.get(4)?,
-            language: parse_language(row.get::<_, String>(5)?.as_str()),
-            node_type: parse_node_type(row.get::<_, String>(6)?.as_str()),
-            symbol_name: row.get(7)?,
-            parent_symbol: row.get(8)?,
-            repository_id: row.get(9)?,
-        })
-    }).map_err(|e| DomainError::storage(format!("Failed to query chunks: {}", e)))?;
-
-    let mut chunks = Vec::new();
-    for row in rows {
-        chunks.push(row.map_err(|e| DomainError::storage(format!("Failed to read row: {}", e)))?);
-    }
-
-    Ok(chunks)
-}
-
-fn parse_language(s: &str) -> Language {
-    match s {
-        "rust" => Language::Rust,
-        "python" => Language::Python,
-        "javascript" => Language::JavaScript,
-        "typescript" => Language::TypeScript,
-        "go" => Language::Go,
-        _ => Language::Unknown,
-    }
-}
-
-fn parse_node_type(s: &str) -> NodeType {
-    match s {
-        "function" => NodeType::Function,
-        "class" => NodeType::Class,
-        "struct" => NodeType::Struct,
-        "enum" => NodeType::Enum,
-        "trait" => NodeType::Trait,
-        "impl" => NodeType::Impl,
-        "module" => NodeType::Module,
-        "constant" => NodeType::Constant,
-        "typedef" => NodeType::TypeDef,
-        "interface" => NodeType::Interface,
-        _ => NodeType::Block,
     }
 }

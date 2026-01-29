@@ -1,6 +1,5 @@
 use thiserror::Error;
 
-/// Domain-level errors.
 #[derive(Debug, Error)]
 pub enum DomainError {
     #[error("Parse error: {0}")]

@@ -1,5 +1,3 @@
-//! Tree-sitter based code parser.
-
 use async_trait::async_trait;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
@@ -7,7 +5,6 @@ use tracing::debug;
 
 use crate::domain::{CodeChunk, DomainError, Language, NodeType, ParserService};
 
-/// Tree-sitter based code parser.
 pub struct TreeSitterParser {
     supported_languages: Vec<Language>,
 }
@@ -147,7 +144,6 @@ impl ParserService for TreeSitterParser {
         let mut chunks = Vec::new();
         let capture_names: Vec<&str> = query.capture_names().to_vec();
 
-        // Iterate through matches using while let
         let mut matches_iter = cursor.matches(&query, tree.root_node(), text_bytes);
 
         while let Some(query_match) = matches_iter.next() {
@@ -174,7 +170,6 @@ impl ParserService for TreeSitterParser {
                 let end_line = node.end_position().row as u32 + 1;
                 let node_content = content[node.byte_range()].to_string();
 
-                // Skip very small chunks
                 if node_content.trim().len() < 10 {
                     continue;
                 }

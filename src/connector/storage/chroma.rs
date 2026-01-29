@@ -1,5 +1,3 @@
-//! ChromaDB vector store for persistent embedding storage.
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -11,30 +9,20 @@ use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::domain::{
-    ChunkRepository, DomainError, Embedding, EmbeddingRepository, SearchQuery, SearchResult,
+    CodeChunk, DomainError, Embedding, Language, NodeType, SearchQuery, SearchResult,
+    VectorRepository,
 };
 
-/// ChromaDB-based embedding storage for persistent vector search.
 pub struct ChromaEmbeddingStorage {
     #[allow(dead_code)]
     client: ChromaClient,
     collection: Arc<Mutex<ChromaCollection>>,
-    chunk_repo: Arc<dyn ChunkRepository>,
-    #[allow(dead_code)]
-    collection_name: String,
 }
 
 impl ChromaEmbeddingStorage {
-    /// Create a new ChromaDB storage instance.
-    ///
-    /// # Arguments
-    /// * `url` - ChromaDB server URL (e.g., "http://localhost:8000")
-    /// * `collection_name` - Name of the collection to use
-    /// * `chunk_repo` - Reference to the chunk repository for metadata lookups
     pub async fn new(
         url: &str,
         collection_name: &str,
-        chunk_repo: Arc<dyn ChunkRepository>,
     ) -> Result<Self, DomainError> {
         let client = ChromaClient::new(ChromaClientOptions {
             url: Some(url.to_string()),
@@ -46,7 +34,6 @@ impl ChromaEmbeddingStorage {
 
         info!("Connected to ChromaDB at {}", url);
 
-        // Get or create the collection
         let collection = client
             .get_or_create_collection(collection_name, None)
             .await
@@ -59,158 +46,185 @@ impl ChromaEmbeddingStorage {
         Ok(Self {
             client,
             collection: Arc::new(Mutex::new(collection)),
-            chunk_repo,
-            collection_name: collection_name.to_string(),
         })
     }
 
-    /// Create with default local ChromaDB settings.
     #[allow(dead_code)]
-    pub async fn new_local(
-        collection_name: &str,
-        chunk_repo: Arc<dyn ChunkRepository>,
-    ) -> Result<Self, DomainError> {
-        Self::new("http://localhost:8000", collection_name, chunk_repo).await
+    pub async fn new_local(collection_name: &str) -> Result<Self, DomainError> {
+        Self::new("http://localhost:8000", collection_name).await
     }
 
-    /// Create a metadata map from an embedding model name.
-    fn create_metadata(model: &str) -> Map<String, serde_json::Value> {
+    fn create_metadata(chunk: &CodeChunk, model: &str) -> Map<String, serde_json::Value> {
         let mut map = Map::new();
         map.insert("model".to_string(), serde_json::Value::String(model.to_string()));
+        map.insert(
+            "file_path".to_string(),
+            serde_json::Value::String(chunk.file_path.clone()),
+        );
+        map.insert(
+            "start_line".to_string(),
+            serde_json::Value::Number((chunk.start_line as u64).into()),
+        );
+        map.insert(
+            "end_line".to_string(),
+            serde_json::Value::Number((chunk.end_line as u64).into()),
+        );
+        map.insert(
+            "language".to_string(),
+            serde_json::Value::String(chunk.language.as_str().to_string()),
+        );
+        map.insert(
+            "node_type".to_string(),
+            serde_json::Value::String(chunk.node_type.as_str().to_string()),
+        );
+        map.insert(
+            "repository_id".to_string(),
+            serde_json::Value::String(chunk.repository_id.clone()),
+        );
+        if let Some(ref name) = chunk.symbol_name {
+            map.insert("symbol_name".to_string(), serde_json::Value::String(name.clone()));
+        }
+        if let Some(ref parent) = chunk.parent_symbol {
+            map.insert("parent_symbol".to_string(), serde_json::Value::String(parent.clone()));
+        }
         map
+    }
+
+    fn chunk_from_metadata(
+        id: &str,
+        content: String,
+        metadata: &Map<String, serde_json::Value>,
+    ) -> Result<CodeChunk, DomainError> {
+        let file_path = metadata
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| DomainError::internal("Missing file_path metadata"))?
+            .to_string();
+        let start_line = metadata
+            .get("start_line")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| DomainError::internal("Missing start_line metadata"))? as u32;
+        let end_line = metadata
+            .get("end_line")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| DomainError::internal("Missing end_line metadata"))? as u32;
+        let language = metadata
+            .get("language")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let node_type = metadata
+            .get("node_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("block")
+            .to_string();
+        let repository_id = metadata
+            .get("repository_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| DomainError::internal("Missing repository_id metadata"))?
+            .to_string();
+
+        let chunk = CodeChunk {
+            id: id.to_string(),
+            file_path,
+            content,
+            start_line,
+            end_line,
+            language: parse_language(&language),
+            node_type: parse_node_type(&node_type),
+            symbol_name: metadata
+                .get("symbol_name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            parent_symbol: metadata
+                .get("parent_symbol")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            repository_id,
+        };
+
+        Ok(chunk)
     }
 }
 
 #[async_trait]
-impl EmbeddingRepository for ChromaEmbeddingStorage {
-    async fn save(&self, embedding: &Embedding) -> Result<(), DomainError> {
-        let collection = self.collection.lock().await;
-
-        let metadata = Self::create_metadata(&embedding.model);
-
-        let entries = CollectionEntries {
-            ids: vec![embedding.chunk_id.as_str()],
-            embeddings: Some(vec![embedding.vector.clone()]),
-            metadatas: Some(vec![metadata]),
-            documents: None,
-        };
-
-        collection
-            .upsert(entries, None)
-            .await
-            .map_err(|e| DomainError::internal(format!("Failed to save embedding: {}", e)))?;
-
-        debug!("Saved embedding for chunk: {}", embedding.chunk_id);
-        Ok(())
-    }
-
-    async fn save_batch(&self, embeddings: &[Embedding]) -> Result<(), DomainError> {
-        if embeddings.is_empty() {
+impl VectorRepository for ChromaEmbeddingStorage {
+    async fn save_batch(
+        &self,
+        chunks: &[CodeChunk],
+        embeddings: &[Embedding],
+    ) -> Result<(), DomainError> {
+        if chunks.is_empty() {
             return Ok(());
+        }
+
+        if chunks.len() != embeddings.len() {
+            return Err(DomainError::InvalidInput(
+                "Chunk and embedding count mismatch".to_string(),
+            ));
         }
 
         let collection = self.collection.lock().await;
 
-        let ids: Vec<&str> = embeddings.iter().map(|e| e.chunk_id.as_str()).collect();
+        let ids: Vec<&str> = chunks.iter().map(|chunk| chunk.id.as_str()).collect();
+        let documents: Vec<&str> = chunks.iter().map(|chunk| chunk.content.as_str()).collect();
         let vectors: Vec<Vec<f32>> = embeddings.iter().map(|e| e.vector.clone()).collect();
-        let metadatas: Vec<Map<String, serde_json::Value>> = embeddings
+        let metadatas: Vec<Map<String, serde_json::Value>> = chunks
             .iter()
-            .map(|e| Self::create_metadata(&e.model))
+            .zip(embeddings.iter())
+            .map(|(chunk, embedding)| Self::create_metadata(chunk, &embedding.model))
             .collect();
 
         let entries = CollectionEntries {
             ids,
             embeddings: Some(vectors),
             metadatas: Some(metadatas),
-            documents: None,
+            documents: Some(documents),
         };
 
         collection
             .upsert(entries, None)
             .await
-            .map_err(|e| DomainError::internal(format!("Failed to save embeddings batch: {}", e)))?;
+            .map_err(|e| DomainError::internal(format!("Failed to save batch: {}", e)))?;
 
-        debug!("Saved {} embeddings to ChromaDB", embeddings.len());
+        debug!("Saved {} chunks to ChromaDB", chunks.len());
         Ok(())
-    }
-
-    async fn find_by_chunk_id(&self, chunk_id: &str) -> Result<Option<Embedding>, DomainError> {
-        let collection = self.collection.lock().await;
-
-        let options = GetOptions {
-            ids: vec![chunk_id.to_string()],
-            where_metadata: None,
-            limit: Some(1),
-            offset: None,
-            where_document: None,
-            include: Some(vec!["embeddings".into(), "metadatas".into()]),
-        };
-
-        let result = collection
-            .get(options)
-            .await
-            .map_err(|e| DomainError::internal(format!("Failed to get embedding: {}", e)))?;
-
-        if result.ids.is_empty() {
-            return Ok(None);
-        }
-
-        // embeddings is Option<Vec<Option<Vec<f32>>>>
-        let vector = result
-            .embeddings
-            .and_then(|e| e.into_iter().next()) // Option<Option<Vec<f32>>>
-            .flatten() // Option<Vec<f32>>
-            .unwrap_or_default();
-
-        // metadatas is Option<Vec<Option<Map<String, Value>>>>
-        let model = result
-            .metadatas
-            .and_then(|m| m.into_iter().next()) // Option<Option<Map>>
-            .flatten() // Option<Map>
-            .and_then(|m| {
-                m.get("model")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-            })
-            .unwrap_or_else(|| "unknown".to_string());
-
-        Ok(Some(Embedding::new(chunk_id.to_string(), vector, model)))
     }
 
     async fn delete(&self, chunk_id: &str) -> Result<(), DomainError> {
         let collection = self.collection.lock().await;
-
         collection
             .delete(Some(vec![chunk_id]), None, None)
             .await
-            .map_err(|e| DomainError::internal(format!("Failed to delete embedding: {}", e)))?;
-
-        debug!("Deleted embedding for chunk: {}", chunk_id);
+            .map_err(|e| DomainError::internal(format!("Failed to delete chunk: {}", e)))?;
         Ok(())
     }
 
     async fn delete_by_repository(&self, repository_id: &str) -> Result<(), DomainError> {
-        // Get all chunk IDs for this repository
-        let chunks = self.chunk_repo.find_by_repository(repository_id).await?;
+        let collection = self.collection.lock().await;
+        let where_metadata = serde_json::json!({"repository_id": repository_id});
+        let ids = collection
+            .get(GetOptions {
+                ids: vec![],
+                where_metadata: Some(where_metadata),
+                limit: None,
+                offset: None,
+                where_document: None,
+                include: None,
+            })
+            .await
+            .map_err(|e| DomainError::internal(format!("Failed to fetch ids: {}", e)))?
+            .ids;
 
-        if chunks.is_empty() {
+        if ids.is_empty() {
             return Ok(());
         }
 
-        let collection = self.collection.lock().await;
-        let chunk_ids: Vec<&str> = chunks.iter().map(|c| c.id.as_str()).collect();
-
-        // ChromaDB delete accepts a list of IDs
+        let id_refs: Vec<&str> = ids.iter().map(|id| id.as_str()).collect();
         collection
-            .delete(Some(chunk_ids), None, None)
+            .delete(Some(id_refs), None, None)
             .await
-            .map_err(|e| DomainError::internal(format!("Failed to delete embeddings: {}", e)))?;
-
-        info!(
-            "Deleted {} embeddings for repository: {}",
-            chunks.len(),
-            repository_id
-        );
+            .map_err(|e| DomainError::internal(format!("Failed to delete chunks: {}", e)))?;
         Ok(())
     }
 
@@ -226,8 +240,8 @@ impl EmbeddingRepository for ChromaEmbeddingStorage {
             query_embeddings: Some(vec![query_embedding.to_vec()]),
             where_metadata: None,
             where_document: None,
-            n_results: Some(query.limit * 2), // Fetch extra to account for filtering
-            include: Some(vec!["embeddings".into(), "distances".into()]),
+            n_results: Some(query.limit * 2),
+            include: Some(vec!["distances", "metadatas", "documents"]),
         };
 
         let result = collection
@@ -235,61 +249,64 @@ impl EmbeddingRepository for ChromaEmbeddingStorage {
             .await
             .map_err(|e| DomainError::internal(format!("Failed to search embeddings: {}", e)))?;
 
-        // Release the lock before doing chunk lookups
-        drop(collection);
-
-        let mut search_results = Vec::new();
-
-        // ChromaDB returns distances, we need to convert to similarity scores
-        // For cosine distance: similarity = 1 - distance (if using cosine distance)
-        // For L2 distance: similarity = 1 / (1 + distance)
         let ids = result.ids.into_iter().next().unwrap_or_default();
         let distances = result
             .distances
             .and_then(|d| d.into_iter().next())
             .unwrap_or_default();
+        let metadatas = result
+            .metadatas
+            .and_then(|m| m.into_iter().next())
+            .unwrap_or_default();
+        let documents = result
+            .documents
+            .and_then(|d| d.into_iter().next())
+            .unwrap_or_default();
 
-        for (chunk_id, distance) in ids.into_iter().zip(distances.into_iter()) {
-            // Convert distance to similarity score (assuming cosine distance)
-            // ChromaDB uses L2 by default, but we'll normalize to 0-1 range
+        let mut search_results = Vec::new();
+
+        for ((chunk_id, distance), (metadata_opt, document)) in ids
+            .into_iter()
+            .zip(distances.into_iter())
+            .zip(metadatas.into_iter().zip(documents.into_iter()))
+        {
             let score = 1.0 / (1.0 + distance);
 
-            // Apply minimum score filter
             if let Some(min_score) = query.min_score {
                 if score < min_score {
                     continue;
                 }
             }
 
-            // Fetch the chunk metadata
-            if let Some(chunk) = self.chunk_repo.find_by_id(&chunk_id).await? {
-                // Apply language filter
-                if let Some(ref languages) = query.languages {
-                    if !languages.iter().any(|l| l == chunk.language.as_str()) {
-                        continue;
-                    }
-                }
+            let metadata = match metadata_opt {
+                Some(metadata) => metadata,
+                None => continue,
+            };
 
-                // Apply node type filter
-                if let Some(ref node_types) = query.node_types {
-                    if !node_types.iter().any(|t| t == chunk.node_type.as_str()) {
-                        continue;
-                    }
-                }
+            let chunk = Self::chunk_from_metadata(&chunk_id, document, &metadata)?;
 
-                // Apply repository filter
-                if let Some(ref repo_ids) = query.repository_ids {
-                    if !repo_ids.contains(&chunk.repository_id) {
-                        continue;
-                    }
+            if let Some(ref languages) = query.languages {
+                if !languages.iter().any(|l| l == chunk.language.as_str()) {
+                    continue;
                 }
+            }
 
-                search_results.push(SearchResult::new(chunk, score));
-
-                // Stop if we have enough results
-                if search_results.len() >= query.limit {
-                    break;
+            if let Some(ref node_types) = query.node_types {
+                if !node_types.iter().any(|t| t == chunk.node_type.as_str()) {
+                    continue;
                 }
+            }
+
+            if let Some(ref repo_ids) = query.repository_ids {
+                if !repo_ids.contains(&chunk.repository_id) {
+                    continue;
+                }
+            }
+
+            search_results.push(SearchResult::new(chunk, score));
+
+            if search_results.len() >= query.limit {
+                break;
             }
         }
 
@@ -298,12 +315,70 @@ impl EmbeddingRepository for ChromaEmbeddingStorage {
 
     async fn count(&self) -> Result<u64, DomainError> {
         let collection = self.collection.lock().await;
-
         let result = collection
             .count()
             .await
-            .map_err(|e| DomainError::internal(format!("Failed to count embeddings: {}", e)))?;
-
+            .map_err(|e| DomainError::internal(format!("Failed to count chunks: {}", e)))?;
         Ok(result as u64)
+    }
+}
+
+fn parse_language(s: &str) -> Language {
+    match s {
+        "rust" => Language::Rust,
+        "python" => Language::Python,
+        "javascript" => Language::JavaScript,
+        "typescript" => Language::TypeScript,
+        "go" => Language::Go,
+        _ => Language::Unknown,
+    }
+}
+
+fn parse_node_type(s: &str) -> NodeType {
+    match s {
+        "function" => NodeType::Function,
+        "class" => NodeType::Class,
+        "struct" => NodeType::Struct,
+        "enum" => NodeType::Enum,
+        "trait" => NodeType::Trait,
+        "impl" => NodeType::Impl,
+        "module" => NodeType::Module,
+        "constant" => NodeType::Constant,
+        "typedef" => NodeType::TypeDef,
+        "interface" => NodeType::Interface,
+        _ => NodeType::Block,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{Language, NodeType};
+
+    #[test]
+    fn test_chroma_metadata_roundtrip() {
+        let chunk = CodeChunk::new(
+            "src/lib.rs".to_string(),
+            "fn add(a: i32, b: i32) -> i32 { a + b }".to_string(),
+            1,
+            1,
+            Language::Rust,
+            NodeType::Function,
+            "repo".to_string(),
+        )
+        .with_symbol_name("add");
+
+        let embedding = Embedding::new(chunk.id.clone(), vec![0.0; 3], "mock".to_string());
+        let metadata = ChromaEmbeddingStorage::create_metadata(&chunk, &embedding.model);
+        let rebuilt = ChromaEmbeddingStorage::chunk_from_metadata(
+            &chunk.id,
+            chunk.content.clone(),
+            &metadata,
+        )
+        .expect("chunk rebuild should succeed");
+
+        assert_eq!(rebuilt.file_path, chunk.file_path);
+        assert_eq!(rebuilt.language, chunk.language);
+        assert_eq!(rebuilt.node_type, chunk.node_type);
     }
 }

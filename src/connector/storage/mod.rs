@@ -1,5 +1,3 @@
-//! Storage implementations for persistence.
-
 mod sqlite;
 mod memory;
 mod chroma;

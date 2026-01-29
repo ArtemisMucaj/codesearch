@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use super::CodeChunk;
 
-/// Represents a search result with relevance score.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     pub chunk: CodeChunk,
@@ -25,7 +24,6 @@ impl SearchResult {
     }
 }
 
-/// Parameters for a search query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchQuery {
     pub query: String,

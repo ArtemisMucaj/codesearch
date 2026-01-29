@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-/// Represents a vector embedding for a code chunk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Embedding {
     pub chunk_id: String,
@@ -22,7 +21,6 @@ impl Embedding {
     }
 }
 
-/// Configuration for the embedding model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingConfig {
     pub model_name: String,
