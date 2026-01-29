@@ -214,12 +214,16 @@ async fn main() -> Result<()> {
         Commands::Delete { id_or_path } => {
             let use_case = DeleteRepositoryUseCase::new(sqlite.clone(), vector_repo);
 
-            let result = use_case.execute(&id_or_path).await;
-            match result {
+            match use_case.execute(&id_or_path).await {
                 Ok(_) => println!("Repository deleted successfully."),
-                Err(_) => {
-                    use_case.delete_by_path(&id_or_path).await?;
-                    println!("Repository deleted successfully.");
+                Err(e) => {
+                    // Only try path-based deletion if the ID was not found
+                    if matches!(e, codesearch::DomainError::NotFound(_)) {
+                        use_case.delete_by_path(&id_or_path).await?;
+                        println!("Repository deleted successfully.");
+                    } else {
+                        return Err(e.into());
+                    }
                 }
             }
         }
@@ -245,8 +249,11 @@ async fn main() -> Result<()> {
 }
 
 fn expand_tilde(path: &str) -> String {
-    if path.starts_with("~/") {
+    if path == "~" || path.starts_with("~/") {
         if let Some(home) = std::env::var_os("HOME") {
+            if path == "~" {
+                return home.to_string_lossy().to_string();
+            }
             return path.replacen("~", &home.to_string_lossy(), 1);
         }
     }

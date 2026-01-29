@@ -68,7 +68,14 @@ impl IndexRepositoryUseCase {
             .git_exclude(true)
             .build();
 
-        for entry in walker.flatten() {
+        for entry in walker {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!("Error walking directory: {}", e);
+                    continue;
+                }
+            };
             let entry_path = entry.path();
 
             if !entry_path.is_file() {

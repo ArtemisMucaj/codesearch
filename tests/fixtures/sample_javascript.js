@@ -23,7 +23,7 @@ class User {
    * Check if the user data is valid.
    */
   isValid() {
-    return this.name && this.email.includes("@");
+    return Boolean(this.name) && typeof this.email === "string" && this.email.includes("@");
   }
 }
 

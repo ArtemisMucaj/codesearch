@@ -100,31 +100,7 @@ impl RepositoryRepository for SqliteRepositoryAdapter {
             .prepare("SELECT id, name, path, created_at, updated_at, chunk_count, file_count FROM repositories WHERE id = ?1")
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
-        let result = stmt
-            .query_row(params![id], |row| {
-                Ok(Repository::reconstitute(
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            })
-            .ok();
-
-        Ok(result)
-    }
-
-    async fn find_by_path(&self, path: &str) -> Result<Option<Repository>, DomainError> {
-        let conn = self.conn.lock().await;
-
-        let mut stmt = conn
-            .prepare("SELECT id, name, path, created_at, updated_at, chunk_count, file_count FROM repositories WHERE path = ?1")
-            .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
-
-        let result = stmt.query_row(params![path], |row| {
+        match stmt.query_row(params![id], |row| {
             Ok(Repository::reconstitute(
                 row.get(0)?,
                 row.get(1)?,
@@ -134,9 +110,35 @@ impl RepositoryRepository for SqliteRepositoryAdapter {
                 row.get(5)?,
                 row.get(6)?,
             ))
-        }).ok();
+        }) {
+            Ok(repo) => Ok(Some(repo)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(DomainError::storage(format!("Failed to query repository: {}", e))),
+        }
+    }
 
-        Ok(result)
+    async fn find_by_path(&self, path: &str) -> Result<Option<Repository>, DomainError> {
+        let conn = self.conn.lock().await;
+
+        let mut stmt = conn
+            .prepare("SELECT id, name, path, created_at, updated_at, chunk_count, file_count FROM repositories WHERE path = ?1")
+            .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
+
+        match stmt.query_row(params![path], |row| {
+            Ok(Repository::reconstitute(
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        }) {
+            Ok(repo) => Ok(Some(repo)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(DomainError::storage(format!("Failed to query repository by path: {}", e))),
+        }
     }
 
     async fn list(&self) -> Result<Vec<Repository>, DomainError> {

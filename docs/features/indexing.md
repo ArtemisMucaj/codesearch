@@ -30,24 +30,13 @@ Files are filtered by:
 
 Tree-sitter parses each file and extracts semantic chunks:
 
-```text
-Source File
-     │
-     ▼
-┌────────────────┐
-│  Tree-sitter   │
-│     Parser     │
-└────────────────┘
-     │
-     ▼
-┌────────────────┐
-│  Query Match   │ ─── Language-specific queries
-└────────────────┘
-     │
-     ▼
-┌────────────────┐
-│ Extract Chunks │
-└────────────────┘
+```mermaid
+flowchart TB
+    A[Source File] --> B[Tree-sitter Parser]
+    B --> C[Query Match]
+    C --> D[Extract Chunks]
+
+    C -.- C1[Language-specific queries]
 ```
 
 #### Extracted Node Types

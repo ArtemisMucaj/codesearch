@@ -71,7 +71,8 @@ impl SearchQuery {
     }
 
     pub fn with_limit(mut self, limit: usize) -> Self {
-        self.limit = limit;
+        // Ensure at least 1 result is requested
+        self.limit = limit.max(1);
         self
     }
 

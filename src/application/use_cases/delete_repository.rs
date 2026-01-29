@@ -42,8 +42,9 @@ impl DeleteRepositoryUseCase {
     pub async fn delete_by_path(&self, path: &str) -> Result<(), DomainError> {
         let canonical_path = Path::new(path)
             .canonicalize()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| path.to_string());
+            .map_err(|e| DomainError::InvalidInput(format!("Invalid path '{}': {}", path, e)))?
+            .to_string_lossy()
+            .to_string();
 
         let repo = self
             .repository_repo

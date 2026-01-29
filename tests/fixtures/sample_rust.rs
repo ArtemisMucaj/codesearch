@@ -1,3 +1,5 @@
+// Intentionally included to test parser handling of imports
+#[allow(unused_imports)]
 use std::collections::HashMap;
 
 pub struct User {

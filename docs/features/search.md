@@ -6,31 +6,18 @@ CodeSearch uses semantic similarity to find relevant code. Unlike keyword search
 
 ## How It Works
 
-```text
-Query: "function to validate email addresses"
-                    │
-                    ▼
-            ┌───────────────┐
-            │  Embed Query  │ ─── Same model as indexing
-            └───────────────┘
-                    │
-                    ▼
-            ┌───────────────┐
-            │ Vector Search │ ─── Find nearest neighbors
-            └───────────────┘
-                    │
-                    ▼
-            ┌───────────────┐
-            │ Apply Filters │ ─── Language, score, etc.
-            └───────────────┘
-                    │
-                    ▼
-            ┌───────────────┐
-            │ Fetch Details │ ─── Get full chunk from SQLite
-            └───────────────┘
-                    │
-                    ▼
-              Search Results
+```mermaid
+flowchart TB
+    A["Query: 'function to validate email addresses'"] --> B[Embed Query]
+    B --> C[Vector Search]
+    C --> D[Apply Filters]
+    D --> E[Fetch Details]
+    E --> F[Search Results]
+
+    B -.- B1[Same model as indexing]
+    C -.- C1[Find nearest neighbors]
+    D -.- D1[Language, score, etc.]
+    E -.- E1[Get full chunk from SQLite]
 ```
 
 ## Search Query Options

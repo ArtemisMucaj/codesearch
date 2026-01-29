@@ -4,55 +4,50 @@ CodeSearch follows Domain-Driven Design (DDD) principles with a clean separation
 
 ## Layer Structure
 
-```text
-┌─────────────────────────────────────────────────────────┐
-│                         CLI                              │
-│              (User Interface Layer)                      │
-└─────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────┐
-│                    Application                           │
-│             (Use Cases + Interfaces/Ports)              │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐   │
-│  │               Use Cases                          │   │
-│  │  Index | Search | List | Delete Repository      │   │
-│  └─────────────────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────────────────┐   │
-│  │            Interfaces (Ports)                    │   │
-│  │  VectorRepository | RepositoryRepository |       │   │
-│  │  EmbeddingService | ParserService                │   │
-│  └─────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────┐
-│                      Domain                              │
-│          (Pure Domain Models with Behavior)              │
-│                                                         │
-│  ┌──────────┐  ┌──────────────┐  ┌─────────────────┐   │
-│  │CodeChunk │  │  Repository  │  │   Embedding     │   │
-│  │          │  │              │  │                 │   │
-│  └──────────┘  └──────────────┘  └─────────────────┘   │
-│  ┌──────────┐  ┌──────────────┐  ┌─────────────────┐   │
-│  │ Language │  │ SearchResult │  │  DomainError    │   │
-│  │          │  │ /SearchQuery │  │                 │   │
-│  └──────────┘  └──────────────┘  └─────────────────┘   │
-└─────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────┐
-│                     Connector                            │
-│              (Adapters / Implementations)                │
-│                                                         │
-│  ┌─────────────────────────────────────────────────┐   │
-│  │                  Adapters                        │   │
-│  │  SqliteRepositoryAdapter | ChromaVectorRepository│  │
-│  │  InMemoryVectorRepository | OrtEmbedding         │   │
-│  │  MockEmbedding            | TreeSitterParser     │   │
-│  └─────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph CLI["CLI Layer"]
+        UI[User Interface]
+    end
+
+    subgraph Application["Application Layer"]
+        subgraph UseCases["Use Cases"]
+            Index[Index]
+            Search[Search]
+            List[List]
+            Delete[Delete]
+        end
+        subgraph Ports["Interfaces / Ports"]
+            VectorRepo[VectorRepository]
+            RepoRepo[RepositoryRepository]
+            EmbedSvc[EmbeddingService]
+            ParseSvc[ParserService]
+        end
+    end
+
+    subgraph Domain["Domain Layer"]
+        CodeChunk[CodeChunk]
+        Repository[Repository]
+        Embedding[Embedding]
+        Language[Language]
+        SearchResult[SearchResult/Query]
+        DomainError[DomainError]
+    end
+
+    subgraph Connector["Connector Layer"]
+        subgraph Adapters["Adapters"]
+            SQLite[SqliteRepositoryAdapter]
+            Chroma[ChromaVectorRepository]
+            InMemory[InMemoryVectorRepository]
+            Ort[OrtEmbedding]
+            Mock[MockEmbedding]
+            TreeSitter[TreeSitterParser]
+        end
+    end
+
+    CLI --> Application
+    Application --> Domain
+    Connector -.->|implements| Application
 ```
 
 ## Layers
@@ -155,58 +150,32 @@ src/
 
 ### Indexing Flow
 
-```text
-Repository Path
-      │
-      ▼
-┌─────────────┐
-│  Walk Files │
-└─────────────┘
-      │
-      ▼
-┌─────────────┐
-│Parse w/ TS  │ ─── TreeSitterParser
-└─────────────┘     Extract functions, classes, etc.
-      │
-      ▼
-┌─────────────┐
-│  Generate   │ ─── OrtEmbedding (all-MiniLM-L6-v2)
-│  Embeddings │
-└─────────────┘
-      │
-      ├──────────────────┐
-      ▼                  ▼
-┌─────────────┐    ┌─────────────┐
-│   SQLite    │    │  ChromaDB   │
-│SqliteAdapter│    │ChromaAdapter│
-└─────────────┘    └─────────────┘
+```mermaid
+flowchart TB
+    A[Repository Path] --> B[Walk Files]
+    B --> C[Parse with Tree-sitter]
+    C --> D[Generate Embeddings]
+    D --> E[SQLite]
+    D --> F[ChromaDB]
+
+    C -.- C1[TreeSitterParser<br/>Extract functions, classes, etc.]
+    D -.- D1[OrtEmbedding<br/>all-MiniLM-L6-v2]
+    E -.- E1[SqliteAdapter<br/>Repository metadata]
+    F -.- F1[ChromaAdapter<br/>Vectors + chunks]
 ```
 
 ### Search Flow
 
-```text
-Query String
-      │
-      ▼
-┌─────────────┐
-│   Embed     │ ─── OrtEmbedding
-│   Query     │
-└─────────────┘
-      │
-      ▼
-┌─────────────┐
-│  Vector     │ ─── ChromaVectorRepository (similarity search)
-│  Search     │
-└─────────────┘
-      │
-      ▼
-┌─────────────┐
-│   Fetch     │ ─── Reconstruct CodeChunk domain objects
-│  Results    │
-└─────────────┘
-      │
-      ▼
-Search Results
+```mermaid
+flowchart TB
+    A[Query String] --> B[Embed Query]
+    B --> C[Vector Search]
+    C --> D[Fetch Results]
+    D --> E[Search Results]
+
+    B -.- B1[OrtEmbedding]
+    C -.- C1[ChromaVectorRepository<br/>similarity search]
+    D -.- D1[Reconstruct CodeChunk<br/>domain objects]
 ```
 
 ## Design Decisions
