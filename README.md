@@ -32,8 +32,23 @@ cp target/release/codesearch bin/
 
 ## Usage
 
+### ChromaDB
+
+Chroma vector store is required for codesearch to operate.
+
 ```bash
-# Index a repository
+# Start ChromaDB server
+docker run -d -p 8000:8000 chromadb/chroma
+
+# Verify it's running
+curl http://localhost:8000/api/v1/heartbeat
+```
+
+Default endpoint is localhost:8000
+
+### Commands
+
+```bash
 codesearch index /path/to/repo
 
 # Search for code
@@ -41,7 +56,45 @@ codesearch search "function that handles authentication"
 
 # Show indexed repositories
 codesearch list
+
+# Delete a repository by name or path
+codesearch delete my-repo
+codesearch delete /path/to/repo
 ```
+
+### Configuration options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--chroma-url` | `http://localhost:8000` | ChromaDB server URL |
+| `--chroma-collection` | `codesearch` | ChromaDB collection name |
+| `--memory-storage` | `false` | Use in-memory storage (embeddings lost on exit) |
+| `--data-dir` | `~/.codesearch` | Directory for SQLite metadata |
+| `--mock-embeddings` | `false` | Use mock embeddings (for testing) |
+| `--model` | (default model) | Custom embedding model path |
+| `-v, --verbose` | `false` | Enable debug logging |
+
+### Examples
+
+```bash
+# Use a custom ChromaDB instance
+codesearch --chroma-url http://chroma.internal:8000 index /path/to/repo
+
+# Use a separate collection for a project
+codesearch --chroma-collection my-project search "error handling"
+
+# Verbose logging
+codesearch -v search "authentication"
+```
+
+### Vector store
+
+| Mode | Persistence | Use Case |
+|------|-------------|----------|
+| **ChromaDB** (default) | Persistent | Retains embeddings across sessions |
+| **In-memory** (`--memory-storage`) | None | Testing |
+
+If ChromaDB is not available, codesearch will automatically fall back to in-memory storage with a warning.
 
 ## Development
 
