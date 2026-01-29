@@ -1,0 +1,63 @@
+[package]
+name = "codesearch"
+version = "0.1.0"
+edition = "2021"
+authors = ["CodeSearch Team"]
+license = "MIT"
+description = "Semantic code search powered by embeddings"
+repository = "https://github.com/codesearch/codesearch"
+
+[[bin]]
+name = "codesearch"
+path = "src/main.rs"
+
+[lib]
+name = "codesearch"
+path = "src/lib.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Tree-sitter for AST parsing
+tree-sitter = "0.24"
+tree-sitter-rust = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.23"
+streaming-iterator = "0.1"
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# File system utilities
+walkdir = "2.4"
+ignore = "0.4"
+
+# UUID generation
+uuid = { version = "1.6", features = ["v4"] }
+
+# Random number generation (for mock embeddings)
+rand = "0.8"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
