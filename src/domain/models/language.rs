@@ -9,6 +9,8 @@ pub enum Language {
     JavaScript,
     TypeScript,
     Go,
+    HCL,
+    Php,
     Unknown,
 }
 
@@ -20,6 +22,8 @@ impl Language {
             "js" | "jsx" | "mjs" | "cjs" => Language::JavaScript,
             "ts" | "tsx" => Language::TypeScript,
             "go" => Language::Go,
+            "hcl" | "tf" => Language::HCL,
+            "php" => Language::Php,
             _ => Language::Unknown,
         }
     }
@@ -38,6 +42,8 @@ impl Language {
             "javascript" => Language::JavaScript,
             "typescript" => Language::TypeScript,
             "go" => Language::Go,
+            "hcl" => Language::HCL,
+            "php" => Language::Php,
             _ => Language::Unknown,
         }
     }
@@ -49,6 +55,8 @@ impl Language {
             Language::JavaScript => "javascript",
             Language::TypeScript => "typescript",
             Language::Go => "go",
+            Language::HCL => "hcl",
+            Language::Php => "php",
             Language::Unknown => "unknown",
         }
     }
@@ -64,6 +72,8 @@ impl Language {
             Language::JavaScript => "js",
             Language::TypeScript => "ts",
             Language::Go => "go",
+            Language::HCL => "hcl",
+            Language::Php => "php",
             Language::Unknown => "",
         }
     }
@@ -75,6 +85,8 @@ impl Language {
             Language::JavaScript => &["js", "jsx", "mjs", "cjs"],
             Language::TypeScript => &["ts", "tsx"],
             Language::Go => &["go"],
+            Language::HCL => &["hcl", "tf"],
+            Language::Php => &["php"],
             Language::Unknown => &[],
         }
     }
@@ -82,12 +94,20 @@ impl Language {
     pub fn uses_braces(&self) -> bool {
         matches!(
             self,
-            Language::Rust | Language::JavaScript | Language::TypeScript | Language::Go
+            Language::Rust
+                | Language::JavaScript
+                | Language::TypeScript
+                | Language::Go
+                | Language::HCL
+                | Language::Php
         )
     }
 
     pub fn is_statically_typed(&self) -> bool {
-        matches!(self, Language::Rust | Language::TypeScript | Language::Go)
+        matches!(
+            self,
+            Language::Rust | Language::TypeScript | Language::Go | Language::Php
+        )
     }
 
     pub fn all_supported() -> Vec<Language> {
@@ -97,6 +117,8 @@ impl Language {
             Language::JavaScript,
             Language::TypeScript,
             Language::Go,
+            Language::HCL,
+            Language::Php,
         ]
     }
 }
@@ -118,6 +140,8 @@ mod tests {
         assert_eq!(Language::from_extension("js"), Language::JavaScript);
         assert_eq!(Language::from_extension("ts"), Language::TypeScript);
         assert_eq!(Language::from_extension("go"), Language::Go);
+        assert_eq!(Language::from_extension("hcl"), Language::HCL);
+        assert_eq!(Language::from_extension("php"), Language::Php);
         assert_eq!(Language::from_extension("txt"), Language::Unknown);
     }
 
@@ -161,6 +185,8 @@ mod tests {
         let supported = Language::all_supported();
         assert!(supported.contains(&Language::Rust));
         assert!(supported.contains(&Language::Python));
+        assert!(supported.contains(&Language::HCL));
+        assert!(supported.contains(&Language::Php));
         assert!(!supported.contains(&Language::Unknown));
     }
 }
