@@ -12,9 +12,9 @@ use tracing::{debug, info};
 use crate::application::EmbeddingService;
 use crate::domain::{CodeChunk, DomainError, Embedding, EmbeddingConfig};
 
-const DEFAULT_MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
+const DEFAULT_MODEL_ID: &str = "mixedbread-ai/mxbai-embed-xsmall-v1";
 const DEFAULT_DIMENSIONS: usize = 384;
-const DEFAULT_MAX_SEQ_LENGTH: usize = 256;
+const DEFAULT_MAX_SEQ_LENGTH: usize = 512;
 
 pub struct OrtEmbedding {
     session: Arc<Mutex<Session>>,
@@ -96,23 +96,19 @@ impl OrtEmbedding {
 
         let mut input_ids: Vec<i64> = Vec::with_capacity(batch_size * max_len);
         let mut attention_mask: Vec<i64> = Vec::with_capacity(batch_size * max_len);
-        let mut token_type_ids: Vec<i64> = Vec::with_capacity(batch_size * max_len);
 
         for encoding in &encodings {
             let ids = encoding.get_ids();
             let mask = encoding.get_attention_mask();
-            let type_ids = encoding.get_type_ids();
 
             let len = ids.len().min(max_len);
 
             input_ids.extend(ids[..len].iter().map(|&x| x as i64));
             attention_mask.extend(mask[..len].iter().map(|&x| x as i64));
-            token_type_ids.extend(type_ids[..len].iter().map(|&x| x as i64));
 
             let padding = max_len - len;
             input_ids.extend(std::iter::repeat_n(0i64, padding));
             attention_mask.extend(std::iter::repeat_n(0i64, padding));
-            token_type_ids.extend(std::iter::repeat_n(0i64, padding));
         }
 
         let shape = [batch_size, max_len];
@@ -120,8 +116,6 @@ impl OrtEmbedding {
             .map_err(|e| DomainError::internal(format!("Failed to create input_ids tensor: {}", e)))?;
         let attention_mask_tensor = Tensor::from_array((shape, attention_mask))
             .map_err(|e| DomainError::internal(format!("Failed to create attention_mask tensor: {}", e)))?;
-        let token_type_ids_tensor = Tensor::from_array((shape, token_type_ids))
-            .map_err(|e| DomainError::internal(format!("Failed to create token_type_ids tensor: {}", e)))?;
 
         let mut session = self
             .session
@@ -132,7 +126,6 @@ impl OrtEmbedding {
             .run(ort::inputs![
                 "input_ids" => input_ids_tensor,
                 "attention_mask" => attention_mask_tensor,
-                "token_type_ids" => token_type_ids_tensor,
             ])
             .map_err(|e| DomainError::internal(format!("Inference failed: {}", e)))?;
 
@@ -285,6 +278,6 @@ mod tests {
         assert_eq!(embedding.len(), DEFAULT_DIMENSIONS);
 
         let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 0.01);
+        assert!((norm - 1.0).abs() < 0.01, "Embedding should be L2 normalized");
     }
 }

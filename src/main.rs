@@ -9,8 +9,8 @@ use tracing_subscriber::FmtSubscriber;
 use codesearch::{
     ChromaVectorRepository, DeleteRepositoryUseCase, EmbeddingService, IndexRepositoryUseCase,
     DuckdbVectorRepository, InMemoryVectorRepository, ListRepositoriesUseCase, MockEmbedding,
-    OrtEmbedding,
-    DuckdbMetadataRepository, SearchCodeUseCase, SearchQuery, TreeSitterParser, 
+    OrtEmbedding, MockReranking, OrtReranking, RerankingService,
+    DuckdbMetadataRepository, SearchCodeUseCase, SearchQuery, TreeSitterParser,
     VectorRepository, VectorStore,
 };
 
@@ -28,9 +28,6 @@ struct Cli {
     mock_embeddings: bool,
 
     #[arg(long, global = true)]
-    model: Option<String>,
-
-    #[arg(long, global = true)]
     chroma_url: Option<String>,
 
     #[arg(long, global = true, default_value = "search")]
@@ -38,6 +35,9 @@ struct Cli {
 
     #[arg(long, global = true)]
     memory_storage: bool,
+
+    #[arg(long, global = true)]
+    no_rerank: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -55,8 +55,8 @@ enum Commands {
     Search {
         query: String,
 
-        #[arg(short, long, default_value = "10")]
-        limit: usize,
+        #[arg(long, default_value = "10")]
+        num: usize,
 
         #[arg(short, long)]
         min_score: Option<f32>,
@@ -99,7 +99,28 @@ async fn main() -> Result<()> {
         Arc::new(MockEmbedding::new())
     } else {
         info!("Initializing ONNX embedding service...");
-        Arc::new(OrtEmbedding::new(cli.model.as_deref())?)
+        Arc::new(OrtEmbedding::new(None)?)
+    };
+
+    let reranking_service: Option<Arc<dyn RerankingService>> = if !cli.no_rerank {
+        if cli.mock_embeddings {
+            info!("Using mock reranking service");
+            Some(Arc::new(MockReranking::new()))
+        } else {
+            info!("Initializing ONNX reranking service...");
+            match OrtReranking::new(None) {
+                Ok(reranker) => Some(Arc::new(reranker)),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to initialize reranking service: {}. Continuing without reranking.",
+                        e
+                    );
+                    None
+                }
+            }
+        }
+    } else {
+        None
     };
 
     // Create vector repository first to ensure it gets write access to DuckDB
@@ -178,14 +199,18 @@ async fn main() -> Result<()> {
 
         Commands::Search {
             query,
-            limit,
+            num,
             min_score,
             language,
             repository,
         } => {
-            let use_case = SearchCodeUseCase::new(vector_repo.clone(), embedding_service);
+            let mut use_case = SearchCodeUseCase::new(vector_repo.clone(), embedding_service);
 
-            let mut search_query = SearchQuery::new(&query).with_limit(limit);
+            if let Some(reranker) = reranking_service {
+                use_case = use_case.with_reranking(reranker);
+            }
+
+            let mut search_query = SearchQuery::new(&query).with_limit(num);
 
             if let Some(score) = min_score {
                 search_query = search_query.with_min_score(score);

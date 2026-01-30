@@ -67,11 +67,10 @@ let embedding = model.embed(text);  // 384 dimensions
 
 #### Embedding Models
 
-| Model               | Dimensions | Sequence Length |
-|---------------------|------------|-----------------|
-| all-MiniLM-L6-v2    | 384        | 256             |
-| bge-small-en-v1.5   | 384        | 512             |
-| bge-base-en-v1.5    | 768        | 512             |
+| Model                          | Dimensions | Sequence Length |
+|--------------------------------|------------|-----------------|
+| mxbai-embed-xsmall-v1 (default) | 384        | 512             |
+| bge-small-en-v1.5              | 384        | 512             |
 
 ### 5. Persistence
 
@@ -151,3 +150,54 @@ The indexing pipeline handles errors gracefully:
 - **Storage errors**: Propagated (fatal)
 
 This ensures partial indexing succeeds even when some files fail.
+
+## Reranking During Search
+
+Optionally, search results can be reranked using a cross-encoder model for improved relevance:
+
+### How Reranking Works
+
+```
+User Query
+    ↓
+Embed Query (384 dimensions)
+    ↓
+Vector Search (retrieve candidates)
+    ├─ If num ≤ 10: fetch 100 candidates
+    └─ If num > 10: fetch num × 10 candidates
+    ↓
+Reranking (mxbai-rerank-xsmall-v1)
+    ├─ Score each candidate against query
+    ├─ Sort by relevance score
+    └─ Keep top num results
+    ↓
+Return Results
+```
+
+### Reranking Model
+
+- **Model**: `mixedbread-ai/mxbai-rerank-xsmall-v1`
+- **Type**: Cross-encoder (scores query-document pairs)
+- **Size**: ~70M parameters (ONNX format)
+- **Download**: Automatic from HuggingFace Hub (~150MB)
+
+### Usage
+
+```bash
+codesearch search "authentication"
+
+# Number of results
+codesearch search "error handling" --num 20
+
+# Disable reranking
+codesearch search "error handling" --no-rerank
+```
+
+### Performance Impact
+
+| Mode | Latency | Quality |
+|------|---------|---------|
+| Vector search only | 50-200ms | Good |
+| + Reranking | 200-800ms | Excellent |
+
+**Recommendation**: Use reranking when result quality is more important than speed, especially for specific or complex queries.
