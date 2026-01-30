@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.1.1...v0.2.0) (2026-01-30)
+
+
+### Features
+
+* add hcl, php treesitter languages ([04e6349](https://github.com/ArtemisMucaj/codesearch/commit/04e634953193602d43875c0638ecac2e148da39c))
+* add hcl, php treesitter languages ([0968e04](https://github.com/ArtemisMucaj/codesearch/commit/0968e046dc151a517e1997a7001b3bd0dd47fe74))
+* rerank results ([14753f8](https://github.com/ArtemisMucaj/codesearch/commit/14753f8d3a7a5314d40795d847adf2ef22664ace))
+* rerank results ([2765a95](https://github.com/ArtemisMucaj/codesearch/commit/2765a959464ee87ab177b5fdc03ac2256336c452))
+* support duckdb vector store ([6a80323](https://github.com/ArtemisMucaj/codesearch/commit/6a80323f1b1882a15594ba814575d50134ddb585))
+* support duckdb vector store ([65381d0](https://github.com/ArtemisMucaj/codesearch/commit/65381d09696aeafe95482e328ddc3197acfb3752))
+
 ## [0.1.1](https://github.com/ArtemisMucaj/codesearch/compare/v0.1.0...v0.1.1) (2026-01-29)
 
 
