@@ -46,7 +46,11 @@ impl VectorRepository for InMemoryVectorRepository {
             embedding_store.insert(embedding.chunk_id().to_string(), embedding.clone());
         }
 
-        debug!("Saved {} chunks and {} embeddings to memory", chunks.len(), embeddings.len());
+        debug!(
+            "Saved {} chunks and {} embeddings to memory",
+            chunks.len(),
+            embeddings.len()
+        );
         Ok(())
     }
 

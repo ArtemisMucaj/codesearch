@@ -3,16 +3,17 @@ pub mod connector;
 pub mod domain;
 
 pub use application::{
-    EmbeddingService, ParserService, MetadataRepository, VectorRepository, RerankingService,
-    DeleteRepositoryUseCase, IndexRepositoryUseCase, ListRepositoriesUseCase, SearchCodeUseCase,
+    DeleteRepositoryUseCase, EmbeddingService, IndexRepositoryUseCase, ListRepositoriesUseCase,
+    MetadataRepository, ParserService, RerankingService, SearchCodeUseCase, VectorRepository,
 };
 
 pub use connector::{
-    ChromaVectorRepository, DuckdbMetadataRepository, DuckdbVectorRepository, InMemoryVectorRepository,
-    MockEmbedding, OrtEmbedding, TreeSitterParser, MockReranking, OrtReranking,
+    ChromaVectorRepository, DuckdbMetadataRepository, DuckdbVectorRepository,
+    InMemoryVectorRepository, MockEmbedding, MockReranking, OrtEmbedding, OrtReranking,
+    TreeSitterParser,
 };
 
 pub use domain::{
-    CodeChunk, DomainError, Embedding, EmbeddingConfig, IndexingStatus, 
-    Language, NodeType, Repository, SearchQuery, SearchResult, VectorStore,
+    CodeChunk, DomainError, Embedding, EmbeddingConfig, IndexingStatus, Language, NodeType,
+    Repository, SearchQuery, SearchResult, VectorStore,
 };

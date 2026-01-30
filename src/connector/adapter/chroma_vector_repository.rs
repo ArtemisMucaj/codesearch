@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chromadb::collection::{CollectionEntries, GetOptions, QueryOptions};
 use chromadb::client::{ChromaAuthMethod, ChromaClient, ChromaClientOptions};
+use chromadb::collection::{CollectionEntries, GetOptions, QueryOptions};
 use chromadb::ChromaCollection;
 use serde_json::Map;
 use tokio::sync::Mutex;
@@ -18,10 +18,7 @@ pub struct ChromaVectorRepository {
 }
 
 impl ChromaVectorRepository {
-    pub async fn new(
-        url: &str,
-        collection_name: &str,
-    ) -> Result<Self, DomainError> {
+    pub async fn new(url: &str, collection_name: &str) -> Result<Self, DomainError> {
         let client = ChromaClient::new(ChromaClientOptions {
             url: Some(url.to_string()),
             database: "default_database".to_string(),
@@ -54,7 +51,10 @@ impl ChromaVectorRepository {
 
     fn create_metadata(chunk: &CodeChunk, model: &str) -> Map<String, serde_json::Value> {
         let mut map = Map::new();
-        map.insert("model".to_string(), serde_json::Value::String(model.to_string()));
+        map.insert(
+            "model".to_string(),
+            serde_json::Value::String(model.to_string()),
+        );
         map.insert(
             "file_path".to_string(),
             serde_json::Value::String(chunk.file_path().to_string()),
@@ -80,10 +80,16 @@ impl ChromaVectorRepository {
             serde_json::Value::String(chunk.repository_id().to_string()),
         );
         if let Some(name) = chunk.symbol_name() {
-            map.insert("symbol_name".to_string(), serde_json::Value::String(name.to_string()));
+            map.insert(
+                "symbol_name".to_string(),
+                serde_json::Value::String(name.to_string()),
+            );
         }
         if let Some(parent) = chunk.parent_symbol() {
-            map.insert("parent_symbol".to_string(), serde_json::Value::String(parent.to_string()));
+            map.insert(
+                "parent_symbol".to_string(),
+                serde_json::Value::String(parent.to_string()),
+            );
         }
         map
     }
@@ -101,11 +107,13 @@ impl ChromaVectorRepository {
         let start_line = metadata
             .get("start_line")
             .and_then(|v| v.as_u64())
-            .ok_or_else(|| DomainError::internal("Missing start_line metadata"))? as u32;
+            .ok_or_else(|| DomainError::internal("Missing start_line metadata"))?
+            as u32;
         let end_line = metadata
             .get("end_line")
             .and_then(|v| v.as_u64())
-            .ok_or_else(|| DomainError::internal("Missing end_line metadata"))? as u32;
+            .ok_or_else(|| DomainError::internal("Missing end_line metadata"))?
+            as u32;
         let language_str = metadata
             .get("language")
             .and_then(|v| v.as_str())
@@ -131,8 +139,14 @@ impl ChromaVectorRepository {
             end_line,
             language,
             node_type,
-            metadata.get("symbol_name").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            metadata.get("parent_symbol").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            metadata
+                .get("symbol_name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            metadata
+                .get("parent_symbol")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             repository_id,
         );
 

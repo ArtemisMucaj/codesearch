@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use codesearch::{DuckdbMetadataRepository, Repository, MetadataRepository};
+use codesearch::{DuckdbMetadataRepository, MetadataRepository, Repository};
 use tempfile::tempdir;
 
 #[tokio::test]

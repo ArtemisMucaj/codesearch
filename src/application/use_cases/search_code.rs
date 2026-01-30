@@ -54,7 +54,10 @@ impl SearchCodeUseCase {
             query.clone()
         };
 
-        let mut results = self.vector_repo.search(&query_embedding, &search_query).await?;
+        let mut results = self
+            .vector_repo
+            .search(&query_embedding, &search_query)
+            .await?;
 
         if let Some(ref reranker) = self.reranking_service {
             info!(
@@ -73,7 +76,11 @@ impl SearchCodeUseCase {
         Ok(results)
     }
 
-    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, DomainError> {
+    pub async fn search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, DomainError> {
         let search_query = SearchQuery::new(query).with_limit(limit);
         self.execute(search_query).await
     }

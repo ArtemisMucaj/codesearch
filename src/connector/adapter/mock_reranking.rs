@@ -48,7 +48,11 @@ impl RerankingService for MockReranking {
             })
             .collect();
 
-        reranked.sort_by(|a, b| b.score().partial_cmp(&a.score()).unwrap_or(std::cmp::Ordering::Equal));
+        reranked.sort_by(|a, b| {
+            b.score()
+                .partial_cmp(&a.score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         if let Some(k) = top_k {
             reranked.truncate(k);
@@ -87,10 +91,7 @@ mod tests {
             .rerank("test query", results.clone(), None)
             .await
             .unwrap();
-        let reranked2 = service
-            .rerank("test query", results, None)
-            .await
-            .unwrap();
+        let reranked2 = service.rerank("test query", results, None).await.unwrap();
 
         assert_eq!(reranked1[0].score(), reranked2[0].score());
     }

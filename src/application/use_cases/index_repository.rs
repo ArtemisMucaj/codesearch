@@ -4,7 +4,7 @@ use std::sync::Arc;
 use ignore::WalkBuilder;
 use tracing::{debug, info, warn};
 
-use crate::application::{EmbeddingService, ParserService, MetadataRepository, VectorRepository};
+use crate::application::{EmbeddingService, MetadataRepository, ParserService, VectorRepository};
 use crate::domain::{DomainError, Language, Repository, VectorStore};
 
 pub struct IndexRepositoryUseCase {
@@ -49,17 +49,16 @@ impl IndexRepositoryUseCase {
             self.repository_repo.delete(existing.id()).await?;
         }
 
-        let repo_name = name
-            .map(String::from)
-            .unwrap_or_else(|| {
-                absolute_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown")
-                    .to_string()
-            });
+        let repo_name = name.map(String::from).unwrap_or_else(|| {
+            absolute_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string()
+        });
 
-        let repository = Repository::new_with_storage(repo_name.clone(), path_str.clone(), store, namespace);
+        let repository =
+            Repository::new_with_storage(repo_name.clone(), path_str.clone(), store, namespace);
         self.repository_repo.save(&repository).await?;
 
         info!("Indexing repository: {} at {}", repo_name, path_str);
@@ -145,7 +144,10 @@ impl IndexRepositoryUseCase {
             .update_stats(repository.id(), chunk_count, file_count)
             .await?;
 
-        info!("Indexing complete: {} files, {} chunks", file_count, chunk_count);
+        info!(
+            "Indexing complete: {} files, {} chunks",
+            file_count, chunk_count
+        );
 
         self.repository_repo
             .find_by_id(repository.id())

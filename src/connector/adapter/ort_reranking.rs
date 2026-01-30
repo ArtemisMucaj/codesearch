@@ -26,7 +26,10 @@ pub struct OrtReranking {
 impl OrtReranking {
     pub fn new(model_id: Option<&str>) -> Result<Self, DomainError> {
         let model_id = model_id.unwrap_or(DEFAULT_MODEL_ID);
-        info!("Initializing ORT reranking service with model: {}", model_id);
+        info!(
+            "Initializing ORT reranking service with model: {}",
+            model_id
+        );
 
         let api = hf_hub::api::sync::ApiBuilder::new()
             .with_progress(true)
@@ -87,7 +90,13 @@ impl OrtReranking {
 
         let encodings = self
             .tokenizer
-            .encode_batch(text_pairs.iter().map(|(q, d)| (q.as_str(), d.as_str())).collect(), true)
+            .encode_batch(
+                text_pairs
+                    .iter()
+                    .map(|(q, d)| (q.as_str(), d.as_str()))
+                    .collect(),
+                true,
+            )
             .map_err(|e| DomainError::internal(format!("Tokenization failed: {}", e)))?;
 
         let max_len = encodings
@@ -115,10 +124,12 @@ impl OrtReranking {
         }
 
         let shape = [batch_size, max_len];
-        let input_ids_tensor = Tensor::from_array((shape, input_ids))
-            .map_err(|e| DomainError::internal(format!("Failed to create input_ids tensor: {}", e)))?;
-        let attention_mask_tensor = Tensor::from_array((shape, attention_mask))
-            .map_err(|e| DomainError::internal(format!("Failed to create attention_mask tensor: {}", e)))?;
+        let input_ids_tensor = Tensor::from_array((shape, input_ids)).map_err(|e| {
+            DomainError::internal(format!("Failed to create input_ids tensor: {}", e))
+        })?;
+        let attention_mask_tensor = Tensor::from_array((shape, attention_mask)).map_err(|e| {
+            DomainError::internal(format!("Failed to create attention_mask tensor: {}", e))
+        })?;
 
         let mut session = self
             .session
@@ -138,9 +149,9 @@ impl OrtReranking {
             .map(|(_, v)| v)
             .ok_or_else(|| DomainError::internal("No output tensor found"))?;
 
-        let (shape, data) = output_value
-            .try_extract_tensor::<f32>()
-            .map_err(|e| DomainError::internal(format!("Failed to extract output tensor: {}", e)))?;
+        let (shape, data) = output_value.try_extract_tensor::<f32>().map_err(|e| {
+            DomainError::internal(format!("Failed to extract output tensor: {}", e))
+        })?;
 
         let shape: Vec<usize> = shape.iter().map(|&x| x as usize).collect();
         debug!("Output tensor shape: {:?}", shape);
@@ -184,10 +195,7 @@ impl RerankingService for OrtReranking {
 
         info!("Reranking {} results for query: {}", results.len(), query);
 
-        let documents: Vec<String> = results
-            .iter()
-            .map(|r| format_document_for_reranking(r))
-            .collect();
+        let documents: Vec<String> = results.iter().map(format_document_for_reranking).collect();
 
         let doc_refs: Vec<&str> = documents.iter().map(|s| s.as_str()).collect();
 
@@ -204,7 +212,11 @@ impl RerankingService for OrtReranking {
             .map(|(result, score)| SearchResult::new(result.chunk().clone(), score))
             .collect();
 
-        reranked.sort_by(|a, b| b.score().partial_cmp(&a.score()).unwrap_or(std::cmp::Ordering::Equal));
+        reranked.sort_by(|a, b| {
+            b.score()
+                .partial_cmp(&a.score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         if let Some(k) = top_k {
             reranked.truncate(k);

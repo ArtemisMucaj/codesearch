@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use rand::SeedableRng;
 use rand::Rng;
+use rand::SeedableRng;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use tracing::debug;
@@ -15,21 +15,13 @@ pub struct MockEmbedding {
 impl MockEmbedding {
     pub fn new() -> Self {
         Self {
-            config: EmbeddingConfig::new(
-                "mock-embedding".to_string(),
-                384,
-                512,
-            ),
+            config: EmbeddingConfig::new("mock-embedding".to_string(), 384, 512),
         }
     }
 
     pub fn with_dimensions(dimensions: usize) -> Self {
         Self {
-            config: EmbeddingConfig::new(
-                "mock-embedding".to_string(),
-                dimensions,
-                512,
-            ),
+            config: EmbeddingConfig::new("mock-embedding".to_string(), dimensions, 512),
         }
     }
 
@@ -98,7 +90,11 @@ impl EmbeddingService for MockEmbedding {
             .map(|chunk| {
                 let text = Self::prepare_text(chunk);
                 let vector = self.generate_embedding(&text);
-                Embedding::new(chunk.id().to_string(), vector, self.config.model_name().to_string())
+                Embedding::new(
+                    chunk.id().to_string(),
+                    vector,
+                    self.config.model_name().to_string(),
+                )
             })
             .collect();
 

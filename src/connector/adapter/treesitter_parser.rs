@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Parser, Query, QueryCursor};
 use tracing::debug;
+use tree_sitter::{Parser, Query, QueryCursor};
 
 use crate::application::ParserService;
 use crate::domain::{CodeChunk, DomainError, Language, NodeType};
@@ -214,7 +214,12 @@ impl ParserService for TreeSitterParser {
             }
         }
 
-        debug!("Parsed {} chunks from {} ({:?})", chunks.len(), file_path, language);
+        debug!(
+            "Parsed {} chunks from {} ({:?})",
+            chunks.len(),
+            file_path,
+            language
+        );
 
         Ok(chunks)
     }

@@ -36,8 +36,9 @@ impl DuckdbMetadataRepository {
 
     #[allow(dead_code)]
     pub fn in_memory() -> Result<Self, DomainError> {
-        let conn = Connection::open_in_memory()
-            .map_err(|e| DomainError::storage(format!("Failed to open DuckDB in-memory DB: {}", e)))?;
+        let conn = Connection::open_in_memory().map_err(|e| {
+            DomainError::storage(format!("Failed to open DuckDB in-memory DB: {}", e))
+        })?;
         Self::initialize_schema(&conn)?;
 
         Ok(Self {
@@ -64,7 +65,8 @@ impl DuckdbMetadataRepository {
         .map_err(|e| DomainError::storage(format!("Failed to initialize schema: {}", e)))?;
 
         // Add store/namespace columns if they don't exist (migration for existing DBs)
-        let _ = conn.execute_batch("ALTER TABLE repositories ADD COLUMN store TEXT DEFAULT 'duckdb';");
+        let _ =
+            conn.execute_batch("ALTER TABLE repositories ADD COLUMN store TEXT DEFAULT 'duckdb';");
         let _ = conn.execute_batch("ALTER TABLE repositories ADD COLUMN namespace TEXT;");
 
         debug!("DuckDB repository schema initialized");
@@ -117,7 +119,9 @@ impl MetadataRepository for DuckdbMetadataRepository {
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
         match stmt.query_row(params![id], |row| {
-            let store_str: String = row.get::<_, Option<String>>(7)?.unwrap_or_else(|| "duckdb".to_string());
+            let store_str: String = row
+                .get::<_, Option<String>>(7)?
+                .unwrap_or_else(|| "duckdb".to_string());
             let namespace: Option<String> = row.get(8)?;
             Ok(Repository::reconstitute(
                 row.get(0)?,
@@ -133,7 +137,10 @@ impl MetadataRepository for DuckdbMetadataRepository {
         }) {
             Ok(repo) => Ok(Some(repo)),
             Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(DomainError::storage(format!("Failed to query repository: {}", e))),
+            Err(e) => Err(DomainError::storage(format!(
+                "Failed to query repository: {}",
+                e
+            ))),
         }
     }
 
@@ -146,7 +153,9 @@ impl MetadataRepository for DuckdbMetadataRepository {
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
         match stmt.query_row(params![path], |row| {
-            let store_str: String = row.get::<_, Option<String>>(7)?.unwrap_or_else(|| "duckdb".to_string());
+            let store_str: String = row
+                .get::<_, Option<String>>(7)?
+                .unwrap_or_else(|| "duckdb".to_string());
             let namespace: Option<String> = row.get(8)?;
             Ok(Repository::reconstitute(
                 row.get(0)?,
@@ -179,7 +188,9 @@ impl MetadataRepository for DuckdbMetadataRepository {
 
         let rows = stmt
             .query_map([], |row| {
-                let store_str: String = row.get::<_, Option<String>>(7)?.unwrap_or_else(|| "duckdb".to_string());
+                let store_str: String = row
+                    .get::<_, Option<String>>(7)?
+                    .unwrap_or_else(|| "duckdb".to_string());
                 let namespace: Option<String> = row.get(8)?;
                 Ok(Repository::reconstitute(
                     row.get(0)?,
@@ -197,7 +208,8 @@ impl MetadataRepository for DuckdbMetadataRepository {
 
         let mut repos = Vec::new();
         for row in rows {
-            repos.push(row.map_err(|e| DomainError::storage(format!("Failed to read row: {}", e)))?);
+            repos
+                .push(row.map_err(|e| DomainError::storage(format!("Failed to read row: {}", e)))?);
         }
         Ok(repos)
     }
@@ -209,7 +221,12 @@ impl MetadataRepository for DuckdbMetadataRepository {
         Ok(())
     }
 
-    async fn update_stats(&self, id: &str, chunk_count: u64, file_count: u64) -> Result<(), DomainError> {
+    async fn update_stats(
+        &self,
+        id: &str,
+        chunk_count: u64,
+        file_count: u64,
+    ) -> Result<(), DomainError> {
         let conn = self.conn.lock().await;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
