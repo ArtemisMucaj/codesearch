@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
-use crate::application::RepositoryRepository;
+use crate::application::MetadataRepository;
 use crate::domain::{DomainError, Repository};
 
 pub struct ListRepositoriesUseCase {
-    repository_repo: Arc<dyn RepositoryRepository>,
+    repository_repo: Arc<dyn MetadataRepository>,
 }
 
 impl ListRepositoriesUseCase {
-    pub fn new(repository_repo: Arc<dyn RepositoryRepository>) -> Self {
+    pub fn new(repository_repo: Arc<dyn MetadataRepository>) -> Self {
         Self { repository_repo }
     }
 

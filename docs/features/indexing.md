@@ -75,17 +75,35 @@ let embedding = model.embed(text);  // 384 dimensions
 
 ### 5. Persistence
 
-Data is stored in two locations:
+Data is stored using configurable backends:
 
-#### SQLite (Metadata)
-- Repository information
-- Code chunks with full content
-- File paths, line numbers
-- Language and node type
+#### DuckDB (Default)
 
-#### ChromaDB (Vectors)
-- Embedding vectors
-- Chunk IDs for lookup
+**Architecture**: Separate adapters handle metadata and vectors with a shared DuckDB connection
+
+**Metadata** (via `DuckdbMetadataRepository`):
+- Repository information: ID, name, path, creation/update timestamps
+- Code statistics: chunk count, file count
+- Storage metadata: vector store type, namespace
+- Code chunks: full content, file paths, line numbers, language, node type, symbol names
+
+**Vectors** (via `DuckdbVectorRepository` with VSS):
+- Stores FLOAT[384] embedding vectors directly in DuckDB
+- **VSS (Vector Similarity Search) acceleration**:
+  - Uses HNSW (Hierarchical Navigable Small World) index
+  - Cosine distance metric for similarity calculations
+  - Fast approximate nearest neighbor search
+- Support for multiple namespaces (separate schemas per project/collection)
+- Lazy index creation: HNSW index is built on first query
+
+#### ChromaDB (Optional)
+Use `--chroma-url` to store vectors in ChromaDB instead:
+- Remote vector storage capability
+- Persistent collection management
+- Metadata storage still uses DuckDB
+
+#### In-Memory (Testing)
+Use `--memory-storage` for testing without persistence
 
 ## Performance Considerations
 

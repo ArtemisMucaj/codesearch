@@ -3,17 +3,17 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use crate::application::{RepositoryRepository, VectorRepository};
+use crate::application::{MetadataRepository, VectorRepository};
 use crate::domain::DomainError;
 
 pub struct DeleteRepositoryUseCase {
-    repository_repo: Arc<dyn RepositoryRepository>,
+    repository_repo: Arc<dyn MetadataRepository>,
     vector_repo: Arc<dyn VectorRepository>,
 }
 
 impl DeleteRepositoryUseCase {
     pub fn new(
-        repository_repo: Arc<dyn RepositoryRepository>,
+        repository_repo: Arc<dyn MetadataRepository>,
         vector_repo: Arc<dyn VectorRepository>,
     ) -> Self {
         Self {

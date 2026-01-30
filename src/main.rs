@@ -8,9 +8,10 @@ use tracing_subscriber::FmtSubscriber;
 
 use codesearch::{
     ChromaVectorRepository, DeleteRepositoryUseCase, EmbeddingService, IndexRepositoryUseCase,
-    InMemoryVectorRepository, ListRepositoriesUseCase, MockEmbedding, OrtEmbedding,
-    SearchCodeUseCase, SearchQuery, SqliteRepositoryAdapter, TreeSitterParser, 
-    VectorRepository,
+    DuckdbVectorRepository, InMemoryVectorRepository, ListRepositoriesUseCase, MockEmbedding,
+    OrtEmbedding,
+    DuckdbMetadataRepository, SearchCodeUseCase, SearchQuery, TreeSitterParser, 
+    VectorRepository, VectorStore,
 };
 
 #[derive(Parser)]
@@ -29,11 +30,11 @@ struct Cli {
     #[arg(long, global = true)]
     model: Option<String>,
 
-    #[arg(long, global = true, default_value = "http://localhost:8000")]
-    chroma_url: String,
+    #[arg(long, global = true)]
+    chroma_url: Option<String>,
 
-    #[arg(long, global = true, default_value = "codesearch")]
-    chroma_collection: String,
+    #[arg(long, global = true, default_value = "search")]
+    namespace: String,
 
     #[arg(long, global = true)]
     memory_storage: bool,
@@ -90,8 +91,7 @@ async fn main() -> Result<()> {
     let data_dir = expand_tilde(&cli.data_dir);
     std::fs::create_dir_all(&data_dir)?;
 
-    let db_path = PathBuf::from(&data_dir).join("codesearch.db");
-    let sqlite = Arc::new(SqliteRepositoryAdapter::new(&db_path)?);
+    let db_path = PathBuf::from(&data_dir).join("codesearch.duckdb");
 
     let parser = Arc::new(TreeSitterParser::new());
     let embedding_service: Arc<dyn EmbeddingService> = if cli.mock_embeddings {
@@ -102,36 +102,74 @@ async fn main() -> Result<()> {
         Arc::new(OrtEmbedding::new(cli.model.as_deref())?)
     };
 
-    let vector_repo: Arc<dyn VectorRepository> = if cli.memory_storage {
+    // Create vector repository first to ensure it gets write access to DuckDB
+    // (DuckDB only allows one write connection per file)
+    // We also need to share the connection with the repository metadata adapter.
+    let (vector_repo, repo_adapter): (Arc<dyn VectorRepository>, Arc<DuckdbMetadataRepository>) = if cli.memory_storage {
         info!("Using in-memory vector storage");
-        Arc::new(InMemoryVectorRepository::new())
-    } else {
-        match ChromaVectorRepository::new(&cli.chroma_url, &cli.chroma_collection).await {
+        let vector = Arc::new(InMemoryVectorRepository::new());
+        let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
+        (vector, repo_adapter)
+    } else if let Some(chroma_url) = cli.chroma_url.as_deref() {
+        match ChromaVectorRepository::new(chroma_url, &cli.namespace).await {
             Ok(chroma) => {
-                info!("Connected to ChromaDB at {}", cli.chroma_url);
-                Arc::new(chroma)
+                info!("Connected to ChromaDB at {} namespace {}", chroma_url, cli.namespace);
+                let vector = Arc::new(chroma);
+                let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
+                (vector, repo_adapter)
             }
             Err(e) => {
                 tracing::warn!(
                     "Failed to connect to ChromaDB ({}): {}. Falling back to in-memory storage.",
-                    cli.chroma_url,
+                    chroma_url,
                     e
                 );
-                Arc::new(InMemoryVectorRepository::new())
+                let vector = Arc::new(InMemoryVectorRepository::new());
+                let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
+                (vector, repo_adapter)
+            }
+        }
+    } else {
+        // DuckDB vector storage - share connection with repository adapter
+        match DuckdbVectorRepository::new_with_namespace(&db_path, &cli.namespace) {
+            Ok(duckdb) => {
+                info!("Using DuckDB vector storage at {:?} namespace {}", db_path, cli.namespace);
+                // Share the connection with the repository adapter
+                let shared_conn = duckdb.shared_connection();
+                let repo_adapter = Arc::new(DuckdbMetadataRepository::with_connection(shared_conn)?);
+                (Arc::new(duckdb), repo_adapter)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to initialize DuckDB ({}): {}. Falling back to in-memory storage.",
+                    db_path.display(),
+                    e
+                );
+                let vector = Arc::new(InMemoryVectorRepository::new());
+                let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
+                (vector, repo_adapter)
             }
         }
     };
 
     match cli.command {
         Commands::Index { path, name } => {
+            let (vector_store, ns): (VectorStore, Option<String>) = if cli.memory_storage {
+                (VectorStore::InMemory, None)
+            } else if cli.chroma_url.is_some() {
+                (VectorStore::ChromaDb, Some(cli.namespace.clone()))
+            } else {
+                (VectorStore::DuckDb, Some(cli.namespace.clone()))
+            };
+
             let use_case = IndexRepositoryUseCase::new(
-                sqlite.clone(),
-                vector_repo,
+                repo_adapter.clone(),
+                vector_repo.clone(),
                 parser,
                 embedding_service,
             );
 
-            let repo = use_case.execute(&path, name.as_deref()).await?;
+            let repo = use_case.execute(&path, name.as_deref(), vector_store, ns).await?;
             println!(
                 "Successfully indexed repository: {} ({} files, {} chunks)",
                 repo.name(), repo.file_count(), repo.chunk_count()
@@ -145,7 +183,7 @@ async fn main() -> Result<()> {
             language,
             repository,
         } => {
-            let use_case = SearchCodeUseCase::new(vector_repo, embedding_service);
+            let use_case = SearchCodeUseCase::new(vector_repo.clone(), embedding_service);
 
             let mut search_query = SearchQuery::new(&query).with_limit(limit);
 
@@ -195,7 +233,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::List => {
-            let use_case = ListRepositoriesUseCase::new(sqlite.clone());
+            let use_case = ListRepositoriesUseCase::new(repo_adapter.clone());
             let repos = use_case.execute().await?;
 
             if repos.is_empty() {
@@ -206,13 +244,15 @@ async fn main() -> Result<()> {
                     println!("  {} ({})", repo.name(), repo.id());
                     println!("    Path: {}", repo.path());
                     println!("    Files: {}, Chunks: {}", repo.file_count(), repo.chunk_count());
+                    let ns_display = repo.namespace().unwrap_or("(none)");
+                    println!("    Store: {}, Namespace: {}", repo.store().as_str(), ns_display);
                     println!();
                 }
             }
         }
 
         Commands::Delete { id_or_path } => {
-            let use_case = DeleteRepositoryUseCase::new(sqlite.clone(), vector_repo);
+            let use_case = DeleteRepositoryUseCase::new(repo_adapter.clone(), vector_repo.clone());
 
             match use_case.execute(&id_or_path).await {
                 Ok(_) => println!("Repository deleted successfully."),
@@ -229,7 +269,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Stats => {
-            let list_use_case = ListRepositoriesUseCase::new(sqlite.clone());
+            let list_use_case = ListRepositoriesUseCase::new(repo_adapter.clone());
             let repos = list_use_case.execute().await?;
 
             let total_repos = repos.len();
@@ -258,4 +298,15 @@ fn expand_tilde(path: &str) -> String {
         }
     }
     path.to_string()
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn use_chroma_flag_is_removed() {
+        let res = Cli::try_parse_from(["codesearch", "--use-chroma", "stats"]);
+        assert!(res.is_err(), "--use-chroma should not be a valid flag");
+    }
 }
