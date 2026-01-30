@@ -76,8 +76,17 @@ codesearch delete /path/to/repo
 | `--chroma-url` | (optional) | Use ChromaDB instead of DuckDB for vectors |
 | `--memory-storage` | `false` | Use in-memory storage (no persistence) |
 | `--mock-embeddings` | `false` | Use mock embeddings (for testing) |
-| `--model` | `all-MiniLM-L6-v2` | Embedding model (from HuggingFace) |
+| `--no-rerank` | `false` | Disable reranking|
 | `-v, --verbose` | `false` | Enable debug logging |
+
+### Search Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--num` | `10` | Number of results to return |
+| `-m, --min-score` | (none) | Minimum relevance score threshold (0.0-1.0) |
+| `-L, --language` | (none) | Filter by programming language (can specify multiple) |
+| `-r, --repository` | (none) | Filter by repository (can specify multiple) |
 
 ### Examples
 
@@ -97,6 +106,11 @@ codesearch -v search "authentication error handling"
 
 # Use mock embeddings for testing
 codesearch --mock-embeddings index ./test-repo --name test
+
+codesearch search "error handling" --num 25
+
+# Filter by language
+codesearch search "async function" --language rust
 ```
 
 ### Storage Backends
@@ -111,6 +125,34 @@ codesearch --mock-embeddings index ./test-repo --name test
 - **Metadata**: Always stored in DuckDB locally via `DuckdbMetadataRepository` (repository info, chunks, file paths, statistics)
 - **Vectors**: DuckDB (default) or ChromaDB (with `--chroma-url`)
 - **Index**: DuckDB uses HNSW (Hierarchical Navigable Small World) for Vector Similarity Search with cosine distance
+
+## Reranking
+
+CodeSearch supports optional reranking to improve search result relevance using cross-encoder models.
+
+### How It Works
+
+1. Initial vector search retrieves candidates (minimum 100, or `num × 10` if `num > 10`)
+2. A cross-encoder model (mxbai-rerank-xsmall-v1) reranks candidates based on query-document relevance
+3. Top `num` reranked results are returned
+
+### Usage
+
+```bash
+codesearch search "authentication"
+
+# Customize number of results
+codesearch search "error handling" --num 20
+
+# Combine with filters
+codesearch search "validation" --language rust --min-score 0.7
+```
+
+### Models
+
+- **Default**: `mixedbread-ai/mxbai-rerank-xsmall-v1` (70M parameters, ONNX)
+- Downloaded automatically from HuggingFace Hub on first use
+- No API key or external service required
 
 ## Development
 

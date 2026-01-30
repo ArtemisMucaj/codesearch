@@ -162,7 +162,7 @@ flowchart TB
     D --> F[ChromaDB]
 
     C -.- C1[TreeSitterParser<br/>Extract functions, classes, etc.]
-    D -.- D1[OrtEmbedding<br/>all-MiniLM-L6-v2]
+    D -.- D1[OrtEmbedding<br/>mxbai-embed-xsmall-v1]
     E -.- E1[DuckdbMetadataRepository<br/>+ DuckdbVectorRepository<br/>Metadata + Vectors]
     F -.- F1[ChromaVectorRepository<br/>Vectors + chunks]
 ```

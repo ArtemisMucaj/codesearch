@@ -24,8 +24,9 @@ flowchart TB
 1. **Query Embedding**: Input text is embedded using the same model as indexing (384 dimensions)
 2. **VSS Search**: DuckDB's Vector Similarity Search uses HNSW index to find similar vectors (fast approximate nearest neighbors)
 3. **Filtering**: Results filtered by language, node type, repository, and minimum score threshold
-4. **Details Fetch**: Full code chunks reconstructed from DuckDB
-5. **Ranking**: Results ranked by cosine distance (0.0 = opposite, 1.0 = identical)
+4. **Reranking**: Enabled by defaylt, skip using `--no-rerank`
+5. **Details Fetch**: Full code chunks reconstructed from DuckDB
+6. **Ranking**: Results ranked by cosine distance (0.0 = opposite, 1.0 = identical) or reranking score if enabled
 
 ## Search Query Options
 
@@ -39,8 +40,33 @@ codesearch search "parse configuration file"
 
 ```bash
 # Get top 20 results
-codesearch search "error handling" --limit 20
+codesearch search "error handling" --num 20
 ```
+
+### Reranking for Better Relevance
+
+Enable cross-encoder reranking to improve result quality:
+
+```bash
+# Basic reranking (fetches 100 candidates, returns top 10)
+codesearch search "error handling"
+
+# Reranking with custom result count (fetches 200, returns top 20)
+codesearch search "validation" --num 20
+
+# No reranking
+codesearch search "validation" --no-rerank
+```
+
+**How reranking works:**
+- Fetches candidates from vector search (minimum 100, or `num × 10` if `num > 10`)
+- Rescores them using a cross-encoder model (mxbai-rerank-xsmall-v1)
+- Returns top `num` results by relevance score
+
+**Trade-offs:**
+- ✅ Better result relevance (especially for specific queries)
+- ✅ No external dependencies or APIs
+- ⚠️ ~2-5x slower than vector-only search
 
 ### Minimum Score Threshold
 
@@ -156,6 +182,8 @@ for result in results {
 
 - [ ] Hybrid search (semantic + keyword)
 - [ ] Code-specific query preprocessing
-- [ ] Result re-ranking with cross-encoder
+- [ ] ✓ Result re-ranking with cross-encoder
 - [ ] Search history and bookmarks
 - [ ] Natural language query expansion
+- [ ] Custom reranking models
+- [ ] GPU acceleration for reranking

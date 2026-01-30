@@ -60,13 +60,14 @@ codesearch --memory-storage index /path/to/your/project
 codesearch search "function that handles user authentication"
 
 # Search with more results
-codesearch search "error handling" --limit 20
+codesearch search "error handling" --num 20
 
 # Filter by language
 codesearch search "parse json" --language rust
 
 # Filter by minimum score
 codesearch search "database connection" --min-score 0.5
+
 ```
 
 ### List Indexed Repositories
