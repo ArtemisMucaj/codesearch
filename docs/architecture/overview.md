@@ -19,7 +19,7 @@ graph TB
         end
         subgraph Ports["Interfaces / Ports"]
             VectorRepo[VectorRepository]
-            RepoRepo[RepositoryRepository]
+            RepoRepo[MetadataRepository]
             EmbedSvc[EmbeddingService]
             ParseSvc[ParserService]
         end
@@ -36,7 +36,8 @@ graph TB
 
     subgraph Connector["Connector Layer"]
         subgraph Adapters["Adapters"]
-            SQLite[SqliteRepositoryAdapter]
+            DuckDBMeta[DuckdbMetadataRepository]
+            DuckDBVec[DuckdbVectorRepository]
             Chroma[ChromaVectorRepository]
             InMemory[InMemoryVectorRepository]
             Ort[OrtEmbedding]
@@ -70,10 +71,10 @@ Contains use cases and interface definitions (ports):
 - **DeleteRepositoryUseCase**: Removes a repository from the index
 
 **Interfaces/Ports** (`src/application/interfaces/`):
-- **VectorRepository**: Interface for vector storage operations
-- **RepositoryRepository**: Interface for repository metadata persistence
-- **EmbeddingService**: Interface for generating embeddings
-- **ParserService**: Interface for code parsing
+- **VectorRepository**: Interface for vector storage and similarity search operations
+- **MetadataRepository**: Interface for repository metadata persistence
+- **EmbeddingService**: Interface for generating embeddings from text
+- **ParserService**: Interface for parsing code and extracting code chunks
 
 ### Domain Layer (`src/domain/`)
 
@@ -94,12 +95,13 @@ Pure domain objects with encapsulated behavior. All fields are private with acce
 Implements the application interfaces with concrete adapters:
 
 **Adapters** (`src/connector/adapter/`):
-- **SqliteRepositoryAdapter**: SQLite-based repository persistence
-- **ChromaVectorRepository**: ChromaDB-based vector storage
-- **InMemoryVectorRepository**: In-memory vector storage for testing
-- **OrtEmbedding**: ONNX Runtime embedding generation
-- **MockEmbedding**: Mock embeddings for testing
-- **TreeSitterParser**: Tree-sitter based code parser
+- **DuckdbMetadataRepository**: DuckDB implementation of MetadataRepository; stores repository metadata, chunks, and statistics
+- **DuckdbVectorRepository**: DuckDB implementation of VectorRepository with VSS (Vector Similarity Search) acceleration using HNSW indexes and cosine distance
+- **ChromaVectorRepository**: ChromaDB implementation of VectorRepository for remote vector storage
+- **InMemoryVectorRepository**: In-memory implementation of VectorRepository for testing/ephemeral indexing
+- **OrtEmbedding**: ONNX Runtime implementation of EmbeddingService using sentence-transformers models
+- **MockEmbedding**: Mock implementation of EmbeddingService for testing
+- **TreeSitterParser**: Tree-sitter based implementation of ParserService for multi-language code parsing
 
 ## Project Structure
 
@@ -119,10 +121,10 @@ src/
 ├── application/                      # Use cases + interfaces
 │   ├── interfaces/                   # Port definitions
 │   │   ├── embedding_service.rs
+│   │   ├── metadata_repository.rs    # Interface for repository metadata
 │   │   ├── mod.rs
 │   │   ├── parser_service.rs
-│   │   ├── repository_repository.rs
-│   │   └── vector_repository.rs
+│   │   └── vector_repository.rs      # Interface for vector storage
 │   ├── mod.rs
 │   └── use_cases/
 │       ├── delete_repository.rs
@@ -134,11 +136,12 @@ src/
 ├── connector/                        # Adapter implementations
 │   ├── adapter/
 │   │   ├── chroma_vector_repository.rs
+│   │   ├── duckdb_metadata_repository.rs    # MetadataRepository impl
+│   │   ├── duckdb_vector_repository.rs      # VectorRepository impl with VSS
 │   │   ├── in_memory_vector_repository.rs
 │   │   ├── mock_embedding.rs
 │   │   ├── mod.rs
 │   │   ├── ort_embedding.rs
-│   │   ├── sqlite_repository_adapter.rs
 │   │   └── treesitter_parser.rs
 │   └── mod.rs
 │
@@ -155,13 +158,13 @@ flowchart TB
     A[Repository Path] --> B[Walk Files]
     B --> C[Parse with Tree-sitter]
     C --> D[Generate Embeddings]
-    D --> E[SQLite]
+    D --> E[DuckDB]
     D --> F[ChromaDB]
 
     C -.- C1[TreeSitterParser<br/>Extract functions, classes, etc.]
     D -.- D1[OrtEmbedding<br/>all-MiniLM-L6-v2]
-    E -.- E1[SqliteAdapter<br/>Repository metadata]
-    F -.- F1[ChromaAdapter<br/>Vectors + chunks]
+    E -.- E1[DuckdbMetadataRepository<br/>+ DuckdbVectorRepository<br/>Metadata + Vectors]
+    F -.- F1[ChromaVectorRepository<br/>Vectors + chunks]
 ```
 
 ### Search Flow
@@ -174,7 +177,7 @@ flowchart TB
     D --> E[Search Results]
 
     B -.- B1[OrtEmbedding]
-    C -.- C1[ChromaVectorRepository<br/>similarity search]
+    C -.- C1[DuckdbVectorRepository<br/>VSS with HNSW index<br/>or ChromaVectorRepository]
     D -.- D1[Reconstruct CodeChunk<br/>domain objects]
 ```
 

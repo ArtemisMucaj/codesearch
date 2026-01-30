@@ -3,16 +3,16 @@ pub mod connector;
 pub mod domain;
 
 pub use application::{
-    EmbeddingService, ParserService, RepositoryRepository, VectorRepository,
+    EmbeddingService, ParserService, MetadataRepository, VectorRepository,
     DeleteRepositoryUseCase, IndexRepositoryUseCase, ListRepositoriesUseCase, SearchCodeUseCase,
 };
 
 pub use connector::{
-    ChromaVectorRepository, InMemoryVectorRepository, MockEmbedding, 
-    OrtEmbedding, SqliteRepositoryAdapter, TreeSitterParser,
+    ChromaVectorRepository, DuckdbMetadataRepository, DuckdbVectorRepository, InMemoryVectorRepository,
+    MockEmbedding, OrtEmbedding, TreeSitterParser,
 };
 
 pub use domain::{
     CodeChunk, DomainError, Embedding, EmbeddingConfig, IndexingStatus, 
-    Language, NodeType, Repository, SearchQuery, SearchResult,
+    Language, NodeType, Repository, SearchQuery, SearchResult, VectorStore,
 };

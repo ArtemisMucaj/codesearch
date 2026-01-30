@@ -2,25 +2,25 @@ use std::sync::Arc;
 
 use codesearch::{
     CodeChunk, IndexRepositoryUseCase, InMemoryVectorRepository, Language, ListRepositoriesUseCase,
-    MockEmbedding, NodeType, ParserService, SearchCodeUseCase, SearchQuery, 
-    SqliteRepositoryAdapter, TreeSitterParser,
+    MockEmbedding, NodeType, ParserService, SearchCodeUseCase, SearchQuery, VectorStore,
+    DuckdbMetadataRepository, TreeSitterParser,
 };
 use tempfile::tempdir;
 
 async fn setup_test_env() -> TestEnv {
-    let sqlite = Arc::new(SqliteRepositoryAdapter::in_memory().expect("Failed to create SQLite"));
+    let metadata_repository = Arc::new(DuckdbMetadataRepository::in_memory().expect("Failed to create DuckDB"));
     let vector_repo = Arc::new(InMemoryVectorRepository::new());
     let parser = Arc::new(TreeSitterParser::new());
 
     TestEnv {
-        sqlite,
+        metadata_repository,
         vector_repo,
         parser,
     }
 }
 
 struct TestEnv {
-    sqlite: Arc<SqliteRepositoryAdapter>,
+    metadata_repository: Arc<DuckdbMetadataRepository>,
     #[allow(dead_code)]
     vector_repo: Arc<InMemoryVectorRepository>,
     #[allow(dead_code)]
@@ -30,7 +30,7 @@ struct TestEnv {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_list_empty_repositories() {
     let env = setup_test_env().await;
-    let use_case = ListRepositoriesUseCase::new(env.sqlite.clone());
+    let use_case = ListRepositoriesUseCase::new(env.metadata_repository.clone());
 
     let repos = use_case.execute().await.expect("Failed to list repositories");
     assert!(repos.is_empty(), "Should have no repositories initially");
@@ -144,7 +144,7 @@ async fn test_code_chunk_creation() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_vector_store_returns_chunk_documents() {
-    let sqlite = Arc::new(SqliteRepositoryAdapter::in_memory().expect("Failed to create SQLite"));
+    let sqlite = Arc::new(DuckdbMetadataRepository::in_memory().expect("Failed to create DuckDB"));
     let vector_repo = Arc::new(InMemoryVectorRepository::new());
     let parser = Arc::new(TreeSitterParser::new());
     let embedding_service = Arc::new(MockEmbedding::new());
@@ -170,7 +170,7 @@ pub fn add(a: i32, b: i32) -> i32 {
     );
 
     index_use_case
-        .execute(temp_dir.path().to_str().unwrap(), Some("test-repo"))
+        .execute(temp_dir.path().to_str().unwrap(), Some("test-repo"), VectorStore::InMemory, None)
         .await
         .expect("Indexing failed");
 
@@ -210,14 +210,14 @@ pub fn subtract(a: i32, b: i32) -> i32 {
     let embedding_service = Arc::new(MockEmbedding::new());
 
     let index_use_case = IndexRepositoryUseCase::new(
-        env.sqlite.clone(),
+        env.metadata_repository.clone(),
         env.vector_repo.clone(),
         env.parser.clone(),
         embedding_service.clone(),
     );
 
     let repository = index_use_case
-        .execute(temp_dir.path().to_str().unwrap(), Some("test-repo"))
+        .execute(temp_dir.path().to_str().unwrap(), Some("test-repo"), VectorStore::InMemory, None)
         .await
         .expect("Indexing failed");
 

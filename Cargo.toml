@@ -33,9 +33,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Database
-rusqlite = { version = "0.32", features = ["bundled"] }
+duckdb = { version = "1.4", features = ["bundled"] }
 
-# Vector database
+# Vector database (optional, for ChromaDB backend)
 chromadb = "2.3"
 
 # Tree-sitter for AST parsing

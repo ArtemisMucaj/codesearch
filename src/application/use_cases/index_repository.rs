@@ -4,11 +4,11 @@ use std::sync::Arc;
 use ignore::WalkBuilder;
 use tracing::{debug, info, warn};
 
-use crate::application::{EmbeddingService, ParserService, RepositoryRepository, VectorRepository};
-use crate::domain::{DomainError, Language, Repository};
+use crate::application::{EmbeddingService, ParserService, MetadataRepository, VectorRepository};
+use crate::domain::{DomainError, Language, Repository, VectorStore};
 
 pub struct IndexRepositoryUseCase {
-    repository_repo: Arc<dyn RepositoryRepository>,
+    repository_repo: Arc<dyn MetadataRepository>,
     vector_repo: Arc<dyn VectorRepository>,
     parser_service: Arc<dyn ParserService>,
     embedding_service: Arc<dyn EmbeddingService>,
@@ -16,7 +16,7 @@ pub struct IndexRepositoryUseCase {
 
 impl IndexRepositoryUseCase {
     pub fn new(
-        repository_repo: Arc<dyn RepositoryRepository>,
+        repository_repo: Arc<dyn MetadataRepository>,
         vector_repo: Arc<dyn VectorRepository>,
         parser_service: Arc<dyn ParserService>,
         embedding_service: Arc<dyn EmbeddingService>,
@@ -29,7 +29,13 @@ impl IndexRepositoryUseCase {
         }
     }
 
-    pub async fn execute(&self, path: &str, name: Option<&str>) -> Result<Repository, DomainError> {
+    pub async fn execute(
+        &self,
+        path: &str,
+        name: Option<&str>,
+        store: VectorStore,
+        namespace: Option<String>,
+    ) -> Result<Repository, DomainError> {
         let path = Path::new(path);
         let absolute_path = path
             .canonicalize()
@@ -53,7 +59,7 @@ impl IndexRepositoryUseCase {
                     .to_string()
             });
 
-        let repository = Repository::new(repo_name.clone(), path_str.clone());
+        let repository = Repository::new_with_storage(repo_name.clone(), path_str.clone(), store, namespace);
         self.repository_repo.save(&repository).await?;
 
         info!("Indexing repository: {} at {}", repo_name, path_str);

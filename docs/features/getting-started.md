@@ -3,7 +3,8 @@
 ## Prerequisites
 
 - Rust 1.70 or later
-- ChromaDB server (optional, for production use)
+- No external services required (DuckDB is bundled)
+- Optional: ChromaDB server (if you prefer remote vector storage)
 
 ## Installation
 
@@ -24,17 +25,17 @@ cp target/release/codesearch bin/
 cargo install --path .
 ```
 
-### Start ChromaDB (Optional)
+### Storage Configuration (Optional)
 
-For production use with persistent vector storage:
+By default, CodeSearch uses DuckDB for both metadata and vectors. Optionally, you can use ChromaDB for remote vector storage:
 
 ```bash
-# Using Docker
-docker run -p 8000:8000 chromadb/chroma
+# Use ChromaDB for vectors (metadata stays in DuckDB)
+# First start ChromaDB
+docker run -d -p 8000:8000 chromadb/chroma
 
-# Or using pip
-pip install chromadb
-chroma run
+# Then use it with codesearch
+codesearch --chroma-url http://localhost:8000 index /path/to/repo
 ```
 
 ## Quick Start
@@ -48,8 +49,8 @@ codesearch index /path/to/your/project
 # Index with a custom name
 codesearch index /path/to/your/project --name "My Project"
 
-# Use in-memory storage (for testing)
-codesearch --in-memory index /path/to/your/project
+# Use in-memory storage (for testing, no persistence)
+codesearch --memory-storage index /path/to/your/project
 ```
 
 ### Search for Code
@@ -107,6 +108,21 @@ Enable debug logging:
 ```bash
 codesearch -v search "my query"
 ```
+
+## How Search Works
+
+Codesearch uses **semantic vector search**:
+
+1. Your query is converted to a 384-dimensional embedding
+2. The DuckDB VSS extension finds semantically similar code using HNSW indexes
+3. Results are ranked by cosine similarity (0.0 to 1.0)
+4. Filters can be applied by language, node type, repository, or minimum score
+
+**Why VSS (Vector Similarity Search)?**
+- ✓ Finds conceptually similar code, not just keyword matches
+- ✓ HNSW index provides fast approximate nearest neighbor search
+- ✓ Built-in to DuckDB - no external service needed
+- ✓ Cosine distance optimized for high-dimensional embeddings
 
 ## Supported Languages
 

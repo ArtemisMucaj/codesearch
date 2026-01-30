@@ -4,7 +4,7 @@ use crate::domain::{DomainError, Repository};
 
 /// Persistence for repository metadata.
 #[async_trait]
-pub trait RepositoryRepository: Send + Sync {
+pub trait MetadataRepository: Send + Sync {
     async fn save(&self, repository: &Repository) -> Result<(), DomainError>;
 
     async fn find_by_id(&self, id: &str) -> Result<Option<Repository>, DomainError>;

@@ -1,5 +1,38 @@
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 use uuid::Uuid;
+
+/// The type of vector storage backend used for a repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VectorStore {
+    #[default]
+    DuckDb,
+    ChromaDb,
+    InMemory,
+}
+
+impl VectorStore {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            VectorStore::DuckDb => "duckdb",
+            VectorStore::ChromaDb => "chromadb",
+            VectorStore::InMemory => "memory",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "duckdb" => VectorStore::DuckDb,
+            "chromadb" | "chroma" => VectorStore::ChromaDb,
+            "memory" | "inmemory" | "in_memory" => VectorStore::InMemory,
+            unknown => {
+                warn!("Unknown vector store type '{}', defaulting to DuckDB", unknown);
+                VectorStore::DuckDb
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repository {
@@ -10,6 +43,10 @@ pub struct Repository {
     updated_at: i64,
     chunk_count: u64,
     file_count: u64,
+    /// Vector store backend (duckdb, chromadb, memory).
+    store: VectorStore,
+    /// Namespace for vector storage (DuckDB schema or ChromaDB collection).
+    namespace: Option<String>,
 }
 
 impl Repository {
@@ -23,6 +60,28 @@ impl Repository {
             updated_at: now,
             chunk_count: 0,
             file_count: 0,
+            store: VectorStore::default(),
+            namespace: None,
+        }
+    }
+
+    pub fn new_with_storage(
+        name: String,
+        path: String,
+        store: VectorStore,
+        namespace: Option<String>,
+    ) -> Self {
+        let now = current_timestamp();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            name,
+            path,
+            created_at: now,
+            updated_at: now,
+            chunk_count: 0,
+            file_count: 0,
+            store,
+            namespace,
         }
     }
 
@@ -35,6 +94,8 @@ impl Repository {
         updated_at: i64,
         chunk_count: u64,
         file_count: u64,
+        store: VectorStore,
+        namespace: Option<String>,
     ) -> Self {
         Self {
             id,
@@ -44,6 +105,8 @@ impl Repository {
             updated_at,
             chunk_count,
             file_count,
+            store,
+            namespace,
         }
     }
 
@@ -73,6 +136,14 @@ impl Repository {
 
     pub fn file_count(&self) -> u64 {
         self.file_count
+    }
+
+    pub fn store(&self) -> VectorStore {
+        self.store
+    }
+
+    pub fn namespace(&self) -> Option<&str> {
+        self.namespace.as_deref()
     }
 
     pub fn update_stats(&mut self, chunk_count: u64, file_count: u64) {
