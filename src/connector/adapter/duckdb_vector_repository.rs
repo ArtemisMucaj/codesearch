@@ -298,6 +298,45 @@ impl VectorRepository for DuckdbVectorRepository {
         Ok(())
     }
 
+    async fn delete_by_file_path(
+        &self,
+        repository_id: &str,
+        file_path: &str,
+    ) -> Result<u64, DomainError> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DomainError::storage(format!("Failed to begin transaction: {}", e)))?;
+
+        tx.execute(
+            &format!(
+                "DELETE FROM \"{0}\".embeddings WHERE chunk_id IN (SELECT id FROM \"{0}\".chunks WHERE repository_id = ? AND file_path = ?)",
+                self.namespace
+            ),
+            params![repository_id, file_path],
+        )
+        .map_err(|e| DomainError::storage(format!("Failed to delete embeddings: {}", e)))?;
+
+        let deleted_count = tx
+            .execute(
+                &format!(
+                    "DELETE FROM \"{}\".chunks WHERE repository_id = ? AND file_path = ?",
+                    self.namespace
+                ),
+                params![repository_id, file_path],
+            )
+            .map_err(|e| DomainError::storage(format!("Failed to delete chunks: {}", e)))?;
+
+        tx.commit()
+            .map_err(|e| DomainError::storage(format!("Failed to commit: {}", e)))?;
+
+        debug!(
+            "Deleted {} chunks for file {} in repository {}",
+            deleted_count, file_path, repository_id
+        );
+        Ok(deleted_count as u64)
+    }
+
     async fn search(
         &self,
         query_embedding: &[f32],

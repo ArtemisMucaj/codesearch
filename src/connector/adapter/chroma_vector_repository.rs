@@ -235,6 +235,49 @@ impl VectorRepository for ChromaVectorRepository {
         Ok(())
     }
 
+    async fn delete_by_file_path(
+        &self,
+        repository_id: &str,
+        file_path: &str,
+    ) -> Result<u64, DomainError> {
+        let collection = self.collection.lock().await;
+        let where_metadata = serde_json::json!({
+            "$and": [
+                {"repository_id": repository_id},
+                {"file_path": file_path}
+            ]
+        });
+        let ids = collection
+            .get(GetOptions {
+                ids: vec![],
+                where_metadata: Some(where_metadata),
+                limit: None,
+                offset: None,
+                where_document: None,
+                include: None,
+            })
+            .await
+            .map_err(|e| DomainError::internal(format!("Failed to fetch ids: {}", e)))?
+            .ids;
+
+        let count = ids.len() as u64;
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let id_refs: Vec<&str> = ids.iter().map(|id| id.as_str()).collect();
+        collection
+            .delete(Some(id_refs), None, None)
+            .await
+            .map_err(|e| DomainError::internal(format!("Failed to delete chunks: {}", e)))?;
+
+        debug!(
+            "Deleted {} chunks for file {} in repository {}",
+            count, file_path, repository_id
+        );
+        Ok(count)
+    }
+
     async fn search(
         &self,
         query_embedding: &[f32],

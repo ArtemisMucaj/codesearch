@@ -13,19 +13,27 @@ impl<'a> RepositoryController<'a> {
         Self { container }
     }
 
-    pub async fn index(&self, path: String, name: Option<String>) -> Result<String> {
+    pub async fn index(&self, path: String, name: Option<String>, force: bool) -> Result<String> {
         use crate::VectorStore;
 
         let (vector_store, ns): (VectorStore, Option<String>) = if self.container.memory_storage() {
             (VectorStore::InMemory, None)
         } else if self.container.chroma_url().is_some() {
-            (VectorStore::ChromaDb, Some(self.container.namespace().to_string()))
+            (
+                VectorStore::ChromaDb,
+                Some(self.container.namespace().to_string()),
+            )
         } else {
-            (VectorStore::DuckDb, Some(self.container.namespace().to_string()))
+            (
+                VectorStore::DuckDb,
+                Some(self.container.namespace().to_string()),
+            )
         };
 
         let use_case = self.container.index_use_case();
-        let repo = use_case.execute(&path, name.as_deref(), vector_store, ns).await?;
+        let repo = use_case
+            .execute(&path, name.as_deref(), vector_store, ns, force)
+            .await?;
 
         Ok(self.format_index_success(&repo))
     }

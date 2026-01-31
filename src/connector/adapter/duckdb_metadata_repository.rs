@@ -34,6 +34,12 @@ impl DuckdbMetadataRepository {
         Ok(Self { conn })
     }
 
+    /// Returns a clone of the shared connection Arc.
+    /// This allows other adapters to share the same DuckDB connection.
+    pub fn shared_connection(&self) -> Arc<Mutex<Connection>> {
+        Arc::clone(&self.conn)
+    }
+
     #[allow(dead_code)]
     pub fn in_memory() -> Result<Self, DomainError> {
         let conn = Connection::open_in_memory().map_err(|e| {
