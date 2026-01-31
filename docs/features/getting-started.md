@@ -15,7 +15,7 @@
 git clone https://github.com/ArtemisMucaj/codesearch
 cd codesearch
 
-# Build in release mode
+# Build in release mode (CPU only)
 cargo build --release
 
 # Copy binary to bin directory
@@ -24,6 +24,20 @@ cp target/release/codesearch bin/
 # Or install system-wide
 cargo install --path .
 ```
+
+### Build with GPU Acceleration
+
+GPU acceleration speeds up embedding generation and reranking during indexing and search.
+
+```bash
+# Linux with NVIDIA GPU (requires CUDA 12.x + cuDNN 9.x)
+cargo build --release --features cuda
+
+# macOS with Apple Silicon (requires macOS 10.15+)
+cargo build --release --features coreml
+```
+
+GPU builds automatically fall back to CPU if the required hardware or drivers are unavailable.
 
 ### Storage Configuration (Optional)
 

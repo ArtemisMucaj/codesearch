@@ -10,6 +10,7 @@ A semantic code search tool that indexes code repositories using embeddings and 
 - **Persistent storage**: DuckDB with VSS (Vector Similarity Search) acceleration
 - **Flexible backends**: supports ChromaDB and in-memory storage
 - **Fast indexing**: efficient batch processing with ONNX embedding generation
+- **GPU acceleration**: optional CUDA (Linux) and CoreML (macOS) support for faster inference
 
 ## Architecture
 
@@ -29,6 +30,38 @@ crates/
 cargo build --release
 # Binary will be placed in bin/
 cp target/release/codesearch bin/
+```
+
+### GPU Acceleration (Optional)
+
+CodeSearch supports GPU acceleration for embedding generation and reranking, which can significantly speed up indexing and search operations.
+
+#### Linux (NVIDIA CUDA)
+
+Requires CUDA 12.x and cuDNN 9.x installed on your system.
+
+```bash
+cargo build --release --features cuda
+```
+
+#### macOS (CoreML / Apple Neural Engine)
+
+Requires macOS 10.15+ (Catalina or later). Works best on Apple Silicon (M1/M2/M3/M4).
+
+```bash
+cargo build --release --features coreml
+```
+
+#### Fallback Behavior
+
+GPU-enabled builds automatically fall back to CPU inference if:
+- GPU hardware is not available
+- Required drivers (CUDA/cuDNN) are not installed
+- The execution provider fails to initialize
+
+You'll see a warning in the logs when fallback occurs:
+```
+WARN CUDA execution provider not available (missing CUDA/cuDNN?), falling back to CPU
 ```
 
 ## Usage
