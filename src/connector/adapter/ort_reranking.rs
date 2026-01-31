@@ -7,7 +7,7 @@ use ort::{
     value::Tensor,
 };
 use tokenizers::Tokenizer;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[cfg(feature = "cuda")]
 use ort::execution_providers::CUDAExecutionProvider;
@@ -83,7 +83,12 @@ impl OrtReranking {
 
         #[cfg(feature = "cuda")]
         let builder = {
-            info!("Configuring CUDA execution provider for GPU acceleration");
+            let cuda_available = CUDAExecutionProvider::is_available();
+            if cuda_available {
+                info!("CUDA execution provider available, enabling GPU acceleration");
+            } else {
+                warn!("CUDA execution provider not available (missing CUDA/cuDNN?), falling back to CPU");
+            }
             builder
                 .with_execution_providers([CUDAExecutionProvider::default().build()])
                 .map_err(|e| {
@@ -93,7 +98,12 @@ impl OrtReranking {
 
         #[cfg(feature = "coreml")]
         let builder = {
-            info!("Configuring CoreML execution provider for GPU/ANE acceleration");
+            let coreml_available = CoreMLExecutionProvider::is_available();
+            if coreml_available {
+                info!("CoreML execution provider available, enabling GPU/ANE acceleration");
+            } else {
+                warn!("CoreML execution provider not available, falling back to CPU");
+            }
             builder
                 .with_execution_providers([CoreMLExecutionProvider::default()
                     .with_subgraphs()
