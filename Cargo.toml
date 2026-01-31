@@ -47,6 +47,7 @@ tree-sitter-typescript = "*"
 tree-sitter-go = "*"
 tree-sitter-hcl = "*"
 tree-sitter-php = "*"
+tree-sitter-cpp = "*"
 streaming-iterator = "0.1"
 
 # CLI

@@ -11,6 +11,7 @@ pub enum Language {
     Go,
     HCL,
     Php,
+    Cpp,
     Unknown,
 }
 
@@ -24,6 +25,7 @@ impl Language {
             "go" => Language::Go,
             "hcl" | "tf" => Language::HCL,
             "php" => Language::Php,
+            "cpp" | "cc" | "cxx" | "c" | "h" | "hpp" => Language::Cpp,
             _ => Language::Unknown,
         }
     }
@@ -44,6 +46,7 @@ impl Language {
             "go" => Language::Go,
             "hcl" => Language::HCL,
             "php" => Language::Php,
+            "cpp" | "c++" => Language::Cpp,
             _ => Language::Unknown,
         }
     }
@@ -57,25 +60,13 @@ impl Language {
             Language::Go => "go",
             Language::HCL => "hcl",
             Language::Php => "php",
+            Language::Cpp => "cpp",
             Language::Unknown => "unknown",
         }
     }
 
     pub fn is_known(&self) -> bool {
         !matches!(self, Language::Unknown)
-    }
-
-    pub fn primary_extension(&self) -> &'static str {
-        match self {
-            Language::Rust => "rs",
-            Language::Python => "py",
-            Language::JavaScript => "js",
-            Language::TypeScript => "ts",
-            Language::Go => "go",
-            Language::HCL => "hcl",
-            Language::Php => "php",
-            Language::Unknown => "",
-        }
     }
 
     pub fn extensions(&self) -> &'static [&'static str] {
@@ -87,6 +78,7 @@ impl Language {
             Language::Go => &["go"],
             Language::HCL => &["hcl", "tf"],
             Language::Php => &["php"],
+            Language::Cpp => &["cpp", "cc", "cxx", "c", "h", "hpp"],
             Language::Unknown => &[],
         }
     }
@@ -100,13 +92,14 @@ impl Language {
                 | Language::Go
                 | Language::HCL
                 | Language::Php
+                | Language::Cpp
         )
     }
 
     pub fn is_statically_typed(&self) -> bool {
         matches!(
             self,
-            Language::Rust | Language::TypeScript | Language::Go | Language::Php
+            Language::Rust | Language::TypeScript | Language::Go | Language::Php | Language::Cpp
         )
     }
 
