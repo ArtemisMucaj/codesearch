@@ -80,6 +80,31 @@ impl VectorRepository for InMemoryVectorRepository {
         Ok(())
     }
 
+    async fn delete_by_file_path(
+        &self,
+        repository_id: &str,
+        file_path: &str,
+    ) -> Result<u64, DomainError> {
+        let mut chunk_store = self.chunks.lock().await;
+        let mut embedding_store = self.embeddings.lock().await;
+
+        let ids: Vec<String> = chunk_store
+            .values()
+            .filter(|chunk| {
+                chunk.repository_id() == repository_id && chunk.file_path() == file_path
+            })
+            .map(|chunk| chunk.id().to_string())
+            .collect();
+
+        let count = ids.len() as u64;
+        for id in ids {
+            chunk_store.remove(&id);
+            embedding_store.remove(&id);
+        }
+
+        Ok(count)
+    }
+
     async fn search(
         &self,
         query_embedding: &[f32],

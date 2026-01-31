@@ -20,7 +20,9 @@ impl<'a> Router<'a> {
 
     pub async fn route(&self, command: Commands) -> Result<String> {
         match command {
-            Commands::Index { path, name } => self.repository_controller.index(path, name).await,
+            Commands::Index { path, name, force } => {
+                self.repository_controller.index(path, name, force).await
+            }
             Commands::Search {
                 query,
                 num,

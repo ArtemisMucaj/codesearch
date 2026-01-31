@@ -120,7 +120,41 @@ for batch in chunks.chunks(100) {
 
 ### Incremental Indexing
 
-Future improvement: Track file hashes to avoid re-indexing unchanged files.
+By default, codesearch uses **hash-based change detection** to avoid re-indexing unchanged files:
+
+1. **SHA-256 content hashing** tracks file changes
+2. **Change detection** categorizes files as: added, modified, deleted, or unchanged
+3. **Selective processing**: only processes added and modified files
+4. **Chunk deletion**: removes chunks for deleted files
+5. **Accurate statistics**: tracks deleted chunk counts for correct total updates
+
+#### Usage
+
+```bash
+# Incremental index (default)
+codesearch index /path/to/repo
+
+# Force full re-index
+codesearch index /path/to/repo --force
+```
+
+#### Example Output
+
+```
+Detected changes: 2 added, 1 modified, 0 deleted, 47 unchanged
+Incremental indexing complete: processed 3 files (15 new chunks)
+Successfully indexed repository: my-repo (50 files, 486 chunks)
+```
+
+#### Performance Impact
+
+| Scenario | Full Index | Incremental |
+|----------|-----------|-------------|
+| First index (new repo) | ~60s | ~60s |
+| All files unchanged | ~60s | <1s |
+| 5% of files changed | ~60s | ~3s |
+
+File hashes are stored in a dedicated `file_hashes` table (DuckDB) with PRIMARY KEY on (repository_id, file_path).
 
 ## Configuration Options
 

@@ -7,6 +7,10 @@ pub enum Commands {
 
         #[arg(short, long)]
         name: Option<String>,
+
+        /// Force full re-index, ignoring cached file hashes
+        #[arg(short, long)]
+        force: bool,
     },
 
     Search {

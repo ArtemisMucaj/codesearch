@@ -15,6 +15,14 @@ pub trait VectorRepository: Send + Sync {
 
     async fn delete_by_repository(&self, repository_id: &str) -> Result<(), DomainError>;
 
+    /// Delete all chunks for a specific file path within a repository.
+    /// Returns the number of chunks deleted.
+    async fn delete_by_file_path(
+        &self,
+        repository_id: &str,
+        file_path: &str,
+    ) -> Result<u64, DomainError>;
+
     async fn search(
         &self,
         query_embedding: &[f32],
