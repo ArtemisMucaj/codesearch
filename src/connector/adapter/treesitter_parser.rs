@@ -21,6 +21,7 @@ impl TreeSitterParser {
                 Language::Go,
                 Language::HCL,
                 Language::Php,
+                Language::Cpp,
             ],
         }
     }
@@ -34,6 +35,7 @@ impl TreeSitterParser {
             Language::Go => Some(tree_sitter_go::LANGUAGE.into()),
             Language::HCL => Some(tree_sitter_hcl::LANGUAGE.into()),
             Language::Php => Some(tree_sitter_php::LANGUAGE_PHP.into()),
+            Language::Cpp => Some(tree_sitter_cpp::LANGUAGE.into()),
             Language::Unknown => None,
         }
     }
@@ -103,6 +105,79 @@ impl TreeSitterParser {
                 (enum_declaration name: (name) @name) @enum
                 "#
             }
+            Language::Cpp => {
+                r#"
+                ; Classes and structs
+                (class_specifier name: (type_identifier) @name) @class
+                (struct_specifier name: (type_identifier) @name) @struct
+                (union_specifier name: (type_identifier) @name) @class
+
+                ; Functions and methods
+                (function_definition
+                  declarator: (function_declarator declarator: (identifier) @name)) @function
+                (function_definition
+                  declarator: (function_declarator declarator: (field_identifier) @name)) @function
+                (function_definition
+                  declarator: (function_declarator
+                    declarator: (qualified_identifier
+                      scope: (namespace_identifier) @class.name
+                      name: (identifier) @name))) @function
+
+                ; Destructors
+                (function_definition
+                  declarator: (function_declarator
+                    (destructor_name
+                      (identifier) @name))) @function
+
+                ; Operators (use function_definition with operator_cast)
+                (function_definition
+                  declarator: (operator_cast) @name) @function
+                (function_definition
+                  declarator: (qualified_identifier
+                    scope: (namespace_identifier) @class.name
+                    name: (operator_cast) @name)) @function
+
+                ; Operator declarations
+                (declaration
+                  declarator: (operator_cast) @name) @function
+
+                ; Template declarations - capture the nested declaration's name
+                (template_declaration
+                  (alias_declaration
+                    name: (type_identifier) @name)) @template
+                (template_declaration
+                  (function_definition
+                    declarator: (function_declarator declarator: (identifier) @name))) @template
+                (template_declaration
+                  (class_specifier
+                    name: (type_identifier) @name)) @template
+
+                ; Template instantiations - these have a declarator field
+                (template_instantiation
+                  declarator: (_declarator
+                    (identifier) @name)) @template
+
+                ; Namespaces
+                (namespace_definition
+                  name: (namespace_identifier) @name) @module
+                (namespace_alias_definition
+                  name: (namespace_identifier) @name) @module
+
+                ; Types
+                (type_definition declarator: (type_identifier) @name) @typedef
+                (enum_specifier name: (type_identifier) @name) @enum
+
+                ; Aliases and using
+                (using_declaration
+                  (identifier) @name) @using
+                (alias_declaration
+                  name: (type_identifier) @name) @alias
+
+                ; Concepts (C++20)
+                (concept_definition
+                  name: (identifier) @name) @concept
+                "#
+            }
             Language::Unknown => "",
         }
     }
@@ -170,6 +245,7 @@ impl ParserService for TreeSitterParser {
 
         while let Some(query_match) = matches_iter.next() {
             let mut symbol_name: Option<String> = None;
+            let mut parent_symbol: Option<String> = None;
             let mut main_node = None;
             let mut node_type = NodeType::Block;
 
@@ -181,6 +257,8 @@ impl ParserService for TreeSitterParser {
 
                 if capture_name == "name" {
                     symbol_name = Some(content[capture.node.byte_range()].to_string());
+                } else if capture_name.ends_with(".name") {
+                    parent_symbol = Some(content[capture.node.byte_range()].to_string());
                 } else {
                     main_node = Some(capture.node);
                     node_type = Self::capture_to_node_type(capture_name);
@@ -208,6 +286,10 @@ impl ParserService for TreeSitterParser {
 
                 if let Some(name) = symbol_name {
                     chunk = chunk.with_symbol_name(name);
+                }
+
+                if let Some(parent) = parent_symbol {
+                    chunk = chunk.with_parent_symbol(parent);
                 }
 
                 chunks.push(chunk);
@@ -296,5 +378,63 @@ class Calculator {
             .unwrap();
 
         assert!(!chunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_parse_cpp_method_outside_class() {
+        let parser = TreeSitterParser::new();
+        let content = std::fs::read_to_string("tests/fixtures/sample_cpp.cpp")
+            .expect("failed to read sample_cpp.cpp");
+
+        let chunks = parser
+            .parse_file(&content, "sample_cpp.cpp", Language::Cpp, "test-repo")
+            .await
+            .unwrap();
+
+        let has_method = chunks
+            .iter()
+            .any(|chunk| chunk.symbol_name() == Some("calculate_area"));
+
+        assert!(has_method, "expected calculate_area to be indexed");
+    }
+
+    #[tokio::test]
+    async fn test_parse_cpp_does_not_duplicate_out_of_class_method() {
+        let parser = TreeSitterParser::new();
+        let content = std::fs::read_to_string("tests/fixtures/sample_cpp.cpp")
+            .expect("failed to read sample_cpp.cpp");
+
+        let chunks = parser
+            .parse_file(&content, "sample_cpp.cpp", Language::Cpp, "test-repo")
+            .await
+            .unwrap();
+
+        let area_count = chunks
+            .iter()
+            .filter(|chunk| chunk.symbol_name() == Some("calculate_area"))
+            .count();
+        assert_eq!(
+            area_count, 1,
+            "expected calculate_area to appear exactly once"
+        );
+
+        let unnamed_area_count = chunks
+            .iter()
+            .filter(|chunk| {
+                chunk.node_type() == NodeType::Function
+                    && chunk.symbol_name().is_none()
+                    && chunk.content().contains("calculate_area")
+            })
+            .count();
+        assert_eq!(
+            unnamed_area_count, 0,
+            "expected no unnamed function chunk containing calculate_area"
+        );
+
+        let main_count = chunks
+            .iter()
+            .filter(|chunk| chunk.symbol_name() == Some("main"))
+            .count();
+        assert_eq!(main_count, 1, "expected main to appear exactly once");
     }
 }
