@@ -21,6 +21,7 @@ impl TreeSitterParser {
                 Language::Go,
                 Language::HCL,
                 Language::Php,
+                Language::Cpp,
             ],
         }
     }
@@ -34,6 +35,7 @@ impl TreeSitterParser {
             Language::Go => Some(tree_sitter_go::LANGUAGE.into()),
             Language::HCL => Some(tree_sitter_hcl::LANGUAGE.into()),
             Language::Php => Some(tree_sitter_php::LANGUAGE_PHP.into()),
+            Language::Cpp => Some(tree_sitter_cpp::LANGUAGE.into()),
             Language::Unknown => None,
         }
     }
@@ -101,6 +103,88 @@ impl TreeSitterParser {
                 (trait_declaration name: (name) @name) @trait
                 (namespace_definition name: (namespace_name) @name) @module
                 (enum_declaration name: (name) @name) @enum
+                "#
+            }
+            Language::Cpp => {
+                r#"
+                ; Classes and structs
+                (class_specifier name: (type_identifier) @name) @class
+                (struct_specifier name: (type_identifier) @name) @struct
+                (union_specifier name: (type_identifier) @name) @class
+
+                ; Functions and methods (TODO functions duplicated)
+                (function_definition
+                  declarator: (function_declarator declarator: (identifier) @name)) @function
+                (function_definition
+                  declarator: (function_declarator declarator: (field_identifier) @name)) @function
+                (function_definition
+                  declarator: (function_declarator
+                    declarator: (qualified_identifier
+                      scope: (namespace_identifier) @class.name
+                      name: (identifier) @name))) @function
+
+                ; Method definitions outside of class body (TODO symbol not captured)
+                (function_definition
+                  declarator: (function_declarator
+                    declarator: (qualified_identifier))) @function
+
+                ; Constructors (use function_definition with identifier)
+                (function_definition
+                  declarator: (function_declarator declarator: (identifier) @name)) @function
+
+                ; Destructors (use function_definition with destructor_name)
+                (function_definition
+                  declarator: (function_declarator
+                    (destructor_name
+                      (identifier) @name))) @function
+
+                ; Operators (use function_definition with operator_cast)
+                (function_definition
+                  declarator: (operator_cast) @name) @function
+                (function_definition
+                  declarator: (qualified_identifier
+                    scope: (namespace_identifier) @class.name
+                    name: (operator_cast) @name)) @function
+
+                ; Operator declarations
+                (declaration
+                  declarator: (operator_cast) @name) @function
+
+                ; Template declarations - capture the nested declaration's name
+                (template_declaration
+                  (alias_declaration
+                    name: (type_identifier) @name)) @template
+                (template_declaration
+                  (function_definition
+                    declarator: (function_declarator declarator: (identifier) @name))) @template
+                (template_declaration
+                  (class_specifier
+                    name: (type_identifier) @name)) @template
+
+                ; Template instantiations - these have a declarator field
+                (template_instantiation
+                  declarator: (_declarator
+                    (identifier) @name)) @template
+
+                ; Namespaces
+                (namespace_definition
+                  name: (namespace_identifier) @name) @module
+                (namespace_alias_definition
+                  name: (namespace_identifier) @name) @module
+
+                ; Types
+                (type_definition declarator: (type_identifier) @name) @typedef
+                (enum_specifier name: (type_identifier) @name) @enum
+
+                ; Aliases and using
+                (using_declaration
+                  (identifier) @name) @using
+                (alias_declaration
+                  name: (type_identifier) @name) @alias
+
+                ; Concepts (C++20)
+                (concept_definition
+                  name: (identifier) @name) @concept
                 "#
             }
             Language::Unknown => "",
