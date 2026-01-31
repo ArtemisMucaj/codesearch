@@ -35,20 +35,23 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact_name: codesearch
-            asset_name: codesearch-linux-x86_64
+            asset_name: codesearch-linux-x86_64-cuda
+            features: cuda
           - os: macos-14
             artifact_name: codesearch
-            asset_name: codesearch-macos-aarch64
+            asset_name: codesearch-macos-aarch64-coreml
+            features: coreml
           - os: windows-latest
             artifact_name: codesearch.exe
             asset_name: codesearch-windows-x86_64.exe
+            features: ""
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --release ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
 
       - name: Rename binary
         shell: bash
