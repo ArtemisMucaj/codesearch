@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.2.0...v0.3.0) (2026-01-31)
+
+
+### Features
+
+* incremental file indexing ([bf722eb](https://github.com/ArtemisMucaj/codesearch/commit/bf722eb1b48d0965af65cae31f3bbbe9c7116cf3))
+
 ## [0.2.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.1.1...v0.2.0) (2026-01-30)
 
 
