@@ -9,6 +9,12 @@ use ort::{
 use tokenizers::Tokenizer;
 use tracing::{debug, info};
 
+#[cfg(feature = "cuda")]
+use ort::execution_providers::CUDAExecutionProvider;
+
+#[cfg(feature = "coreml")]
+use ort::execution_providers::CoreMLExecutionProvider;
+
 use crate::application::RerankingService;
 use crate::domain::{DomainError, SearchResult};
 
@@ -57,12 +63,7 @@ impl OrtReranking {
     ) -> Result<Self, DomainError> {
         info!("Loading ONNX model from: {:?}", model_path);
 
-        let session = Session::builder()
-            .map_err(|e| DomainError::internal(format!("Failed to create session builder: {}", e)))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| DomainError::internal(format!("Failed to set optimization level: {}", e)))?
-            .commit_from_file(&model_path)
-            .map_err(|e| DomainError::internal(format!("Failed to load ONNX model: {}", e)))?;
+        let session = Self::create_session(&model_path)?;
 
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| DomainError::internal(format!("Failed to load tokenizer: {}", e)))?;
@@ -73,6 +74,43 @@ impl OrtReranking {
             model_name: model_name.to_string(),
             max_sequence_length: DEFAULT_MAX_SEQ_LENGTH,
         })
+    }
+
+    fn create_session(model_path: &PathBuf) -> Result<Session, DomainError> {
+        let builder = Session::builder().map_err(|e| {
+            DomainError::internal(format!("Failed to create session builder: {}", e))
+        })?;
+
+        #[cfg(feature = "cuda")]
+        let builder = {
+            info!("Configuring CUDA execution provider for GPU acceleration");
+            builder
+                .with_execution_providers([CUDAExecutionProvider::default().build()])
+                .map_err(|e| {
+                    DomainError::internal(format!("Failed to set CUDA execution provider: {}", e))
+                })?
+        };
+
+        #[cfg(feature = "coreml")]
+        let builder = {
+            info!("Configuring CoreML execution provider for GPU/ANE acceleration");
+            builder
+                .with_execution_providers([CoreMLExecutionProvider::default()
+                    .with_subgraphs()
+                    .build()])
+                .map_err(|e| {
+                    DomainError::internal(format!("Failed to set CoreML execution provider: {}", e))
+                })?
+        };
+
+        #[cfg(not(any(feature = "cuda", feature = "coreml")))]
+        info!("No GPU execution provider configured, using CPU");
+
+        builder
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| DomainError::internal(format!("Failed to set optimization level: {}", e)))?
+            .commit_from_file(model_path)
+            .map_err(|e| DomainError::internal(format!("Failed to load ONNX model: {}", e)))
     }
 
     fn rerank_batch(&self, query: &str, documents: &[&str]) -> Result<Vec<f32>, DomainError> {

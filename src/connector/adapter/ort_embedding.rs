@@ -9,6 +9,12 @@ use ort::{
 use tokenizers::Tokenizer;
 use tracing::{debug, info};
 
+#[cfg(feature = "cuda")]
+use ort::execution_providers::CUDAExecutionProvider;
+
+#[cfg(feature = "coreml")]
+use ort::execution_providers::CoreMLExecutionProvider;
+
 use crate::application::EmbeddingService;
 use crate::domain::{CodeChunk, DomainError, Embedding, EmbeddingConfig};
 
@@ -56,12 +62,7 @@ impl OrtEmbedding {
     ) -> Result<Self, DomainError> {
         info!("Loading ONNX model from: {:?}", model_path);
 
-        let session = Session::builder()
-            .map_err(|e| DomainError::internal(format!("Failed to create session builder: {}", e)))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| DomainError::internal(format!("Failed to set optimization level: {}", e)))?
-            .commit_from_file(&model_path)
-            .map_err(|e| DomainError::internal(format!("Failed to load ONNX model: {}", e)))?;
+        let session = Self::create_session(&model_path)?;
 
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| DomainError::internal(format!("Failed to load tokenizer: {}", e)))?;
@@ -77,6 +78,43 @@ impl OrtEmbedding {
             tokenizer: Arc::new(tokenizer),
             config,
         })
+    }
+
+    fn create_session(model_path: &PathBuf) -> Result<Session, DomainError> {
+        let builder = Session::builder().map_err(|e| {
+            DomainError::internal(format!("Failed to create session builder: {}", e))
+        })?;
+
+        #[cfg(feature = "cuda")]
+        let builder = {
+            info!("Configuring CUDA execution provider for GPU acceleration");
+            builder
+                .with_execution_providers([CUDAExecutionProvider::default().build()])
+                .map_err(|e| {
+                    DomainError::internal(format!("Failed to set CUDA execution provider: {}", e))
+                })?
+        };
+
+        #[cfg(feature = "coreml")]
+        let builder = {
+            info!("Configuring CoreML execution provider for GPU/ANE acceleration");
+            builder
+                .with_execution_providers([CoreMLExecutionProvider::default()
+                    .with_subgraphs()
+                    .build()])
+                .map_err(|e| {
+                    DomainError::internal(format!("Failed to set CoreML execution provider: {}", e))
+                })?
+        };
+
+        #[cfg(not(any(feature = "cuda", feature = "coreml")))]
+        info!("No GPU execution provider configured, using CPU");
+
+        builder
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| DomainError::internal(format!("Failed to set optimization level: {}", e)))?
+            .commit_from_file(model_path)
+            .map_err(|e| DomainError::internal(format!("Failed to load ONNX model: {}", e)))
     }
 
     fn embed_texts(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, DomainError> {
