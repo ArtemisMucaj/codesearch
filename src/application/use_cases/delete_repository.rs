@@ -50,7 +50,9 @@ impl DeleteRepositoryUseCase {
             .repository_repo
             .find_by_path(&canonical_path)
             .await?
-            .ok_or_else(|| DomainError::not_found(format!("Repository not found at path: {}", path)))?;
+            .ok_or_else(|| {
+                DomainError::not_found(format!("Repository not found at path: {}", path))
+            })?;
 
         self.execute(repo.id()).await
     }

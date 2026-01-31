@@ -7,11 +7,11 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use codesearch::{
-    ChromaVectorRepository, DeleteRepositoryUseCase, EmbeddingService, IndexRepositoryUseCase,
-    DuckdbVectorRepository, InMemoryVectorRepository, ListRepositoriesUseCase, MockEmbedding,
-    OrtEmbedding, MockReranking, OrtReranking, RerankingService,
-    DuckdbMetadataRepository, SearchCodeUseCase, SearchQuery, TreeSitterParser,
-    VectorRepository, VectorStore,
+    ChromaVectorRepository, DeleteRepositoryUseCase, DuckdbMetadataRepository,
+    DuckdbVectorRepository, EmbeddingService, InMemoryVectorRepository, IndexRepositoryUseCase,
+    ListRepositoriesUseCase, MockEmbedding, MockReranking, OrtEmbedding, OrtReranking,
+    RerankingService, SearchCodeUseCase, SearchQuery, TreeSitterParser, VectorRepository,
+    VectorStore,
 };
 
 #[derive(Parser)]
@@ -81,7 +81,11 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let level = if cli.verbose { Level::DEBUG } else { Level::INFO };
+    let level = if cli.verbose {
+        Level::DEBUG
+    } else {
+        Level::INFO
+    };
     let subscriber = FmtSubscriber::builder()
         .with_max_level(level)
         .with_target(false)
@@ -126,52 +130,60 @@ async fn main() -> Result<()> {
     // Create vector repository first to ensure it gets write access to DuckDB
     // (DuckDB only allows one write connection per file)
     // We also need to share the connection with the repository metadata adapter.
-    let (vector_repo, repo_adapter): (Arc<dyn VectorRepository>, Arc<DuckdbMetadataRepository>) = if cli.memory_storage {
-        info!("Using in-memory vector storage");
-        let vector = Arc::new(InMemoryVectorRepository::new());
-        let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
-        (vector, repo_adapter)
-    } else if let Some(chroma_url) = cli.chroma_url.as_deref() {
-        match ChromaVectorRepository::new(chroma_url, &cli.namespace).await {
-            Ok(chroma) => {
-                info!("Connected to ChromaDB at {} namespace {}", chroma_url, cli.namespace);
-                let vector = Arc::new(chroma);
-                let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
-                (vector, repo_adapter)
-            }
-            Err(e) => {
-                tracing::warn!(
+    let (vector_repo, repo_adapter): (Arc<dyn VectorRepository>, Arc<DuckdbMetadataRepository>) =
+        if cli.memory_storage {
+            info!("Using in-memory vector storage");
+            let vector = Arc::new(InMemoryVectorRepository::new());
+            let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
+            (vector, repo_adapter)
+        } else if let Some(chroma_url) = cli.chroma_url.as_deref() {
+            match ChromaVectorRepository::new(chroma_url, &cli.namespace).await {
+                Ok(chroma) => {
+                    info!(
+                        "Connected to ChromaDB at {} namespace {}",
+                        chroma_url, cli.namespace
+                    );
+                    let vector = Arc::new(chroma);
+                    let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
+                    (vector, repo_adapter)
+                }
+                Err(e) => {
+                    tracing::warn!(
                     "Failed to connect to ChromaDB ({}): {}. Falling back to in-memory storage.",
                     chroma_url,
                     e
                 );
-                let vector = Arc::new(InMemoryVectorRepository::new());
-                let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
-                (vector, repo_adapter)
+                    let vector = Arc::new(InMemoryVectorRepository::new());
+                    let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
+                    (vector, repo_adapter)
+                }
             }
-        }
-    } else {
-        // DuckDB vector storage - share connection with repository adapter
-        match DuckdbVectorRepository::new_with_namespace(&db_path, &cli.namespace) {
-            Ok(duckdb) => {
-                info!("Using DuckDB vector storage at {:?} namespace {}", db_path, cli.namespace);
-                // Share the connection with the repository adapter
-                let shared_conn = duckdb.shared_connection();
-                let repo_adapter = Arc::new(DuckdbMetadataRepository::with_connection(shared_conn)?);
-                (Arc::new(duckdb), repo_adapter)
+        } else {
+            // DuckDB vector storage - share connection with repository adapter
+            match DuckdbVectorRepository::new_with_namespace(&db_path, &cli.namespace) {
+                Ok(duckdb) => {
+                    info!(
+                        "Using DuckDB vector storage at {:?} namespace {}",
+                        db_path, cli.namespace
+                    );
+                    // Share the connection with the repository adapter
+                    let shared_conn = duckdb.shared_connection();
+                    let repo_adapter =
+                        Arc::new(DuckdbMetadataRepository::with_connection(shared_conn)?);
+                    (Arc::new(duckdb), repo_adapter)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to initialize DuckDB ({}): {}. Falling back to in-memory storage.",
+                        db_path.display(),
+                        e
+                    );
+                    let vector = Arc::new(InMemoryVectorRepository::new());
+                    let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
+                    (vector, repo_adapter)
+                }
             }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to initialize DuckDB ({}): {}. Falling back to in-memory storage.",
-                    db_path.display(),
-                    e
-                );
-                let vector = Arc::new(InMemoryVectorRepository::new());
-                let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
-                (vector, repo_adapter)
-            }
-        }
-    };
+        };
 
     match cli.command {
         Commands::Index { path, name } => {
@@ -190,10 +202,14 @@ async fn main() -> Result<()> {
                 embedding_service,
             );
 
-            let repo = use_case.execute(&path, name.as_deref(), vector_store, ns).await?;
+            let repo = use_case
+                .execute(&path, name.as_deref(), vector_store, ns)
+                .await?;
             println!(
                 "Successfully indexed repository: {} ({} files, {} chunks)",
-                repo.name(), repo.file_count(), repo.chunk_count()
+                repo.name(),
+                repo.file_count(),
+                repo.chunk_count()
             );
         }
 
@@ -247,7 +263,7 @@ async fn main() -> Result<()> {
                         .chunk()
                         .content()
                         .lines()
-                        .take(3)
+                        .take(10)
                         .map(|l| format!("   | {}", l))
                         .collect::<Vec<_>>()
                         .join("\n");
@@ -268,9 +284,17 @@ async fn main() -> Result<()> {
                 for repo in repos {
                     println!("  {} ({})", repo.name(), repo.id());
                     println!("    Path: {}", repo.path());
-                    println!("    Files: {}, Chunks: {}", repo.file_count(), repo.chunk_count());
+                    println!(
+                        "    Files: {}, Chunks: {}",
+                        repo.file_count(),
+                        repo.chunk_count()
+                    );
                     let ns_display = repo.namespace().unwrap_or("(none)");
-                    println!("    Store: {}, Namespace: {}", repo.store().as_str(), ns_display);
+                    println!(
+                        "    Store: {}, Namespace: {}",
+                        repo.store().as_str(),
+                        ns_display
+                    );
                     println!();
                 }
             }

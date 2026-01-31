@@ -27,7 +27,10 @@ impl VectorStore {
             "chromadb" | "chroma" => VectorStore::ChromaDb,
             "memory" | "inmemory" | "in_memory" => VectorStore::InMemory,
             unknown => {
-                warn!("Unknown vector store type '{}', defaulting to DuckDB", unknown);
+                warn!(
+                    "Unknown vector store type '{}', defaulting to DuckDB",
+                    unknown
+                );
                 VectorStore::DuckDb
             }
         }

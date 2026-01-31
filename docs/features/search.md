@@ -149,41 +149,4 @@ codesearch search "CustomerOrder aggregate root validation"
 
 ## Similarity Scoring
 
-Scores range from 0.0 to 1.0:
-
-| Score Range | Meaning                          |
-|-------------|----------------------------------|
-| 0.8 - 1.0   | Highly relevant, exact matches   |
-| 0.6 - 0.8   | Good matches, related code       |
-| 0.4 - 0.6   | Somewhat relevant                |
-| < 0.4       | Weak matches                     |
-
-## Programmatic Search
-
-From Rust code:
-
-```rust
-use codesearch_application::SearchCodeUseCase;
-use codesearch_domain::SearchQuery;
-
-let query = SearchQuery::new("validate user input")
-    .with_limit(10)
-    .with_min_score(0.5)
-    .with_languages(vec!["rust".to_string()]);
-
-let results = search_use_case.execute(query).await?;
-
-for result in results {
-    println!("{}: {}", result.chunk.location(), result.score);
-}
-```
-
-## Future Improvements
-
-- [ ] Hybrid search (semantic + keyword)
-- [ ] Code-specific query preprocessing
-- [ ] ✓ Result re-ranking with cross-encoder
-- [ ] Search history and bookmarks
-- [ ] Natural language query expansion
-- [ ] Custom reranking models
-- [ ] GPU acceleration for reranking
+Scores range from 0.0 to 1.0

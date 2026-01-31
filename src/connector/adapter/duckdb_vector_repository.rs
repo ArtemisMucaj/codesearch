@@ -34,8 +34,9 @@ impl DuckdbVectorRepository {
 
     #[allow(dead_code)]
     pub fn in_memory() -> Result<Self, DomainError> {
-        let conn = Connection::open_in_memory()
-            .map_err(|e| DomainError::storage(format!("Failed to open DuckDB in-memory DB: {}", e)))?;
+        let conn = Connection::open_in_memory().map_err(|e| {
+            DomainError::storage(format!("Failed to open DuckDB in-memory DB: {}", e))
+        })?;
         let namespace = "main";
         Self::initialize(&conn, namespace)?;
 
@@ -95,7 +96,10 @@ impl DuckdbVectorRepository {
                 e
             )));
         }
-        debug!("DuckDB tables created successfully in schema {}", schema_name);
+        debug!(
+            "DuckDB tables created successfully in schema {}",
+            schema_name
+        );
 
         // Create repositories table in main schema (shared with MetadataRepository)
         conn.execute_batch(
@@ -157,7 +161,6 @@ impl DuckdbVectorRepository {
         s.push_str("::FLOAT[384]");
         Ok(s)
     }
-
 }
 
 #[async_trait]
@@ -249,15 +252,18 @@ impl VectorRepository for DuckdbVectorRepository {
             .transaction()
             .map_err(|e| DomainError::storage(format!("Failed to begin transaction: {}", e)))?;
         tx.execute(
-            &format!("DELETE FROM \"{}\".embeddings WHERE chunk_id = ?", self.namespace),
+            &format!(
+                "DELETE FROM \"{}\".embeddings WHERE chunk_id = ?",
+                self.namespace
+            ),
             params![chunk_id],
         )
-            .map_err(|e| DomainError::storage(format!("Failed to delete embedding: {}", e)))?;
+        .map_err(|e| DomainError::storage(format!("Failed to delete embedding: {}", e)))?;
         tx.execute(
             &format!("DELETE FROM \"{}\".chunks WHERE id = ?", self.namespace),
             params![chunk_id],
         )
-            .map_err(|e| DomainError::storage(format!("Failed to delete chunk: {}", e)))?;
+        .map_err(|e| DomainError::storage(format!("Failed to delete chunk: {}", e)))?;
         tx.commit()
             .map_err(|e| DomainError::storage(format!("Failed to commit: {}", e)))?;
         Ok(())
@@ -279,7 +285,10 @@ impl VectorRepository for DuckdbVectorRepository {
         .map_err(|e| DomainError::storage(format!("Failed to delete embeddings: {}", e)))?;
 
         tx.execute(
-            &format!("DELETE FROM \"{}\".chunks WHERE repository_id = ?", self.namespace),
+            &format!(
+                "DELETE FROM \"{}\".chunks WHERE repository_id = ?",
+                self.namespace
+            ),
             params![repository_id],
         )
         .map_err(|e| DomainError::storage(format!("Failed to delete chunks: {}", e)))?;
@@ -375,28 +384,32 @@ impl VectorRepository for DuckdbVectorRepository {
             let chunk = CodeChunk::reconstitute(
                 row.get::<_, String>(0)
                     .map_err(|e| DomainError::storage(format!("Failed to read id: {}", e)))?,
-                row.get::<_, String>(1)
-                    .map_err(|e| DomainError::storage(format!("Failed to read file_path: {}", e)))?,
+                row.get::<_, String>(1).map_err(|e| {
+                    DomainError::storage(format!("Failed to read file_path: {}", e))
+                })?,
                 row.get::<_, String>(2)
                     .map_err(|e| DomainError::storage(format!("Failed to read content: {}", e)))?,
-                row.get::<_, i64>(3)
-                    .map_err(|e| DomainError::storage(format!("Failed to read start_line: {}", e)))? as u32,
+                row.get::<_, i64>(3).map_err(|e| {
+                    DomainError::storage(format!("Failed to read start_line: {}", e))
+                })? as u32,
                 row.get::<_, i64>(4)
-                    .map_err(|e| DomainError::storage(format!("Failed to read end_line: {}", e)))? as u32,
-                crate::domain::Language::parse(
-                    &row.get::<_, String>(5)
-                        .map_err(|e| DomainError::storage(format!("Failed to read language: {}", e)))?,
-                ),
-                crate::domain::NodeType::parse(
-                    &row.get::<_, String>(6)
-                        .map_err(|e| DomainError::storage(format!("Failed to read node_type: {}", e)))?,
-                ),
-                row.get::<_, Option<String>>(7)
-                    .map_err(|e| DomainError::storage(format!("Failed to read symbol_name: {}", e)))?,
-                row.get::<_, Option<String>>(8)
-                    .map_err(|e| DomainError::storage(format!("Failed to read parent_symbol: {}", e)))?,
-                row.get::<_, String>(9)
-                    .map_err(|e| DomainError::storage(format!("Failed to read repository_id: {}", e)))?,
+                    .map_err(|e| DomainError::storage(format!("Failed to read end_line: {}", e)))?
+                    as u32,
+                crate::domain::Language::parse(&row.get::<_, String>(5).map_err(|e| {
+                    DomainError::storage(format!("Failed to read language: {}", e))
+                })?),
+                crate::domain::NodeType::parse(&row.get::<_, String>(6).map_err(|e| {
+                    DomainError::storage(format!("Failed to read node_type: {}", e))
+                })?),
+                row.get::<_, Option<String>>(7).map_err(|e| {
+                    DomainError::storage(format!("Failed to read symbol_name: {}", e))
+                })?,
+                row.get::<_, Option<String>>(8).map_err(|e| {
+                    DomainError::storage(format!("Failed to read parent_symbol: {}", e))
+                })?,
+                row.get::<_, String>(9).map_err(|e| {
+                    DomainError::storage(format!("Failed to read repository_id: {}", e))
+                })?,
             );
 
             results.push(SearchResult::new(chunk, score));

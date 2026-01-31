@@ -200,4 +200,4 @@ codesearch search "error handling" --no-rerank
 | Vector search only | 50-200ms | Good |
 | + Reranking | 200-800ms | Excellent |
 
-**Recommendation**: Use reranking when result quality is more important than speed, especially for specific or complex queries.
+**Recommendation**: use reranking when result quality is more important than speed, especially for specific or complex queries.

@@ -1,14 +1,15 @@
 use std::sync::Arc;
 
 use codesearch::{
-    CodeChunk, IndexRepositoryUseCase, InMemoryVectorRepository, Language, ListRepositoriesUseCase,
-    MockEmbedding, NodeType, ParserService, SearchCodeUseCase, SearchQuery, VectorStore,
-    DuckdbMetadataRepository, TreeSitterParser,
+    CodeChunk, DuckdbMetadataRepository, InMemoryVectorRepository, IndexRepositoryUseCase,
+    Language, ListRepositoriesUseCase, MockEmbedding, NodeType, ParserService, SearchCodeUseCase,
+    SearchQuery, TreeSitterParser, VectorStore,
 };
 use tempfile::tempdir;
 
 async fn setup_test_env() -> TestEnv {
-    let metadata_repository = Arc::new(DuckdbMetadataRepository::in_memory().expect("Failed to create DuckDB"));
+    let metadata_repository =
+        Arc::new(DuckdbMetadataRepository::in_memory().expect("Failed to create DuckDB"));
     let vector_repo = Arc::new(InMemoryVectorRepository::new());
     let parser = Arc::new(TreeSitterParser::new());
 
@@ -32,7 +33,10 @@ async fn test_list_empty_repositories() {
     let env = setup_test_env().await;
     let use_case = ListRepositoriesUseCase::new(env.metadata_repository.clone());
 
-    let repos = use_case.execute().await.expect("Failed to list repositories");
+    let repos = use_case
+        .execute()
+        .await
+        .expect("Failed to list repositories");
     assert!(repos.is_empty(), "Should have no repositories initially");
 }
 
@@ -107,7 +111,10 @@ async fn test_search_query_builder() {
         query.languages(),
         Some(["rust".to_string(), "python".to_string()].as_slice())
     );
-    assert_eq!(query.repository_ids(), Some(["repo1".to_string()].as_slice()));
+    assert_eq!(
+        query.repository_ids(),
+        Some(["repo1".to_string()].as_slice())
+    );
 }
 
 #[tokio::test]
@@ -116,10 +123,19 @@ async fn test_language_detection() {
 
     assert_eq!(Language::from_path(Path::new("main.rs")), Language::Rust);
     assert_eq!(Language::from_path(Path::new("app.py")), Language::Python);
-    assert_eq!(Language::from_path(Path::new("index.js")), Language::JavaScript);
-    assert_eq!(Language::from_path(Path::new("app.tsx")), Language::TypeScript);
+    assert_eq!(
+        Language::from_path(Path::new("index.js")),
+        Language::JavaScript
+    );
+    assert_eq!(
+        Language::from_path(Path::new("app.tsx")),
+        Language::TypeScript
+    );
     assert_eq!(Language::from_path(Path::new("main.go")), Language::Go);
-    assert_eq!(Language::from_path(Path::new("readme.md")), Language::Unknown);
+    assert_eq!(
+        Language::from_path(Path::new("readme.md")),
+        Language::Unknown
+    );
 }
 
 #[tokio::test]
@@ -170,7 +186,12 @@ pub fn add(a: i32, b: i32) -> i32 {
     );
 
     index_use_case
-        .execute(temp_dir.path().to_str().unwrap(), Some("test-repo"), VectorStore::InMemory, None)
+        .execute(
+            temp_dir.path().to_str().unwrap(),
+            Some("test-repo"),
+            VectorStore::InMemory,
+            None,
+        )
         .await
         .expect("Indexing failed");
 
@@ -217,12 +238,23 @@ pub fn subtract(a: i32, b: i32) -> i32 {
     );
 
     let repository = index_use_case
-        .execute(temp_dir.path().to_str().unwrap(), Some("test-repo"), VectorStore::InMemory, None)
+        .execute(
+            temp_dir.path().to_str().unwrap(),
+            Some("test-repo"),
+            VectorStore::InMemory,
+            None,
+        )
         .await
         .expect("Indexing failed");
 
-    assert!(repository.file_count() > 0, "Should have indexed at least one file");
-    assert!(repository.chunk_count() > 0, "Should have indexed at least one chunk");
+    assert!(
+        repository.file_count() > 0,
+        "Should have indexed at least one file"
+    );
+    assert!(
+        repository.chunk_count() > 0,
+        "Should have indexed at least one chunk"
+    );
 
     let search_use_case = SearchCodeUseCase::new(env.vector_repo.clone(), embedding_service);
 
@@ -230,5 +262,8 @@ pub fn subtract(a: i32, b: i32) -> i32 {
     let results = search_use_case.execute(query).await.expect("Search failed");
 
     assert!(!results.is_empty(), "Should find at least one result");
-    assert!(results[0].score() > 0.0, "Top result should have positive score");
+    assert!(
+        results[0].score() > 0.0,
+        "Top result should have positive score"
+    );
 }

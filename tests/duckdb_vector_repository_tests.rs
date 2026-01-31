@@ -30,15 +30,18 @@ async fn duckdb_vector_repository_can_save_and_search() {
     .with_symbol_name("add");
 
     let embedding_vec = unit_vector(384, 0);
-    let embedding = Embedding::new(chunk.id().to_string(), embedding_vec.clone(), "mock".to_string());
+    let embedding = Embedding::new(
+        chunk.id().to_string(),
+        embedding_vec.clone(),
+        "mock".to_string(),
+    );
 
-    repo.save_batch(&[chunk.clone()], &[embedding]).await.expect("save_batch");
+    repo.save_batch(&[chunk.clone()], &[embedding])
+        .await
+        .expect("save_batch");
 
     let query = SearchQuery::new("add numbers").with_limit(3);
-    let results = repo
-        .search(&embedding_vec, &query)
-        .await
-        .expect("search");
+    let results = repo.search(&embedding_vec, &query).await.expect("search");
 
     assert!(!results.is_empty(), "expected at least one result");
     assert_eq!(results[0].chunk().id(), chunk.id());
@@ -71,10 +74,20 @@ async fn duckdb_vector_repository_delete_by_repository_removes_all() {
         "repo-del".to_string(),
     );
 
-    let e1 = Embedding::new(chunk1.id().to_string(), unit_vector(384, 1), "mock".to_string());
-    let e2 = Embedding::new(chunk2.id().to_string(), unit_vector(384, 2), "mock".to_string());
+    let e1 = Embedding::new(
+        chunk1.id().to_string(),
+        unit_vector(384, 1),
+        "mock".to_string(),
+    );
+    let e2 = Embedding::new(
+        chunk2.id().to_string(),
+        unit_vector(384, 2),
+        "mock".to_string(),
+    );
 
-    repo.save_batch(&[chunk1, chunk2], &[e1, e2]).await.expect("save_batch");
+    repo.save_batch(&[chunk1, chunk2], &[e1, e2])
+        .await
+        .expect("save_batch");
     assert_eq!(repo.count().await.expect("count"), 2);
 
     repo.delete_by_repository("repo-del")
@@ -107,7 +120,11 @@ async fn duckdb_vector_repository_schema_namespaces_tables() {
     )
     .with_symbol_name("add");
     let embedding_vec = unit_vector(384, 0);
-    let embedding = Embedding::new(chunk.id().to_string(), embedding_vec.clone(), "mock".to_string());
+    let embedding = Embedding::new(
+        chunk.id().to_string(),
+        embedding_vec.clone(),
+        "mock".to_string(),
+    );
 
     repo_a
         .save_batch(&[chunk.clone()], &[embedding])

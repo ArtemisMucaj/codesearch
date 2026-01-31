@@ -25,7 +25,10 @@ pub struct OrtEmbedding {
 impl OrtEmbedding {
     pub fn new(model_id: Option<&str>) -> Result<Self, DomainError> {
         let model_id = model_id.unwrap_or(DEFAULT_MODEL_ID);
-        info!("Initializing ORT embedding service with model: {}", model_id);
+        info!(
+            "Initializing ORT embedding service with model: {}",
+            model_id
+        );
 
         let api = hf_hub::api::sync::ApiBuilder::new()
             .with_progress(true)
@@ -112,10 +115,12 @@ impl OrtEmbedding {
         }
 
         let shape = [batch_size, max_len];
-        let input_ids_tensor = Tensor::from_array((shape, input_ids))
-            .map_err(|e| DomainError::internal(format!("Failed to create input_ids tensor: {}", e)))?;
-        let attention_mask_tensor = Tensor::from_array((shape, attention_mask))
-            .map_err(|e| DomainError::internal(format!("Failed to create attention_mask tensor: {}", e)))?;
+        let input_ids_tensor = Tensor::from_array((shape, input_ids)).map_err(|e| {
+            DomainError::internal(format!("Failed to create input_ids tensor: {}", e))
+        })?;
+        let attention_mask_tensor = Tensor::from_array((shape, attention_mask)).map_err(|e| {
+            DomainError::internal(format!("Failed to create attention_mask tensor: {}", e))
+        })?;
 
         let mut session = self
             .session
@@ -135,9 +140,9 @@ impl OrtEmbedding {
             .map(|(_, v)| v)
             .ok_or_else(|| DomainError::internal("No output tensor found"))?;
 
-        let (shape, data) = output_value
-            .try_extract_tensor::<f32>()
-            .map_err(|e| DomainError::internal(format!("Failed to extract output tensor: {}", e)))?;
+        let (shape, data) = output_value.try_extract_tensor::<f32>().map_err(|e| {
+            DomainError::internal(format!("Failed to extract output tensor: {}", e))
+        })?;
 
         let shape: Vec<usize> = shape.iter().map(|&x| x as usize).collect();
         debug!("Output tensor shape: {:?}", shape);
@@ -273,11 +278,17 @@ mod tests {
     async fn test_ort_embedding_service() {
         let service = OrtEmbedding::new(None).expect("Failed to create service");
 
-        let embedding = service.embed_query("fn main() { println!(\"Hello\"); }").await.unwrap();
+        let embedding = service
+            .embed_query("fn main() { println!(\"Hello\"); }")
+            .await
+            .unwrap();
 
         assert_eq!(embedding.len(), DEFAULT_DIMENSIONS);
 
         let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 0.01, "Embedding should be L2 normalized");
+        assert!(
+            (norm - 1.0).abs() < 0.01,
+            "Embedding should be L2 normalized"
+        );
     }
 }
