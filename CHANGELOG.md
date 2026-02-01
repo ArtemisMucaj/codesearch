@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.3.0...v0.4.0) (2026-02-01)
+
+
+### Features
+
+* support cpp ([dc5f023](https://github.com/ArtemisMucaj/codesearch/commit/dc5f0230eb3090f4963249ed6e7d070fea4d5050))
+
 ## [0.3.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.2.0...v0.3.0) (2026-01-31)
 
 
