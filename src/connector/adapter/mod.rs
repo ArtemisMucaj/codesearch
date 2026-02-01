@@ -1,3 +1,5 @@
+mod candle_embedding;
+mod candle_reranking;
 mod chroma_vector_repository;
 mod duckdb_file_hash_repository;
 mod duckdb_metadata_repository;
@@ -5,10 +7,10 @@ mod duckdb_vector_repository;
 mod in_memory_vector_repository;
 mod mock_embedding;
 mod mock_reranking;
-mod ort_embedding;
-mod ort_reranking;
 mod treesitter_parser;
 
+pub use candle_embedding::*;
+pub use candle_reranking::*;
 pub use chroma_vector_repository::*;
 pub use duckdb_file_hash_repository::*;
 pub use duckdb_metadata_repository::*;
@@ -16,6 +18,4 @@ pub use duckdb_vector_repository::*;
 pub use in_memory_vector_repository::*;
 pub use mock_embedding::*;
 pub use mock_reranking::*;
-pub use ort_embedding::*;
-pub use ort_reranking::*;
 pub use treesitter_parser::*;

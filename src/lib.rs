@@ -12,9 +12,9 @@ pub use application::{
 pub use cli::Commands;
 
 pub use connector::{
-    ChromaVectorRepository, DuckdbFileHashRepository, DuckdbMetadataRepository,
-    DuckdbVectorRepository, InMemoryVectorRepository, MockEmbedding, MockReranking, OrtEmbedding,
-    OrtReranking, TreeSitterParser,
+    CandleEmbedding, CandleReranking, ChromaVectorRepository, DuckdbFileHashRepository,
+    DuckdbMetadataRepository, DuckdbVectorRepository, InMemoryVectorRepository, MockEmbedding,
+    MockReranking, TreeSitterParser,
 };
 
 pub use domain::{

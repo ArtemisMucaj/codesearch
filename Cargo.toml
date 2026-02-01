@@ -65,11 +65,17 @@ rand = "0.8"
 # Cryptographic hashing (for incremental indexing)
 sha2 = "0.10"
 
-# Embeddings (ONNX Runtime + HuggingFace tokenizers)
-ort = { version = "2.0.0-rc.9", features = ["ndarray"] }
+# ML Inference (Candle + HuggingFace tokenizers)
+candle-core = "0.9"
+candle-nn = "0.9"
+candle-transformers = "0.9"
 tokenizers = "0.21"
 hf-hub = "0.4"
-ndarray = "0.16"
+
+[features]
+default = []
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 
 [dev-dependencies]
 tempfile = "3.10"

@@ -30,6 +30,10 @@ struct Cli {
     #[arg(long, global = true)]
     no_rerank: bool,
 
+    /// Force CPU-only inference (disables automatic GPU detection)
+    #[arg(long, global = true)]
+    cpu: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -59,6 +63,7 @@ async fn main() -> Result<()> {
         namespace: cli.namespace,
         memory_storage: cli.memory_storage,
         no_rerank: cli.no_rerank,
+        cpu_only: cli.cpu,
     };
 
     let container = Container::new(config).await?;

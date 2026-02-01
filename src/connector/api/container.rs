@@ -6,10 +6,10 @@ use tracing::info;
 
 use crate::application::FileHashRepository;
 use crate::{
-    ChromaVectorRepository, DeleteRepositoryUseCase, DuckdbFileHashRepository,
-    DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService, InMemoryVectorRepository,
-    IndexRepositoryUseCase, ListRepositoriesUseCase, MockEmbedding, MockReranking, OrtEmbedding,
-    OrtReranking, RerankingService, SearchCodeUseCase, TreeSitterParser, VectorRepository,
+    CandleEmbedding, CandleReranking, ChromaVectorRepository, DeleteRepositoryUseCase,
+    DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
+    InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, MockEmbedding,
+    MockReranking, RerankingService, SearchCodeUseCase, TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -19,6 +19,8 @@ pub struct ContainerConfig {
     pub namespace: String,
     pub memory_storage: bool,
     pub no_rerank: bool,
+    /// Force CPU-only inference, disabling automatic GPU detection
+    pub cpu_only: bool,
 }
 
 pub struct Container {
@@ -38,23 +40,31 @@ impl Container {
         // Initialize parser
         let parser = Arc::new(TreeSitterParser::new());
 
-        // Initialize embedding service
+        // Initialize embedding service (Candle with automatic GPU detection)
         let embedding_service: Arc<dyn EmbeddingService> = if config.mock_embeddings {
             info!("Using mock embedding service");
             Arc::new(MockEmbedding::new())
         } else {
-            info!("Initializing ONNX embedding service...");
-            Arc::new(OrtEmbedding::new(None)?)
+            let use_gpu = !config.cpu_only;
+            info!(
+                "Initializing Candle embedding service (GPU enabled: {})...",
+                use_gpu
+            );
+            Arc::new(CandleEmbedding::new(None, use_gpu)?)
         };
 
-        // Initialize reranking service
+        // Initialize reranking service (Candle with automatic GPU detection)
         let reranking_service: Option<Arc<dyn RerankingService>> = if !config.no_rerank {
             if config.mock_embeddings {
                 info!("Using mock reranking service");
                 Some(Arc::new(MockReranking::new()))
             } else {
-                info!("Initializing ONNX reranking service...");
-                match OrtReranking::new(None) {
+                let use_gpu = !config.cpu_only;
+                info!(
+                    "Initializing Candle reranking service (GPU enabled: {})...",
+                    use_gpu
+                );
+                match CandleReranking::new(None, use_gpu) {
                     Ok(reranker) => Some(Arc::new(reranker)),
                     Err(e) => {
                         tracing::warn!(
@@ -78,9 +88,9 @@ impl Container {
             info!("Using in-memory vector storage");
             let vector = Arc::new(InMemoryVectorRepository::new());
             let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
-            let file_hash_repo = Arc::new(DuckdbFileHashRepository::with_connection(
-                repo_adapter.shared_connection(),
-            ).await?);
+            let file_hash_repo = Arc::new(
+                DuckdbFileHashRepository::with_connection(repo_adapter.shared_connection()).await?,
+            );
             (vector, repo_adapter, file_hash_repo)
         } else if let Some(chroma_url) = config.chroma_url.as_deref() {
             match ChromaVectorRepository::new(chroma_url, &config.namespace).await {
@@ -91,9 +101,10 @@ impl Container {
                     );
                     let vector = Arc::new(chroma);
                     let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
-                    let file_hash_repo = Arc::new(DuckdbFileHashRepository::with_connection(
-                        repo_adapter.shared_connection(),
-                    ).await?);
+                    let file_hash_repo = Arc::new(
+                        DuckdbFileHashRepository::with_connection(repo_adapter.shared_connection())
+                            .await?,
+                    );
                     (vector, repo_adapter, file_hash_repo)
                 }
                 Err(e) => {
@@ -104,9 +115,10 @@ impl Container {
                     );
                     let vector = Arc::new(InMemoryVectorRepository::new());
                     let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
-                    let file_hash_repo = Arc::new(DuckdbFileHashRepository::with_connection(
-                        repo_adapter.shared_connection(),
-                    ).await?);
+                    let file_hash_repo = Arc::new(
+                        DuckdbFileHashRepository::with_connection(repo_adapter.shared_connection())
+                            .await?,
+                    );
                     (vector, repo_adapter, file_hash_repo)
                 }
             }
@@ -135,9 +147,10 @@ impl Container {
                     );
                     let vector = Arc::new(InMemoryVectorRepository::new());
                     let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
-                    let file_hash_repo = Arc::new(DuckdbFileHashRepository::with_connection(
-                        repo_adapter.shared_connection(),
-                    ).await?);
+                    let file_hash_repo = Arc::new(
+                        DuckdbFileHashRepository::with_connection(repo_adapter.shared_connection())
+                            .await?,
+                    );
                     (vector, repo_adapter, file_hash_repo)
                 }
             }

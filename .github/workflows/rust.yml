@@ -11,12 +11,43 @@ env:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
-    - name: Build
+
+    - name: Build (CPU)
       run: cargo build --verbose
+
     - name: Run tests
       run: cargo test --verbose
+
+    - name: Check formatting
+      run: cargo fmt --check
+
+    - name: Clippy
+      run: cargo clippy -- -D warnings
+
+  # Optional: Build with GPU features to ensure they compile
+  # Note: These don't run GPU tests since CI runners don't have GPUs
+  build-gpu-features:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        feature: [cuda]
+    continue-on-error: true  # CUDA requires toolkit, may fail
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build with ${{ matrix.feature }} feature
+      run: cargo build --features ${{ matrix.feature }} || echo "Feature ${{ matrix.feature }} build failed (expected if SDK not available)"
+
+  build-macos-metal:
+    runs-on: macos-14
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build with Metal feature
+      run: cargo build --features metal
