@@ -63,12 +63,23 @@ impl<'a> RepositoryController<'a> {
     }
 
     fn format_index_success(&self, repo: &Repository) -> String {
-        format!(
+        let mut output = format!(
             "Successfully indexed repository: {} ({} files, {} chunks)",
             repo.name(),
             repo.file_count(),
             repo.chunk_count()
-        )
+        );
+
+        if !repo.languages().is_empty() {
+            let langs: Vec<_> = repo
+                .languages()
+                .iter()
+                .map(|(lang, stats)| format!("{}: {} files", lang, stats.file_count))
+                .collect();
+            output.push_str(&format!("\nLanguages: {}", langs.join(", ")));
+        }
+
+        output
     }
 
     fn format_repository_list(&self, repos: &[Repository]) -> String {
@@ -85,6 +96,14 @@ impl<'a> RepositoryController<'a> {
                 repo.file_count(),
                 repo.chunk_count()
             ));
+            if !repo.languages().is_empty() {
+                let langs: Vec<_> = repo
+                    .languages()
+                    .iter()
+                    .map(|(lang, stats)| format!("{}: {} files", lang, stats.file_count))
+                    .collect();
+                output.push_str(&format!("    Languages: {}\n", langs.join(", ")));
+            }
             let ns_display = repo.namespace().unwrap_or("(none)");
             output.push_str(&format!(
                 "    Store: {}, Namespace: {}\n",

@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 
-use crate::domain::{DomainError, Repository};
+use crate::domain::{DomainError, LanguageStats, Repository};
 
 /// Persistence for repository metadata.
 #[async_trait]
@@ -20,5 +22,11 @@ pub trait MetadataRepository: Send + Sync {
         id: &str,
         chunk_count: u64,
         file_count: u64,
+    ) -> Result<(), DomainError>;
+
+    async fn update_languages(
+        &self,
+        id: &str,
+        languages: HashMap<String, LanguageStats>,
     ) -> Result<(), DomainError>;
 }

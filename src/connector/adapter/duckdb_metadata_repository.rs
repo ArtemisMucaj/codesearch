@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -7,7 +8,7 @@ use tokio::sync::Mutex;
 use tracing::debug;
 
 use crate::application::MetadataRepository;
-use crate::domain::{DomainError, Repository, VectorStore};
+use crate::domain::{DomainError, LanguageStats, Repository, VectorStore};
 
 pub struct DuckdbMetadataRepository {
     conn: Arc<Mutex<Connection>>,
@@ -64,19 +65,34 @@ impl DuckdbMetadataRepository {
                 chunk_count BIGINT DEFAULT 0,
                 file_count BIGINT DEFAULT 0,
                 store TEXT DEFAULT 'duckdb',
-                namespace TEXT
+                namespace TEXT,
+                languages TEXT
             );
             "#,
         )
         .map_err(|e| DomainError::storage(format!("Failed to initialize schema: {}", e)))?;
 
-        // Add store/namespace columns if they don't exist (migration for existing DBs)
+        // Add columns if they don't exist (migration for existing DBs)
         let _ =
             conn.execute_batch("ALTER TABLE repositories ADD COLUMN store TEXT DEFAULT 'duckdb';");
         let _ = conn.execute_batch("ALTER TABLE repositories ADD COLUMN namespace TEXT;");
+        let _ = conn.execute_batch("ALTER TABLE repositories ADD COLUMN languages TEXT;");
 
         debug!("DuckDB repository schema initialized");
         Ok(())
+    }
+
+    fn serialize_languages(languages: &HashMap<String, LanguageStats>) -> Option<String> {
+        if languages.is_empty() {
+            None
+        } else {
+            serde_json::to_string(languages).ok()
+        }
+    }
+
+    fn deserialize_languages(json: Option<String>) -> HashMap<String, LanguageStats> {
+        json.and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
     }
 }
 
@@ -84,11 +100,12 @@ impl DuckdbMetadataRepository {
 impl MetadataRepository for DuckdbMetadataRepository {
     async fn save(&self, repository: &Repository) -> Result<(), DomainError> {
         let conn = self.conn.lock().await;
+        let languages_json = Self::serialize_languages(repository.languages());
 
         conn.execute(
             r#"
-            INSERT INTO repositories (id, name, path, created_at, updated_at, chunk_count, file_count, store, namespace)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            INSERT INTO repositories (id, name, path, created_at, updated_at, chunk_count, file_count, store, namespace, languages)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT (id) DO UPDATE SET
                 name = excluded.name,
                 path = excluded.path,
@@ -97,7 +114,8 @@ impl MetadataRepository for DuckdbMetadataRepository {
                 chunk_count = excluded.chunk_count,
                 file_count = excluded.file_count,
                 store = excluded.store,
-                namespace = excluded.namespace
+                namespace = excluded.namespace,
+                languages = excluded.languages
             "#,
             params![
                 repository.id(),
@@ -109,6 +127,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
                 repository.file_count() as i64,
                 repository.store().as_str(),
                 repository.namespace(),
+                languages_json,
             ],
         )
         .map_err(|e| DomainError::storage(format!("Failed to save repository: {}", e)))?;
@@ -120,7 +139,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, path, created_at, updated_at, chunk_count, file_count, store, namespace FROM repositories WHERE id = ?1",
+                "SELECT id, name, path, created_at, updated_at, chunk_count, file_count, store, namespace, languages FROM repositories WHERE id = ?1",
             )
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
@@ -129,6 +148,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
                 .get::<_, Option<String>>(7)?
                 .unwrap_or_else(|| "duckdb".to_string());
             let namespace: Option<String> = row.get(8)?;
+            let languages_json: Option<String> = row.get(9)?;
             Ok(Repository::reconstitute(
                 row.get(0)?,
                 row.get(1)?,
@@ -139,6 +159,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
                 row.get::<_, i64>(6)? as u64,
                 VectorStore::from_str(&store_str),
                 namespace,
+                Self::deserialize_languages(languages_json),
             ))
         }) {
             Ok(repo) => Ok(Some(repo)),
@@ -154,7 +175,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, path, created_at, updated_at, chunk_count, file_count, store, namespace FROM repositories WHERE path = ?1",
+                "SELECT id, name, path, created_at, updated_at, chunk_count, file_count, store, namespace, languages FROM repositories WHERE path = ?1",
             )
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
@@ -163,6 +184,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
                 .get::<_, Option<String>>(7)?
                 .unwrap_or_else(|| "duckdb".to_string());
             let namespace: Option<String> = row.get(8)?;
+            let languages_json: Option<String> = row.get(9)?;
             Ok(Repository::reconstitute(
                 row.get(0)?,
                 row.get(1)?,
@@ -173,6 +195,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
                 row.get::<_, i64>(6)? as u64,
                 VectorStore::from_str(&store_str),
                 namespace,
+                Self::deserialize_languages(languages_json),
             ))
         }) {
             Ok(repo) => Ok(Some(repo)),
@@ -188,7 +211,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, path, created_at, updated_at, chunk_count, file_count, store, namespace FROM repositories ORDER BY name",
+                "SELECT id, name, path, created_at, updated_at, chunk_count, file_count, store, namespace, languages FROM repositories ORDER BY name",
             )
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
@@ -198,6 +221,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
                     .get::<_, Option<String>>(7)?
                     .unwrap_or_else(|| "duckdb".to_string());
                 let namespace: Option<String> = row.get(8)?;
+                let languages_json: Option<String> = row.get(9)?;
                 Ok(Repository::reconstitute(
                     row.get(0)?,
                     row.get(1)?,
@@ -208,6 +232,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
                     row.get::<_, i64>(6)? as u64,
                     VectorStore::from_str(&store_str),
                     namespace,
+                    Self::deserialize_languages(languages_json),
                 ))
             })
             .map_err(|e| DomainError::storage(format!("Failed to query repositories: {}", e)))?;
@@ -244,6 +269,30 @@ impl MetadataRepository for DuckdbMetadataRepository {
             params![chunk_count as i64, file_count as i64, now, id],
         )
         .map_err(|e| DomainError::storage(format!("Failed to update repository stats: {}", e)))?;
+
+        Ok(())
+    }
+
+    async fn update_languages(
+        &self,
+        id: &str,
+        languages: HashMap<String, LanguageStats>,
+    ) -> Result<(), DomainError> {
+        let conn = self.conn.lock().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let languages_json = Self::serialize_languages(&languages);
+
+        conn.execute(
+            "UPDATE repositories SET languages = ?1, updated_at = ?2 WHERE id = ?3",
+            params![languages_json, now, id],
+        )
+        .map_err(|e| {
+            DomainError::storage(format!("Failed to update repository languages: {}", e))
+        })?;
 
         Ok(())
     }
