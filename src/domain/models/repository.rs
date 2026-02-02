@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use uuid::Uuid;
@@ -37,6 +39,22 @@ impl VectorStore {
     }
 }
 
+/// Statistics for a single programming language in a repository.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LanguageStats {
+    pub file_count: u64,
+    pub chunk_count: u64,
+}
+
+impl LanguageStats {
+    pub fn new(file_count: u64, chunk_count: u64) -> Self {
+        Self {
+            file_count,
+            chunk_count,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repository {
     id: String,
@@ -50,6 +68,9 @@ pub struct Repository {
     store: VectorStore,
     /// Namespace for vector storage (DuckDB schema or ChromaDB collection).
     namespace: Option<String>,
+    /// Language statistics (language name -> stats).
+    #[serde(default)]
+    languages: HashMap<String, LanguageStats>,
 }
 
 impl Repository {
@@ -65,6 +86,7 @@ impl Repository {
             file_count: 0,
             store: VectorStore::default(),
             namespace: None,
+            languages: HashMap::new(),
         }
     }
 
@@ -85,6 +107,7 @@ impl Repository {
             file_count: 0,
             store,
             namespace,
+            languages: HashMap::new(),
         }
     }
 
@@ -99,6 +122,7 @@ impl Repository {
         file_count: u64,
         store: VectorStore,
         namespace: Option<String>,
+        languages: HashMap<String, LanguageStats>,
     ) -> Self {
         Self {
             id,
@@ -110,6 +134,7 @@ impl Repository {
             file_count,
             store,
             namespace,
+            languages,
         }
     }
 
@@ -149,9 +174,18 @@ impl Repository {
         self.namespace.as_deref()
     }
 
+    pub fn languages(&self) -> &HashMap<String, LanguageStats> {
+        &self.languages
+    }
+
     pub fn update_stats(&mut self, chunk_count: u64, file_count: u64) {
         self.chunk_count = chunk_count;
         self.file_count = file_count;
+        self.updated_at = current_timestamp();
+    }
+
+    pub fn set_languages(&mut self, languages: HashMap<String, LanguageStats>) {
+        self.languages = languages;
         self.updated_at = current_timestamp();
     }
 
@@ -172,9 +206,19 @@ impl Repository {
     }
 
     pub fn summary(&self) -> String {
+        let lang_summary = if self.languages.is_empty() {
+            String::new()
+        } else {
+            let langs: Vec<_> = self
+                .languages
+                .iter()
+                .map(|(lang, stats)| format!("{}: {} files", lang, stats.file_count))
+                .collect();
+            format!(", languages: {}", langs.join(", "))
+        };
         format!(
-            "{} ({} files, {} chunks)",
-            self.name, self.file_count, self.chunk_count
+            "{} ({} files, {} chunks{})",
+            self.name, self.file_count, self.chunk_count, lang_summary
         )
     }
 
