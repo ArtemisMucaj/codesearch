@@ -78,9 +78,9 @@ impl Container {
             info!("Using in-memory vector storage");
             let vector = Arc::new(InMemoryVectorRepository::new());
             let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
-            let file_hash_repo = Arc::new(DuckdbFileHashRepository::with_connection(
-                repo_adapter.shared_connection(),
-            ).await?);
+            let file_hash_repo = Arc::new(
+                DuckdbFileHashRepository::with_connection(repo_adapter.shared_connection()).await?,
+            );
             (vector, repo_adapter, file_hash_repo)
         } else if let Some(chroma_url) = config.chroma_url.as_deref() {
             match ChromaVectorRepository::new(chroma_url, &config.namespace).await {
@@ -91,9 +91,10 @@ impl Container {
                     );
                     let vector = Arc::new(chroma);
                     let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
-                    let file_hash_repo = Arc::new(DuckdbFileHashRepository::with_connection(
-                        repo_adapter.shared_connection(),
-                    ).await?);
+                    let file_hash_repo = Arc::new(
+                        DuckdbFileHashRepository::with_connection(repo_adapter.shared_connection())
+                            .await?,
+                    );
                     (vector, repo_adapter, file_hash_repo)
                 }
                 Err(e) => {
@@ -104,9 +105,10 @@ impl Container {
                     );
                     let vector = Arc::new(InMemoryVectorRepository::new());
                     let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
-                    let file_hash_repo = Arc::new(DuckdbFileHashRepository::with_connection(
-                        repo_adapter.shared_connection(),
-                    ).await?);
+                    let file_hash_repo = Arc::new(
+                        DuckdbFileHashRepository::with_connection(repo_adapter.shared_connection())
+                            .await?,
+                    );
                     (vector, repo_adapter, file_hash_repo)
                 }
             }
@@ -135,9 +137,10 @@ impl Container {
                     );
                     let vector = Arc::new(InMemoryVectorRepository::new());
                     let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
-                    let file_hash_repo = Arc::new(DuckdbFileHashRepository::with_connection(
-                        repo_adapter.shared_connection(),
-                    ).await?);
+                    let file_hash_repo = Arc::new(
+                        DuckdbFileHashRepository::with_connection(repo_adapter.shared_connection())
+                            .await?,
+                    );
                     (vector, repo_adapter, file_hash_repo)
                 }
             }

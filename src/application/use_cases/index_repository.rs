@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ignore::WalkBuilder;
+use indicatif::{ProgressBar, ProgressStyle};
 use tracing::{debug, info, warn};
 
 use crate::application::{
@@ -110,35 +111,39 @@ impl IndexRepositoryUseCase {
 
         let start_time = Instant::now();
 
-        let mut file_count = 0u64;
-        let mut chunk_count = 0u64;
-        let mut file_hashes = Vec::new();
-
-        let walker = WalkBuilder::new(absolute_path)
+        // First pass: collect all files to process
+        let files_to_process: Vec<_> = WalkBuilder::new(absolute_path)
             .hidden(true)
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
-            .build();
+            .build()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_file())
+            .filter(|entry| {
+                let language = Language::from_path(entry.path());
+                language != Language::Unknown && self.parser_service.supports_language(language)
+            })
+            .collect();
 
-        for entry in walker {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!("Error walking directory: {}", e);
-                    continue;
-                }
-            };
+        let total_files = files_to_process.len() as u64;
+        info!("Found {} files to index", total_files);
+
+        let progress_bar = ProgressBar::new(total_files);
+        progress_bar.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+                .expect("Invalid progress bar template")
+                .progress_chars("#>-"),
+        );
+
+        let mut file_count = 0u64;
+        let mut chunk_count = 0u64;
+        let mut file_hashes = Vec::new();
+
+        for entry in files_to_process {
             let entry_path = entry.path();
-
-            if !entry_path.is_file() {
-                continue;
-            }
-
             let language = Language::from_path(entry_path);
-            if language == Language::Unknown || !self.parser_service.supports_language(language) {
-                continue;
-            }
 
             let relative_path = entry_path
                 .strip_prefix(absolute_path)
@@ -146,12 +151,14 @@ impl IndexRepositoryUseCase {
                 .to_string_lossy()
                 .to_string();
 
+            progress_bar.set_message(relative_path.clone());
             debug!("Processing file: {}", relative_path);
 
             let content = match tokio::fs::read_to_string(entry_path).await {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("Failed to read file {}: {}", relative_path, e);
+                    progress_bar.inc(1);
                     continue;
                 }
             };
@@ -172,11 +179,13 @@ impl IndexRepositoryUseCase {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("Failed to parse file {}: {}", relative_path, e);
+                    progress_bar.inc(1);
                     continue;
                 }
             };
 
             if chunks.is_empty() {
+                progress_bar.inc(1);
                 continue;
             }
 
@@ -184,6 +193,7 @@ impl IndexRepositoryUseCase {
                 Ok(e) => e,
                 Err(e) => {
                     warn!("Failed to generate embeddings for {}: {}", relative_path, e);
+                    progress_bar.inc(1);
                     continue;
                 }
             };
@@ -194,7 +204,10 @@ impl IndexRepositoryUseCase {
             chunk_count += chunks.len() as u64;
 
             debug!("Indexed {} chunks from {}", chunks.len(), relative_path);
+            progress_bar.inc(1);
         }
+
+        progress_bar.finish_with_message("done");
 
         // Save all file hashes
         self.file_hash_repo.save_batch(&file_hashes).await?;
@@ -206,7 +219,9 @@ impl IndexRepositoryUseCase {
         let duration = start_time.elapsed();
         info!(
             "Indexing complete: {} files, {} chunks in {:.2}s",
-            file_count, chunk_count, duration.as_secs_f64()
+            file_count,
+            chunk_count,
+            duration.as_secs_f64()
         );
 
         self.repository_repo
@@ -328,11 +343,23 @@ impl IndexRepositoryUseCase {
 
         // Process added and modified files
         let files_to_process: Vec<&String> = added.iter().chain(modified.iter()).copied().collect();
+        let total_to_process = files_to_process.len() as u64;
+
+        let progress_bar = ProgressBar::new(total_to_process);
+        progress_bar.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+                .expect("Invalid progress bar template")
+                .progress_chars("#>-"),
+        );
+
         let mut new_file_hashes = Vec::new();
         let mut processed_count = 0u64;
         let mut new_chunk_count = 0u64;
 
         for relative_path in files_to_process {
+            progress_bar.set_message(relative_path.clone());
+
             let entry_path = absolute_path.join(relative_path);
             let language = Language::from_path(&entry_path);
 
@@ -340,6 +367,7 @@ impl IndexRepositoryUseCase {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("Failed to read file {}: {}", relative_path, e);
+                    progress_bar.inc(1);
                     continue;
                 }
             };
@@ -357,11 +385,13 @@ impl IndexRepositoryUseCase {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("Failed to parse file {}: {}", relative_path, e);
+                    progress_bar.inc(1);
                     continue;
                 }
             };
 
             if chunks.is_empty() {
+                progress_bar.inc(1);
                 continue;
             }
 
@@ -369,6 +399,7 @@ impl IndexRepositoryUseCase {
                 Ok(e) => e,
                 Err(e) => {
                     warn!("Failed to generate embeddings for {}: {}", relative_path, e);
+                    progress_bar.inc(1);
                     continue;
                 }
             };
@@ -386,7 +417,10 @@ impl IndexRepositoryUseCase {
             new_chunk_count += chunks.len() as u64;
 
             debug!("Indexed {} chunks from {}", chunks.len(), relative_path);
+            progress_bar.inc(1);
         }
+
+        progress_bar.finish_with_message("done");
 
         // Save new file hashes
         if !new_file_hashes.is_empty() {
@@ -405,7 +439,9 @@ impl IndexRepositoryUseCase {
         let duration = start_time.elapsed();
         info!(
             "Incremental indexing complete: processed {} files ({} new chunks) in {:.2}s",
-            processed_count, new_chunk_count, duration.as_secs_f64()
+            processed_count,
+            new_chunk_count,
+            duration.as_secs_f64()
         );
 
         self.repository_repo
