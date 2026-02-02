@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use ort::{
@@ -195,6 +196,8 @@ impl RerankingService for OrtReranking {
 
         info!("Reranking {} results for query: {}", results.len(), query);
 
+        let start_time = Instant::now();
+
         let documents: Vec<String> = results.iter().map(format_document_for_reranking).collect();
 
         let doc_refs: Vec<&str> = documents.iter().map(|s| s.as_str()).collect();
@@ -222,7 +225,8 @@ impl RerankingService for OrtReranking {
             reranked.truncate(k);
         }
 
-        debug!("Reranking complete, returning {} results", reranked.len());
+        let duration = start_time.elapsed();
+        info!("Reranking complete: {} results in {:.2}s", reranked.len(), duration.as_secs_f64());
 
         Ok(reranked)
     }

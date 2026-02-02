@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use ignore::WalkBuilder;
 use tracing::{debug, info, warn};
@@ -107,6 +108,8 @@ impl IndexRepositoryUseCase {
 
         info!("Indexing repository: {} at {}", repo_name, path_str);
 
+        let start_time = Instant::now();
+
         let mut file_count = 0u64;
         let mut chunk_count = 0u64;
         let mut file_hashes = Vec::new();
@@ -200,9 +203,10 @@ impl IndexRepositoryUseCase {
             .update_stats(repository.id(), chunk_count, file_count)
             .await?;
 
+        let duration = start_time.elapsed();
         info!(
-            "Indexing complete: {} files, {} chunks",
-            file_count, chunk_count
+            "Indexing complete: {} files, {} chunks in {:.2}s",
+            file_count, chunk_count, duration.as_secs_f64()
         );
 
         self.repository_repo
@@ -216,6 +220,8 @@ impl IndexRepositoryUseCase {
         absolute_path: &Path,
         repository: &Repository,
     ) -> Result<Repository, DomainError> {
+        let start_time = Instant::now();
+
         // Load existing file hashes
         let existing_hashes = self
             .file_hash_repo
@@ -396,9 +402,10 @@ impl IndexRepositoryUseCase {
             .update_stats(repository.id(), total_chunk_count, total_file_count)
             .await?;
 
+        let duration = start_time.elapsed();
         info!(
-            "Incremental indexing complete: processed {} files ({} new chunks)",
-            processed_count, new_chunk_count
+            "Incremental indexing complete: processed {} files ({} new chunks) in {:.2}s",
+            processed_count, new_chunk_count, duration.as_secs_f64()
         );
 
         self.repository_repo
