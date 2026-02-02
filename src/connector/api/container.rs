@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tracing::info;
+use tracing::debug;
 
 use crate::application::FileHashRepository;
 use crate::{
@@ -40,20 +40,20 @@ impl Container {
 
         // Initialize embedding service
         let embedding_service: Arc<dyn EmbeddingService> = if config.mock_embeddings {
-            info!("Using mock embedding service");
+            debug!("Using mock embedding service");
             Arc::new(MockEmbedding::new())
         } else {
-            info!("Initializing ONNX embedding service...");
+            debug!("Initializing ONNX embedding service...");
             Arc::new(OrtEmbedding::new(None)?)
         };
 
         // Initialize reranking service
         let reranking_service: Option<Arc<dyn RerankingService>> = if !config.no_rerank {
             if config.mock_embeddings {
-                info!("Using mock reranking service");
+                debug!("Using mock reranking service");
                 Some(Arc::new(MockReranking::new()))
             } else {
-                info!("Initializing ONNX reranking service...");
+                debug!("Initializing ONNX reranking service...");
                 match OrtReranking::new(None) {
                     Ok(reranker) => Some(Arc::new(reranker)),
                     Err(e) => {
@@ -75,7 +75,7 @@ impl Container {
             Arc<DuckdbMetadataRepository>,
             Arc<dyn FileHashRepository>,
         ) = if config.memory_storage {
-            info!("Using in-memory vector storage");
+            debug!("Using in-memory vector storage");
             let vector = Arc::new(InMemoryVectorRepository::new());
             let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
             let file_hash_repo = Arc::new(
@@ -85,7 +85,7 @@ impl Container {
         } else if let Some(chroma_url) = config.chroma_url.as_deref() {
             match ChromaVectorRepository::new(chroma_url, &config.namespace).await {
                 Ok(chroma) => {
-                    info!(
+                    debug!(
                         "Connected to ChromaDB at {} namespace {}",
                         chroma_url, config.namespace
                     );
@@ -116,7 +116,7 @@ impl Container {
             // DuckDB vector storage - share connection with repository adapter
             match DuckdbVectorRepository::new_with_namespace(&db_path, &config.namespace) {
                 Ok(duckdb) => {
-                    info!(
+                    debug!(
                         "Using DuckDB vector storage at {:?} namespace {}",
                         db_path, config.namespace
                     );

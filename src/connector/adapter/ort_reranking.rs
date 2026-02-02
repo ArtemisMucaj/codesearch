@@ -27,7 +27,7 @@ pub struct OrtReranking {
 impl OrtReranking {
     pub fn new(model_id: Option<&str>) -> Result<Self, DomainError> {
         let model_id = model_id.unwrap_or(DEFAULT_MODEL_ID);
-        info!(
+        debug!(
             "Initializing ORT reranking service with model: {}",
             model_id
         );
@@ -56,7 +56,7 @@ impl OrtReranking {
         tokenizer_path: PathBuf,
         model_name: &str,
     ) -> Result<Self, DomainError> {
-        info!("Loading ONNX model from: {:?}", model_path);
+        debug!("Loading ONNX model from: {:?}", model_path);
 
         let session = Session::builder()
             .map_err(|e| DomainError::internal(format!("Failed to create session builder: {}", e)))?

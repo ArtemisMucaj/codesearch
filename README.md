@@ -154,6 +154,49 @@ codesearch search "validation" --language rust --min-score 0.7
 - Downloaded automatically from HuggingFace Hub on first use
 - No API key or external service required
 
+## Logging
+
+CodeSearch uses structured logging with sensible defaults to keep output clean while providing detailed information when needed.
+
+### Default Behavior
+
+By default, only application-level logs are shown:
+- Indexing progress and completion
+- Search queries and results
+- Reranking operations
+- Repository deletion
+
+Logs from external dependencies (ONNX runtime, tokenizers, database drivers, etc.) are suppressed to reduce noise.
+
+### Verbose Mode
+
+Use `-v` or `--verbose` to enable debug-level logging for troubleshooting:
+
+```bash
+codesearch -v index /path/to/repo
+codesearch -v search "authentication"
+```
+
+This shows additional details like:
+- File processing progress
+- Model initialization
+- Storage backend configuration
+
+### Advanced: External Crate Logs
+
+To debug issues with external dependencies, use the `RUST_LOG` environment variable:
+
+```bash
+# Debug ONNX runtime issues
+RUST_LOG=warn,codesearch=info,ort=debug codesearch index /path/to/repo
+
+# Debug database issues
+RUST_LOG=warn,codesearch=info,duckdb=debug codesearch search "query"
+
+# Debug everything (very verbose)
+RUST_LOG=debug codesearch index /path/to/repo
+```
+
 ## Development
 
 ```bash
