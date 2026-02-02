@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use tracing::Level;
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::EnvFilter;
 
 use codesearch::{Commands, Container, ContainerConfig, Router};
 
@@ -38,16 +37,16 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let level = if cli.verbose {
-        Level::DEBUG
+    // Configure logging: only show codesearch logs, suppress noisy external crates
+    let filter = if cli.verbose {
+        EnvFilter::new("warn,codesearch=debug")
     } else {
-        Level::INFO
+        EnvFilter::new("warn,codesearch=info")
     };
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(level)
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
         .with_target(false)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)?;
+        .init();
 
     let data_dir = expand_tilde(&cli.data_dir);
     std::fs::create_dir_all(&data_dir)?;

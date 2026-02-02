@@ -7,7 +7,7 @@ use ort::{
     value::Tensor,
 };
 use tokenizers::Tokenizer;
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::application::EmbeddingService;
 use crate::domain::{CodeChunk, DomainError, Embedding, EmbeddingConfig};
@@ -25,7 +25,7 @@ pub struct OrtEmbedding {
 impl OrtEmbedding {
     pub fn new(model_id: Option<&str>) -> Result<Self, DomainError> {
         let model_id = model_id.unwrap_or(DEFAULT_MODEL_ID);
-        info!(
+        debug!(
             "Initializing ORT embedding service with model: {}",
             model_id
         );
@@ -54,7 +54,7 @@ impl OrtEmbedding {
         tokenizer_path: PathBuf,
         model_name: &str,
     ) -> Result<Self, DomainError> {
-        info!("Loading ONNX model from: {:?}", model_path);
+        debug!("Loading ONNX model from: {:?}", model_path);
 
         let session = Session::builder()
             .map_err(|e| DomainError::internal(format!("Failed to create session builder: {}", e)))?

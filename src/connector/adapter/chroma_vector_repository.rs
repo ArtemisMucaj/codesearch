@@ -6,7 +6,7 @@ use chromadb::collection::{CollectionEntries, GetOptions, QueryOptions};
 use chromadb::ChromaCollection;
 use serde_json::Map;
 use tokio::sync::Mutex;
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::application::VectorRepository;
 use crate::domain::{CodeChunk, DomainError, Embedding, SearchQuery, SearchResult};
@@ -27,7 +27,7 @@ impl ChromaVectorRepository {
         .await
         .map_err(|e| DomainError::internal(format!("Failed to connect to ChromaDB: {}", e)))?;
 
-        info!("Connected to ChromaDB at {}", url);
+        debug!("Connected to ChromaDB at {}", url);
 
         let collection = client
             .get_or_create_collection(collection_name, None)
@@ -36,7 +36,7 @@ impl ChromaVectorRepository {
                 DomainError::internal(format!("Failed to get/create collection: {}", e))
             })?;
 
-        info!("Using ChromaDB collection: {}", collection_name);
+        debug!("Using ChromaDB collection: {}", collection_name);
 
         Ok(Self {
             client,
