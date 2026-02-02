@@ -75,7 +75,11 @@ impl SearchCodeUseCase {
         }
 
         let duration = start_time.elapsed();
-        info!("Found {} results in {:.2}s", results.len(), duration.as_secs_f64());
+        info!(
+            "Found {} results in {:.2}s",
+            results.len(),
+            duration.as_secs_f64()
+        );
 
         Ok(results)
     }

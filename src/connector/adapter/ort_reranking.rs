@@ -226,7 +226,11 @@ impl RerankingService for OrtReranking {
         }
 
         let duration = start_time.elapsed();
-        info!("Reranking complete: {} results in {:.2}s", reranked.len(), duration.as_secs_f64());
+        info!(
+            "Reranking complete: {} results in {:.2}s",
+            reranked.len(),
+            duration.as_secs_f64()
+        );
 
         Ok(reranked)
     }
