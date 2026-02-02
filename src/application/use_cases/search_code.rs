@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use tracing::{debug, info};
 
@@ -30,6 +31,8 @@ impl SearchCodeUseCase {
 
     pub async fn execute(&self, query: SearchQuery) -> Result<Vec<SearchResult>, DomainError> {
         info!("Searching for: {}", query.query());
+
+        let start_time = Instant::now();
 
         let query_embedding = self.embedding_service.embed_query(query.query()).await?;
 
@@ -71,7 +74,8 @@ impl SearchCodeUseCase {
                 .await?;
         }
 
-        info!("Found {} results", results.len());
+        let duration = start_time.elapsed();
+        info!("Found {} results in {:.2}s", results.len(), duration.as_secs_f64());
 
         Ok(results)
     }
