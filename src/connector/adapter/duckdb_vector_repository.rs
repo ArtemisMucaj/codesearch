@@ -58,17 +58,17 @@ impl DuckdbVectorRepository {
         let schema = schema.trim();
         let schema_name = if schema.is_empty() { "main" } else { schema };
         debug!("Initializing DuckDB with schema: {}", schema_name);
-        let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{}\";", schema_name);
-        if let Err(e) = conn.execute_batch(&create_schema) {
-            return Err(DomainError::storage(format!(
-                "Failed to create DuckDB schema {}: {}",
-                schema_name, e
-            )));
-        }
 
-        let create_tables = format!(
-            "\
-            CREATE TABLE IF NOT EXISTS \"{}\".chunks (
+        // Install and load VSS extension first (required for vector type)
+        conn.execute_batch("INSTALL vss; LOAD vss; SET hnsw_enable_experimental_persistence = true;")
+            .map_err(|e| DomainError::storage(format!("Failed to initialize VSS extension: {}", e)))?;
+
+        // Create all tables in a single batch
+        let schema_sql = format!(
+            r#"
+            CREATE SCHEMA IF NOT EXISTS "{}";
+
+            CREATE TABLE IF NOT EXISTS "{}".chunks (
                 id TEXT PRIMARY KEY,
                 file_path TEXT NOT NULL,
                 content TEXT NOT NULL,
@@ -81,29 +81,12 @@ impl DuckdbVectorRepository {
                 repository_id TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS \"{}\".embeddings (
+            CREATE TABLE IF NOT EXISTS "{}".embeddings (
                 chunk_id TEXT PRIMARY KEY,
                 vector FLOAT[384] NOT NULL,
                 model TEXT NOT NULL
             );
-            ",
-            schema_name, schema_name
-        );
 
-        if let Err(e) = conn.execute_batch(&create_tables) {
-            return Err(DomainError::storage(format!(
-                "Failed to initialize DuckDB tables: {}",
-                e
-            )));
-        }
-        debug!(
-            "DuckDB tables created successfully in schema {}",
-            schema_name
-        );
-
-        // Create repositories table in main schema (shared with MetadataRepository)
-        conn.execute_batch(
-            r#"
             CREATE TABLE IF NOT EXISTS repositories (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -113,30 +96,19 @@ impl DuckdbVectorRepository {
                 chunk_count BIGINT DEFAULT 0,
                 file_count BIGINT DEFAULT 0,
                 store TEXT DEFAULT 'duckdb',
-                namespace TEXT
+                namespace TEXT,
+                languages TEXT
             );
+
+            CREATE INDEX IF NOT EXISTS embedding_hnsw_idx ON "{}".embeddings USING HNSW (vector) WITH (metric = 'cosine');
             "#,
-        )
-        .map_err(|e| DomainError::storage(format!("Failed to create repositories table: {}", e)))?;
-        debug!("Repositories table created successfully");
+            schema_name, schema_name, schema_name, schema_name
+        );
 
-        // VSS extension is required for vector search
-        conn.execute_batch("INSTALL vss;")
-            .map_err(|e| DomainError::storage(format!("Failed to INSTALL vss: {}", e)))?;
-        conn.execute_batch("LOAD vss;")
-            .map_err(|e| DomainError::storage(format!("Failed to LOAD vss: {}", e)))?;
+        conn.execute_batch(&schema_sql)
+            .map_err(|e| DomainError::storage(format!("Failed to initialize DuckDB schema: {}", e)))?;
 
-        conn.execute_batch("SET hnsw_enable_experimental_persistence = true;")
-            .map_err(|e| DomainError::storage(format!("Failed to set HNSW persistence: {}", e)))?;
-
-        conn.execute_batch(
-            &format!(
-                "CREATE INDEX IF NOT EXISTS embedding_hnsw_idx ON \"{}\".embeddings USING HNSW (vector) WITH (metric = 'cosine');",
-                schema_name
-            ),
-        )
-        .map_err(|e| DomainError::storage(format!("Failed to create HNSW index: {}", e)))?;
-
+        debug!("DuckDB schema initialized successfully");
         Ok(())
     }
 
