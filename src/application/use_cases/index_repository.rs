@@ -134,9 +134,9 @@ impl IndexRepositoryUseCase {
         let progress_bar = ProgressBar::new(total_files);
         progress_bar.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+                .template("  {spinner:.green} {bar:40.green/dim} {pos}/{len} {msg:.dim}")
                 .expect("Invalid progress bar template")
-                .progress_chars("#>-"),
+                .progress_chars("━━─"),
         );
 
         let mut file_count = 0u64;
@@ -216,7 +216,7 @@ impl IndexRepositoryUseCase {
             progress_bar.inc(1);
         }
 
-        progress_bar.finish_with_message("done");
+        progress_bar.finish_and_clear();
 
         // Save all file hashes
         self.file_hash_repo.save_batch(&file_hashes).await?;
@@ -361,9 +361,9 @@ impl IndexRepositoryUseCase {
         let progress_bar = ProgressBar::new(total_to_process);
         progress_bar.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+                .template("  {spinner:.green} {bar:40.green/dim} {pos}/{len} {msg:.dim}")
                 .expect("Invalid progress bar template")
-                .progress_chars("#>-"),
+                .progress_chars("━━─"),
         );
 
         let mut new_file_hashes = Vec::new();
@@ -440,7 +440,7 @@ impl IndexRepositoryUseCase {
             progress_bar.inc(1);
         }
 
-        progress_bar.finish_with_message("done");
+        progress_bar.finish_and_clear();
 
         // Track language statistics for unchanged files
         // We need to count them by language based on their file extensions

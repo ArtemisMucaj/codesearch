@@ -72,12 +72,6 @@ impl DuckdbMetadataRepository {
         )
         .map_err(|e| DomainError::storage(format!("Failed to initialize schema: {}", e)))?;
 
-        // Add columns if they don't exist (migration for existing DBs)
-        let _ =
-            conn.execute_batch("ALTER TABLE repositories ADD COLUMN store TEXT DEFAULT 'duckdb';");
-        let _ = conn.execute_batch("ALTER TABLE repositories ADD COLUMN namespace TEXT;");
-        let _ = conn.execute_batch("ALTER TABLE repositories ADD COLUMN languages TEXT;");
-
         debug!("DuckDB repository schema initialized");
         Ok(())
     }

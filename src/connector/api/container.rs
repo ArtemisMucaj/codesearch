@@ -183,7 +183,11 @@ impl Container {
     }
 
     pub fn delete_use_case(&self) -> DeleteRepositoryUseCase {
-        DeleteRepositoryUseCase::new(self.repo_adapter.clone(), self.vector_repo.clone())
+        DeleteRepositoryUseCase::new(
+            self.repo_adapter.clone(),
+            self.vector_repo.clone(),
+            self.file_hash_repo.clone(),
+        )
     }
 
     pub fn data_dir(&self) -> &str {
