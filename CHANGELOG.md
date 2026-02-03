@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.4.0...v0.5.0) (2026-02-03)
+
+
+### Features
+
+* add duration metrics to indexing, search, and reranking logs ([3df778d](https://github.com/ArtemisMucaj/codesearch/commit/3df778d5ba6494ee0f7bed2a4571c258dd022bfb))
+* add multi-language repository support ([2a6664a](https://github.com/ArtemisMucaj/codesearch/commit/2a6664a6989fa582fee3c5650e37c5e80cdd919e))
+* add progress bar to indexing operations ([dbd6787](https://github.com/ArtemisMucaj/codesearch/commit/dbd67874b8539235e2155b6901a2e315d48a4473))
+
+
+### Bug Fixes
+
+* various small fixes to make the tool robust ([5b71513](https://github.com/ArtemisMucaj/codesearch/commit/5b715130b2b2fff36fe7cc1e85817fa92f57d537))
+
 ## [0.4.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.3.0...v0.4.0) (2026-02-01)
 
 
