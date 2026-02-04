@@ -4,12 +4,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::debug;
 
-use crate::application::FileHashRepository;
+use crate::application::{CallGraphRepository, FileHashRepository};
 use crate::{
-    ChromaVectorRepository, DeleteRepositoryUseCase, DuckdbFileHashRepository,
-    DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService, InMemoryVectorRepository,
-    IndexRepositoryUseCase, ListRepositoriesUseCase, MockEmbedding, MockReranking, OrtEmbedding,
-    OrtReranking, RerankingService, SearchCodeUseCase, TreeSitterParser, VectorRepository,
+    ChromaVectorRepository, DeleteRepositoryUseCase, DuckdbCallGraphRepository,
+    DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
+    InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, MockEmbedding,
+    MockReranking, OrtEmbedding, OrtReranking, RerankingService, SearchCodeUseCase,
+    TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -28,6 +29,7 @@ pub struct Container {
     vector_repo: Arc<dyn VectorRepository>,
     repo_adapter: Arc<DuckdbMetadataRepository>,
     file_hash_repo: Arc<dyn FileHashRepository>,
+    call_graph_repo: Arc<dyn CallGraphRepository>,
     config: ContainerConfig,
 }
 
@@ -69,19 +71,23 @@ impl Container {
             None
         };
 
-        // Create vector repository, metadata adapter, and file hash repository
-        let (vector_repo, repo_adapter, file_hash_repo): (
+        // Create vector repository, metadata adapter, file hash repository, and call graph repository
+        let (vector_repo, repo_adapter, file_hash_repo, call_graph_repo): (
             Arc<dyn VectorRepository>,
             Arc<DuckdbMetadataRepository>,
             Arc<dyn FileHashRepository>,
+            Arc<dyn CallGraphRepository>,
         ) = if config.memory_storage {
             debug!("Using in-memory vector storage");
             let vector = Arc::new(InMemoryVectorRepository::new());
             let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
+            let shared_conn = repo_adapter.shared_connection();
             let file_hash_repo = Arc::new(
-                DuckdbFileHashRepository::with_connection(repo_adapter.shared_connection()).await?,
+                DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn)).await?,
             );
-            (vector, repo_adapter, file_hash_repo)
+            let call_graph_repo =
+                Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?);
+            (vector, repo_adapter, file_hash_repo, call_graph_repo)
         } else if let Some(chroma_url) = config.chroma_url.as_deref() {
             match ChromaVectorRepository::new(chroma_url, &config.namespace).await {
                 Ok(chroma) => {
@@ -91,11 +97,13 @@ impl Container {
                     );
                     let vector = Arc::new(chroma);
                     let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
+                    let shared_conn = repo_adapter.shared_connection();
                     let file_hash_repo = Arc::new(
-                        DuckdbFileHashRepository::with_connection(repo_adapter.shared_connection())
-                            .await?,
+                        DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn)).await?,
                     );
-                    (vector, repo_adapter, file_hash_repo)
+                    let call_graph_repo =
+                        Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?);
+                    (vector, repo_adapter, file_hash_repo, call_graph_repo)
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -105,11 +113,13 @@ impl Container {
                     );
                     let vector = Arc::new(InMemoryVectorRepository::new());
                     let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
+                    let shared_conn = repo_adapter.shared_connection();
                     let file_hash_repo = Arc::new(
-                        DuckdbFileHashRepository::with_connection(repo_adapter.shared_connection())
-                            .await?,
+                        DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn)).await?,
                     );
-                    (vector, repo_adapter, file_hash_repo)
+                    let call_graph_repo =
+                        Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?);
+                    (vector, repo_adapter, file_hash_repo, call_graph_repo)
                 }
             }
         } else {
@@ -120,14 +130,17 @@ impl Container {
                         "Using DuckDB vector storage at {:?} namespace {}",
                         db_path, config.namespace
                     );
-                    // Share the connection with the repository adapter and file hash repo
+                    // Share the connection with all adapters
                     let shared_conn = duckdb.shared_connection();
                     let repo_adapter = Arc::new(DuckdbMetadataRepository::with_connection(
                         Arc::clone(&shared_conn),
                     )?);
-                    let file_hash_repo =
-                        Arc::new(DuckdbFileHashRepository::with_connection(shared_conn).await?);
-                    (Arc::new(duckdb), repo_adapter, file_hash_repo)
+                    let file_hash_repo = Arc::new(
+                        DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn)).await?,
+                    );
+                    let call_graph_repo =
+                        Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?);
+                    (Arc::new(duckdb), repo_adapter, file_hash_repo, call_graph_repo)
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -137,11 +150,13 @@ impl Container {
                     );
                     let vector = Arc::new(InMemoryVectorRepository::new());
                     let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
+                    let shared_conn = repo_adapter.shared_connection();
                     let file_hash_repo = Arc::new(
-                        DuckdbFileHashRepository::with_connection(repo_adapter.shared_connection())
-                            .await?,
+                        DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn)).await?,
                     );
-                    (vector, repo_adapter, file_hash_repo)
+                    let call_graph_repo =
+                        Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?);
+                    (vector, repo_adapter, file_hash_repo, call_graph_repo)
                 }
             }
         };
@@ -153,6 +168,7 @@ impl Container {
             vector_repo,
             repo_adapter,
             file_hash_repo,
+            call_graph_repo,
             config,
         })
     }
@@ -162,6 +178,7 @@ impl Container {
             self.repo_adapter.clone(),
             self.vector_repo.clone(),
             self.file_hash_repo.clone(),
+            self.call_graph_repo.clone(),
             self.parser.clone(),
             self.embedding_service.clone(),
         )
@@ -187,6 +204,7 @@ impl Container {
             self.repo_adapter.clone(),
             self.vector_repo.clone(),
             self.file_hash_repo.clone(),
+            self.call_graph_repo.clone(),
         )
     }
 

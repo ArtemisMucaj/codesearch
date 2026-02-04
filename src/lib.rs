@@ -4,22 +4,23 @@ pub mod connector;
 pub mod domain;
 
 pub use application::{
-    DeleteRepositoryUseCase, EmbeddingService, FileHashRepository, IndexRepositoryUseCase,
-    ListRepositoriesUseCase, MetadataRepository, ParserService, RerankingService,
-    SearchCodeUseCase, VectorRepository,
+    CallGraphQuery, CallGraphRepository, CallGraphStats, DeleteRepositoryUseCase, EmbeddingService,
+    FileHashRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, MetadataRepository,
+    ParserService, RerankingService, SearchCodeUseCase, VectorRepository,
 };
 
 pub use cli::Commands;
 
 pub use connector::{
-    ChromaVectorRepository, DuckdbFileHashRepository, DuckdbMetadataRepository,
-    DuckdbVectorRepository, InMemoryVectorRepository, MockEmbedding, MockReranking, OrtEmbedding,
-    OrtReranking, TreeSitterParser,
+    ChromaVectorRepository, DuckdbCallGraphRepository, DuckdbFileHashRepository,
+    DuckdbMetadataRepository, DuckdbVectorRepository, InMemoryVectorRepository, MockEmbedding,
+    MockReranking, OrtEmbedding, OrtReranking, TreeSitterParser,
 };
 
 pub use domain::{
     compute_file_hash, CodeChunk, DomainError, Embedding, EmbeddingConfig, FileHash,
-    IndexingStatus, Language, NodeType, Repository, SearchQuery, SearchResult, VectorStore,
+    IndexingStatus, Language, NodeType, ReferenceKind, Repository, SearchQuery, SearchResult,
+    SymbolReference, VectorStore,
 };
 
 pub use connector::api::{Container, ContainerConfig, Router};
