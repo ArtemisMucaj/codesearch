@@ -4,7 +4,7 @@ use tracing::debug;
 use tree_sitter::{Parser, Query, QueryCursor};
 
 use crate::application::ParserService;
-use crate::domain::{CodeChunk, DomainError, Language, NodeType};
+use crate::domain::{CodeChunk, DomainError, Language, NodeType, ReferenceKind, SymbolReference};
 
 pub struct TreeSitterParser {
     supported_languages: Vec<Language>,
@@ -197,6 +197,350 @@ impl TreeSitterParser {
             _ => NodeType::Block,
         }
     }
+
+    /// Get tree-sitter query patterns for extracting symbol references.
+    fn get_reference_query_patterns(&self, language: Language) -> &'static str {
+        match language {
+            Language::Rust => {
+                r#"
+                ; Function calls
+                (call_expression
+                    function: (identifier) @callee) @call
+
+                ; Method calls
+                (call_expression
+                    function: (field_expression
+                        field: (field_identifier) @callee)) @method_call
+
+                ; Scoped calls (e.g., Module::function())
+                (call_expression
+                    function: (scoped_identifier
+                        name: (identifier) @callee)) @call
+
+                ; Macro invocations
+                (macro_invocation
+                    macro: (identifier) @callee) @macro
+
+                ; Use statements (imports)
+                (use_declaration
+                    argument: (scoped_identifier
+                        name: (identifier) @callee)) @import
+                (use_declaration
+                    argument: (identifier) @callee) @import
+
+                ; Struct instantiation
+                (struct_expression
+                    name: (type_identifier) @callee) @instantiation
+                "#
+            }
+            Language::Python => {
+                r#"
+                ; Function calls
+                (call
+                    function: (identifier) @callee) @call
+
+                ; Method calls
+                (call
+                    function: (attribute
+                        attribute: (identifier) @callee)) @method_call
+
+                ; Import statements
+                (import_statement
+                    name: (dotted_name
+                        (identifier) @callee)) @import
+                (import_from_statement
+                    name: (dotted_name
+                        (identifier) @callee)) @import
+
+                ; Type annotations (Python 3.5+)
+                (type
+                    (identifier) @callee) @type_ref
+
+                ; Class instantiation (same as function call in Python)
+                (call
+                    function: (identifier) @callee) @call
+
+                ; Decorator usage
+                (decorator
+                    (identifier) @callee) @decorator
+                (decorator
+                    (call
+                        function: (identifier) @callee)) @decorator
+                "#
+            }
+            Language::JavaScript => {
+                r#"
+                ; Function calls
+                (call_expression
+                    function: (identifier) @callee) @call
+
+                ; Method calls
+                (call_expression
+                    function: (member_expression
+                        property: (property_identifier) @callee)) @method_call
+
+                ; New expressions (instantiation)
+                (new_expression
+                    constructor: (identifier) @callee) @instantiation
+
+                ; Import statements
+                (import_statement
+                    (import_clause
+                        (identifier) @callee)) @import
+                (import_statement
+                    (import_clause
+                        (named_imports
+                            (import_specifier
+                                name: (identifier) @callee)))) @import
+
+                ; JSX elements (React components)
+                (jsx_element
+                    open_tag: (jsx_opening_element
+                        name: (identifier) @callee)) @instantiation
+                (jsx_self_closing_element
+                    name: (identifier) @callee) @instantiation
+                "#
+            }
+            Language::TypeScript => {
+                r#"
+                ; Function calls
+                (call_expression
+                    function: (identifier) @callee) @call
+
+                ; Method calls
+                (call_expression
+                    function: (member_expression
+                        property: (property_identifier) @callee)) @method_call
+
+                ; New expressions (instantiation)
+                (new_expression
+                    constructor: (identifier) @callee) @instantiation
+
+                ; Import statements
+                (import_statement
+                    (import_clause
+                        (identifier) @callee)) @import
+                (import_statement
+                    (import_clause
+                        (named_imports
+                            (import_specifier
+                                name: (identifier) @callee)))) @import
+
+                ; Type annotations
+                (type_annotation
+                    (type_identifier) @callee) @type_ref
+                "#
+            }
+            Language::Go => {
+                r#"
+                ; Function calls
+                (call_expression
+                    function: (identifier) @callee) @call
+
+                ; Method calls
+                (call_expression
+                    function: (selector_expression
+                        field: (field_identifier) @callee)) @method_call
+
+                ; Package-qualified calls
+                (call_expression
+                    function: (selector_expression
+                        operand: (identifier) @_pkg
+                        field: (field_identifier) @callee)) @call
+
+                ; Type references
+                (type_identifier) @type_ref
+
+                ; Import statements
+                (import_spec
+                    path: (interpreted_string_literal) @callee) @import
+
+                ; Struct instantiation (composite literal)
+                (composite_literal
+                    type: (type_identifier) @callee) @instantiation
+
+                ; Interface embedding
+                (interface_type
+                    (type_identifier) @callee) @inheritance
+                "#
+            }
+            Language::Php => {
+                r#"
+                ; Function calls
+                (function_call_expression
+                    function: (name) @callee) @call
+
+                ; Method calls
+                (member_call_expression
+                    name: (name) @callee) @method_call
+
+                ; Static method calls
+                (scoped_call_expression
+                    name: (name) @callee) @method_call
+
+                ; New expressions (instantiation)
+                (object_creation_expression
+                    (name) @callee) @instantiation
+
+                ; Use statements (imports)
+                (namespace_use_clause
+                    (qualified_name) @callee) @import
+
+                ; Class extends
+                (base_clause
+                    (name) @callee) @inheritance
+
+                ; Interface implements
+                (class_interface_clause
+                    (name) @callee) @implementation
+
+                ; Type hints
+                (type_list
+                    (named_type
+                        (name) @callee)) @type_ref
+                "#
+            }
+            Language::Cpp => {
+                r#"
+                ; Function calls
+                (call_expression
+                    function: (identifier) @callee) @call
+
+                ; Method calls
+                (call_expression
+                    function: (field_expression
+                        field: (field_identifier) @callee)) @method_call
+
+                ; Scoped calls (namespace::function)
+                (call_expression
+                    function: (qualified_identifier
+                        name: (identifier) @callee)) @call
+
+                ; Constructor calls (new)
+                (new_expression
+                    type: (type_identifier) @callee) @instantiation
+
+                ; Type references
+                (type_identifier) @type_ref
+
+                ; Include statements
+                (preproc_include
+                    path: (string_literal) @callee) @import
+                (preproc_include
+                    path: (system_lib_string) @callee) @import
+
+                ; Template arguments
+                (template_argument_list
+                    (type_descriptor
+                        type: (type_identifier) @callee)) @generic
+
+                ; Inheritance
+                (base_class_clause
+                    (type_identifier) @callee) @inheritance
+                "#
+            }
+            Language::HCL => {
+                r#"
+                ; Function calls
+                (function_call
+                    (identifier) @callee) @call
+
+                ; Variable references
+                (variable_expr
+                    (identifier) @callee) @variable_ref
+
+                ; Block references (resource, data, module)
+                (block
+                    (identifier) @callee) @call
+                "#
+            }
+            Language::Unknown => "",
+        }
+    }
+
+    fn capture_to_reference_kind(capture_name: &str) -> ReferenceKind {
+        match capture_name {
+            "call" => ReferenceKind::Call,
+            "method_call" => ReferenceKind::MethodCall,
+            "type_ref" => ReferenceKind::TypeReference,
+            "import" => ReferenceKind::Import,
+            "instantiation" => ReferenceKind::Instantiation,
+            "macro" => ReferenceKind::MacroInvocation,
+            "decorator" => ReferenceKind::MacroInvocation,
+            "inheritance" => ReferenceKind::Inheritance,
+            "implementation" => ReferenceKind::Implementation,
+            "generic" => ReferenceKind::GenericArgument,
+            "variable_ref" => ReferenceKind::VariableReference,
+            _ => ReferenceKind::Unknown,
+        }
+    }
+
+    /// Find the enclosing function or class for a given node position.
+    fn find_enclosing_scope(
+        &self,
+        content: &str,
+        tree: &tree_sitter::Tree,
+        line: u32,
+        language: Language,
+    ) -> Option<(String, Option<String>)> {
+        let ts_language = self.get_ts_language(language)?;
+        let query_source = self.get_query_patterns(language);
+        if query_source.is_empty() {
+            return None;
+        }
+
+        let query = Query::new(&ts_language, query_source).ok()?;
+        let mut cursor = QueryCursor::new();
+        let text_bytes = content.as_bytes();
+
+        let capture_names: Vec<&str> = query.capture_names().to_vec();
+        let mut matches_iter = cursor.matches(&query, tree.root_node(), text_bytes);
+
+        let mut best_match: Option<(u32, u32, String, Option<String>)> = None; // (start, end, name, parent)
+
+        while let Some(query_match) = matches_iter.next() {
+            let mut symbol_name: Option<String> = None;
+            let mut parent_symbol: Option<String> = None;
+            let mut main_node = None;
+
+            for capture in query_match.captures {
+                let capture_name = capture_names
+                    .get(capture.index as usize)
+                    .copied()
+                    .unwrap_or("");
+
+                if capture_name == "name" {
+                    symbol_name = Some(content[capture.node.byte_range()].to_string());
+                } else if capture_name.ends_with(".name") {
+                    parent_symbol = Some(content[capture.node.byte_range()].to_string());
+                } else {
+                    main_node = Some(capture.node);
+                }
+            }
+
+            if let (Some(node), Some(name)) = (main_node, symbol_name) {
+                let start_line = node.start_position().row as u32 + 1;
+                let end_line = node.end_position().row as u32 + 1;
+
+                // Check if this scope contains our target line and is a better (tighter) match
+                if start_line <= line && end_line >= line {
+                    let is_better = match &best_match {
+                        None => true,
+                        Some((best_start, best_end, _, _)) => {
+                            // Prefer tighter scope (smaller range that still contains the line)
+                            (end_line - start_line) < (best_end - best_start)
+                        }
+                    };
+
+                    if is_better {
+                        best_match = Some((start_line, end_line, name, parent_symbol));
+                    }
+                }
+            }
+        }
+
+        best_match.map(|(_, _, name, parent)| (name, parent))
+    }
 }
 
 impl Default for TreeSitterParser {
@@ -308,6 +652,128 @@ impl ParserService for TreeSitterParser {
 
     fn supported_languages(&self) -> Vec<Language> {
         self.supported_languages.clone()
+    }
+
+    async fn extract_references(
+        &self,
+        content: &str,
+        file_path: &str,
+        language: Language,
+        repository_id: &str,
+    ) -> Result<Vec<SymbolReference>, DomainError> {
+        let ts_language = self
+            .get_ts_language(language)
+            .ok_or_else(|| DomainError::parse(format!("Unsupported language: {:?}", language)))?;
+
+        let mut parser = Parser::new();
+        parser
+            .set_language(&ts_language)
+            .map_err(|e| DomainError::parse(format!("Failed to set language: {}", e)))?;
+
+        let tree = parser
+            .parse(content, None)
+            .ok_or_else(|| DomainError::parse("Failed to parse file"))?;
+
+        let query_source = self.get_reference_query_patterns(language);
+        if query_source.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let query = Query::new(&ts_language, query_source)
+            .map_err(|e| DomainError::parse(format!("Failed to create reference query: {}", e)))?;
+
+        let mut cursor = QueryCursor::new();
+        let text_bytes = content.as_bytes();
+
+        let mut references = Vec::new();
+        let capture_names: Vec<&str> = query.capture_names().to_vec();
+
+        let mut matches_iter = cursor.matches(&query, tree.root_node(), text_bytes);
+
+        while let Some(query_match) = matches_iter.next() {
+            let mut callee_name: Option<String> = None;
+            let mut reference_kind = ReferenceKind::Unknown;
+            let mut ref_node = None;
+
+            for capture in query_match.captures {
+                let capture_name = capture_names
+                    .get(capture.index as usize)
+                    .copied()
+                    .unwrap_or("");
+
+                if capture_name == "callee" || capture_name == "type_ref" {
+                    callee_name = Some(content[capture.node.byte_range()].to_string());
+                    ref_node = Some(capture.node);
+                    // For type_ref, the capture itself determines the kind
+                    if capture_name == "type_ref" {
+                        reference_kind = ReferenceKind::TypeReference;
+                    }
+                } else {
+                    // This is the outer capture (call, method_call, etc.)
+                    if reference_kind == ReferenceKind::Unknown {
+                        reference_kind = Self::capture_to_reference_kind(capture_name);
+                    }
+                }
+            }
+
+            if let (Some(name), Some(node)) = (callee_name, ref_node) {
+                // Skip very short names (likely noise) and common keywords
+                if name.len() < 2
+                    || matches!(
+                        name.as_str(),
+                        "if" | "else"
+                            | "for"
+                            | "while"
+                            | "return"
+                            | "true"
+                            | "false"
+                            | "null"
+                            | "None"
+                            | "self"
+                            | "this"
+                            | "super"
+                    )
+                {
+                    continue;
+                }
+
+                let line = node.start_position().row as u32 + 1;
+                let column = node.start_position().column as u32 + 1;
+
+                // Find enclosing scope (function/class that contains this reference)
+                let (caller_symbol, enclosing_scope) =
+                    self.find_enclosing_scope(content, &tree, line, language)
+                        .map(|(name, parent)| (Some(name), parent))
+                        .unwrap_or((None, None));
+
+                let mut reference = SymbolReference::new(
+                    caller_symbol,
+                    name,
+                    file_path.to_string(),
+                    file_path.to_string(),
+                    line,
+                    column,
+                    reference_kind,
+                    language,
+                    repository_id.to_string(),
+                );
+
+                if let Some(scope) = enclosing_scope {
+                    reference = reference.with_enclosing_scope(scope);
+                }
+
+                references.push(reference);
+            }
+        }
+
+        debug!(
+            "Extracted {} references from {} ({:?})",
+            references.len(),
+            file_path,
+            language
+        );
+
+        Ok(references)
     }
 }
 
@@ -436,5 +902,137 @@ class Calculator {
             .filter(|chunk| chunk.symbol_name() == Some("main"))
             .count();
         assert_eq!(main_count, 1, "expected main to appear exactly once");
+    }
+
+    #[tokio::test]
+    async fn test_extract_rust_function_calls() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+fn helper() -> i32 {
+    42
+}
+
+fn main() {
+    let x = helper();
+    println!("Result: {}", x);
+}
+"#;
+
+        let references = parser
+            .extract_references(content, "test.rs", Language::Rust, "test-repo")
+            .await
+            .unwrap();
+
+        // Should find call to `helper`
+        let helper_calls: Vec<_> = references
+            .iter()
+            .filter(|r| r.callee_symbol() == "helper")
+            .collect();
+        assert!(!helper_calls.is_empty(), "Should find call to helper()");
+        assert_eq!(helper_calls[0].reference_kind(), ReferenceKind::Call);
+
+        // Should find macro invocation `println`
+        let println_calls: Vec<_> = references
+            .iter()
+            .filter(|r| r.callee_symbol() == "println")
+            .collect();
+        assert!(
+            !println_calls.is_empty(),
+            "Should find println! macro invocation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_extract_python_calls_and_imports() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+import os
+
+def helper():
+    return 42
+
+def main():
+    result = helper()
+    os.path.exists("/tmp")
+"#;
+
+        let references = parser
+            .extract_references(content, "test.py", Language::Python, "test-repo")
+            .await
+            .unwrap();
+
+        // Should find call to `helper`
+        let helper_calls: Vec<_> = references
+            .iter()
+            .filter(|r| r.callee_symbol() == "helper")
+            .collect();
+        assert!(!helper_calls.is_empty(), "Should find call to helper()");
+
+        // Should find import of `os`
+        let os_imports: Vec<_> = references
+            .iter()
+            .filter(|r| r.callee_symbol() == "os" && r.reference_kind() == ReferenceKind::Import)
+            .collect();
+        assert!(!os_imports.is_empty(), "Should find import of os");
+    }
+
+    #[tokio::test]
+    async fn test_extract_typescript_type_references() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+interface User {
+    name: string;
+}
+
+function greet(user: User): string {
+    return user.name;
+}
+"#;
+
+        let references = parser
+            .extract_references(content, "test.ts", Language::TypeScript, "test-repo")
+            .await
+            .unwrap();
+
+        // Should find type reference to `User`
+        let user_refs: Vec<_> = references
+            .iter()
+            .filter(|r| r.callee_symbol() == "User")
+            .collect();
+        assert!(
+            !user_refs.is_empty(),
+            "Should find type reference to User"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_extract_references_with_enclosing_scope() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+fn helper() -> i32 {
+    42
+}
+
+fn caller() {
+    let x = helper();
+}
+"#;
+
+        let references = parser
+            .extract_references(content, "test.rs", Language::Rust, "test-repo")
+            .await
+            .unwrap();
+
+        let helper_call = references
+            .iter()
+            .find(|r| r.callee_symbol() == "helper")
+            .expect("Should find call to helper");
+
+        // The caller should be identified
+        assert_eq!(
+            helper_call.caller_symbol(),
+            Some("caller"),
+            "Should identify caller function"
+        );
     }
 }

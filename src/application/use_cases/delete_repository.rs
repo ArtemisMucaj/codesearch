@@ -3,13 +3,14 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use crate::application::{FileHashRepository, MetadataRepository, VectorRepository};
+use crate::application::{CallGraphRepository, FileHashRepository, MetadataRepository, VectorRepository};
 use crate::domain::DomainError;
 
 pub struct DeleteRepositoryUseCase {
     repository_repo: Arc<dyn MetadataRepository>,
     vector_repo: Arc<dyn VectorRepository>,
     file_hash_repo: Arc<dyn FileHashRepository>,
+    call_graph_repo: Arc<dyn CallGraphRepository>,
 }
 
 impl DeleteRepositoryUseCase {
@@ -17,11 +18,13 @@ impl DeleteRepositoryUseCase {
         repository_repo: Arc<dyn MetadataRepository>,
         vector_repo: Arc<dyn VectorRepository>,
         file_hash_repo: Arc<dyn FileHashRepository>,
+        call_graph_repo: Arc<dyn CallGraphRepository>,
     ) -> Self {
         Self {
             repository_repo,
             vector_repo,
             file_hash_repo,
+            call_graph_repo,
         }
     }
 
@@ -36,6 +39,7 @@ impl DeleteRepositoryUseCase {
 
         self.vector_repo.delete_by_repository(id).await?;
         self.file_hash_repo.delete_by_repository(id).await?;
+        self.call_graph_repo.delete_by_repository(id).await?;
         self.repository_repo.delete(id).await?;
 
         info!("Repository deleted successfully");
