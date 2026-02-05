@@ -3,6 +3,7 @@ mod duckdb_file_hash_repository;
 mod duckdb_metadata_repository;
 mod duckdb_vector_repository;
 mod in_memory_vector_repository;
+pub mod mcp;
 mod mock_embedding;
 mod mock_reranking;
 mod ort_embedding;

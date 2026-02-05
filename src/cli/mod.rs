@@ -36,4 +36,11 @@ pub enum Commands {
     },
 
     Stats,
+
+    /// Start MCP (Model Context Protocol) server for integration with AI tools
+    Mcp {
+        /// Run as HTTP server on specified port (e.g., --http 8080)
+        #[arg(long)]
+        http: Option<u16>,
+    },
 }
