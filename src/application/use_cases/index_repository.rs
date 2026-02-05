@@ -8,7 +8,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use tracing::{debug, info, warn};
 
 use crate::application::{
-    EmbeddingService, FileHashRepository, MetadataRepository, ParserService, VectorRepository,
+    CallGraphRepository, EmbeddingService, FileHashRepository, MetadataRepository, ParserService,
+    VectorRepository,
 };
 use crate::domain::{
     compute_file_hash, DomainError, FileHash, Language, LanguageStats, Repository, VectorStore,
@@ -18,6 +19,7 @@ pub struct IndexRepositoryUseCase {
     repository_repo: Arc<dyn MetadataRepository>,
     vector_repo: Arc<dyn VectorRepository>,
     file_hash_repo: Arc<dyn FileHashRepository>,
+    call_graph_repo: Arc<dyn CallGraphRepository>,
     parser_service: Arc<dyn ParserService>,
     embedding_service: Arc<dyn EmbeddingService>,
 }
@@ -27,6 +29,7 @@ impl IndexRepositoryUseCase {
         repository_repo: Arc<dyn MetadataRepository>,
         vector_repo: Arc<dyn VectorRepository>,
         file_hash_repo: Arc<dyn FileHashRepository>,
+        call_graph_repo: Arc<dyn CallGraphRepository>,
         parser_service: Arc<dyn ParserService>,
         embedding_service: Arc<dyn EmbeddingService>,
     ) -> Self {
@@ -34,6 +37,7 @@ impl IndexRepositoryUseCase {
             repository_repo,
             vector_repo,
             file_hash_repo,
+            call_graph_repo,
             parser_service,
             embedding_service,
         }
@@ -66,6 +70,9 @@ impl IndexRepositoryUseCase {
                 );
                 self.vector_repo.delete_by_repository(existing.id()).await?;
                 self.file_hash_repo
+                    .delete_by_repository(existing.id())
+                    .await?;
+                self.call_graph_repo
                     .delete_by_repository(existing.id())
                     .await?;
                 self.repository_repo.delete(existing.id()).await?;
@@ -141,6 +148,7 @@ impl IndexRepositoryUseCase {
 
         let mut file_count = 0u64;
         let mut chunk_count = 0u64;
+        let mut reference_count = 0u64;
         let mut file_hashes = Vec::new();
         let mut language_stats: HashMap<String, LanguageStats> = HashMap::new();
 
@@ -203,6 +211,27 @@ impl IndexRepositoryUseCase {
 
             self.vector_repo.save_batch(&chunks, &embeddings).await?;
 
+            // Extract and save symbol references (call graph)
+            let references = match self
+                .parser_service
+                .extract_references(&content, &relative_path, language, repository.id())
+                .await
+            {
+                Ok(refs) => refs,
+                Err(e) => {
+                    debug!(
+                        "Failed to extract references from {}: {} (continuing)",
+                        relative_path, e
+                    );
+                    Vec::new()
+                }
+            };
+
+            if !references.is_empty() {
+                self.call_graph_repo.save_batch(&references).await?;
+                reference_count += references.len() as u64;
+            }
+
             file_count += 1;
             chunk_count += chunks.len() as u64;
 
@@ -212,7 +241,12 @@ impl IndexRepositoryUseCase {
             stats.file_count += 1;
             stats.chunk_count += chunks.len() as u64;
 
-            debug!("Indexed {} chunks from {}", chunks.len(), relative_path);
+            debug!(
+                "Indexed {} chunks, {} references from {}",
+                chunks.len(),
+                references.len(),
+                relative_path
+            );
             progress_bar.inc(1);
         }
 
@@ -231,9 +265,10 @@ impl IndexRepositoryUseCase {
 
         let duration = start_time.elapsed();
         info!(
-            "Indexing complete: {} files, {} chunks in {:.2}s",
+            "Indexing complete: {} files, {} chunks, {} references in {:.2}s",
             file_count,
             chunk_count,
+            reference_count,
             duration.as_secs_f64()
         );
 
@@ -330,11 +365,15 @@ impl IndexRepositoryUseCase {
         // Track total chunks deleted
         let mut deleted_chunk_count = 0u64;
 
-        // Process deleted files
+        // Process deleted files (remove chunks and references)
         for path in &deleted {
             debug!("Removing deleted file: {}", path);
             deleted_chunk_count += self
                 .vector_repo
+                .delete_by_file_path(repository.id(), path)
+                .await?;
+            // Also delete symbol references for this file
+            self.call_graph_repo
                 .delete_by_file_path(repository.id(), path)
                 .await?;
         }
@@ -345,11 +384,15 @@ impl IndexRepositoryUseCase {
                 .await?;
         }
 
-        // Process modified files (delete old chunks, then re-index)
+        // Process modified files (delete old chunks and references, then re-index)
         for path in &modified {
             debug!("Re-indexing modified file: {}", path);
             deleted_chunk_count += self
                 .vector_repo
+                .delete_by_file_path(repository.id(), path)
+                .await?;
+            // Also delete symbol references for this file
+            self.call_graph_repo
                 .delete_by_file_path(repository.id(), path)
                 .await?;
         }
@@ -369,6 +412,7 @@ impl IndexRepositoryUseCase {
         let mut new_file_hashes = Vec::new();
         let mut processed_count = 0u64;
         let mut new_chunk_count = 0u64;
+        let mut new_reference_count = 0u64;
         let mut language_stats: HashMap<String, LanguageStats> = HashMap::new();
 
         for relative_path in files_to_process {
@@ -420,6 +464,27 @@ impl IndexRepositoryUseCase {
 
             self.vector_repo.save_batch(&chunks, &embeddings).await?;
 
+            // Extract and save symbol references (call graph)
+            let references = match self
+                .parser_service
+                .extract_references(&content, relative_path, language, repository.id())
+                .await
+            {
+                Ok(refs) => refs,
+                Err(e) => {
+                    debug!(
+                        "Failed to extract references from {}: {} (continuing)",
+                        relative_path, e
+                    );
+                    Vec::new()
+                }
+            };
+
+            if !references.is_empty() {
+                self.call_graph_repo.save_batch(&references).await?;
+                new_reference_count += references.len() as u64;
+            }
+
             // Only add file hash after successful indexing
             new_file_hashes.push(FileHash::new(
                 relative_path.clone(),
@@ -436,7 +501,12 @@ impl IndexRepositoryUseCase {
             stats.file_count += 1;
             stats.chunk_count += chunks.len() as u64;
 
-            debug!("Indexed {} chunks from {}", chunks.len(), relative_path);
+            debug!(
+                "Indexed {} chunks, {} references from {}",
+                chunks.len(),
+                references.len(),
+                relative_path
+            );
             progress_bar.inc(1);
         }
 
@@ -479,9 +549,10 @@ impl IndexRepositoryUseCase {
 
         let duration = start_time.elapsed();
         info!(
-            "Incremental indexing complete: processed {} files ({} new chunks) in {:.2}s",
+            "Incremental indexing complete: processed {} files ({} new chunks, {} references) in {:.2}s",
             processed_count,
             new_chunk_count,
+            new_reference_count,
             duration.as_secs_f64()
         );
 
