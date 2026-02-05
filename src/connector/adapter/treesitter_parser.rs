@@ -235,7 +235,7 @@ impl TreeSitterParser {
             }
             Language::Python => {
                 r#"
-                ; Function calls
+                ; Function calls (also covers class instantiation in Python)
                 (call
                     function: (identifier) @callee) @call
 
@@ -255,10 +255,6 @@ impl TreeSitterParser {
                 ; Type annotations (Python 3.5+)
                 (type
                     (identifier) @callee) @type_ref
-
-                ; Class instantiation (same as function call in Python)
-                (call
-                    function: (identifier) @callee) @call
 
                 ; Decorator usage
                 (decorator
@@ -717,10 +713,11 @@ impl ParserService for TreeSitterParser {
             }
 
             if let (Some(name), Some(node)) = (callee_name, ref_node) {
-                // Skip very short names (likely noise) and common keywords
+                // Skip very short names (likely noise), common keywords, and primitive types
                 if name.len() < 2
                     || matches!(
                         name.as_str(),
+                        // Common keywords
                         "if" | "else"
                             | "for"
                             | "while"
@@ -732,6 +729,32 @@ impl ParserService for TreeSitterParser {
                             | "self"
                             | "this"
                             | "super"
+                            // Common primitive types (to reduce noise from bare type_identifier patterns)
+                            | "int"
+                            | "i8"
+                            | "i16"
+                            | "i32"
+                            | "i64"
+                            | "i128"
+                            | "u8"
+                            | "u16"
+                            | "u32"
+                            | "u64"
+                            | "u128"
+                            | "f32"
+                            | "f64"
+                            | "bool"
+                            | "char"
+                            | "str"
+                            | "void"
+                            | "string"
+                            | "float"
+                            | "double"
+                            | "byte"
+                            | "short"
+                            | "long"
+                            | "usize"
+                            | "isize"
                     )
                 {
                     continue;
