@@ -1,7 +1,11 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use clap::Parser;
+use rmcp::ServiceExt;
 use tracing_subscriber::EnvFilter;
 
+use codesearch::connector::adapter::mcp::CodesearchMcpServer;
 use codesearch::{Commands, Container, ContainerConfig, Router};
 
 #[derive(Parser)]
@@ -37,16 +41,34 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Configure logging: only show codesearch logs, suppress noisy external crates
+    // Extract MCP mode info before moving cli.command
+    let (is_mcp, http_port) = match &cli.command {
+        Commands::Mcp { http } => (true, *http),
+        _ => (false, None),
+    };
+
+    // For MCP stdio mode, log to stderr (stdout is for MCP protocol)
+    // For HTTP mode, we can log to stdout since HTTP uses a different channel
     let filter = if cli.verbose {
         EnvFilter::new("warn,codesearch=debug")
     } else {
         EnvFilter::new("warn,codesearch=info")
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+
+    if is_mcp && http_port.is_none() {
+        // Stdio mode - log to stderr
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .init();
+    }
 
     let data_dir = expand_tilde(&cli.data_dir);
     std::fs::create_dir_all(&data_dir)?;
@@ -60,11 +82,74 @@ async fn main() -> Result<()> {
         no_rerank: cli.no_rerank,
     };
 
+    // Handle MCP command specially - it runs as a long-lived server
+    if is_mcp {
+        let container = Arc::new(Container::new(config).await?);
+
+        if let Some(port) = http_port {
+            // HTTP mode
+            run_http_server(container, port).await?;
+        } else {
+            // Stdio mode
+            tracing::info!("Starting codesearch MCP server (stdio)");
+            let server = CodesearchMcpServer::new(container);
+            let service = server.serve(rmcp::transport::stdio()).await?;
+            service.waiting().await?;
+        }
+        return Ok(());
+    }
+
     let container = Container::new(config).await?;
     let router = Router::new(&container);
     let output = router.route(cli.command).await?;
 
     println!("{}", output);
+
+    Ok(())
+}
+
+async fn run_http_server(container: Arc<Container>, port: u16) -> Result<()> {
+    use axum::routing::any;
+    use axum::Router;
+    use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+    use rmcp::transport::streamable_http_server::tower::{
+        StreamableHttpServerConfig, StreamableHttpService,
+    };
+    use std::net::SocketAddr;
+    use tokio_util::sync::CancellationToken;
+
+    tracing::info!("Starting codesearch MCP server (HTTP) on port {}", port);
+
+    let ct = CancellationToken::new();
+    let config = StreamableHttpServerConfig {
+        sse_keep_alive: Some(std::time::Duration::from_secs(15)),
+        sse_retry: None,
+        stateful_mode: true,
+        cancellation_token: ct.clone(),
+    };
+
+    let session_manager = Arc::new(LocalSessionManager::default());
+
+    let mcp_service = StreamableHttpService::new(
+        move || Ok(CodesearchMcpServer::new(container.clone())),
+        session_manager,
+        config,
+    );
+
+    let app = Router::new().route("/mcp", any(move |req| async move { mcp_service.handle(req).await }));
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+
+    tracing::info!("MCP HTTP server listening on http://{}/mcp", addr);
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            tokio::signal::ctrl_c().await.ok();
+            tracing::info!("Shutting down MCP HTTP server");
+            ct.cancel();
+        })
+        .await?;
 
     Ok(())
 }

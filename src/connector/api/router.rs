@@ -37,6 +37,7 @@ impl<'a> Router<'a> {
             Commands::List => self.repository_controller.list().await,
             Commands::Delete { id_or_path } => self.repository_controller.delete(id_or_path).await,
             Commands::Stats => self.search_controller.stats().await,
+            Commands::Mcp { .. } => unreachable!("MCP command is handled separately in main"),
         }
     }
 }
