@@ -1,21 +1,42 @@
 use std::sync::Arc;
 
 use codesearch::{
-    CodeChunk, DuckdbMetadataRepository, InMemoryVectorRepository, IndexRepositoryUseCase,
-    Language, ListRepositoriesUseCase, MockEmbedding, NodeType, ParserService, SearchCodeUseCase,
-    SearchQuery, TreeSitterParser, VectorStore,
+    CallGraphRepository, CallGraphUseCase, CodeChunk, DuckdbCallGraphRepository,
+    DuckdbFileHashRepository, DuckdbMetadataRepository, FileHashRepository,
+    InMemoryVectorRepository, IndexRepositoryUseCase, Language, ListRepositoriesUseCase,
+    MockEmbedding, NodeType, ParserService, SearchCodeUseCase, SearchQuery, TreeSitterParser,
+    VectorStore,
 };
 use tempfile::tempdir;
 
 async fn setup_test_env() -> TestEnv {
     let metadata_repository =
         Arc::new(DuckdbMetadataRepository::in_memory().expect("Failed to create DuckDB"));
+    let shared_conn = metadata_repository.shared_connection();
+    let file_hash_repo: Arc<dyn FileHashRepository> = Arc::new(
+        DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn))
+            .await
+            .expect("Failed to create file hash repo"),
+    );
+    let call_graph_repo: Arc<dyn CallGraphRepository> = Arc::new(
+        DuckdbCallGraphRepository::with_connection(shared_conn)
+            .await
+            .expect("Failed to create call graph repo"),
+    );
     let vector_repo = Arc::new(InMemoryVectorRepository::new());
     let parser = Arc::new(TreeSitterParser::new());
+
+    // Create CallGraphUseCase with parser-based extractor
+    let call_graph_use_case = Arc::new(CallGraphUseCase::with_parser(
+        parser.clone() as Arc<dyn ParserService>,
+        call_graph_repo,
+    ));
 
     TestEnv {
         metadata_repository,
         vector_repo,
+        file_hash_repo,
+        call_graph_use_case,
         parser,
     }
 }
@@ -24,6 +45,10 @@ struct TestEnv {
     metadata_repository: Arc<DuckdbMetadataRepository>,
     #[allow(dead_code)]
     vector_repo: Arc<InMemoryVectorRepository>,
+    #[allow(dead_code)]
+    file_hash_repo: Arc<dyn FileHashRepository>,
+    #[allow(dead_code)]
+    call_graph_use_case: Arc<CallGraphUseCase>,
     #[allow(dead_code)]
     parser: Arc<TreeSitterParser>,
 }
@@ -161,9 +186,26 @@ async fn test_code_chunk_creation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_vector_store_returns_chunk_documents() {
     let sqlite = Arc::new(DuckdbMetadataRepository::in_memory().expect("Failed to create DuckDB"));
+    let shared_conn = sqlite.shared_connection();
+    let file_hash_repo: Arc<dyn FileHashRepository> = Arc::new(
+        DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn))
+            .await
+            .expect("Failed to create file hash repo"),
+    );
+    let call_graph_repo: Arc<dyn CallGraphRepository> = Arc::new(
+        DuckdbCallGraphRepository::with_connection(shared_conn)
+            .await
+            .expect("Failed to create call graph repo"),
+    );
     let vector_repo = Arc::new(InMemoryVectorRepository::new());
     let parser = Arc::new(TreeSitterParser::new());
     let embedding_service = Arc::new(MockEmbedding::new());
+
+    // Create CallGraphUseCase with parser-based extractor
+    let call_graph_use_case = Arc::new(CallGraphUseCase::with_parser(
+        parser.clone() as Arc<dyn ParserService>,
+        call_graph_repo,
+    ));
 
     let temp_dir = tempdir().expect("Failed to create temp directory");
     let src_dir = temp_dir.path().join("src");
@@ -181,6 +223,8 @@ pub fn add(a: i32, b: i32) -> i32 {
     let index_use_case = IndexRepositoryUseCase::new(
         sqlite.clone(),
         vector_repo.clone(),
+        file_hash_repo,
+        call_graph_use_case,
         parser,
         embedding_service.clone(),
     );
@@ -191,6 +235,7 @@ pub fn add(a: i32, b: i32) -> i32 {
             Some("test-repo"),
             VectorStore::InMemory,
             None,
+            false,
         )
         .await
         .expect("Indexing failed");
@@ -233,6 +278,8 @@ pub fn subtract(a: i32, b: i32) -> i32 {
     let index_use_case = IndexRepositoryUseCase::new(
         env.metadata_repository.clone(),
         env.vector_repo.clone(),
+        env.file_hash_repo.clone(),
+        env.call_graph_use_case.clone(),
         env.parser.clone(),
         embedding_service.clone(),
     );
@@ -243,6 +290,7 @@ pub fn subtract(a: i32, b: i32) -> i32 {
             Some("test-repo"),
             VectorStore::InMemory,
             None,
+            false,
         )
         .await
         .expect("Indexing failed");

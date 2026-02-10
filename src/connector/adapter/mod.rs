@@ -1,4 +1,5 @@
 mod chroma_vector_repository;
+mod duckdb_call_graph_repository;
 mod duckdb_file_hash_repository;
 mod duckdb_metadata_repository;
 mod duckdb_vector_repository;
@@ -11,6 +12,7 @@ mod ort_reranking;
 mod treesitter_parser;
 
 pub use chroma_vector_repository::*;
+pub use duckdb_call_graph_repository::*;
 pub use duckdb_file_hash_repository::*;
 pub use duckdb_metadata_repository::*;
 pub use duckdb_vector_repository::*;
