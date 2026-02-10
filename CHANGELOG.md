@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.5.0...v0.6.0) (2026-02-10)
+
+
+### Features
+
+* expose search as mcp server ([#38](https://github.com/ArtemisMucaj/codesearch/issues/38)) ([eee2dda](https://github.com/ArtemisMucaj/codesearch/commit/eee2dda06bf1a527dd31708811be87c72bf81409))
+
 ## [0.5.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.4.0...v0.5.0) (2026-02-03)
 
 
