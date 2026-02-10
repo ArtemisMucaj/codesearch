@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use codesearch::{
-    CallGraphRepository, CodeChunk, DuckdbCallGraphRepository, DuckdbFileHashRepository,
-    DuckdbMetadataRepository, FileHashRepository, InMemoryVectorRepository, IndexRepositoryUseCase,
-    Language, ListRepositoriesUseCase, MockEmbedding, NodeType, ParserService, SearchCodeUseCase,
-    SearchQuery, TreeSitterParser, VectorStore,
+    CallGraphRepository, CallGraphUseCase, CodeChunk, DuckdbCallGraphRepository,
+    DuckdbFileHashRepository, DuckdbMetadataRepository, FileHashRepository,
+    InMemoryVectorRepository, IndexRepositoryUseCase, Language, ListRepositoriesUseCase,
+    MockEmbedding, NodeType, ParserService, SearchCodeUseCase, SearchQuery, TreeSitterParser,
+    VectorStore,
 };
 use tempfile::tempdir;
 
@@ -25,11 +26,17 @@ async fn setup_test_env() -> TestEnv {
     let vector_repo = Arc::new(InMemoryVectorRepository::new());
     let parser = Arc::new(TreeSitterParser::new());
 
+    // Create CallGraphUseCase with parser-based extractor
+    let call_graph_use_case = Arc::new(CallGraphUseCase::with_parser(
+        parser.clone() as Arc<dyn ParserService>,
+        call_graph_repo,
+    ));
+
     TestEnv {
         metadata_repository,
         vector_repo,
         file_hash_repo,
-        call_graph_repo,
+        call_graph_use_case,
         parser,
     }
 }
@@ -41,7 +48,7 @@ struct TestEnv {
     #[allow(dead_code)]
     file_hash_repo: Arc<dyn FileHashRepository>,
     #[allow(dead_code)]
-    call_graph_repo: Arc<dyn CallGraphRepository>,
+    call_graph_use_case: Arc<CallGraphUseCase>,
     #[allow(dead_code)]
     parser: Arc<TreeSitterParser>,
 }
@@ -194,6 +201,12 @@ async fn test_vector_store_returns_chunk_documents() {
     let parser = Arc::new(TreeSitterParser::new());
     let embedding_service = Arc::new(MockEmbedding::new());
 
+    // Create CallGraphUseCase with parser-based extractor
+    let call_graph_use_case = Arc::new(CallGraphUseCase::with_parser(
+        parser.clone() as Arc<dyn ParserService>,
+        call_graph_repo,
+    ));
+
     let temp_dir = tempdir().expect("Failed to create temp directory");
     let src_dir = temp_dir.path().join("src");
     std::fs::create_dir_all(&src_dir).expect("Failed to create src directory");
@@ -211,7 +224,7 @@ pub fn add(a: i32, b: i32) -> i32 {
         sqlite.clone(),
         vector_repo.clone(),
         file_hash_repo,
-        call_graph_repo,
+        call_graph_use_case,
         parser,
         embedding_service.clone(),
     );
@@ -266,7 +279,7 @@ pub fn subtract(a: i32, b: i32) -> i32 {
         env.metadata_repository.clone(),
         env.vector_repo.clone(),
         env.file_hash_repo.clone(),
-        env.call_graph_repo.clone(),
+        env.call_graph_use_case.clone(),
         env.parser.clone(),
         embedding_service.clone(),
     );
