@@ -8,7 +8,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use tracing::{debug, info, warn};
 
 use crate::application::{
-    CallGraphRepository, EmbeddingService, FileHashRepository, MetadataRepository, ParserService,
+    CallGraphUseCase, EmbeddingService, FileHashRepository, MetadataRepository, ParserService,
     VectorRepository,
 };
 use crate::domain::{
@@ -19,7 +19,7 @@ pub struct IndexRepositoryUseCase {
     repository_repo: Arc<dyn MetadataRepository>,
     vector_repo: Arc<dyn VectorRepository>,
     file_hash_repo: Arc<dyn FileHashRepository>,
-    call_graph_repo: Arc<dyn CallGraphRepository>,
+    call_graph_use_case: Arc<CallGraphUseCase>,
     parser_service: Arc<dyn ParserService>,
     embedding_service: Arc<dyn EmbeddingService>,
 }
@@ -29,7 +29,7 @@ impl IndexRepositoryUseCase {
         repository_repo: Arc<dyn MetadataRepository>,
         vector_repo: Arc<dyn VectorRepository>,
         file_hash_repo: Arc<dyn FileHashRepository>,
-        call_graph_repo: Arc<dyn CallGraphRepository>,
+        call_graph_use_case: Arc<CallGraphUseCase>,
         parser_service: Arc<dyn ParserService>,
         embedding_service: Arc<dyn EmbeddingService>,
     ) -> Self {
@@ -37,7 +37,7 @@ impl IndexRepositoryUseCase {
             repository_repo,
             vector_repo,
             file_hash_repo,
-            call_graph_repo,
+            call_graph_use_case,
             parser_service,
             embedding_service,
         }
@@ -72,7 +72,7 @@ impl IndexRepositoryUseCase {
                 self.file_hash_repo
                     .delete_by_repository(existing.id())
                     .await?;
-                self.call_graph_repo
+                self.call_graph_use_case
                     .delete_by_repository(existing.id())
                     .await?;
                 self.repository_repo.delete(existing.id()).await?;
@@ -212,25 +212,11 @@ impl IndexRepositoryUseCase {
             self.vector_repo.save_batch(&chunks, &embeddings).await?;
 
             // Extract and save symbol references (call graph)
-            let references = match self
-                .parser_service
-                .extract_references(&content, &relative_path, language, repository.id())
-                .await
-            {
-                Ok(refs) => refs,
-                Err(e) => {
-                    debug!(
-                        "Failed to extract references from {}: {} (continuing)",
-                        relative_path, e
-                    );
-                    Vec::new()
-                }
-            };
-
-            if !references.is_empty() {
-                self.call_graph_repo.save_batch(&references).await?;
-                reference_count += references.len() as u64;
-            }
+            let refs_count = self
+                .call_graph_use_case
+                .extract_and_save(&content, &relative_path, language, repository.id())
+                .await?;
+            reference_count += refs_count;
 
             file_count += 1;
             chunk_count += chunks.len() as u64;
@@ -244,7 +230,7 @@ impl IndexRepositoryUseCase {
             debug!(
                 "Indexed {} chunks, {} references from {}",
                 chunks.len(),
-                references.len(),
+                refs_count,
                 relative_path
             );
             progress_bar.inc(1);
@@ -373,8 +359,8 @@ impl IndexRepositoryUseCase {
                 .delete_by_file_path(repository.id(), path)
                 .await?;
             // Also delete symbol references for this file
-            self.call_graph_repo
-                .delete_by_file_path(repository.id(), path)
+            self.call_graph_use_case
+                .delete_by_file(repository.id(), path)
                 .await?;
         }
         if !deleted.is_empty() {
@@ -392,8 +378,8 @@ impl IndexRepositoryUseCase {
                 .delete_by_file_path(repository.id(), path)
                 .await?;
             // Also delete symbol references for this file
-            self.call_graph_repo
-                .delete_by_file_path(repository.id(), path)
+            self.call_graph_use_case
+                .delete_by_file(repository.id(), path)
                 .await?;
         }
 
@@ -465,25 +451,11 @@ impl IndexRepositoryUseCase {
             self.vector_repo.save_batch(&chunks, &embeddings).await?;
 
             // Extract and save symbol references (call graph)
-            let references = match self
-                .parser_service
-                .extract_references(&content, relative_path, language, repository.id())
-                .await
-            {
-                Ok(refs) => refs,
-                Err(e) => {
-                    debug!(
-                        "Failed to extract references from {}: {} (continuing)",
-                        relative_path, e
-                    );
-                    Vec::new()
-                }
-            };
-
-            if !references.is_empty() {
-                self.call_graph_repo.save_batch(&references).await?;
-                new_reference_count += references.len() as u64;
-            }
+            let refs_count = self
+                .call_graph_use_case
+                .extract_and_save(&content, relative_path, language, repository.id())
+                .await?;
+            new_reference_count += refs_count;
 
             // Only add file hash after successful indexing
             new_file_hashes.push(FileHash::new(
@@ -504,7 +476,7 @@ impl IndexRepositoryUseCase {
             debug!(
                 "Indexed {} chunks, {} references from {}",
                 chunks.len(),
-                references.len(),
+                refs_count,
                 relative_path
             );
             progress_bar.inc(1);

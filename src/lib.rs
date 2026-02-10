@@ -4,9 +4,10 @@ pub mod connector;
 pub mod domain;
 
 pub use application::{
-    CallGraphQuery, CallGraphRepository, CallGraphStats, DeleteRepositoryUseCase, EmbeddingService,
-    FileHashRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, MetadataRepository,
-    ParserService, RerankingService, SearchCodeUseCase, VectorRepository,
+    CallGraphExtractor, CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase,
+    DeleteRepositoryUseCase, EmbeddingService, FileHashRepository, IndexRepositoryUseCase,
+    ListRepositoriesUseCase, MetadataRepository, ParserBasedExtractor, ParserService,
+    RerankingService, SearchCodeUseCase, VectorRepository,
 };
 
 pub use cli::Commands;

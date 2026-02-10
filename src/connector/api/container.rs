@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::debug;
 
-use crate::application::{CallGraphRepository, FileHashRepository};
+use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, ParserService};
 use crate::{
     ChromaVectorRepository, DeleteRepositoryUseCase, DuckdbCallGraphRepository,
     DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
@@ -29,7 +29,7 @@ pub struct Container {
     vector_repo: Arc<dyn VectorRepository>,
     repo_adapter: Arc<DuckdbMetadataRepository>,
     file_hash_repo: Arc<dyn FileHashRepository>,
-    call_graph_repo: Arc<dyn CallGraphRepository>,
+    call_graph_use_case: Arc<CallGraphUseCase>,
     config: ContainerConfig,
 }
 
@@ -161,6 +161,12 @@ impl Container {
             }
         };
 
+        // Create the call graph use case with parser-based extractor
+        let call_graph_use_case = Arc::new(CallGraphUseCase::with_parser(
+            parser.clone() as Arc<dyn ParserService>,
+            call_graph_repo,
+        ));
+
         Ok(Self {
             parser,
             embedding_service,
@@ -168,7 +174,7 @@ impl Container {
             vector_repo,
             repo_adapter,
             file_hash_repo,
-            call_graph_repo,
+            call_graph_use_case,
             config,
         })
     }
@@ -178,7 +184,7 @@ impl Container {
             self.repo_adapter.clone(),
             self.vector_repo.clone(),
             self.file_hash_repo.clone(),
-            self.call_graph_repo.clone(),
+            self.call_graph_use_case.clone(),
             self.parser.clone(),
             self.embedding_service.clone(),
         )
@@ -204,8 +210,13 @@ impl Container {
             self.repo_adapter.clone(),
             self.vector_repo.clone(),
             self.file_hash_repo.clone(),
-            self.call_graph_repo.clone(),
+            self.call_graph_use_case.clone(),
         )
+    }
+
+    /// Get the call graph use case for direct access to call graph functionality.
+    pub fn call_graph_use_case(&self) -> Arc<CallGraphUseCase> {
+        self.call_graph_use_case.clone()
     }
 
     pub fn data_dir(&self) -> &str {
