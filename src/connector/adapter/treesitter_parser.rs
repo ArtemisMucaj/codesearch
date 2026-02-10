@@ -697,12 +697,16 @@ impl ParserService for TreeSitterParser {
                     .copied()
                     .unwrap_or("");
 
-                if capture_name == "callee" || capture_name == "type_ref" {
+                if capture_name == "callee" {
+                    // "callee" always takes priority - set name and node unconditionally
                     callee_name = Some(content[capture.node.byte_range()].to_string());
                     ref_node = Some(capture.node);
-                    // For type_ref, the capture itself determines the kind
-                    if capture_name == "type_ref" {
-                        reference_kind = ReferenceKind::TypeReference;
+                } else if capture_name == "type_ref" {
+                    // For type_ref, set the kind but only set name/node if not already set by "callee"
+                    reference_kind = ReferenceKind::TypeReference;
+                    if callee_name.is_none() {
+                        callee_name = Some(content[capture.node.byte_range()].to_string());
+                        ref_node = Some(capture.node);
                     }
                 } else {
                     // This is the outer capture (call, method_call, etc.)
