@@ -42,9 +42,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Extract MCP mode info before moving cli.command
-    let (is_mcp, http_port) = match &cli.command {
-        Commands::Mcp { http } => (true, *http),
-        _ => (false, None),
+    let (is_mcp, http_port, public_bind) = match &cli.command {
+        Commands::Mcp { http, public } => (true, *http, *public),
+        _ => (false, None, false),
     };
 
     // For MCP stdio mode, log to stderr (stdout is for MCP protocol)
@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
 
         if let Some(port) = http_port {
             // HTTP mode
-            run_http_server(container, port).await?;
+            run_http_server(container, port, public_bind).await?;
         } else {
             // Stdio mode
             tracing::info!("Starting codesearch MCP server (stdio)");
@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_http_server(container: Arc<Container>, port: u16) -> Result<()> {
+async fn run_http_server(container: Arc<Container>, port: u16, public: bool) -> Result<()> {
     use axum::routing::any;
     use axum::Router;
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -118,7 +118,10 @@ async fn run_http_server(container: Arc<Container>, port: u16) -> Result<()> {
     use std::net::SocketAddr;
     use tokio_util::sync::CancellationToken;
 
-    tracing::info!("Starting codesearch MCP server (HTTP) on port {}", port);
+    let bind_addr: [u8; 4] = if public { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
+    let addr = SocketAddr::from((bind_addr, port));
+
+    tracing::info!("Starting codesearch MCP server (HTTP) on {}", addr);
 
     let ct = CancellationToken::new();
     let config = StreamableHttpServerConfig {
@@ -138,7 +141,6 @@ async fn run_http_server(container: Arc<Container>, port: u16) -> Result<()> {
 
     let app = Router::new().route("/mcp", any(move |req| async move { mcp_service.handle(req).await }));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     tracing::info!("MCP HTTP server listening on http://{}/mcp", addr);

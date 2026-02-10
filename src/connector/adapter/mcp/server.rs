@@ -18,6 +18,9 @@ use crate::domain::SearchQuery;
 
 use super::tools::SearchResultOutput;
 
+/// Server-side maximum for the number of results a single search can return.
+const MAX_LIMIT: usize = 100;
+
 fn default_limit() -> usize {
     10
 }
@@ -28,7 +31,7 @@ pub struct SearchToolInput {
     /// Natural language query describing the code you're looking for
     pub query: String,
 
-    /// Maximum number of results to return (default: 10)
+    /// Maximum number of results to return (default: 10, server cap: 100)
     #[serde(default = "default_limit")]
     pub limit: usize,
 
@@ -67,8 +70,11 @@ impl CodesearchMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let input = params.0;
 
+        // Clamp to server-side maximum
+        let limit = input.limit.min(MAX_LIMIT);
+
         // Build SearchQuery from input
-        let mut query = SearchQuery::new(&input.query).with_limit(input.limit);
+        let mut query = SearchQuery::new(&input.query).with_limit(limit);
 
         if let Some(score) = input.min_score {
             query = query.with_min_score(score);
