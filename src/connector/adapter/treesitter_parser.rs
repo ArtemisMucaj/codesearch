@@ -487,28 +487,36 @@ impl TreeSitterParser {
         }
     }
 
-    /// Find the enclosing function or class for a given node position.
-    fn find_enclosing_scope(
+    /// Collect all scopes (functions, classes, etc.) from the file in one pass.
+    /// Returns a Vec of (start_line, end_line, name, parent) for each scope.
+    /// This avoids repeated Query creation and tree traversal for each reference.
+    fn collect_scopes(
         &self,
         content: &str,
         tree: &tree_sitter::Tree,
-        line: u32,
         language: Language,
-    ) -> Option<(String, Option<String>)> {
-        let ts_language = self.get_ts_language(language)?;
+    ) -> Vec<(u32, u32, String, Option<String>)> {
+        let ts_language = match self.get_ts_language(language) {
+            Some(lang) => lang,
+            None => return Vec::new(),
+        };
+
         let query_source = self.get_query_patterns(language);
         if query_source.is_empty() {
-            return None;
+            return Vec::new();
         }
 
-        let query = Query::new(&ts_language, query_source).ok()?;
+        let query = match Query::new(&ts_language, query_source) {
+            Ok(q) => q,
+            Err(_) => return Vec::new(),
+        };
+
         let mut cursor = QueryCursor::new();
         let text_bytes = content.as_bytes();
-
         let capture_names: Vec<&str> = query.capture_names().to_vec();
-        let mut matches_iter = cursor.matches(&query, tree.root_node(), text_bytes);
 
-        let mut best_match: Option<(u32, u32, String, Option<String>)> = None; // (start, end, name, parent)
+        let mut scopes = Vec::new();
+        let mut matches_iter = cursor.matches(&query, tree.root_node(), text_bytes);
 
         while let Some(query_match) = matches_iter.next() {
             let mut symbol_name: Option<String> = None;
@@ -533,26 +541,43 @@ impl TreeSitterParser {
             if let (Some(node), Some(name)) = (main_node, symbol_name) {
                 let start_line = node.start_position().row as u32 + 1;
                 let end_line = node.end_position().row as u32 + 1;
-
-                // Check if this scope contains our target line and is a better (tighter) match
-                if start_line <= line && end_line >= line {
-                    let is_better = match &best_match {
-                        None => true,
-                        Some((best_start, best_end, _, _)) => {
-                            // Prefer tighter scope (smaller range that still contains the line)
-                            (end_line - start_line) < (best_end - best_start)
-                        }
-                    };
-
-                    if is_better {
-                        best_match = Some((start_line, end_line, name, parent_symbol));
-                    }
-                }
+                scopes.push((start_line, end_line, name, parent_symbol));
             }
         }
 
-        best_match.map(|(_, _, name, parent)| (name, parent))
+        scopes
     }
+}
+
+/// Look up the tightest enclosing scope for a given line.
+/// Scopes is a slice of (start_line, end_line, name, parent).
+/// Returns (name, parent) of the tightest scope containing the line.
+fn lookup_enclosing_scope(
+    scopes: &[(u32, u32, String, Option<String>)],
+    line: u32,
+) -> Option<(String, Option<String>)> {
+    let mut best_match: Option<&(u32, u32, String, Option<String>)> = None;
+
+    for scope in scopes {
+        let (start_line, end_line, _, _) = scope;
+
+        // Check if this scope contains our target line
+        if *start_line <= line && *end_line >= line {
+            let is_better = match best_match {
+                None => true,
+                Some((best_start, best_end, _, _)) => {
+                    // Prefer tighter scope (smaller range that still contains the line)
+                    (end_line - start_line) < (best_end - best_start)
+                }
+            };
+
+            if is_better {
+                best_match = Some(scope);
+            }
+        }
+    }
+
+    best_match.map(|(_, _, name, parent)| (name.clone(), parent.clone()))
 }
 
 impl Default for TreeSitterParser {
@@ -697,6 +722,9 @@ impl ParserService for TreeSitterParser {
         let mut cursor = QueryCursor::new();
         let text_bytes = content.as_bytes();
 
+        // Collect all scopes once for efficient lookup
+        let scopes = self.collect_scopes(content, &tree, language);
+
         let mut references = Vec::new();
         let capture_names: Vec<&str> = query.capture_names().to_vec();
 
@@ -791,10 +819,9 @@ impl ParserService for TreeSitterParser {
                 let column = node.start_position().column as u32 + 1;
 
                 // Find enclosing scope (function/class that contains this reference)
-                let (caller_symbol, enclosing_scope) =
-                    self.find_enclosing_scope(content, &tree, line, language)
-                        .map(|(name, parent)| (Some(name), parent))
-                        .unwrap_or((None, None));
+                let (caller_symbol, enclosing_scope) = lookup_enclosing_scope(&scopes, line)
+                    .map(|(name, parent)| (Some(name), parent))
+                    .unwrap_or((None, None));
 
                 let mut reference = SymbolReference::new(
                     caller_symbol,
