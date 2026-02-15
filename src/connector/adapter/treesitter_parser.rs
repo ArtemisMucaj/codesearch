@@ -6,6 +6,31 @@ use tree_sitter::{Parser, Query, QueryCursor};
 use crate::application::ParserService;
 use crate::domain::{CodeChunk, DomainError, Language, NodeType, ReferenceKind, SymbolReference};
 
+/// Normalize import paths by stripping surrounding delimiters.
+/// - Go imports: "fmt" -> fmt
+/// - C++ string includes: "header.h" -> header.h
+/// - C++ system includes: <iostream> -> iostream
+fn normalize_import_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.len() < 2 {
+        return trimmed.to_string();
+    }
+
+    // Check for surrounding quotes (Go imports, C++ string includes)
+    if (trimmed.starts_with('"') && trimmed.ends_with('"'))
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+    {
+        return trimmed[1..trimmed.len() - 1].to_string();
+    }
+
+    // Check for surrounding angle brackets (C++ system includes)
+    if trimmed.starts_with('<') && trimmed.ends_with('>') {
+        return trimmed[1..trimmed.len() - 1].to_string();
+    }
+
+    trimmed.to_string()
+}
+
 pub struct TreeSitterParser {
     supported_languages: Vec<Language>,
 }
@@ -333,12 +358,7 @@ impl TreeSitterParser {
                 (call_expression
                     function: (identifier) @callee) @call
 
-                ; Method calls
-                (call_expression
-                    function: (selector_expression
-                        field: (field_identifier) @callee)) @method_call
-
-                ; Package-qualified calls
+                ; Package-qualified calls (also covers method calls on package variables)
                 (call_expression
                     function: (selector_expression
                         operand: (identifier) @_pkg
@@ -354,10 +374,6 @@ impl TreeSitterParser {
                 ; Struct instantiation (composite literal)
                 (composite_literal
                     type: (type_identifier) @callee) @instantiation
-
-                ; Interface embedding
-                (interface_type
-                    (type_identifier) @callee) @inheritance
                 "#
             }
             Language::Php => {
@@ -716,7 +732,14 @@ impl ParserService for TreeSitterParser {
                 }
             }
 
-            if let (Some(name), Some(node)) = (callee_name, ref_node) {
+            if let (Some(mut name), Some(node)) = (callee_name, ref_node) {
+                // Normalize import paths: strip surrounding quotes/brackets
+                // Go imports: "fmt" -> fmt
+                // C++ includes: "header.h" -> header.h, <iostream> -> iostream
+                if reference_kind == ReferenceKind::Import {
+                    name = normalize_import_path(&name);
+                }
+
                 // Skip very short names (likely noise), common keywords, and primitive types
                 if name.len() < 2
                     || matches!(
@@ -1060,6 +1083,157 @@ fn caller() {
             helper_call.caller_symbol(),
             Some("caller"),
             "Should identify caller function"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_go_imports_strip_quotes() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+package main
+
+import (
+    "fmt"
+    "os"
+)
+
+func main() {
+    fmt.Println("hello")
+}
+"#;
+
+        let references = parser
+            .extract_references(content, "main.go", Language::Go, "test-repo")
+            .await
+            .unwrap();
+
+        // Check that import paths have quotes stripped
+        let fmt_imports: Vec<_> = references
+            .iter()
+            .filter(|r| r.callee_symbol() == "fmt" && r.reference_kind() == ReferenceKind::Import)
+            .collect();
+        assert!(
+            !fmt_imports.is_empty(),
+            "Should find import of fmt (without quotes)"
+        );
+
+        let os_imports: Vec<_> = references
+            .iter()
+            .filter(|r| r.callee_symbol() == "os" && r.reference_kind() == ReferenceKind::Import)
+            .collect();
+        assert!(
+            !os_imports.is_empty(),
+            "Should find import of os (without quotes)"
+        );
+
+        // Verify no imports with quotes
+        let quoted_imports: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.reference_kind() == ReferenceKind::Import && r.callee_symbol().starts_with('"')
+            })
+            .collect();
+        assert!(
+            quoted_imports.is_empty(),
+            "Should not have imports with surrounding quotes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_go_no_duplicate_package_calls() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+package main
+
+import "fmt"
+
+func main() {
+    fmt.Println("hello")
+}
+"#;
+
+        let references = parser
+            .extract_references(content, "main.go", Language::Go, "test-repo")
+            .await
+            .unwrap();
+
+        // Should find exactly one call to Println (not duplicated by method_call pattern)
+        let println_calls: Vec<_> = references
+            .iter()
+            .filter(|r| r.callee_symbol() == "Println" && r.reference_kind() == ReferenceKind::Call)
+            .collect();
+        assert_eq!(
+            println_calls.len(),
+            1,
+            "Should find exactly one call to Println (no duplicates)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cpp_includes_strip_quotes_and_brackets() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+#include <iostream>
+#include <vector>
+#include "myheader.h"
+
+int main() {
+    return 0;
+}
+"#;
+
+        let references = parser
+            .extract_references(content, "main.cpp", Language::Cpp, "test-repo")
+            .await
+            .unwrap();
+
+        // Check system includes have angle brackets stripped
+        let iostream_imports: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "iostream" && r.reference_kind() == ReferenceKind::Import
+            })
+            .collect();
+        assert!(
+            !iostream_imports.is_empty(),
+            "Should find import of iostream (without angle brackets)"
+        );
+
+        let vector_imports: Vec<_> = references
+            .iter()
+            .filter(|r| r.callee_symbol() == "vector" && r.reference_kind() == ReferenceKind::Import)
+            .collect();
+        assert!(
+            !vector_imports.is_empty(),
+            "Should find import of vector (without angle brackets)"
+        );
+
+        // Check string includes have quotes stripped
+        let myheader_imports: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "myheader.h" && r.reference_kind() == ReferenceKind::Import
+            })
+            .collect();
+        assert!(
+            !myheader_imports.is_empty(),
+            "Should find import of myheader.h (without quotes)"
+        );
+
+        // Verify no imports with quotes or brackets
+        let raw_imports: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.reference_kind() == ReferenceKind::Import
+                    && (r.callee_symbol().starts_with('"')
+                        || r.callee_symbol().starts_with('<')
+                        || r.callee_symbol().ends_with('"')
+                        || r.callee_symbol().ends_with('>'))
+            })
+            .collect();
+        assert!(
+            raw_imports.is_empty(),
+            "Should not have imports with surrounding delimiters"
         );
     }
 }
