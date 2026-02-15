@@ -10,7 +10,7 @@ pub use application::{
     RerankingService, SearchCodeUseCase, VectorRepository,
 };
 
-pub use cli::Commands;
+pub use cli::{Commands, OutputFormat};
 
 pub use connector::{
     ChromaVectorRepository, DuckdbCallGraphRepository, DuckdbFileHashRepository,
