@@ -132,7 +132,7 @@ CodeSearch supports optional reranking to improve search result relevance using 
 
 ### How It Works
 
-1. Initial vector search retrieves candidates using logarithmic scaling: `num + num × ⌈ln(num)⌉` (defaults to 20 base candidates when `num ≤ 10`)
+1. Initial vector search retrieves candidates using inverse-log scaling: `num + ⌈num / ln(num)⌉` (defaults to 20 base candidates when `num ≤ 10`)
 2. Candidates with vector similarity score below 0.1 are excluded (too irrelevant to benefit from reranking)
 3. A cross-encoder model (mxbai-rerank-xsmall-v1) reranks remaining candidates based on query-document relevance
 4. Top `num` reranked results are returned

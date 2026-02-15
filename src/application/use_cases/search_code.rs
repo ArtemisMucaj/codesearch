@@ -42,17 +42,15 @@ impl SearchCodeUseCase {
         );
 
         let fetch_limit = if self.reranking_service.is_some() {
-            // Use a log-based formula to scale candidates for reranking:
-            // fetch_limit = num + num * ceil(ln(num))
-            // This gives enough candidates without being overwhelming:
-            //   num=10  -> 10 + 10*3 = 40
-            //   num=20  -> 20 + 20*3 = 80
-            //   num=50  -> 50 + 50*4 = 250
-            //   num=100 -> 100 + 100*5 = 600
-            // Default to 20 candidates when not specified (i.e. when limit <= 10)
+            // Use an inverse-log formula so the overhead shrinks as num grows:
+            // fetch_limit = num + ceil(num / ln(num))
+            //   num=20 (default) -> 20 + 7  = 27  (+35%)
+            //   num=50           -> 50 + 13  = 63  (+26%)
+            //   num=100          -> 100 + 22 = 122 (+22%)
+            // Default to 20 base candidates when not specified (i.e. when limit <= 10)
             let base = if query.limit() <= 10 { 20 } else { query.limit() };
-            let log_factor = (base as f64).ln().ceil() as usize;
-            base + base * log_factor
+            let extra = ((base as f64) / (base as f64).ln()).ceil() as usize;
+            base + extra
         } else {
             query.limit()
         };
