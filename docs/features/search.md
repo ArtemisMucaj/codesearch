@@ -48,10 +48,10 @@ codesearch search "error handling" --num 20
 Enable cross-encoder reranking to improve result quality:
 
 ```bash
-# Basic reranking (fetches 100 candidates, returns top 10)
+# Basic reranking (fetches ~20 candidates via log-based scaling, returns top 10)
 codesearch search "error handling"
 
-# Reranking with custom result count (fetches 200, returns top 20)
+# Reranking with custom result count
 codesearch search "validation" --num 20
 
 # No reranking
@@ -59,14 +59,15 @@ codesearch search "validation" --no-rerank
 ```
 
 **How reranking works:**
-- Fetches candidates from vector search (minimum 100, or `num × 10` if `num > 10`)
-- Rescores them using a cross-encoder model (mxbai-rerank-xsmall-v1)
+- Fetches candidates from vector search using a logarithmic scaling formula: `num + num × ⌈ln(num)⌉` (defaults to 20 base candidates when `num ≤ 10`)
+- Filters out candidates with a vector similarity score below 0.1 (too irrelevant to benefit from reranking)
+- Rescores remaining candidates using a cross-encoder model (mxbai-rerank-xsmall-v1)
 - Returns top `num` results by relevance score
 
 **Trade-offs:**
 - ✅ Better result relevance (especially for specific queries)
 - ✅ No external dependencies or APIs
-- ⚠️ ~2-5x slower than vector-only search
+- ✅ Logarithmic candidate scaling keeps reranking fast even for large result counts
 
 ### Minimum Score Threshold
 

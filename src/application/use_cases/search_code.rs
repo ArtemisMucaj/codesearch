@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::application::{EmbeddingService, RerankingService, VectorRepository};
 use crate::domain::{DomainError, SearchQuery, SearchResult};
@@ -42,11 +42,17 @@ impl SearchCodeUseCase {
         );
 
         let fetch_limit = if self.reranking_service.is_some() {
-            if query.limit() <= 10 {
-                100
-            } else {
-                query.limit() * 10
-            }
+            // Use a log-based formula to scale candidates for reranking:
+            // fetch_limit = num + num * ceil(ln(num))
+            // This gives enough candidates without being overwhelming:
+            //   num=10  -> 10 + 10*3 = 40
+            //   num=20  -> 20 + 20*3 = 80
+            //   num=50  -> 50 + 50*4 = 250
+            //   num=100 -> 100 + 100*5 = 600
+            // Default to 20 candidates when not specified (i.e. when limit <= 10)
+            let base = if query.limit() <= 10 { 20 } else { query.limit() };
+            let log_factor = (base as f64).ln().ceil() as usize;
+            base + base * log_factor
         } else {
             query.limit()
         };
@@ -63,6 +69,18 @@ impl SearchCodeUseCase {
             .await?;
 
         if let Some(ref reranker) = self.reranking_service {
+            // Filter out very low-scoring results before reranking — they are
+            // unlikely to resurface and just slow down the cross-encoder.
+            let before_filter = results.len();
+            results.retain(|r| r.score() >= 0.1);
+            let filtered = before_filter - results.len();
+            if filtered > 0 {
+                warn!(
+                    "Excluded {} candidates with score < 0.1 before reranking",
+                    filtered
+                );
+            }
+
             info!(
                 "Reranking {} candidates with {}",
                 results.len(),
