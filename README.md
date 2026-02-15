@@ -87,6 +87,15 @@ codesearch delete /path/to/repo
 | `-m, --min-score` | (none) | Minimum relevance score threshold (0.0-1.0) |
 | `-L, --language` | (none) | Filter by programming language (can specify multiple) |
 | `-r, --repository` | (none) | Filter by repository (can specify multiple) |
+| `-F, --format` | `text` | Output format: `text`, `json`, or `vimgrep` |
+
+### Output Formats
+
+| Format | Description |
+|--------|-------------|
+| `text` | Human-readable output with code previews (default) |
+| `json` | Structured JSON array for programmatic use and editor integrations |
+| `vimgrep` | `file:line:col:text` format for Neovim quickfix list and Telescope |
 
 ### Examples
 
@@ -111,6 +120,63 @@ codesearch search "error handling" --num 25
 
 # Filter by language
 codesearch search "async function" --language rust
+
+# JSON output for scripts or editor integrations
+codesearch search "error handling" --format json
+
+# Vimgrep format for Neovim quickfix
+codesearch search "error handling" --format vimgrep
+```
+
+## Editor Integrations
+
+### Neovim / Telescope
+
+A [Telescope](https://github.com/nvim-telescope/telescope.nvim) extension is included under `ide/nvim/`. It provides a fuzzy picker over semantic search results, with file preview at the correct line.
+
+**Setup:**
+
+1. Add `ide/nvim/lua` to your Neovim runtime path:
+
+```lua
+vim.opt.runtimepath:append("/path/to/codesearch/ide/nvim")
+```
+
+2. Load the extension:
+
+```lua
+require("telescope").load_extension("codesearch")
+```
+
+3. Bind a key:
+
+```lua
+vim.keymap.set("n", "<leader>cs", function()
+  require("telescope").extensions.codesearch.codesearch()
+end, { desc = "Semantic code search" })
+```
+
+**Configuration (optional):**
+
+```lua
+require("telescope").setup({
+  extensions = {
+    codesearch = {
+      bin = "codesearch",     -- path to binary
+      num = 20,               -- number of results
+      min_score = 0.3,        -- minimum relevance score
+      data_dir = nil,         -- custom data directory
+      namespace = nil,        -- custom namespace
+    },
+  },
+})
+```
+
+**Quick use without Telescope:**
+
+```bash
+# Load results directly into Neovim's quickfix list
+codesearch search "error handling" --format vimgrep | nvim -q /dev/stdin
 ```
 
 ### Storage Backends
