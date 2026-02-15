@@ -6,5 +6,3 @@
 - [ ] GPU acceleration
 - [x] Neovim/Telescope integration
 - [x] Multiple output formats (text, json, vimgrep)
-- [ ] VS Code extension
-- [ ] Emacs integration
