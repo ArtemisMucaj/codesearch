@@ -150,14 +150,6 @@ codesearch --memory-storage search "query"
 codesearch --no-rerank search "query"
 ```
 
-## Fallback
-
-If codesearch is unavailable, try to fix it before falling back to Grep/Glob:
-- **Binary not found**: Run the install script (see [Installation](#installation) above), then retry
-- **Index not built**: Run `codesearch index /path/to/repo`, then retry
-- **No results**: Try broadening the query or check that the target language is supported
-- **Persistent errors**: Fall back to standard Grep/Glob tools
-
 ## Keywords
 
 semantic search, code search, natural language search, find code, explore codebase, code understanding, intent search, AST analysis, embeddings, code discovery, code exploration
