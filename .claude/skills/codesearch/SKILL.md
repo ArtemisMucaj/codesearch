@@ -30,10 +30,10 @@ Use Grep/Glob for:
 
 ## Installation
 
-If the `codesearch` binary is not found, install it automatically by running the install script from the repository root:
+If the `codesearch` binary is not found, install it automatically by running the install script bundled with this skill:
 
 ```shell
-INSTALL_DIR="$HOME/.local/bin" sh ./install.sh
+INSTALL_DIR="$HOME/.local/bin" sh .claude/skills/codesearch/install.sh
 ```
 
 After installation, verify it works:
