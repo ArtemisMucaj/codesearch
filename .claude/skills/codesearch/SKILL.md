@@ -28,6 +28,22 @@ Use Grep/Glob for:
 - File patterns: `Glob "**/*.rs"` (find files by extension)
 - Variable references: `Grep "config_path"` (find exact variable name)
 
+## Installation
+
+If the `codesearch` binary is not found, install it automatically by running the install script from the repository root:
+
+```shell
+INSTALL_DIR="$HOME/.local/bin" sh ./install.sh
+```
+
+After installation, verify it works:
+
+```shell
+codesearch --version
+```
+
+> **Note:** The script downloads the latest release binary from GitHub for the current OS/architecture. It installs to `$INSTALL_DIR` (defaults to `$HOME/.local/bin` above). Ensure `$HOME/.local/bin` is in your `PATH`.
+
 ## Prerequisites
 
 Before using codesearch, the target repository must be indexed:
@@ -136,10 +152,11 @@ codesearch --no-rerank search "query"
 
 ## Fallback
 
-If codesearch is unavailable (not installed, index not built, or errors), fall back to standard Grep/Glob tools. Common issues:
-- **Binary not found**: Install codesearch (see install.sh)
-- **Index not built**: Run `codesearch index /path/to/repo`
+If codesearch is unavailable, try to fix it before falling back to Grep/Glob:
+- **Binary not found**: Run the install script (see [Installation](#installation) above), then retry
+- **Index not built**: Run `codesearch index /path/to/repo`, then retry
 - **No results**: Try broadening the query or check that the target language is supported
+- **Persistent errors**: Fall back to standard Grep/Glob tools
 
 ## Keywords
 
