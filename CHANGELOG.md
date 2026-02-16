@@ -7,6 +7,29 @@
 * add `--format` flag to search command with `text`, `json`, and `vimgrep` output modes
 * add Telescope extension for Neovim (`ide/nvim/`) with semantic search picker and file preview
 
+## [0.6.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.5.0...v0.6.0) (2026-02-16)
+
+
+### Features
+
+* add call graph indexing to track symbol references ([ef4c6ec](https://github.com/ArtemisMucaj/codesearch/commit/ef4c6ec2c75a2b574449e6672182c93bb8b655c3))
+* add skill for codesearch CLI ([#42](https://github.com/ArtemisMucaj/codesearch/issues/42)) ([e228bde](https://github.com/ArtemisMucaj/codesearch/commit/e228bde8d5b5cffcc10c6caa22c585dbc57c951d))
+* add Telescope/Neovim integration for semantic code search ([#40](https://github.com/ArtemisMucaj/codesearch/issues/40)) ([3c87058](https://github.com/ArtemisMucaj/codesearch/commit/3c870588428f18b2006a32f737879dd68fc920a1))
+* expose search as mcp server ([#38](https://github.com/ArtemisMucaj/codesearch/issues/38)) ([eee2dda](https://github.com/ArtemisMucaj/codesearch/commit/eee2dda06bf1a527dd31708811be87c72bf81409))
+
+
+### Bug Fixes
+
+* normalize Go/C++ imports and remove duplicate Go patterns ([471c137](https://github.com/ArtemisMucaj/codesearch/commit/471c137ff937619005f1bf666637f0b305cb087b))
+* prioritize callee capture over type_ref in reference extraction ([8401f5f](https://github.com/ArtemisMucaj/codesearch/commit/8401f5f62a6ae3ad6571b45e512ed26c262a1e0e))
+* remove duplicate Python pattern and filter primitive types ([729ba99](https://github.com/ArtemisMucaj/codesearch/commit/729ba998eb907e15df98bf970a0250ae37cf515e))
+
+
+### Performance Improvements
+
+* optimize enclosing scope lookup from O(R×D) to O(D+R) ([32b6a6d](https://github.com/ArtemisMucaj/codesearch/commit/32b6a6de3eb9aacc08742ec02609ddfcbd89a91b))
+* optimize reranking ([29a2e22](https://github.com/ArtemisMucaj/codesearch/commit/29a2e2248d8831f273fbae59877eba9a1852a672))
+
 ## [0.5.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.4.0...v0.5.0) (2026-02-03)
 
 
