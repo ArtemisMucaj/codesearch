@@ -20,7 +20,7 @@ case "$ARCH" in
 esac
 
 # Get latest version
-VERSION=$(curl -sSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
 if [ -z "$VERSION" ]; then
   echo "Failed to get latest version"
   exit 1
@@ -41,7 +41,7 @@ TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
 echo "Downloading $URL..."
-if ! curl -sSL -o "$TMPDIR/codesearch${EXT}" "$URL"; then
+if ! curl -fsSL -o "$TMPDIR/codesearch${EXT}" "$URL"; then
   echo "Download failed. Check that a release exists for your platform ($OS/$ARCH)."
   exit 1
 fi
