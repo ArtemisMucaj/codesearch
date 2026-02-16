@@ -120,7 +120,10 @@ impl<'a> SearchController<'a> {
             })
             .collect();
 
-        serde_json::to_string_pretty(&json_results).unwrap_or_else(|_| "[]".to_string())
+        serde_json::to_string_pretty(&json_results).unwrap_or_else(|e| {
+            eprintln!("Failed to serialize search results: {e}");
+            "[]".to_string()
+        })
     }
 
     /// Format results in vimgrep-compatible format: `file:line:col:text`

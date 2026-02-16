@@ -136,7 +136,7 @@ A [Telescope](https://github.com/nvim-telescope/telescope.nvim) extension is inc
 
 **Setup:**
 
-1. Add `ide/nvim/lua` to your Neovim runtime path:
+1. Add `ide/nvim` to your Neovim runtime path (Neovim resolves the `lua/` subdirectory automatically):
 
 ```lua
 vim.opt.runtimepath:append("/path/to/codesearch/ide/nvim")

@@ -137,56 +137,60 @@ local function codesearch(opts)
   end
 
   local cmd = build_cmd(opts)
-  local result = vim.system(cmd, { text = true }):wait()
+  local query = opts.query
 
-  if result.code ~= 0 then
-    vim.notify("codesearch failed: " .. (result.stderr or "unknown error"), vim.log.levels.ERROR)
-    return
-  end
+  vim.system(cmd, { text = true }, function(result)
+    vim.schedule(function()
+      if result.code ~= 0 then
+        vim.notify("codesearch failed: " .. (result.stderr or "unknown error"), vim.log.levels.ERROR)
+        return
+      end
 
-  local results = parse_results(result.stdout)
-  if #results == 0 then
-    vim.notify("No results found.", vim.log.levels.INFO)
-    return
-  end
+      local results = parse_results(result.stdout)
+      if #results == 0 then
+        vim.notify("No results found.", vim.log.levels.INFO)
+        return
+      end
 
-  pickers
-    .new(opts, {
-      prompt_title = "Codesearch: " .. opts.query,
-      finder = finders.new_table({
-        results = results,
-        entry_maker = make_entry,
-      }),
-      sorter = conf.generic_sorter(opts),
-      previewer = previewers.new_buffer_previewer({
-        title = "Code Preview",
-        define_preview = function(self, entry)
-          -- Use Telescope's built-in file preview at the right line
-          conf.buffer_previewer_maker(entry.filename, self.state.bufnr, {
-            bufname = entry.filename,
-            callback = function(bufnr)
-              -- Jump to the start line in the preview
-              pcall(vim.api.nvim_buf_call, bufnr, function()
-                pcall(vim.cmd, "normal! " .. entry.lnum .. "Gzz")
-              end)
+      pickers
+        .new(opts, {
+          prompt_title = "Codesearch: " .. query,
+          finder = finders.new_table({
+            results = results,
+            entry_maker = make_entry,
+          }),
+          sorter = conf.generic_sorter(opts),
+          previewer = previewers.new_buffer_previewer({
+            title = "Code Preview",
+            define_preview = function(self, entry)
+              -- Use Telescope's built-in file preview at the right line
+              conf.buffer_previewer_maker(entry.filename, self.state.bufnr, {
+                bufname = entry.filename,
+                callback = function(bufnr)
+                  -- Jump to the start line in the preview
+                  pcall(vim.api.nvim_buf_call, bufnr, function()
+                    pcall(vim.cmd, "normal! " .. entry.lnum .. "Gzz")
+                  end)
+                end,
+              })
             end,
-          })
-        end,
-      }),
-      attach_mappings = function(prompt_bufnr, map)
-        actions.select_default:replace(function()
-          actions.close(prompt_bufnr)
-          local entry = action_state.get_selected_entry()
-          if entry then
-            vim.cmd("edit " .. vim.fn.fnameescape(entry.filename))
-            vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
-            vim.cmd("normal! zz")
-          end
-        end)
-        return true
-      end,
-    })
-    :find()
+          }),
+          attach_mappings = function(prompt_bufnr, map)
+            actions.select_default:replace(function()
+              actions.close(prompt_bufnr)
+              local entry = action_state.get_selected_entry()
+              if entry then
+                vim.cmd("edit " .. vim.fn.fnameescape(entry.filename))
+                vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
+                vim.cmd("normal! zz")
+              end
+            end)
+            return true
+          end,
+        })
+        :find()
+    end)
+  end)
 end
 
 return require("telescope").register_extension({
