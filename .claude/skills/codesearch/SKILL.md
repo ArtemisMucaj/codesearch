@@ -42,7 +42,11 @@ After installation, verify it works:
 codesearch --version
 ```
 
-> **Note:** The script downloads the latest release binary from GitHub for the current OS/architecture. It installs to `$INSTALL_DIR` (defaults to `$HOME/.local/bin` above). Ensure `$HOME/.local/bin` is in your `PATH`.
+> **Note:** The script downloads the latest release binary from GitHub for the current OS/architecture. It installs to `$INSTALL_DIR` (defaults to `$HOME/.local/bin` above). Ensure `$HOME/.local/bin` is in your `PATH`. If it's not already in your PATH, add this line to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.):
+> ```shell
+> export PATH="$HOME/.local/bin:$PATH"
+> ```
+> Then reload your shell configuration: `source ~/.bashrc` (or `source ~/.zshrc`).
 
 ## Prerequisites
 
