@@ -1,4 +1,16 @@
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
+
+/// Output format for search results.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum OutputFormat {
+    /// Human-readable text (default)
+    #[default]
+    Text,
+    /// JSON array of result objects
+    Json,
+    /// vimgrep-compatible format (file:line:col:text) for quickfix/Telescope
+    Vimgrep,
+}
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -27,6 +39,10 @@ pub enum Commands {
 
         #[arg(short, long)]
         repository: Option<Vec<String>>,
+
+        /// Output format: text, json, or vimgrep (for Neovim/Telescope)
+        #[arg(short = 'F', long, value_enum, default_value = "text")]
+        format: OutputFormat,
     },
 
     List,

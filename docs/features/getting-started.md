@@ -68,6 +68,11 @@ codesearch search "parse json" --language rust
 # Filter by minimum score
 codesearch search "database connection" --min-score 0.5
 
+# Output as JSON (for scripts and editor integrations)
+codesearch search "error handling" --format json
+
+# Output in vimgrep format (for Neovim quickfix / Telescope)
+codesearch search "error handling" --format vimgrep
 ```
 
 ### List Indexed Repositories

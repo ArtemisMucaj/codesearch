@@ -95,7 +95,17 @@ codesearch search "http client" --language rust --language python
 codesearch search "authentication" --repository abc123
 ```
 
-## Search Result Format
+## Output Formats
+
+Use `-F` / `--format` to control the output format:
+
+```bash
+codesearch search "validate email" --format text    # default
+codesearch search "validate email" --format json    # structured JSON
+codesearch search "validate email" --format vimgrep # Neovim-compatible
+```
+
+### Text (default)
 
 ```text
 Found 3 results:
@@ -117,6 +127,39 @@ Found 3 results:
    | #[test]
    |  fn test_email_validation() {
    |     assert!(validate_email("user@example.com"));
+```
+
+### JSON
+
+Returns a JSON array of result objects, useful for scripts and editor integrations (e.g., the Telescope extension):
+
+```json
+[
+  {
+    "file_path": "src/auth/validator.rs",
+    "start_line": 42,
+    "end_line": 58,
+    "score": 0.847,
+    "language": "rust",
+    "node_type": "function",
+    "symbol_name": "validate_email",
+    "content": "pub fn validate_email(email: &str) -> bool { ... }"
+  }
+]
+```
+
+### Vimgrep
+
+Outputs `file:line:col:text` format, directly loadable into Neovim's quickfix list:
+
+```text
+src/auth/validator.rs:42:1:[0.847] validate_email - pub fn validate_email(email: &str) -> bool {
+src/user/registration.rs:15:1:[0.723] check_email_format - fn check_email_format(input: &str) -> Result<(), ValidationError> {
+```
+
+```bash
+# Open results in Neovim's quickfix list
+codesearch search "validate email" --format vimgrep | nvim -q /dev/stdin
 ```
 
 ## Search Quality Tips

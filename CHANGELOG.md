@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+* add `--format` flag to search command with `text`, `json`, and `vimgrep` output modes
+* add Telescope extension for Neovim (`ide/nvim/`) with semantic search picker and file preview
+
 ## [0.5.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.4.0...v0.5.0) (2026-02-03)
 
 
