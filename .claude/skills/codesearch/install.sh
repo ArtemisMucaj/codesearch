@@ -7,6 +7,7 @@ INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 # Detect OS
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 case "$OS" in
+  darwin) OS="macos" ;;
   mingw*|msys*|cygwin*) OS="windows" ;;
 esac
 
@@ -37,13 +38,11 @@ ASSET_NAME="codesearch-${OS}-${ARCH}${EXT}"
 URL="https://github.com/$REPO/releases/download/$VERSION/$ASSET_NAME"
 
 TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
 
 echo "Downloading $URL..."
-curl -sSL -o "$TMPDIR/codesearch${EXT}" "$URL"
-
-if [ $? -ne 0 ]; then
+if ! curl -sSL -o "$TMPDIR/codesearch${EXT}" "$URL"; then
   echo "Download failed. Check that a release exists for your platform ($OS/$ARCH)."
-  rm -rf "$TMPDIR"
   exit 1
 fi
 
@@ -56,9 +55,6 @@ else
   echo "Installing to $INSTALL_DIR (requires sudo)..."
   sudo mv "$TMPDIR/codesearch${EXT}" "$INSTALL_DIR/"
 fi
-
-# Cleanup
-rm -rf "$TMPDIR"
 
 echo "codesearch $VERSION installed successfully to $INSTALL_DIR/codesearch${EXT}"
 echo ""
