@@ -20,6 +20,14 @@ pub struct ContainerConfig {
     pub namespace: String,
     pub memory_storage: bool,
     pub no_rerank: bool,
+    /// Open the database in read-only mode.
+    ///
+    /// When `true`, DuckDB is opened with `AccessMode::ReadOnly`, which does not
+    /// acquire the exclusive write lock. This allows multiple `codesearch` processes
+    /// (e.g. concurrent search commands) to read the same database file simultaneously.
+    ///
+    /// Set this to `true` for commands that never write: `search`, `list`, `stats`.
+    pub read_only: bool,
 }
 
 pub struct Container {
@@ -96,6 +104,35 @@ impl Container {
                         chroma_url, config.namespace
                     );
                     let vector = Arc::new(chroma);
+                    let repo_adapter = if config.read_only {
+                        Arc::new(DuckdbMetadataRepository::new_read_only(&db_path)?)
+                    } else {
+                        Arc::new(DuckdbMetadataRepository::new(&db_path)?)
+                    };
+                    let shared_conn = repo_adapter.shared_connection();
+                    let file_hash_repo = if config.read_only {
+                        Arc::new(DuckdbFileHashRepository::with_connection_no_init(Arc::clone(&shared_conn)))
+                            as Arc<dyn crate::application::FileHashRepository>
+                    } else {
+                        Arc::new(DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn)).await?)
+                            as Arc<dyn crate::application::FileHashRepository>
+                    };
+                    let call_graph_repo = if config.read_only {
+                        Arc::new(DuckdbCallGraphRepository::with_connection_no_init(shared_conn))
+                            as Arc<dyn CallGraphRepository>
+                    } else {
+                        Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?)
+                            as Arc<dyn CallGraphRepository>
+                    };
+                    (vector, repo_adapter, file_hash_repo, call_graph_repo)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to connect to ChromaDB ({}): {}. Falling back to in-memory storage.",
+                        chroma_url,
+                        e
+                    );
+                    let vector = Arc::new(InMemoryVectorRepository::new());
                     let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
                     let shared_conn = repo_adapter.shared_connection();
                     let file_hash_repo = Arc::new(
@@ -105,10 +142,31 @@ impl Container {
                         Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?);
                     (vector, repo_adapter, file_hash_repo, call_graph_repo)
                 }
+            }
+        } else if config.read_only {
+            // Read-only DuckDB path: no exclusive write lock → concurrent searches work
+            match DuckdbVectorRepository::new_read_only_with_namespace(&db_path, &config.namespace) {
+                Ok(duckdb) => {
+                    debug!(
+                        "Using DuckDB vector storage (read-only) at {:?} namespace {}",
+                        db_path, config.namespace
+                    );
+                    let shared_conn = duckdb.shared_connection();
+                    let repo_adapter = Arc::new(DuckdbMetadataRepository::with_connection(
+                        Arc::clone(&shared_conn),
+                    )?);
+                    let file_hash_repo = Arc::new(
+                        DuckdbFileHashRepository::with_connection_no_init(Arc::clone(&shared_conn)),
+                    );
+                    let call_graph_repo = Arc::new(
+                        DuckdbCallGraphRepository::with_connection_no_init(shared_conn),
+                    );
+                    (Arc::new(duckdb), repo_adapter, file_hash_repo, call_graph_repo)
+                }
                 Err(e) => {
                     tracing::warn!(
-                        "Failed to connect to ChromaDB ({}): {}. Falling back to in-memory storage.",
-                        chroma_url,
+                        "Failed to open DuckDB in read-only mode ({}): {}. Falling back to in-memory storage.",
+                        db_path.display(),
                         e
                     );
                     let vector = Arc::new(InMemoryVectorRepository::new());

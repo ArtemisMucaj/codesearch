@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use duckdb::{params, Connection};
+use duckdb::{params, AccessMode, Config, Connection};
 use tokio::sync::Mutex;
 use tracing::debug;
 
@@ -19,6 +19,24 @@ impl DuckdbMetadataRepository {
         let conn = Connection::open(db_path)
             .map_err(|e| DomainError::storage(format!("Failed to open DuckDB database: {}", e)))?;
         Self::initialize_schema(&conn)?;
+
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    /// Opens the database in read-only mode.
+    ///
+    /// Used for the ChromaDB backend path where DuckDB only stores metadata.
+    /// Multiple read-only connections can coexist, enabling concurrent searches.
+    /// Schema initialization is skipped (tables must already exist).
+    pub fn new_read_only(db_path: &Path) -> Result<Self, DomainError> {
+        let config = Config::default()
+            .access_mode(AccessMode::ReadOnly)
+            .map_err(|e| DomainError::storage(format!("Failed to configure read-only access: {}", e)))?;
+
+        let conn = Connection::open_with_flags(db_path, config)
+            .map_err(|e| DomainError::storage(format!("Failed to open DuckDB (read-only): {}", e)))?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),

@@ -23,6 +23,15 @@ impl DuckdbFileHashRepository {
         Ok(Self { conn })
     }
 
+    /// Create a new adapter from a shared connection without running schema initialization.
+    ///
+    /// Use this when the connection is read-only (DDL is forbidden) or when the
+    /// schema is guaranteed to already exist. The file_hashes table is never
+    /// queried during read-only operations (search / list / stats), so this is safe.
+    pub fn with_connection_no_init(conn: Arc<Mutex<Connection>>) -> Self {
+        Self { conn }
+    }
+
     fn initialize_schema(conn: &Connection) -> Result<(), DomainError> {
         conn.execute_batch(
             r#"

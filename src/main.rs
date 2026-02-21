@@ -73,6 +73,15 @@ async fn main() -> Result<()> {
     let data_dir = expand_tilde(&cli.data_dir);
     std::fs::create_dir_all(&data_dir)?;
 
+    // Read-only mode for commands that never write to the database.
+    // This avoids acquiring DuckDB's exclusive write lock, allowing multiple
+    // codesearch processes (e.g. concurrent searches) to run simultaneously.
+    let read_only = !is_mcp
+        && matches!(
+            &cli.command,
+            Commands::Search { .. } | Commands::List | Commands::Stats
+        );
+
     let config = ContainerConfig {
         data_dir,
         mock_embeddings: cli.mock_embeddings,
@@ -80,6 +89,7 @@ async fn main() -> Result<()> {
         namespace: cli.namespace,
         memory_storage: cli.memory_storage,
         no_rerank: cli.no_rerank,
+        read_only,
     };
 
     // Handle MCP command specially - it runs as a long-lived server
