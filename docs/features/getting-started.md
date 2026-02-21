@@ -97,6 +97,21 @@ codesearch delete abc123
 codesearch delete /path/to/your/project
 ```
 
+### Start the MCP Server
+
+Run CodeSearch as a [Model Context Protocol](https://modelcontextprotocol.io/) server for AI tool integration:
+
+```bash
+# Stdio mode (default, for Claude Desktop / Cursor / etc.)
+codesearch mcp
+
+# HTTP mode on a specific port
+codesearch mcp --http 8080
+
+# HTTP mode accessible on all interfaces
+codesearch mcp --http 8080 --public
+```
+
 ## Configuration
 
 ### Data Directory
@@ -121,8 +136,9 @@ Codesearch uses **semantic vector search**:
 
 1. Your query is converted to a 384-dimensional embedding
 2. The DuckDB VSS extension finds semantically similar code using HNSW indexes
-3. Results are ranked by cosine similarity (0.0 to 1.0)
-4. Filters can be applied by language, node type, repository, or minimum score
+3. A cross-encoder reranker (mxbai-rerank-xsmall-v1) rescores candidates for higher relevance (enabled by default, disable with `--no-rerank`)
+4. Results are ranked by cosine similarity (0.0 to 1.0) or reranking score
+5. Filters can be applied by language, node type, repository, or minimum score
 
 **Why VSS (Vector Similarity Search)?**
 - ✓ Finds conceptually similar code, not just keyword matches
@@ -137,6 +153,9 @@ Codesearch uses **semantic vector search**:
 - JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`)
 - TypeScript (`.ts`, `.tsx`)
 - Go (`.go`)
+- HCL (`.hcl`, `.tf`)
+- PHP (`.php`)
+- C++ (`.cpp`, `.cc`, `.cxx`, `.h`, `.hpp`)
 
 ## What Gets Indexed
 

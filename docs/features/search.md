@@ -24,7 +24,7 @@ flowchart TB
 1. **Query Embedding**: Input text is embedded using the same model as indexing (384 dimensions)
 2. **VSS Search**: DuckDB's Vector Similarity Search uses HNSW index to find similar vectors (fast approximate nearest neighbors)
 3. **Filtering**: Results filtered by language, node type, repository, and minimum score threshold
-4. **Reranking**: Enabled by defaylt, skip using `--no-rerank`
+4. **Reranking**: Enabled by default, skip using `--no-rerank`
 5. **Details Fetch**: Full code chunks reconstructed from DuckDB
 6. **Ranking**: Results ranked by cosine distance (0.0 = opposite, 1.0 = identical) or reranking score if enabled
 

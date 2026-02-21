@@ -6,7 +6,7 @@ A semantic code search tool that indexes code repositories using embeddings and 
 
 - **Semantic search**: uses ML embeddings to find semantically similar code
 - **AST-aware**: parses code using tree-sitter for structure-aware indexing
-- **Multi-language support**: supports Rust, Python, JavaScript, TypeScript, Go
+- **Multi-language support**: supports Rust, Python, JavaScript, TypeScript, Go, HCL, PHP, C++
 - **Persistent storage**: DuckDB with VSS (Vector Similarity Search) acceleration
 - **Flexible backends**: supports ChromaDB and in-memory storage
 - **Fast indexing**: efficient batch processing with ONNX embedding generation
@@ -16,9 +16,9 @@ A semantic code search tool that indexes code repositories using embeddings and 
 This project follows Domain-Driven Design (DDD) principles:
 
 ```
-crates/
+src/
 ├── domain/
-|── application/
+├── application/
 ├── connector/
 └── cli/
 ```
@@ -65,6 +65,12 @@ codesearch list
 # Delete a repository by name or path
 codesearch delete my-repo
 codesearch delete /path/to/repo
+
+# Start MCP server (stdio, for AI tool integration)
+codesearch mcp
+
+# Start MCP server over HTTP
+codesearch mcp --http 8080
 ```
 
 ### Configuration Options
@@ -72,7 +78,7 @@ codesearch delete /path/to/repo
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--data-dir` | `~/.codesearch` | Directory for DuckDB database files |
-| `--namespace` | `main` | DuckDB schema namespace for vector storage |
+| `--namespace` | `search` | DuckDB schema namespace for vector storage |
 | `--chroma-url` | (optional) | Use ChromaDB instead of DuckDB for vectors |
 | `--memory-storage` | `false` | Use in-memory storage (no persistence) |
 | `--mock-embeddings` | `false` | Use mock embeddings (for testing) |
@@ -178,6 +184,30 @@ require("telescope").setup({
 # Load results directly into Neovim's quickfix list
 codesearch search "error handling" --format vimgrep | nvim -q /dev/stdin
 ```
+
+### MCP Server
+
+CodeSearch can run as a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server, allowing AI tools (Claude, Cursor, etc.) to search your codebase semantically.
+
+**Stdio mode** (default, for local AI tool integration):
+
+```bash
+codesearch mcp
+```
+
+**HTTP mode** (for network-accessible deployments):
+
+```bash
+# Listen on localhost:8080
+codesearch mcp --http 8080
+
+# Listen on all interfaces (public)
+codesearch mcp --http 8080 --public
+```
+
+The HTTP server exposes the MCP endpoint at `/mcp`.
+
+**Exposed tool**: `search_code` — accepts `query`, `limit`, `min_score`, `languages`, and `repositories` parameters.
 
 ### Storage Backends
 

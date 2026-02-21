@@ -2,16 +2,12 @@
 
 ## Unreleased
 
-### Features
-
-* add `--format` flag to search command with `text`, `json`, and `vimgrep` output modes
-* add Telescope extension for Neovim (`ide/nvim/`) with semantic search picker and file preview
-
 ## [0.6.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.5.0...v0.6.0) (2026-02-16)
 
 
 ### Features
 
+* add `--format` flag to search command with `text`, `json`, and `vimgrep` output modes ([3c87058](https://github.com/ArtemisMucaj/codesearch/commit/3c870588428f18b2006a32f737879dd68fc920a1))
 * add call graph indexing to track symbol references ([ef4c6ec](https://github.com/ArtemisMucaj/codesearch/commit/ef4c6ec2c75a2b574449e6672182c93bb8b655c3))
 * add skill for codesearch CLI ([#42](https://github.com/ArtemisMucaj/codesearch/issues/42)) ([e228bde](https://github.com/ArtemisMucaj/codesearch/commit/e228bde8d5b5cffcc10c6caa22c585dbc57c951d))
 * add Telescope/Neovim integration for semantic code search ([#40](https://github.com/ArtemisMucaj/codesearch/issues/40)) ([3c87058](https://github.com/ArtemisMucaj/codesearch/commit/3c870588428f18b2006a32f737879dd68fc920a1))
