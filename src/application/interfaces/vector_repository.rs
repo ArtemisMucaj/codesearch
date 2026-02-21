@@ -29,5 +29,14 @@ pub trait VectorRepository: Send + Sync {
         query: &SearchQuery,
     ) -> Result<Vec<SearchResult>, DomainError>;
 
+    /// Full-text / keyword search for hybrid mode.
+    /// Scores chunks by how many of the provided terms appear in content or symbol name.
+    /// Returns an empty vec by default (backends that don't support text search skip fusion).
+    async fn search_text(
+        &self,
+        terms: &[&str],
+        query: &SearchQuery,
+    ) -> Result<Vec<SearchResult>, DomainError>;
+
     async fn count(&self) -> Result<u64, DomainError>;
 }

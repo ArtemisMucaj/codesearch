@@ -167,6 +167,69 @@ impl VectorRepository for InMemoryVectorRepository {
         Ok(results)
     }
 
+    async fn search_text(
+        &self,
+        terms: &[&str],
+        query: &SearchQuery,
+    ) -> Result<Vec<SearchResult>, DomainError> {
+        if terms.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let chunk_store = self.chunks.lock().await;
+        let max_score = (terms.len() * 3) as f32;
+
+        let mut results: Vec<SearchResult> = chunk_store
+            .values()
+            .filter_map(|chunk| {
+                let content_lower = chunk.content().to_lowercase();
+                let symbol_lower = chunk
+                    .symbol_name()
+                    .map(|s| s.to_lowercase())
+                    .unwrap_or_default();
+
+                let score: f32 = terms
+                    .iter()
+                    .map(|t| {
+                        let t = t.to_lowercase();
+                        let content_hit = if content_lower.contains(&t) { 1.0_f32 } else { 0.0 };
+                        let symbol_hit = if symbol_lower.contains(&t) { 2.0_f32 } else { 0.0 };
+                        content_hit + symbol_hit
+                    })
+                    .sum::<f32>()
+                    / max_score;
+
+                if score == 0.0 {
+                    return None;
+                }
+                if let Some(min) = query.min_score() {
+                    if score < min {
+                        return None;
+                    }
+                }
+                if let Some(langs) = query.languages() {
+                    if !langs.iter().any(|l| l == chunk.language().as_str()) {
+                        return None;
+                    }
+                }
+                if let Some(repos) = query.repository_ids() {
+                    if !repos.contains(&chunk.repository_id().to_string()) {
+                        return None;
+                    }
+                }
+                Some(SearchResult::new(chunk.clone(), score))
+            })
+            .collect();
+
+        results.sort_by(|a, b| {
+            b.score()
+                .partial_cmp(&a.score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.truncate(query.limit());
+        Ok(results)
+    }
+
     async fn count(&self) -> Result<u64, DomainError> {
         let chunks = self.chunks.lock().await;
         Ok(chunks.len() as u64)

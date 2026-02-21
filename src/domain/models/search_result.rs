@@ -56,6 +56,7 @@ pub struct SearchQuery {
     languages: Option<Vec<String>>,
     repository_ids: Option<Vec<String>>,
     node_types: Option<Vec<String>>,
+    hybrid: bool,
 }
 
 impl SearchQuery {
@@ -67,6 +68,7 @@ impl SearchQuery {
             languages: None,
             repository_ids: None,
             node_types: None,
+            hybrid: false,
         }
     }
 
@@ -96,6 +98,11 @@ impl SearchQuery {
         self
     }
 
+    pub fn with_hybrid(mut self, hybrid: bool) -> Self {
+        self.hybrid = hybrid;
+        self
+    }
+
     pub fn query(&self) -> &str {
         &self.query
     }
@@ -118,6 +125,10 @@ impl SearchQuery {
 
     pub fn node_types(&self) -> Option<&[String]> {
         self.node_types.as_deref()
+    }
+
+    pub fn is_hybrid(&self) -> bool {
+        self.hybrid
     }
 
     pub fn has_filters(&self) -> bool {

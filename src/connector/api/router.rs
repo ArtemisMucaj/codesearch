@@ -30,14 +30,35 @@ impl<'a> Router<'a> {
                 language,
                 repository,
                 format,
+                hybrid,
             } => {
                 self.search_controller
-                    .search(query, num, min_score, language, repository, format)
+                    .search(query, num, min_score, language, repository, format, hybrid)
                     .await
             }
             Commands::List => self.repository_controller.list().await,
             Commands::Delete { id_or_path } => self.repository_controller.delete(id_or_path).await,
             Commands::Stats => self.search_controller.stats().await,
+            Commands::Impact {
+                symbol,
+                depth,
+                repository,
+                format,
+            } => {
+                self.search_controller
+                    .impact(symbol, depth, repository, format)
+                    .await
+            }
+            Commands::Context {
+                symbol,
+                repository,
+                limit,
+                format,
+            } => {
+                self.search_controller
+                    .context(symbol, repository, limit, format)
+                    .await
+            }
             Commands::Mcp { .. } => unreachable!("MCP command is handled separately in main"),
         }
     }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -30,6 +31,10 @@ impl SearchCodeUseCase {
     }
 
     pub async fn execute(&self, query: SearchQuery) -> Result<Vec<SearchResult>, DomainError> {
+        if query.is_hybrid() {
+            return self.execute_hybrid(query).await;
+        }
+
         info!("Searching for: {}", query.query());
 
         let start_time = Instant::now();
@@ -98,6 +103,91 @@ impl SearchCodeUseCase {
         );
 
         Ok(results)
+    }
+
+    /// Hybrid search: run semantic + keyword searches in parallel then fuse with RRF.
+    async fn execute_hybrid(&self, query: SearchQuery) -> Result<Vec<SearchResult>, DomainError> {
+        info!("Hybrid searching for: {}", query.query());
+        let start_time = Instant::now();
+
+        let query_embedding = self.embedding_service.embed_query(query.query()).await?;
+
+        // Fetch extra candidates from both legs so RRF has a meaningful pool.
+        let fetch_limit = (query.limit() * 2).max(20);
+        let fetch_query = query.clone().with_limit(fetch_limit);
+
+        let terms: Vec<&str> = query.query().split_whitespace().collect();
+
+        let (semantic_results, text_results) = tokio::join!(
+            self.vector_repo.search(&query_embedding, &fetch_query),
+            self.vector_repo.search_text(&terms, &fetch_query),
+        );
+
+        let semantic_results = semantic_results?;
+        let text_results = text_results?;
+
+        debug!(
+            "Hybrid: {} semantic + {} text candidates",
+            semantic_results.len(),
+            text_results.len()
+        );
+
+        let mut fused = Self::rrf_fuse(semantic_results, text_results, query.limit());
+
+        if let Some(ref reranker) = self.reranking_service {
+            fused = reranker
+                .rerank(query.query(), fused, Some(query.limit()))
+                .await?;
+        }
+
+        let duration = start_time.elapsed();
+        info!(
+            "Hybrid found {} results in {:.2}s",
+            fused.len(),
+            duration.as_secs_f64()
+        );
+
+        Ok(fused)
+    }
+
+    /// Reciprocal Rank Fusion (k=60) over two ranked result lists.
+    /// Each result's score = 1/(60 + rank_semantic) + 1/(60 + rank_text),
+    /// using 0 for the leg that didn't return the chunk.
+    fn rrf_fuse(
+        semantic: Vec<SearchResult>,
+        text: Vec<SearchResult>,
+        limit: usize,
+    ) -> Vec<SearchResult> {
+        const K: f32 = 60.0;
+        // chunk_id → (SearchResult, rrf_score)
+        let mut scores: HashMap<String, (SearchResult, f32)> = HashMap::new();
+
+        for (rank, result) in semantic.into_iter().enumerate() {
+            let rrf = 1.0 / (K + (rank + 1) as f32);
+            let id = result.chunk().id().to_string();
+            scores
+                .entry(id)
+                .and_modify(|(_, s)| *s += rrf)
+                .or_insert((result, rrf));
+        }
+
+        for (rank, result) in text.into_iter().enumerate() {
+            let rrf = 1.0 / (K + (rank + 1) as f32);
+            let id = result.chunk().id().to_string();
+            scores
+                .entry(id)
+                .and_modify(|(_, s)| *s += rrf)
+                .or_insert((result, rrf));
+        }
+
+        let mut fused: Vec<(SearchResult, f32)> = scores.into_values().collect();
+        fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        fused
+            .into_iter()
+            .take(limit)
+            .map(|(r, rrf_score)| SearchResult::new(r.chunk().clone(), rrf_score))
+            .collect()
     }
 
     pub async fn search(
