@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::application::{EmbeddingService, RerankingService, VectorRepository};
 use crate::domain::{DomainError, SearchQuery, SearchResult};
@@ -30,16 +30,15 @@ impl SearchCodeUseCase {
     }
 
     pub async fn execute(&self, query: SearchQuery) -> Result<Vec<SearchResult>, DomainError> {
-        info!("Searching for: {}", query.query());
+        info!(
+            "Searching for: {} (hybrid={})",
+            query.query(),
+            query.is_hybrid()
+        );
 
         let start_time = Instant::now();
 
         let query_embedding = self.embedding_service.embed_query(query.query()).await?;
-
-        debug!(
-            "Generated query embedding with {} dimensions",
-            query_embedding.len()
-        );
 
         let fetch_limit = if self.reranking_service.is_some() {
             // Use an inverse-log formula so the overhead shrinks as num grows:
@@ -61,6 +60,8 @@ impl SearchCodeUseCase {
             query.clone()
         };
 
+        // The repository handles hybrid (BM25 + semantic + RRF) internally
+        // when query.is_hybrid() is true.
         let mut results = self
             .vector_repo
             .search(&query_embedding, &search_query)

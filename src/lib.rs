@@ -5,9 +5,10 @@ pub mod domain;
 
 pub use application::{
     CallGraphExtractor, CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase,
-    DeleteRepositoryUseCase, EmbeddingService, FileHashRepository, IndexRepositoryUseCase,
+    ContextEdge, DeleteRepositoryUseCase, EmbeddingService, FileHashRepository,
+    ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode, IndexRepositoryUseCase,
     ListRepositoriesUseCase, MetadataRepository, ParserBasedExtractor, ParserService,
-    RerankingService, SearchCodeUseCase, VectorRepository,
+    RerankingService, SearchCodeUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
 };
 
 pub use cli::{Commands, OutputFormat};

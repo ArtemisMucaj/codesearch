@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::cli::OutputFormat;
-use crate::{Repository, SearchQuery, SearchResult};
+use crate::{ImpactAnalysis, Repository, SearchQuery, SearchResult, SymbolContext};
 
 use super::super::Container;
 
@@ -35,17 +35,16 @@ impl<'a> SearchController<'a> {
         languages: Option<Vec<String>>,
         repositories: Option<Vec<String>>,
         format: OutputFormat,
+        hybrid: bool,
     ) -> Result<String> {
-        let mut search_query = SearchQuery::new(&query).with_limit(num);
+        let mut search_query = SearchQuery::new(&query).with_limit(num).with_hybrid(hybrid);
 
         if let Some(score) = min_score {
             search_query = search_query.with_min_score(score);
         }
-
         if let Some(langs) = languages {
             search_query = search_query.with_languages(langs);
         }
-
         if let Some(repos) = repositories {
             search_query = search_query.with_repositories(repos);
         }
@@ -60,12 +59,55 @@ impl<'a> SearchController<'a> {
         })
     }
 
+    pub async fn impact(
+        &self,
+        symbol: String,
+        depth: usize,
+        repository: Option<String>,
+        format: OutputFormat,
+    ) -> Result<String> {
+        let use_case = self.container.impact_use_case();
+        let analysis = use_case
+            .analyze(&symbol, depth, repository.as_deref())
+            .await?;
+
+        Ok(match format {
+            OutputFormat::Json => serde_json::to_string_pretty(&analysis).unwrap_or_else(|e| {
+                eprintln!("Failed to serialize impact analysis: {e}");
+                "{}".to_string()
+            }),
+            _ => self.format_impact(&analysis),
+        })
+    }
+
+    pub async fn context(
+        &self,
+        symbol: String,
+        repository: Option<String>,
+        limit: Option<u32>,
+        format: OutputFormat,
+    ) -> Result<String> {
+        let use_case = self.container.context_use_case();
+        let ctx = use_case
+            .get_context(&symbol, repository.as_deref(), limit)
+            .await?;
+
+        Ok(match format {
+            OutputFormat::Json => serde_json::to_string_pretty(&ctx).unwrap_or_else(|e| {
+                eprintln!("Failed to serialize symbol context: {e}");
+                "{}".to_string()
+            }),
+            _ => self.format_context(&ctx),
+        })
+    }
+
     pub async fn stats(&self) -> Result<String> {
         let use_case = self.container.list_use_case();
         let repos = use_case.execute().await?;
-
         Ok(self.format_stats(&repos))
     }
+
+    // ── formatting helpers ────────────────────────────────────────────────────
 
     fn format_search_results(&self, results: &[SearchResult]) -> String {
         if results.is_empty() {
@@ -148,6 +190,80 @@ impl<'a> SearchController<'a> {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn format_impact(&self, analysis: &ImpactAnalysis) -> String {
+        if analysis.total_affected == 0 {
+            return format!(
+                "No callers found for '{}'. Either the symbol is a root entry point or \
+                 it hasn't been indexed yet.",
+                analysis.root_symbol
+            );
+        }
+
+        let mut out = format!(
+            "Impact analysis for '{}'\n\
+             ─────────────────────────────────────────\n\
+             Total affected symbols : {}\n\
+             Max depth reached      : {}\n\n",
+            analysis.root_symbol, analysis.total_affected, analysis.max_depth_reached
+        );
+
+        for (depth_idx, nodes) in analysis.by_depth.iter().enumerate() {
+            if nodes.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("Depth {} ({} symbol(s)):\n", depth_idx + 1, nodes.len()));
+            for node in nodes {
+                out.push_str(&format!(
+                    "  • {} [{}]  {}\n",
+                    node.symbol, node.reference_kind, node.file_path
+                ));
+            }
+            out.push('\n');
+        }
+
+        out
+    }
+
+    fn format_context(&self, ctx: &SymbolContext) -> String {
+        let mut out = format!(
+            "Context for '{}'\n\
+             ─────────────────────────────────────────\n",
+            ctx.symbol
+        );
+
+        out.push_str(&format!(
+            "\nCallers ({} total) — who uses this symbol:\n",
+            ctx.caller_count
+        ));
+        if ctx.callers.is_empty() {
+            out.push_str("  (none found)\n");
+        } else {
+            for edge in &ctx.callers {
+                out.push_str(&format!(
+                    "  ← {} [{}]  {}:{}\n",
+                    edge.symbol, edge.reference_kind, edge.file_path, edge.line
+                ));
+            }
+        }
+
+        out.push_str(&format!(
+            "\nCallees ({} total) — what this symbol uses:\n",
+            ctx.callee_count
+        ));
+        if ctx.callees.is_empty() {
+            out.push_str("  (none found)\n");
+        } else {
+            for edge in &ctx.callees {
+                out.push_str(&format!(
+                    "  → {} [{}]  {}:{}\n",
+                    edge.symbol, edge.reference_kind, edge.file_path, edge.line
+                ));
+            }
+        }
+
+        out
     }
 
     fn format_stats(&self, repos: &[Repository]) -> String {
