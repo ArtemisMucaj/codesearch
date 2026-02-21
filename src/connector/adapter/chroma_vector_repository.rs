@@ -363,16 +363,6 @@ impl VectorRepository for ChromaVectorRepository {
         Ok(search_results)
     }
 
-    /// ChromaDB does not expose SQL-level text search; hybrid mode degrades
-    /// gracefully to semantic-only when this backend is in use.
-    async fn search_text(
-        &self,
-        _terms: &[&str],
-        _query: &SearchQuery,
-    ) -> Result<Vec<SearchResult>, DomainError> {
-        Ok(vec![])
-    }
-
     async fn count(&self) -> Result<u64, DomainError> {
         let collection = self.collection.lock().await;
         let result = collection

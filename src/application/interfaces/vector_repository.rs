@@ -23,18 +23,13 @@ pub trait VectorRepository: Send + Sync {
         file_path: &str,
     ) -> Result<u64, DomainError>;
 
+    /// Similarity search. When `query.is_hybrid()` is true, implementations should
+    /// additionally run keyword (BM25-style) matching and fuse both result lists via
+    /// Reciprocal Rank Fusion before returning. Backends that cannot perform text
+    /// search may silently fall back to semantic-only results.
     async fn search(
         &self,
         query_embedding: &[f32],
-        query: &SearchQuery,
-    ) -> Result<Vec<SearchResult>, DomainError>;
-
-    /// Full-text / keyword search for hybrid mode.
-    /// Scores chunks by how many of the provided terms appear in content or symbol name.
-    /// Returns an empty vec by default (backends that don't support text search skip fusion).
-    async fn search_text(
-        &self,
-        terms: &[&str],
         query: &SearchQuery,
     ) -> Result<Vec<SearchResult>, DomainError>;
 

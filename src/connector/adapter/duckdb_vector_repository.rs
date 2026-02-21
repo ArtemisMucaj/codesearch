@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use duckdb::{params, Connection};
+use duckdb::{params, Connection, Row};
 use tokio::sync::Mutex;
 use tracing::debug;
 
@@ -10,6 +11,7 @@ use crate::application::VectorRepository;
 use crate::domain::{CodeChunk, DomainError, Embedding, SearchQuery, SearchResult};
 
 const VECTOR_DIMENSIONS: usize = 384;
+const RRF_K: f32 = 60.0;
 
 pub struct DuckdbVectorRepository {
     conn: Arc<Mutex<Connection>>,
@@ -132,6 +134,235 @@ impl DuckdbVectorRepository {
         s.push(']');
         s.push_str("::FLOAT[384]");
         Ok(s)
+    }
+
+    // ── Private query helpers (synchronous, take &Connection) ────────────────
+
+    fn row_to_chunk(row: &Row) -> Result<CodeChunk, duckdb::Error> {
+        Ok(CodeChunk::reconstitute(
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)? as u32,
+            row.get::<_, i64>(4)? as u32,
+            crate::domain::Language::parse(&row.get::<_, String>(5)?),
+            crate::domain::NodeType::parse(&row.get::<_, String>(6)?),
+            row.get::<_, Option<String>>(7)?,
+            row.get::<_, Option<String>>(8)?,
+            row.get::<_, String>(9)?,
+        ))
+    }
+
+    fn run_semantic(
+        conn: &Connection,
+        namespace: &str,
+        array_lit: &str,
+        query: &SearchQuery,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, DomainError> {
+        let mut sql = format!(
+            "SELECT \
+                c.id, c.file_path, c.content, c.start_line, c.end_line, c.language, c.node_type, \
+                c.symbol_name, c.parent_symbol, c.repository_id, \
+                1.0 - array_cosine_distance(e.vector, {array_lit}) AS score \
+             FROM \"{schema}\".embeddings e \
+             JOIN \"{schema}\".chunks c ON c.id = e.chunk_id",
+            array_lit = array_lit,
+            schema = namespace,
+        );
+
+        let mut where_clauses: Vec<String> = Vec::new();
+        if let Some(languages) = query.languages() {
+            let quoted = languages
+                .iter()
+                .map(|l| format!("'{}'", l.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(",");
+            where_clauses.push(format!("c.language IN ({})", quoted));
+        }
+        if let Some(node_types) = query.node_types() {
+            let quoted = node_types
+                .iter()
+                .map(|t| format!("'{}'", t.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(",");
+            where_clauses.push(format!("c.node_type IN ({})", quoted));
+        }
+        if let Some(repo_ids) = query.repository_ids() {
+            let quoted = repo_ids
+                .iter()
+                .map(|r| format!("'{}'", r.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(",");
+            where_clauses.push(format!("c.repository_id IN ({})", quoted));
+        }
+        if !where_clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_clauses.join(" AND "));
+        }
+        sql.push_str(&format!(
+            " ORDER BY array_cosine_distance(e.vector, {array_lit}) LIMIT ?",
+            array_lit = array_lit
+        ));
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| DomainError::storage(format!("Failed to prepare semantic search: {}", e)))?;
+        let mut rows = stmt
+            .query(params![limit as i64])
+            .map_err(|e| DomainError::storage(format!("Failed to run semantic search: {}", e)))?;
+
+        let mut results = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| DomainError::storage(format!("Failed to read semantic row: {}", e)))?
+        {
+            let score: f32 = row
+                .get(10)
+                .map_err(|e| DomainError::storage(format!("Failed to read score: {}", e)))?;
+            if let Some(min) = query.min_score() {
+                if score < min {
+                    continue;
+                }
+            }
+            let chunk = Self::row_to_chunk(row)
+                .map_err(|e| DomainError::storage(format!("Failed to parse chunk row: {}", e)))?;
+            results.push(SearchResult::new(chunk, score));
+            if results.len() >= limit {
+                break;
+            }
+        }
+        Ok(results)
+    }
+
+    fn run_text(
+        conn: &Connection,
+        namespace: &str,
+        terms: &[&str],
+        query: &SearchQuery,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, DomainError> {
+        if terms.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let max_score = (terms.len() * 3) as f64;
+        let mut score_parts: Vec<String> = Vec::new();
+        let mut where_parts: Vec<String> = Vec::new();
+
+        for term in terms {
+            let safe = term.to_lowercase().replace('\'', "''");
+            score_parts.push(format!(
+                "(CASE WHEN LOWER(c.content) LIKE '%{s}%' THEN 1.0 ELSE 0.0 END \
+                 + CASE WHEN LOWER(c.symbol_name) LIKE '%{s}%' THEN 2.0 ELSE 0.0 END)",
+                s = safe
+            ));
+            where_parts.push(format!(
+                "LOWER(c.content) LIKE '%{s}%' OR LOWER(c.symbol_name) LIKE '%{s}%'",
+                s = safe
+            ));
+        }
+
+        let score_expr = format!("({}) / {:.1}", score_parts.join(" + "), max_score);
+        let where_expr = where_parts.join(" OR ");
+
+        let mut sql = format!(
+            "SELECT c.id, c.file_path, c.content, c.start_line, c.end_line, \
+             c.language, c.node_type, c.symbol_name, c.parent_symbol, c.repository_id, \
+             CAST({score} AS FLOAT) AS score \
+             FROM \"{ns}\".chunks c \
+             WHERE ({where_clause})",
+            score = score_expr,
+            ns = namespace,
+            where_clause = where_expr,
+        );
+
+        let mut extra: Vec<String> = Vec::new();
+        if let Some(languages) = query.languages() {
+            let quoted = languages
+                .iter()
+                .map(|l| format!("'{}'", l.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            extra.push(format!("c.language IN ({})", quoted));
+        }
+        if let Some(node_types) = query.node_types() {
+            let quoted = node_types
+                .iter()
+                .map(|t| format!("'{}'", t.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            extra.push(format!("c.node_type IN ({})", quoted));
+        }
+        if let Some(repo_ids) = query.repository_ids() {
+            let quoted = repo_ids
+                .iter()
+                .map(|r| format!("'{}'", r.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            extra.push(format!("c.repository_id IN ({})", quoted));
+        }
+        if !extra.is_empty() {
+            sql.push_str(&format!(" AND ({})", extra.join(" AND ")));
+        }
+        sql.push_str(" ORDER BY score DESC LIMIT ?");
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| DomainError::storage(format!("Failed to prepare text search: {}", e)))?;
+        let mut rows = stmt
+            .query(params![limit as i64])
+            .map_err(|e| DomainError::storage(format!("Failed to run text search: {}", e)))?;
+
+        let mut results = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| DomainError::storage(format!("Failed to read text row: {}", e)))?
+        {
+            let score: f32 = row
+                .get(10)
+                .map_err(|e| DomainError::storage(format!("Failed to read text score: {}", e)))?;
+            if score == 0.0 {
+                continue;
+            }
+            let chunk = Self::row_to_chunk(row)
+                .map_err(|e| DomainError::storage(format!("Failed to parse text chunk row: {}", e)))?;
+            results.push(SearchResult::new(chunk, score));
+        }
+        Ok(results)
+    }
+
+    fn rrf_fuse(
+        semantic: Vec<SearchResult>,
+        text: Vec<SearchResult>,
+        limit: usize,
+    ) -> Vec<SearchResult> {
+        let mut scores: HashMap<String, (SearchResult, f32)> = HashMap::new();
+
+        for (rank, result) in semantic.into_iter().enumerate() {
+            let rrf = 1.0 / (RRF_K + (rank + 1) as f32);
+            let id = result.chunk().id().to_string();
+            scores
+                .entry(id)
+                .and_modify(|(_, s)| *s += rrf)
+                .or_insert((result, rrf));
+        }
+        for (rank, result) in text.into_iter().enumerate() {
+            let rrf = 1.0 / (RRF_K + (rank + 1) as f32);
+            let id = result.chunk().id().to_string();
+            scores
+                .entry(id)
+                .and_modify(|(_, s)| *s += rrf)
+                .or_insert((result, rrf));
+        }
+
+        let mut fused: Vec<(SearchResult, f32)> = scores.into_values().collect();
+        fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        fused
+            .into_iter()
+            .take(limit)
+            .map(|(r, score)| SearchResult::new(r.chunk().clone(), score))
+            .collect()
     }
 }
 
@@ -323,246 +554,33 @@ impl VectorRepository for DuckdbVectorRepository {
         }
 
         let array_lit = Self::vector_to_array_literal(query_embedding)?;
-        let mut sql = format!(
-            "SELECT \
-                c.id, c.file_path, c.content, c.start_line, c.end_line, c.language, c.node_type, c.symbol_name, c.parent_symbol, c.repository_id, \
-                1.0 - array_cosine_distance(e.vector, {array_lit}) AS score \
-            FROM \"{schema}\".embeddings e \
-            JOIN \"{schema}\".chunks c ON c.id = e.chunk_id \
-            ",
-            array_lit = array_lit,
-            schema = self.namespace
-        );
 
-        let mut where_clauses: Vec<String> = Vec::new();
-        if let Some(languages) = query.languages() {
-            let quoted = languages
-                .iter()
-                .map(|l| format!("'{}'", l.replace('\'', "''")))
-                .collect::<Vec<_>>()
-                .join(",");
-            where_clauses.push(format!("c.language IN ({})", quoted));
-        }
-        if let Some(node_types) = query.node_types() {
-            let quoted = node_types
-                .iter()
-                .map(|t| format!("'{}'", t.replace('\'', "''")))
-                .collect::<Vec<_>>()
-                .join(",");
-            where_clauses.push(format!("c.node_type IN ({})", quoted));
-        }
-        if let Some(repo_ids) = query.repository_ids() {
-            let quoted = repo_ids
-                .iter()
-                .map(|r| format!("'{}'", r.replace('\'', "''")))
-                .collect::<Vec<_>>()
-                .join(",");
-            where_clauses.push(format!("c.repository_id IN ({})", quoted));
-        }
-        if !where_clauses.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&where_clauses.join(" AND "));
-        }
-
-        sql.push_str(&format!(
-            " ORDER BY array_cosine_distance(e.vector, {array_lit}) LIMIT ?",
-            array_lit = array_lit
-        ));
+        // When hybrid, fetch more candidates from each leg so RRF has a
+        // meaningful pool to rank. The final result is capped at query.limit().
+        let fetch_limit = if query.is_hybrid() {
+            (query.limit() * 2).max(20)
+        } else {
+            query.limit()
+        };
 
         let conn = self.conn.lock().await;
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| DomainError::storage(format!("Failed to prepare search: {}", e)))?;
-        let mut rows = stmt
-            .query(params![query.limit() as i64])
-            .map_err(|e| DomainError::storage(format!("Failed to run search: {}", e)))?;
 
-        let mut results = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| DomainError::storage(format!("Failed to read row: {}", e)))?
-        {
-            let score: f32 = row
-                .get(10)
-                .map_err(|e| DomainError::storage(format!("Failed to read score: {}", e)))?;
+        let semantic = Self::run_semantic(&conn, &self.namespace, &array_lit, query, fetch_limit)?;
 
-            if let Some(min_score) = query.min_score() {
-                if score < min_score {
-                    continue;
-                }
-            }
-
-            let chunk = CodeChunk::reconstitute(
-                row.get::<_, String>(0)
-                    .map_err(|e| DomainError::storage(format!("Failed to read id: {}", e)))?,
-                row.get::<_, String>(1).map_err(|e| {
-                    DomainError::storage(format!("Failed to read file_path: {}", e))
-                })?,
-                row.get::<_, String>(2)
-                    .map_err(|e| DomainError::storage(format!("Failed to read content: {}", e)))?,
-                row.get::<_, i64>(3).map_err(|e| {
-                    DomainError::storage(format!("Failed to read start_line: {}", e))
-                })? as u32,
-                row.get::<_, i64>(4)
-                    .map_err(|e| DomainError::storage(format!("Failed to read end_line: {}", e)))?
-                    as u32,
-                crate::domain::Language::parse(&row.get::<_, String>(5).map_err(|e| {
-                    DomainError::storage(format!("Failed to read language: {}", e))
-                })?),
-                crate::domain::NodeType::parse(&row.get::<_, String>(6).map_err(|e| {
-                    DomainError::storage(format!("Failed to read node_type: {}", e))
-                })?),
-                row.get::<_, Option<String>>(7).map_err(|e| {
-                    DomainError::storage(format!("Failed to read symbol_name: {}", e))
-                })?,
-                row.get::<_, Option<String>>(8).map_err(|e| {
-                    DomainError::storage(format!("Failed to read parent_symbol: {}", e))
-                })?,
-                row.get::<_, String>(9).map_err(|e| {
-                    DomainError::storage(format!("Failed to read repository_id: {}", e))
-                })?,
-            );
-
-            results.push(SearchResult::new(chunk, score));
-            if results.len() >= query.limit() {
-                break;
-            }
-        }
-        Ok(results)
-    }
-
-    async fn search_text(
-        &self,
-        terms: &[&str],
-        query: &SearchQuery,
-    ) -> Result<Vec<SearchResult>, DomainError> {
-        if terms.is_empty() {
-            return Ok(vec![]);
+        if !query.is_hybrid() {
+            return Ok(semantic);
         }
 
-        // Build per-term score contributions:
-        //   symbol_name match → weight 2, content match → weight 1
-        // Normalised by maximum possible score so result is in (0, 1].
-        let max_score = (terms.len() * 3) as f64;
+        let terms: Vec<&str> = query.query().split_whitespace().collect();
+        let text = Self::run_text(&conn, &self.namespace, &terms, query, fetch_limit)?;
 
-        let mut score_parts: Vec<String> = Vec::new();
-        let mut where_parts: Vec<String> = Vec::new();
-
-        for term in terms {
-            let safe = term.to_lowercase().replace('\'', "''");
-            score_parts.push(format!(
-                "(CASE WHEN LOWER(c.content) LIKE '%{s}%' THEN 1.0 ELSE 0.0 END \
-                 + CASE WHEN LOWER(c.symbol_name) LIKE '%{s}%' THEN 2.0 ELSE 0.0 END)",
-                s = safe
-            ));
-            where_parts.push(format!(
-                "LOWER(c.content) LIKE '%{s}%' OR LOWER(c.symbol_name) LIKE '%{s}%'",
-                s = safe
-            ));
-        }
-
-        let score_expr = format!("({}) / {:.1}", score_parts.join(" + "), max_score);
-        let where_expr = where_parts.join(" OR ");
-
-        let mut sql = format!(
-            "SELECT c.id, c.file_path, c.content, c.start_line, c.end_line, \
-             c.language, c.node_type, c.symbol_name, c.parent_symbol, c.repository_id, \
-             CAST({score} AS FLOAT) AS score \
-             FROM \"{ns}\".chunks c \
-             WHERE ({where_clause})",
-            score = score_expr,
-            ns = self.namespace,
-            where_clause = where_expr,
+        debug!(
+            "Hybrid: {} semantic + {} text candidates → fusing",
+            semantic.len(),
+            text.len()
         );
 
-        let mut extra: Vec<String> = Vec::new();
-        if let Some(languages) = query.languages() {
-            let quoted = languages
-                .iter()
-                .map(|l| format!("'{}'", l.replace('\'', "''")))
-                .collect::<Vec<_>>()
-                .join(", ");
-            extra.push(format!("c.language IN ({})", quoted));
-        }
-        if let Some(node_types) = query.node_types() {
-            let quoted = node_types
-                .iter()
-                .map(|t| format!("'{}'", t.replace('\'', "''")))
-                .collect::<Vec<_>>()
-                .join(", ");
-            extra.push(format!("c.node_type IN ({})", quoted));
-        }
-        if let Some(repo_ids) = query.repository_ids() {
-            let quoted = repo_ids
-                .iter()
-                .map(|r| format!("'{}'", r.replace('\'', "''")))
-                .collect::<Vec<_>>()
-                .join(", ");
-            extra.push(format!("c.repository_id IN ({})", quoted));
-        }
-        if !extra.is_empty() {
-            sql.push_str(&format!(" AND ({})", extra.join(" AND ")));
-        }
-
-        sql.push_str(" ORDER BY score DESC LIMIT ?");
-
-        let conn = self.conn.lock().await;
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| DomainError::storage(format!("Failed to prepare text search: {}", e)))?;
-        let mut rows = stmt
-            .query(params![query.limit() as i64])
-            .map_err(|e| DomainError::storage(format!("Failed to run text search: {}", e)))?;
-
-        let mut results = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| DomainError::storage(format!("Failed to read text search row: {}", e)))?
-        {
-            let score: f32 = row
-                .get(10)
-                .map_err(|e| DomainError::storage(format!("Failed to read score: {}", e)))?;
-
-            if let Some(min_score) = query.min_score() {
-                if score < min_score {
-                    continue;
-                }
-            }
-
-            let chunk = CodeChunk::reconstitute(
-                row.get::<_, String>(0)
-                    .map_err(|e| DomainError::storage(format!("Failed to read id: {}", e)))?,
-                row.get::<_, String>(1).map_err(|e| {
-                    DomainError::storage(format!("Failed to read file_path: {}", e))
-                })?,
-                row.get::<_, String>(2)
-                    .map_err(|e| DomainError::storage(format!("Failed to read content: {}", e)))?,
-                row.get::<_, i64>(3).map_err(|e| {
-                    DomainError::storage(format!("Failed to read start_line: {}", e))
-                })? as u32,
-                row.get::<_, i64>(4)
-                    .map_err(|e| DomainError::storage(format!("Failed to read end_line: {}", e)))?
-                    as u32,
-                crate::domain::Language::parse(&row.get::<_, String>(5).map_err(|e| {
-                    DomainError::storage(format!("Failed to read language: {}", e))
-                })?),
-                crate::domain::NodeType::parse(&row.get::<_, String>(6).map_err(|e| {
-                    DomainError::storage(format!("Failed to read node_type: {}", e))
-                })?),
-                row.get::<_, Option<String>>(7).map_err(|e| {
-                    DomainError::storage(format!("Failed to read symbol_name: {}", e))
-                })?,
-                row.get::<_, Option<String>>(8).map_err(|e| {
-                    DomainError::storage(format!("Failed to read parent_symbol: {}", e))
-                })?,
-                row.get::<_, String>(9).map_err(|e| {
-                    DomainError::storage(format!("Failed to read repository_id: {}", e))
-                })?,
-            );
-
-            results.push(SearchResult::new(chunk, score));
-        }
-        Ok(results)
+        Ok(Self::rrf_fuse(semantic, text, query.limit()))
     }
 
     async fn count(&self) -> Result<u64, DomainError> {

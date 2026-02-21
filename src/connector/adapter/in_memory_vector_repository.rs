@@ -8,6 +8,8 @@ use tracing::debug;
 use crate::application::VectorRepository;
 use crate::domain::{CodeChunk, DomainError, Embedding, SearchQuery, SearchResult};
 
+const RRF_K: f32 = 60.0;
+
 pub struct InMemoryVectorRepository {
     chunks: Arc<Mutex<HashMap<String, CodeChunk>>>,
     embeddings: Arc<Mutex<HashMap<String, Embedding>>>,
@@ -41,7 +43,6 @@ impl VectorRepository for InMemoryVectorRepository {
         for chunk in chunks {
             chunk_store.insert(chunk.id().to_string(), chunk.clone());
         }
-
         for embedding in embeddings {
             embedding_store.insert(embedding.chunk_id().to_string(), embedding.clone());
         }
@@ -110,6 +111,37 @@ impl VectorRepository for InMemoryVectorRepository {
         query_embedding: &[f32],
         query: &SearchQuery,
     ) -> Result<Vec<SearchResult>, DomainError> {
+        let fetch_limit = if query.is_hybrid() {
+            (query.limit() * 2).max(20)
+        } else {
+            query.limit()
+        };
+
+        let semantic = self.search_semantic(query_embedding, query, fetch_limit).await;
+
+        if !query.is_hybrid() {
+            return Ok(semantic);
+        }
+
+        let terms: Vec<&str> = query.query().split_whitespace().collect();
+        let text = self.search_text(&terms, query, fetch_limit).await;
+
+        Ok(Self::rrf_fuse(semantic, text, query.limit()))
+    }
+
+    async fn count(&self) -> Result<u64, DomainError> {
+        let chunks = self.chunks.lock().await;
+        Ok(chunks.len() as u64)
+    }
+}
+
+impl InMemoryVectorRepository {
+    async fn search_semantic(
+        &self,
+        query_embedding: &[f32],
+        query: &SearchQuery,
+        limit: usize,
+    ) -> Vec<SearchResult> {
         let scored_ids: Vec<(String, f32)> = {
             let embeddings = self.embeddings.lock().await;
             let mut scored: Vec<(String, f32)> = embeddings
@@ -119,7 +151,6 @@ impl VectorRepository for InMemoryVectorRepository {
                     (embedding.chunk_id().to_string(), score)
                 })
                 .collect();
-
             scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             scored
         };
@@ -128,52 +159,42 @@ impl VectorRepository for InMemoryVectorRepository {
         let mut results = Vec::new();
 
         for (chunk_id, score) in scored_ids {
-            if results.len() >= query.limit() {
+            if results.len() >= limit {
                 break;
             }
-
-            if let Some(min_score) = query.min_score() {
-                if score < min_score {
+            if let Some(min) = query.min_score() {
+                if score < min {
                     continue;
                 }
             }
-
             let chunk = match chunk_store.get(&chunk_id) {
-                Some(chunk) => chunk.clone(),
+                Some(c) => c.clone(),
                 None => continue,
             };
-
             if let Some(languages) = query.languages() {
                 if !languages.iter().any(|l| l == chunk.language().as_str()) {
                     continue;
                 }
             }
-
             if let Some(node_types) = query.node_types() {
                 if !node_types.iter().any(|t| t == chunk.node_type().as_str()) {
                     continue;
                 }
             }
-
             if let Some(repo_ids) = query.repository_ids() {
                 if !repo_ids.contains(&chunk.repository_id().to_string()) {
                     continue;
                 }
             }
-
             results.push(SearchResult::new(chunk, score));
         }
 
-        Ok(results)
+        results
     }
 
-    async fn search_text(
-        &self,
-        terms: &[&str],
-        query: &SearchQuery,
-    ) -> Result<Vec<SearchResult>, DomainError> {
+    async fn search_text(&self, terms: &[&str], query: &SearchQuery, limit: usize) -> Vec<SearchResult> {
         if terms.is_empty() {
-            return Ok(vec![]);
+            return vec![];
         }
 
         let chunk_store = self.chunks.lock().await;
@@ -192,20 +213,15 @@ impl VectorRepository for InMemoryVectorRepository {
                     .iter()
                     .map(|t| {
                         let t = t.to_lowercase();
-                        let content_hit = if content_lower.contains(&t) { 1.0_f32 } else { 0.0 };
-                        let symbol_hit = if symbol_lower.contains(&t) { 2.0_f32 } else { 0.0 };
-                        content_hit + symbol_hit
+                        let c = if content_lower.contains(&t) { 1.0_f32 } else { 0.0 };
+                        let s = if symbol_lower.contains(&t) { 2.0_f32 } else { 0.0 };
+                        c + s
                     })
                     .sum::<f32>()
                     / max_score;
 
                 if score == 0.0 {
                     return None;
-                }
-                if let Some(min) = query.min_score() {
-                    if score < min {
-                        return None;
-                    }
                 }
                 if let Some(langs) = query.languages() {
                     if !langs.iter().any(|l| l == chunk.language().as_str()) {
@@ -226,13 +242,41 @@ impl VectorRepository for InMemoryVectorRepository {
                 .partial_cmp(&a.score())
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        results.truncate(query.limit());
-        Ok(results)
+        results.truncate(limit);
+        results
     }
 
-    async fn count(&self) -> Result<u64, DomainError> {
-        let chunks = self.chunks.lock().await;
-        Ok(chunks.len() as u64)
+    fn rrf_fuse(
+        semantic: Vec<SearchResult>,
+        text: Vec<SearchResult>,
+        limit: usize,
+    ) -> Vec<SearchResult> {
+        let mut scores: HashMap<String, (SearchResult, f32)> = HashMap::new();
+
+        for (rank, result) in semantic.into_iter().enumerate() {
+            let rrf = 1.0 / (RRF_K + (rank + 1) as f32);
+            let id = result.chunk().id().to_string();
+            scores
+                .entry(id)
+                .and_modify(|(_, s)| *s += rrf)
+                .or_insert((result, rrf));
+        }
+        for (rank, result) in text.into_iter().enumerate() {
+            let rrf = 1.0 / (RRF_K + (rank + 1) as f32);
+            let id = result.chunk().id().to_string();
+            scores
+                .entry(id)
+                .and_modify(|(_, s)| *s += rrf)
+                .or_insert((result, rrf));
+        }
+
+        let mut fused: Vec<(SearchResult, f32)> = scores.into_values().collect();
+        fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        fused
+            .into_iter()
+            .take(limit)
+            .map(|(r, score)| SearchResult::new(r.chunk().clone(), score))
+            .collect()
     }
 }
 
