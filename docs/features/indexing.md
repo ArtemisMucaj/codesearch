@@ -48,6 +48,9 @@ flowchart TB
 | JavaScript | function, class, method, arrow_function       |
 | TypeScript | function, class, method, arrow_function       |
 | Go         | function, method, type                        |
+| HCL        | block, attribute                              |
+| PHP        | function, class, method                       |
+| C++        | function, class, struct, method               |
 
 ### 4. Embedding Generation
 
@@ -197,8 +200,9 @@ User Query
 Embed Query (384 dimensions)
     ↓
 Vector Search (retrieve candidates)
-    ├─ If num ≤ 10: fetch 100 candidates
-    └─ If num > 10: fetch num × 10 candidates
+    └─ Fetch num + ⌈num / ln(num)⌉ candidates (defaults to 20 base when num ≤ 10)
+    ↓
+Filter (exclude candidates with vector score < 0.1)
     ↓
 Reranking (mxbai-rerank-xsmall-v1)
     ├─ Score each candidate against query

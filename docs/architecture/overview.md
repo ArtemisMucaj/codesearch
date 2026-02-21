@@ -16,6 +16,7 @@ graph TB
             Search[Search]
             List[List]
             Delete[Delete]
+            CallGraph[CallGraph]
         end
         subgraph Ports["Interfaces / Ports"]
             VectorRepo[VectorRepository]
@@ -38,11 +39,15 @@ graph TB
         subgraph Adapters["Adapters"]
             DuckDBMeta[DuckdbMetadataRepository]
             DuckDBVec[DuckdbVectorRepository]
+            DuckDBCallGraph[DuckdbCallGraphRepository]
+            DuckDBFileHash[DuckdbFileHashRepository]
             Chroma[ChromaVectorRepository]
             InMemory[InMemoryVectorRepository]
             Ort[OrtEmbedding]
+            OrtRerank[OrtReranking]
             Mock[MockEmbedding]
             TreeSitter[TreeSitterParser]
+            MCP[McpServer]
         end
     end
 
@@ -69,6 +74,7 @@ Contains use cases and interface definitions (ports):
 - **SearchCodeUseCase**: Performs semantic search
 - **ListRepositoriesUseCase**: Lists indexed repositories
 - **DeleteRepositoryUseCase**: Removes a repository from the index
+- **CallGraphUseCase**: Tracks and queries symbol references (callers, callees, cross-repo lookups)
 
 **Interfaces/Ports** (`src/application/interfaces/`):
 - **VectorRepository**: Interface for vector storage and similarity search operations
@@ -97,11 +103,15 @@ Implements the application interfaces with concrete adapters:
 **Adapters** (`src/connector/adapter/`):
 - **DuckdbMetadataRepository**: DuckDB implementation of MetadataRepository; stores repository metadata, chunks, and statistics
 - **DuckdbVectorRepository**: DuckDB implementation of VectorRepository with VSS (Vector Similarity Search) acceleration using HNSW indexes and cosine distance
+- **DuckdbCallGraphRepository**: DuckDB implementation storing symbol references (callers, callees, reference kind, location) with indexes for efficient lookup
+- **DuckdbFileHashRepository**: DuckDB implementation storing SHA-256 file hashes for incremental indexing change detection
 - **ChromaVectorRepository**: ChromaDB implementation of VectorRepository for remote vector storage
 - **InMemoryVectorRepository**: In-memory implementation of VectorRepository for testing/ephemeral indexing
 - **OrtEmbedding**: ONNX Runtime implementation of EmbeddingService using sentence-transformers models
+- **OrtReranking**: ONNX Runtime cross-encoder implementation for reranking search results by query-document relevance
 - **MockEmbedding**: Mock implementation of EmbeddingService for testing
 - **TreeSitterParser**: Tree-sitter based implementation of ParserService for multi-language code parsing
+- **CodesearchMcpServer**: Model Context Protocol server exposing the `search_code` tool over stdio or HTTP
 
 ## Data Flow
 
