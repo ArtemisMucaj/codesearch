@@ -251,14 +251,18 @@ impl DuckdbVectorRepository {
         let mut where_parts: Vec<String> = Vec::new();
 
         for term in terms {
-            let safe = term.to_lowercase().replace('\'', "''");
+            let safe = term.to_lowercase()
+                .replace('\\', "\\\\")
+                .replace('\'', "''")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
             score_parts.push(format!(
-                "(CASE WHEN LOWER(c.content) LIKE '%{s}%' THEN 1.0 ELSE 0.0 END \
-                 + CASE WHEN LOWER(c.symbol_name) LIKE '%{s}%' THEN 2.0 ELSE 0.0 END)",
+                "(CASE WHEN LOWER(c.content) LIKE '%{s}%' ESCAPE '\\\\' THEN 1.0 ELSE 0.0 END \
+                 + CASE WHEN LOWER(c.symbol_name) LIKE '%{s}%' ESCAPE '\\\\' THEN 2.0 ELSE 0.0 END)",
                 s = safe
             ));
             where_parts.push(format!(
-                "LOWER(c.content) LIKE '%{s}%' OR LOWER(c.symbol_name) LIKE '%{s}%'",
+                "LOWER(c.content) LIKE '%{s}%' ESCAPE '\\\\' OR LOWER(c.symbol_name) LIKE '%{s}%' ESCAPE '\\\\'",
                 s = safe
             ));
         }

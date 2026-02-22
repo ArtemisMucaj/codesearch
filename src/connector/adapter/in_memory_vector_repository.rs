@@ -228,6 +228,11 @@ impl InMemoryVectorRepository {
                         return None;
                     }
                 }
+                if let Some(node_types) = query.node_types() {
+                    if !node_types.iter().any(|nt| nt == chunk.node_type().as_str()) {
+                        return None;
+                    }
+                }
                 if let Some(repos) = query.repository_ids() {
                     if !repos.contains(&chunk.repository_id().to_string()) {
                         return None;
