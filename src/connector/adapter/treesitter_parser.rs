@@ -927,6 +927,14 @@ impl ParserService for TreeSitterParser {
                             | "UInt32"
                             | "UInt64"
                             | "Character"
+                            // Kotlin core types
+                            | "Unit"
+                            | "Any"
+                            | "Nothing"
+                            | "Boolean"
+                            | "Long"
+                            | "Short"
+                            | "Byte"
                     )
                 {
                     continue;

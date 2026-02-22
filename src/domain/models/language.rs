@@ -130,6 +130,7 @@ impl Language {
             Language::Go,
             Language::HCL,
             Language::Php,
+            Language::Cpp,
             Language::Swift,
             Language::Kotlin,
         ]
