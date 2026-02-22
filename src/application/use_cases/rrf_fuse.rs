@@ -39,10 +39,15 @@ pub fn is_test_file(path: &str) -> bool {
     // Inspect the filename itself.
     let filename = parts.last().copied().unwrap_or("");
 
-    // Dot-separated components: `foo.test.ts` → ["foo", "test", "ts"]
-    for component in filename.split('.') {
-        if matches!(component, "test" | "spec") {
-            return true;
+    // Dot-separated middle components: `foo.test.ts` → middle "test" matches.
+    // Skip the first (stem) and last (extension) to avoid false positives such
+    // as `test.go` where "test" is the stem, not an embedded test marker.
+    let dot_parts: Vec<&str> = filename.split('.').collect();
+    if dot_parts.len() > 2 {
+        for component in &dot_parts[1..dot_parts.len() - 1] {
+            if matches!(*component, "test" | "spec") {
+                return true;
+            }
         }
     }
 
@@ -140,6 +145,7 @@ mod tests {
         assert!(!is_test_file("src/foo/bar.rs"));
         assert!(!is_test_file("main.py"));
         assert!(!is_test_file("src/testing_utils.rs")); // "testing_" ≠ "test_"
+        assert!(!is_test_file("service/test.go")); // stem named "test" is not a dot-marker
     }
 
     #[test]
@@ -200,6 +206,20 @@ mod tests {
             10,
         );
         let expected = (1.0 / (RRF_K + 1.0)) * TEST_FILE_PENALTY;
+        assert!((fused[0].score() - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_file_in_both_lists_score_is_additive_then_penalized() {
+        // Same test-file result at rank 0 in both legs:
+        // raw score = 2 × 1/(RRF_K + 1), then multiplied by TEST_FILE_PENALTY.
+        let fused = rrf_fuse(
+            vec![make_result_at("x", "tests/foo.rs")],
+            vec![make_result_at("x", "tests/foo.rs")],
+            10,
+        );
+        assert_eq!(fused.len(), 1);
+        let expected = (2.0 / (RRF_K + 1.0)) * TEST_FILE_PENALTY;
         assert!((fused[0].score() - expected).abs() < 1e-6);
     }
 
