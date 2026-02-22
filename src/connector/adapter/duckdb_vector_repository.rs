@@ -225,10 +225,7 @@ impl DuckdbVectorRepository {
             sql.push_str(" WHERE ");
             sql.push_str(&where_clauses.join(" AND "));
         }
-        sql.push_str(&format!(
-            " ORDER BY array_cosine_distance(e.vector, {array_lit}) LIMIT ?",
-            array_lit = array_lit
-        ));
+        sql.push_str(" ORDER BY score DESC LIMIT ?");
 
         let mut stmt = conn
             .prepare(&sql)
@@ -578,7 +575,7 @@ impl VectorRepository for DuckdbVectorRepository {
         let text = Self::run_text(&conn, &self.namespace, &terms, query, fetch_limit)?;
 
         debug!(
-            "Text search: {} semantic + {} text candidates → fusing",
+            "Hybrid search: {} semantic + {} text candidates → fusing",
             semantic.len(),
             text.len()
         );
