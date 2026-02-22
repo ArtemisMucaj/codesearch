@@ -133,13 +133,31 @@ impl Container {
                         e
                     );
                     let vector = Arc::new(InMemoryVectorRepository::new());
-                    let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
+                    let repo_adapter = if config.read_only {
+                        debug!("ChromaDB fallback: opening DuckDB metadata in read-only mode");
+                        Arc::new(DuckdbMetadataRepository::new_read_only(&db_path)?)
+                    } else {
+                        Arc::new(DuckdbMetadataRepository::new(&db_path)?)
+                    };
                     let shared_conn = repo_adapter.shared_connection();
-                    let file_hash_repo = Arc::new(
-                        DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn)).await?,
-                    );
-                    let call_graph_repo =
-                        Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?);
+                    let file_hash_repo = if config.read_only {
+                        Arc::new(DuckdbFileHashRepository::with_connection_no_init(Arc::clone(
+                            &shared_conn,
+                        ))) as Arc<dyn crate::application::FileHashRepository>
+                    } else {
+                        Arc::new(
+                            DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn))
+                                .await?,
+                        ) as Arc<dyn crate::application::FileHashRepository>
+                    };
+                    let call_graph_repo = if config.read_only {
+                        Arc::new(DuckdbCallGraphRepository::with_connection_no_init(shared_conn))
+                            as Arc<dyn CallGraphRepository>
+                    } else {
+                        Arc::new(
+                            DuckdbCallGraphRepository::with_connection(shared_conn).await?,
+                        ) as Arc<dyn CallGraphRepository>
+                    };
                     (vector, repo_adapter, file_hash_repo, call_graph_repo)
                 }
             }
@@ -168,6 +186,15 @@ impl Container {
                         "Failed to open DuckDB in read-only mode ({}): {}. Falling back to in-memory storage.",
                         db_path.display(),
                         e
+                    );
+                    // The read-only open already failed (database may not exist yet or is
+                    // corrupt). We intentionally open DuckDB metadata in write mode here as
+                    // a last-resort degraded fallback. This may fail if another process holds
+                    // the write lock, but the vector store is in-memory so no vector writes
+                    // will occur.
+                    debug!(
+                        "Degraded fallback: opening DuckDB metadata in write mode despite \
+                        read_only=true (read-only open failed above)"
                     );
                     let vector = Arc::new(InMemoryVectorRepository::new());
                     let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
