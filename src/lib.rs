@@ -17,8 +17,7 @@ pub use cli::{Commands, OutputFormat};
 pub use connector::{
     DuckdbCallGraphRepository, DuckdbFileHashRepository,
     DuckdbMetadataRepository, DuckdbVectorRepository, InMemoryVectorRepository, LlmQueryExpander,
-    MockEmbedding, MockReranking, OrtEmbedding, OrtReranking, RuleBasedQueryExpander,
-    TreeSitterParser,
+    MockEmbedding, MockReranking, OrtEmbedding, OrtReranking, TreeSitterParser,
 };
 
 pub use domain::{

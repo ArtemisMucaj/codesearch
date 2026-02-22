@@ -9,7 +9,6 @@ mod mock_embedding;
 mod mock_reranking;
 mod ort_embedding;
 mod ort_reranking;
-mod rule_based_query_expander;
 mod treesitter_parser;
 
 pub use duckdb_call_graph_repository::*;
@@ -22,5 +21,4 @@ pub use mock_embedding::*;
 pub use mock_reranking::*;
 pub use ort_embedding::*;
 pub use ort_reranking::*;
-pub use rule_based_query_expander::*;
 pub use treesitter_parser::*;
