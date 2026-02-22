@@ -45,8 +45,8 @@ pub enum Commands {
         format: OutputFormat,
 
         /// Disable keyword (BM25) search and use only semantic (vector) search
-        #[arg(long)]
-        no_text_search: bool,
+        #[arg(long = "no-text-search", default_value_t = true, action = clap::ArgAction::SetFalse)]
+        text_search: bool,
     },
 
     List,
