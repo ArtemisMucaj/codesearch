@@ -47,6 +47,7 @@ impl TreeSitterParser {
                 Language::HCL,
                 Language::Php,
                 Language::Cpp,
+                Language::Swift,
             ],
         }
     }
@@ -61,6 +62,7 @@ impl TreeSitterParser {
             Language::HCL => Some(tree_sitter_hcl::LANGUAGE.into()),
             Language::Php => Some(tree_sitter_php::LANGUAGE_PHP.into()),
             Language::Cpp => Some(tree_sitter_cpp::LANGUAGE.into()),
+            Language::Swift => Some(tree_sitter_swift::LANGUAGE.into()),
             Language::Unknown => None,
         }
     }
@@ -201,6 +203,41 @@ impl TreeSitterParser {
                 ; Concepts (C++20)
                 (concept_definition
                   name: (identifier) @name) @concept
+                "#
+            }
+            Language::Swift => {
+                r#"
+                ; Free functions and methods
+                (function_declaration name: (simple_identifier) @name) @function
+
+                ; Classes
+                (class_declaration
+                  declaration_kind: "class"
+                  name: (type_identifier) @name) @class
+
+                ; Structs
+                (class_declaration
+                  declaration_kind: "struct"
+                  name: (type_identifier) @name) @struct
+
+                ; Enums
+                (class_declaration
+                  declaration_kind: "enum"
+                  name: (type_identifier) @name) @enum
+
+                ; Actors (treated as classes)
+                (class_declaration
+                  declaration_kind: "actor"
+                  name: (type_identifier) @name) @class
+
+                ; Protocols (like traits/interfaces)
+                (protocol_declaration name: (type_identifier) @name) @trait
+
+                ; Extensions (like impl blocks)
+                (class_declaration declaration_kind: "extension") @impl
+
+                ; Type aliases
+                (typealias_declaration name: (type_identifier) @name) @typedef
                 "#
             }
             Language::Unknown => "",
@@ -464,6 +501,29 @@ impl TreeSitterParser {
                 ; Block references (resource, data, module)
                 (block
                     (identifier) @callee) @call
+                "#
+            }
+            Language::Swift => {
+                r#"
+                ; Simple function calls: foo()
+                (call_expression
+                    (simple_identifier) @callee) @call
+
+                ; Method calls: obj.method()
+                (call_expression
+                    (navigation_expression
+                        suffix: (navigation_suffix
+                            suffix: (simple_identifier) @callee))) @method_call
+
+                ; Import statements: import Foundation
+                (import_declaration
+                    (identifier (simple_identifier) @callee)) @import
+
+                ; Type references (user-defined types in annotations, generics, etc.)
+                (user_type (type_identifier) @callee) @type_ref
+
+                ; Inheritance / protocol conformance
+                (inheritance_specifier (user_type (type_identifier) @callee)) @inheritance
                 "#
             }
             Language::Unknown => "",
@@ -1261,6 +1321,92 @@ int main() {
         assert!(
             raw_imports.is_empty(),
             "Should not have imports with surrounding delimiters"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parse_swift_class_and_struct() {
+        let parser = TreeSitterParser::new();
+        let content = std::fs::read_to_string("tests/fixtures/sample_swift.swift")
+            .expect("failed to read sample_swift.swift");
+
+        let chunks = parser
+            .parse_file(&content, "sample_swift.swift", Language::Swift, "test-repo")
+            .await
+            .unwrap();
+
+        assert!(!chunks.is_empty(), "Should extract chunks from Swift file");
+
+        let has_circle = chunks
+            .iter()
+            .any(|c| c.symbol_name() == Some("Circle"));
+        assert!(has_circle, "Should find Circle class");
+
+        let has_rect = chunks
+            .iter()
+            .any(|c| c.symbol_name() == Some("Rectangle"));
+        assert!(has_rect, "Should find Rectangle struct");
+
+        let has_shape = chunks
+            .iter()
+            .any(|c| c.symbol_name() == Some("Shape"));
+        assert!(has_shape, "Should find Shape protocol");
+    }
+
+    #[tokio::test]
+    async fn test_parse_swift_functions_and_enums() {
+        let parser = TreeSitterParser::new();
+        let content = std::fs::read_to_string("tests/fixtures/sample_swift.swift")
+            .expect("failed to read sample_swift.swift");
+
+        let chunks = parser
+            .parse_file(&content, "sample_swift.swift", Language::Swift, "test-repo")
+            .await
+            .unwrap();
+
+        let has_fn = chunks
+            .iter()
+            .any(|c| c.symbol_name() == Some("printShapeInfo"));
+        assert!(has_fn, "Should find printShapeInfo function");
+
+        let has_enum = chunks
+            .iter()
+            .any(|c| c.symbol_name() == Some("Result"));
+        assert!(has_enum, "Should find Result enum");
+    }
+
+    #[tokio::test]
+    async fn test_extract_swift_imports_and_calls() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+import Foundation
+import UIKit
+
+func greet(name: String) -> String {
+    return "Hello, \(name)!"
+}
+
+let message = greet(name: "World")
+print(message)
+"#;
+
+        let references = parser
+            .extract_references(content, "test.swift", Language::Swift, "test-repo")
+            .await
+            .unwrap();
+
+        assert!(!references.is_empty(), "Should extract references from Swift");
+
+        let foundation_imports: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "Foundation"
+                    && r.reference_kind() == ReferenceKind::Import
+            })
+            .collect();
+        assert!(
+            !foundation_imports.is_empty(),
+            "Should find import of Foundation"
         );
     }
 }
