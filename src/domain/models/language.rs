@@ -12,6 +12,7 @@ pub enum Language {
     HCL,
     Php,
     Cpp,
+    Swift,
     Unknown,
 }
 
@@ -26,6 +27,7 @@ impl Language {
             "hcl" | "tf" => Language::HCL,
             "php" => Language::Php,
             "cpp" | "cc" | "cxx" | "c" | "h" | "hpp" => Language::Cpp,
+            "swift" => Language::Swift,
             _ => Language::Unknown,
         }
     }
@@ -47,6 +49,7 @@ impl Language {
             "hcl" => Language::HCL,
             "php" => Language::Php,
             "cpp" | "c++" => Language::Cpp,
+            "swift" => Language::Swift,
             _ => Language::Unknown,
         }
     }
@@ -61,6 +64,7 @@ impl Language {
             Language::HCL => "hcl",
             Language::Php => "php",
             Language::Cpp => "cpp",
+            Language::Swift => "swift",
             Language::Unknown => "unknown",
         }
     }
@@ -79,6 +83,7 @@ impl Language {
             Language::HCL => &["hcl", "tf"],
             Language::Php => &["php"],
             Language::Cpp => &["cpp", "cc", "cxx", "c", "h", "hpp"],
+            Language::Swift => &["swift"],
             Language::Unknown => &[],
         }
     }
@@ -93,13 +98,19 @@ impl Language {
                 | Language::HCL
                 | Language::Php
                 | Language::Cpp
+                | Language::Swift
         )
     }
 
     pub fn is_statically_typed(&self) -> bool {
         matches!(
             self,
-            Language::Rust | Language::TypeScript | Language::Go | Language::Php | Language::Cpp
+            Language::Rust
+                | Language::TypeScript
+                | Language::Go
+                | Language::Php
+                | Language::Cpp
+                | Language::Swift
         )
     }
 
@@ -112,6 +123,7 @@ impl Language {
             Language::Go,
             Language::HCL,
             Language::Php,
+            Language::Swift,
         ]
     }
 }

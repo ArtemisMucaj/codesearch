@@ -45,6 +45,7 @@ tree-sitter-go = "*"
 tree-sitter-hcl = "*"
 tree-sitter-php = "*"
 tree-sitter-cpp = "*"
+tree-sitter-swift = "*"
 streaming-iterator = "0.1"
 
 # CLI
