@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use duckdb::{params, AccessMode, Config, Connection};
+use duckdb::{params, AccessMode, Config, Connection, Row};
 use tokio::sync::Mutex;
 use tracing::debug;
 
