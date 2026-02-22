@@ -30,6 +30,13 @@ struct Cli {
     #[arg(long, global = true)]
     no_rerank: bool,
 
+    /// Enable query expansion: the search query is automatically expanded into
+    /// multiple variants before searching. Results are fused via RRF for better
+    /// recall. Uses Claude (if ANTHROPIC_API_KEY is set) or the built-in
+    /// rule-based expander otherwise.
+    #[arg(long, global = true)]
+    expand_query: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -85,6 +92,7 @@ async fn main() -> Result<()> {
         namespace: cli.namespace,
         memory_storage: cli.memory_storage,
         no_rerank: cli.no_rerank,
+        expand_query: cli.expand_query,
         read_only,
     };
 

@@ -8,15 +8,17 @@ pub use application::{
     ContextEdge, DeleteRepositoryUseCase, EmbeddingService, FileHashRepository,
     ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode, IndexRepositoryUseCase,
     ListRepositoriesUseCase, MetadataRepository, ParserBasedExtractor, ParserService,
-    RerankingService, SearchCodeUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
+    QueryExpander, RerankingService, SearchCodeUseCase, SymbolContext, SymbolContextUseCase,
+    VectorRepository,
 };
 
 pub use cli::{Commands, OutputFormat};
 
 pub use connector::{
     DuckdbCallGraphRepository, DuckdbFileHashRepository,
-    DuckdbMetadataRepository, DuckdbVectorRepository, InMemoryVectorRepository, MockEmbedding,
-    MockReranking, OrtEmbedding, OrtReranking, TreeSitterParser,
+    DuckdbMetadataRepository, DuckdbVectorRepository, InMemoryVectorRepository, LlmQueryExpander,
+    MockEmbedding, MockReranking, OrtEmbedding, OrtReranking, RuleBasedQueryExpander,
+    TreeSitterParser,
 };
 
 pub use domain::{

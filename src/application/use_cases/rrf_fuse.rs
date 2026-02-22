@@ -74,23 +74,31 @@ pub fn rrf_fuse(
     text: Vec<SearchResult>,
     limit: usize,
 ) -> Vec<SearchResult> {
+    rrf_fuse_many(vec![semantic, text], limit)
+}
+
+/// Merge N ranked result lists using Reciprocal Rank Fusion.
+///
+/// Each result receives a score of `1 / (RRF_K + rank)` from every list it
+/// appears in; scores are summed across lists.  This is the natural extension
+/// of [`rrf_fuse`] to an arbitrary number of candidate lists, e.g. when
+/// multiple query variants are searched independently and their results need
+/// to be combined (query expansion).
+///
+/// Results from test files are penalised by [`TEST_FILE_PENALTY`] before the
+/// final sort so that production code consistently ranks above test helpers.
+pub fn rrf_fuse_many(lists: Vec<Vec<SearchResult>>, limit: usize) -> Vec<SearchResult> {
     let mut scores: HashMap<String, (SearchResult, f32)> = HashMap::new();
 
-    for (rank, result) in semantic.into_iter().enumerate() {
-        let rrf = 1.0 / (RRF_K + (rank + 1) as f32);
-        let id = result.chunk().id().to_string();
-        scores
-            .entry(id)
-            .and_modify(|(_, s)| *s += rrf)
-            .or_insert((result, rrf));
-    }
-    for (rank, result) in text.into_iter().enumerate() {
-        let rrf = 1.0 / (RRF_K + (rank + 1) as f32);
-        let id = result.chunk().id().to_string();
-        scores
-            .entry(id)
-            .and_modify(|(_, s)| *s += rrf)
-            .or_insert((result, rrf));
+    for list in lists {
+        for (rank, result) in list.into_iter().enumerate() {
+            let rrf = 1.0 / (RRF_K + (rank + 1) as f32);
+            let id = result.chunk().id().to_string();
+            scores
+                .entry(id)
+                .and_modify(|(_, s)| *s += rrf)
+                .or_insert((result, rrf));
+        }
     }
 
     let mut fused: Vec<(SearchResult, f32)> = scores.into_values().collect();

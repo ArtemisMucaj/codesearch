@@ -4,13 +4,14 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::debug;
 
-use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, ParserService};
+use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, ParserService, QueryExpander};
 use crate::{
     DeleteRepositoryUseCase, DuckdbCallGraphRepository,
     DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
     ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
-    ListRepositoriesUseCase, MockEmbedding, MockReranking, OrtEmbedding, OrtReranking,
-    RerankingService, SearchCodeUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
+    ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding, MockReranking, OrtEmbedding,
+    OrtReranking, RerankingService, RuleBasedQueryExpander, SearchCodeUseCase,
+    SymbolContextUseCase, TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -27,12 +28,20 @@ pub struct ContainerConfig {
     ///
     /// Set this to `true` for commands that never write: `search`, `list`, `stats`.
     pub read_only: bool,
+    /// Enable query expansion. When `true`, the search query is automatically
+    /// expanded into multiple variants before searching so that complementary
+    /// results are surfaced and fused via RRF.
+    ///
+    /// If `ANTHROPIC_API_KEY` is set in the environment, an LLM-based expander
+    /// (Claude) is used; otherwise the built-in rule-based expander is used.
+    pub expand_query: bool,
 }
 
 pub struct Container {
     parser: Arc<TreeSitterParser>,
     embedding_service: Arc<dyn EmbeddingService>,
     reranking_service: Option<Arc<dyn RerankingService>>,
+    query_expander: Option<Arc<dyn QueryExpander>>,
     vector_repo: Arc<dyn VectorRepository>,
     repo_adapter: Arc<DuckdbMetadataRepository>,
     file_hash_repo: Arc<dyn FileHashRepository>,
@@ -214,10 +223,26 @@ impl Container {
             call_graph_repo,
         ));
 
+        // Initialise the query expander when --expand-query is requested.
+        // Prefer the LLM-based expander when ANTHROPIC_API_KEY is set; fall back
+        // to the rule-based expander so the flag always works even offline.
+        let query_expander: Option<Arc<dyn QueryExpander>> = if config.expand_query {
+            if let Some(llm_expander) = LlmQueryExpander::from_env() {
+                debug!("Using LLM-based query expander (Claude API)");
+                Some(Arc::new(llm_expander))
+            } else {
+                debug!("Using rule-based query expander (ANTHROPIC_API_KEY not set)");
+                Some(Arc::new(RuleBasedQueryExpander::new()))
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             parser,
             embedding_service,
             reranking_service,
+            query_expander,
             vector_repo,
             repo_adapter,
             file_hash_repo,
@@ -243,6 +268,10 @@ impl Container {
 
         if let Some(reranker) = self.reranking_service.clone() {
             use_case = use_case.with_reranking(reranker);
+        }
+
+        if let Some(expander) = self.query_expander.clone() {
+            use_case = use_case.with_query_expansion(expander);
         }
 
         use_case
