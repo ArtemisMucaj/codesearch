@@ -10,7 +10,6 @@ use uuid::Uuid;
 pub enum VectorStore {
     #[default]
     DuckDb,
-    ChromaDb,
     InMemory,
 }
 
@@ -18,7 +17,6 @@ impl VectorStore {
     pub fn as_str(&self) -> &'static str {
         match self {
             VectorStore::DuckDb => "duckdb",
-            VectorStore::ChromaDb => "chromadb",
             VectorStore::InMemory => "memory",
         }
     }
@@ -26,7 +24,6 @@ impl VectorStore {
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "duckdb" => VectorStore::DuckDb,
-            "chromadb" | "chroma" => VectorStore::ChromaDb,
             "memory" | "inmemory" | "in_memory" => VectorStore::InMemory,
             unknown => {
                 warn!(

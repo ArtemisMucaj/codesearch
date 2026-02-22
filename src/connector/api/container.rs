@@ -6,7 +6,7 @@ use tracing::debug;
 
 use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, ParserService};
 use crate::{
-    ChromaVectorRepository, DeleteRepositoryUseCase, DuckdbCallGraphRepository,
+    DeleteRepositoryUseCase, DuckdbCallGraphRepository,
     DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
     ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
     ListRepositoriesUseCase, MockEmbedding, MockReranking, OrtEmbedding, OrtReranking,
@@ -16,7 +16,6 @@ use crate::{
 pub struct ContainerConfig {
     pub data_dir: String,
     pub mock_embeddings: bool,
-    pub chroma_url: Option<String>,
     pub namespace: String,
     pub memory_storage: bool,
     pub no_rerank: bool,
@@ -124,33 +123,6 @@ impl Container {
             let (repo_adapter, file_hash_repo, call_graph_repo) =
                 init_duckdb_metadata_repos(&db_path, config.read_only).await?;
             (vector, repo_adapter, file_hash_repo, call_graph_repo)
-        } else if let Some(chroma_url) = config.chroma_url.as_deref() {
-            match ChromaVectorRepository::new(chroma_url, &config.namespace).await {
-                Ok(chroma) => {
-                    debug!(
-                        "Connected to ChromaDB at {} namespace {}",
-                        chroma_url, config.namespace
-                    );
-                    let vector = Arc::new(chroma);
-                    let (repo_adapter, file_hash_repo, call_graph_repo) =
-                        init_duckdb_metadata_repos(&db_path, config.read_only).await?;
-                    (vector, repo_adapter, file_hash_repo, call_graph_repo)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to connect to ChromaDB ({}): {}. Falling back to in-memory storage.",
-                        chroma_url,
-                        e
-                    );
-                    if config.read_only {
-                        debug!("ChromaDB fallback: opening DuckDB metadata in read-only mode");
-                    }
-                    let vector = Arc::new(InMemoryVectorRepository::new());
-                    let (repo_adapter, file_hash_repo, call_graph_repo) =
-                        init_duckdb_metadata_repos(&db_path, config.read_only).await?;
-                    (vector, repo_adapter, file_hash_repo, call_graph_repo)
-                }
-            }
         } else if config.read_only {
             // Read-only DuckDB path: no exclusive write lock → concurrent searches work
             match DuckdbVectorRepository::new_read_only_with_namespace(&db_path, &config.namespace) {
@@ -314,7 +286,4 @@ impl Container {
         self.config.memory_storage
     }
 
-    pub fn chroma_url(&self) -> Option<&str> {
-        self.config.chroma_url.as_deref()
-    }
 }

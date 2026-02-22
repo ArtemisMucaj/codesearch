@@ -21,9 +21,6 @@ struct Cli {
     #[arg(long, global = true)]
     mock_embeddings: bool,
 
-    #[arg(long, global = true)]
-    chroma_url: Option<String>,
-
     #[arg(long, global = true, default_value = "search")]
     namespace: String,
 
@@ -85,7 +82,6 @@ async fn main() -> Result<()> {
     let config = ContainerConfig {
         data_dir,
         mock_embeddings: cli.mock_embeddings,
-        chroma_url: cli.chroma_url,
         namespace: cli.namespace,
         memory_storage: cli.memory_storage,
         no_rerank: cli.no_rerank,
@@ -176,15 +172,4 @@ fn expand_tilde(path: &str) -> String {
         }
     }
     path.to_string()
-}
-
-#[cfg(test)]
-mod cli_tests {
-    use super::*;
-
-    #[test]
-    fn use_chroma_flag_is_removed() {
-        let res = Cli::try_parse_from(["codesearch", "--use-chroma", "stats"]);
-        assert!(res.is_err(), "--use-chroma should not be a valid flag");
-    }
 }
