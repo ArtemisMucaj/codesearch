@@ -124,7 +124,11 @@ impl VectorRepository for InMemoryVectorRepository {
         let terms: Vec<&str> = query.query().split_whitespace().collect();
         let text = self.search_text(&terms, query, fetch_limit).await;
 
-        Ok(rrf_fuse(semantic, text, query.limit()))
+        let mut fused = rrf_fuse(semantic, text, query.limit());
+        if let Some(min) = query.min_score() {
+            fused.retain(|r| r.score() >= min);
+        }
+        Ok(fused)
     }
 
     async fn count(&self) -> Result<u64, DomainError> {
@@ -160,9 +164,13 @@ impl InMemoryVectorRepository {
             if results.len() >= limit {
                 break;
             }
-            if let Some(min) = query.min_score() {
-                if score < min {
-                    continue;
+            // In hybrid mode the full candidate pool is passed to rrf_fuse, so
+            // min_score is applied there; only filter early in semantic-only mode.
+            if !query.is_text_search() {
+                if let Some(min) = query.min_score() {
+                    if score < min {
+                        continue;
+                    }
                 }
             }
             let chunk = match chunk_store.get(&chunk_id) {

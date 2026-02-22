@@ -245,9 +245,13 @@ impl DuckdbVectorRepository {
             let score: f32 = row
                 .get(10)
                 .map_err(|e| DomainError::storage(format!("Failed to read score: {}", e)))?;
-            if let Some(min) = query.min_score() {
-                if score < min {
-                    continue;
+            // In hybrid mode the full candidate pool feeds rrf_fuse; apply
+            // min_score after fusion instead of dropping candidates here.
+            if !query.is_text_search() {
+                if let Some(min) = query.min_score() {
+                    if score < min {
+                        continue;
+                    }
                 }
             }
             let chunk = Self::row_to_chunk(row)
@@ -276,18 +280,20 @@ impl DuckdbVectorRepository {
         let mut where_parts: Vec<String> = Vec::new();
 
         for term in terms {
+            // Use '!' as the single-character LIKE escape so the SQL is valid.
+            // DuckDB requires exactly one character for ESCAPE; '\\' (two chars) is not accepted.
             let safe = term.to_lowercase()
-                .replace('\\', "\\\\")
+                .replace('!', "!!")
                 .replace('\'', "''")
-                .replace('%', "\\%")
-                .replace('_', "\\_");
+                .replace('%', "!%")
+                .replace('_', "!_");
             score_parts.push(format!(
-                "(CASE WHEN LOWER(c.content) LIKE '%{s}%' ESCAPE '\\\\' THEN 1.0 ELSE 0.0 END \
-                 + CASE WHEN LOWER(c.symbol_name) LIKE '%{s}%' ESCAPE '\\\\' THEN 2.0 ELSE 0.0 END)",
+                "(CASE WHEN LOWER(c.content) LIKE '%{s}%' ESCAPE '!' THEN 1.0 ELSE 0.0 END \
+                 + CASE WHEN LOWER(c.symbol_name) LIKE '%{s}%' ESCAPE '!' THEN 2.0 ELSE 0.0 END)",
                 s = safe
             ));
             where_parts.push(format!(
-                "LOWER(c.content) LIKE '%{s}%' ESCAPE '\\\\' OR LOWER(c.symbol_name) LIKE '%{s}%' ESCAPE '\\\\'",
+                "LOWER(c.content) LIKE '%{s}%' ESCAPE '!' OR LOWER(c.symbol_name) LIKE '%{s}%' ESCAPE '!'",
                 s = safe
             ));
         }
@@ -577,7 +583,11 @@ impl VectorRepository for DuckdbVectorRepository {
             text.len()
         );
 
-        Ok(rrf_fuse(semantic, text, query.limit()))
+        let mut fused = rrf_fuse(semantic, text, query.limit());
+        if let Some(min) = query.min_score() {
+            fused.retain(|r| r.score() >= min);
+        }
+        Ok(fused)
     }
 
     async fn count(&self) -> Result<u64, DomainError> {

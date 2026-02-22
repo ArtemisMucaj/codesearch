@@ -60,7 +60,7 @@ impl SearchCodeUseCase {
             query.clone()
         };
 
-        // The repository fuses keyword (BM25 + semantic + RRF) when
+        // The repository fuses two legs — BM25 and semantic — using RRF when
         // query.is_text_search() is true.
         let mut results = self
             .vector_repo
@@ -70,14 +70,18 @@ impl SearchCodeUseCase {
         if let Some(ref reranker) = self.reranking_service {
             // Filter out very low-scoring results before reranking — they are
             // unlikely to resurface and just slow down the cross-encoder.
-            let before_filter = results.len();
-            results.retain(|r| r.score() >= 0.1);
-            let filtered = before_filter - results.len();
-            if filtered > 0 {
-                warn!(
-                    "Excluded {} candidates with score < 0.1 before reranking",
-                    filtered
-                );
+            // Skip this filter for hybrid/RRF results: RRF scores are ~0.016–0.033
+            // by design and would all be dropped by a hard >= 0.1 threshold.
+            if !search_query.is_text_search() {
+                let before_filter = results.len();
+                results.retain(|r| r.score() >= 0.1);
+                let filtered = before_filter - results.len();
+                if filtered > 0 {
+                    warn!(
+                        "Excluded {} candidates with score < 0.1 before reranking",
+                        filtered
+                    );
+                }
             }
 
             info!(
