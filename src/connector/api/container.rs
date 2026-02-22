@@ -41,6 +41,39 @@ pub struct Container {
     config: ContainerConfig,
 }
 
+/// Initialise the three DuckDB-backed metadata repositories shared across all storage paths.
+///
+/// When `read_only` is `true`, the metadata database is opened with
+/// `AccessMode::ReadOnly` (no exclusive write lock), and the file-hash / call-graph
+/// repositories are created without running `CREATE TABLE` DDL (forbidden in
+/// read-only mode).  When `false`, the normal writable constructors are used.
+async fn init_duckdb_metadata_repos(
+    db_path: &std::path::Path,
+    read_only: bool,
+) -> Result<(
+    Arc<DuckdbMetadataRepository>,
+    Arc<dyn FileHashRepository>,
+    Arc<dyn CallGraphRepository>,
+)> {
+    let repo_adapter = if read_only {
+        Arc::new(DuckdbMetadataRepository::new_read_only(db_path)?)
+    } else {
+        Arc::new(DuckdbMetadataRepository::new(db_path)?)
+    };
+    let shared_conn = repo_adapter.shared_connection();
+    let file_hash_repo: Arc<dyn FileHashRepository> = if read_only {
+        Arc::new(DuckdbFileHashRepository::with_connection_no_init(Arc::clone(&shared_conn)))
+    } else {
+        Arc::new(DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn)).await?)
+    };
+    let call_graph_repo: Arc<dyn CallGraphRepository> = if read_only {
+        Arc::new(DuckdbCallGraphRepository::with_connection_no_init(shared_conn))
+    } else {
+        Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?)
+    };
+    Ok((repo_adapter, file_hash_repo, call_graph_repo))
+}
+
 impl Container {
     pub async fn new(config: ContainerConfig) -> Result<Self> {
         let db_path = PathBuf::from(&config.data_dir).join("codesearch.duckdb");
@@ -88,13 +121,8 @@ impl Container {
         ) = if config.memory_storage {
             debug!("Using in-memory vector storage");
             let vector = Arc::new(InMemoryVectorRepository::new());
-            let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
-            let shared_conn = repo_adapter.shared_connection();
-            let file_hash_repo = Arc::new(
-                DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn)).await?,
-            );
-            let call_graph_repo =
-                Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?);
+            let (repo_adapter, file_hash_repo, call_graph_repo) =
+                init_duckdb_metadata_repos(&db_path, config.read_only).await?;
             (vector, repo_adapter, file_hash_repo, call_graph_repo)
         } else if let Some(chroma_url) = config.chroma_url.as_deref() {
             match ChromaVectorRepository::new(chroma_url, &config.namespace).await {
@@ -104,26 +132,8 @@ impl Container {
                         chroma_url, config.namespace
                     );
                     let vector = Arc::new(chroma);
-                    let repo_adapter = if config.read_only {
-                        Arc::new(DuckdbMetadataRepository::new_read_only(&db_path)?)
-                    } else {
-                        Arc::new(DuckdbMetadataRepository::new(&db_path)?)
-                    };
-                    let shared_conn = repo_adapter.shared_connection();
-                    let file_hash_repo = if config.read_only {
-                        Arc::new(DuckdbFileHashRepository::with_connection_no_init(Arc::clone(&shared_conn)))
-                            as Arc<dyn crate::application::FileHashRepository>
-                    } else {
-                        Arc::new(DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn)).await?)
-                            as Arc<dyn crate::application::FileHashRepository>
-                    };
-                    let call_graph_repo = if config.read_only {
-                        Arc::new(DuckdbCallGraphRepository::with_connection_no_init(shared_conn))
-                            as Arc<dyn CallGraphRepository>
-                    } else {
-                        Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?)
-                            as Arc<dyn CallGraphRepository>
-                    };
+                    let (repo_adapter, file_hash_repo, call_graph_repo) =
+                        init_duckdb_metadata_repos(&db_path, config.read_only).await?;
                     (vector, repo_adapter, file_hash_repo, call_graph_repo)
                 }
                 Err(e) => {
@@ -132,32 +142,12 @@ impl Container {
                         chroma_url,
                         e
                     );
-                    let vector = Arc::new(InMemoryVectorRepository::new());
-                    let repo_adapter = if config.read_only {
+                    if config.read_only {
                         debug!("ChromaDB fallback: opening DuckDB metadata in read-only mode");
-                        Arc::new(DuckdbMetadataRepository::new_read_only(&db_path)?)
-                    } else {
-                        Arc::new(DuckdbMetadataRepository::new(&db_path)?)
-                    };
-                    let shared_conn = repo_adapter.shared_connection();
-                    let file_hash_repo = if config.read_only {
-                        Arc::new(DuckdbFileHashRepository::with_connection_no_init(Arc::clone(
-                            &shared_conn,
-                        ))) as Arc<dyn crate::application::FileHashRepository>
-                    } else {
-                        Arc::new(
-                            DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn))
-                                .await?,
-                        ) as Arc<dyn crate::application::FileHashRepository>
-                    };
-                    let call_graph_repo = if config.read_only {
-                        Arc::new(DuckdbCallGraphRepository::with_connection_no_init(shared_conn))
-                            as Arc<dyn CallGraphRepository>
-                    } else {
-                        Arc::new(
-                            DuckdbCallGraphRepository::with_connection(shared_conn).await?,
-                        ) as Arc<dyn CallGraphRepository>
-                    };
+                    }
+                    let vector = Arc::new(InMemoryVectorRepository::new());
+                    let (repo_adapter, file_hash_repo, call_graph_repo) =
+                        init_duckdb_metadata_repos(&db_path, config.read_only).await?;
                     (vector, repo_adapter, file_hash_repo, call_graph_repo)
                 }
             }
