@@ -22,6 +22,18 @@
 * unit tests for `InMemoryVectorRepository` hybrid paths: cosine vs RRF score ranges, dual-leg ranking, post-fusion `min_score` filtering, no early pruning, empty-term fallback, and limit enforcement
 * integration tests for end-to-end hybrid search: results returned with positive scores, keyword-matched chunk surfaces, special SQL characters (`%`, `_`, `!`) do not cause errors, and semantic-only baseline confirms the flag gates the BM25 leg
 
+## [0.8.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.7.0...v0.8.0) (2026-02-22)
+
+
+### Features
+
+* add Swift language support ([#52](https://github.com/ArtemisMucaj/codesearch/issues/52)) ([c321aaa](https://github.com/ArtemisMucaj/codesearch/commit/c321aaaf825b74bc51eb01e39ef90476fb30e4c4))
+
+
+### Bug Fixes
+
+* add repository_id to ImpactNode for cross-repo impact visibility ([#53](https://github.com/ArtemisMucaj/codesearch/issues/53)) ([cc2673d](https://github.com/ArtemisMucaj/codesearch/commit/cc2673d3c1b72746db9c29f5b188b15307b53d99))
+
 ## [0.7.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.6.0...v0.7.0) (2026-02-22)
 
 
