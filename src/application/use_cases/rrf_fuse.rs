@@ -6,11 +6,69 @@ use crate::domain::SearchResult;
 /// Higher values reduce the weight difference between high and low-ranked items.
 pub const RRF_K: f32 = 60.0;
 
+/// Score multiplier applied to results that come from test files.
+/// Keeps test results discoverable while reducing their dominance over
+/// production code in search rankings.
+pub const TEST_FILE_PENALTY: f32 = 0.5;
+
+/// Returns `true` if the file path looks like a test file.
+///
+/// Matches common conventions across languages:
+/// - Directory segments: `test`, `tests`, `spec`, `specs`, `__tests__`, `__test__`, `testdata`
+/// - File-name dot-components: `.test.`, `.spec.` (e.g. `foo.test.ts`, `bar.spec.js`)
+/// - File-stem prefixes/suffixes: `test_foo`, `foo_test` (e.g. Python, Rust)
+pub fn is_test_file(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_lowercase();
+    let parts: Vec<&str> = normalized.split('/').collect();
+
+    // Check every directory component (all but the last part, which is the filename).
+    let dir_parts = if parts.len() > 1 {
+        &parts[..parts.len() - 1]
+    } else {
+        &[][..]
+    };
+    for dir in dir_parts {
+        if matches!(
+            *dir,
+            "test" | "tests" | "spec" | "specs" | "__tests__" | "__test__" | "testdata"
+        ) {
+            return true;
+        }
+    }
+
+    // Inspect the filename itself.
+    let filename = parts.last().copied().unwrap_or("");
+
+    // Dot-separated middle components: `foo.test.ts` → middle "test" matches.
+    // Skip the first (stem) and last (extension) to avoid false positives such
+    // as `test.go` where "test" is the stem, not an embedded test marker.
+    let dot_parts: Vec<&str> = filename.split('.').collect();
+    if dot_parts.len() > 2 {
+        for component in &dot_parts[1..dot_parts.len() - 1] {
+            if matches!(*component, "test" | "spec") {
+                return true;
+            }
+        }
+    }
+
+    // Stem prefix/suffix: `test_foo` or `foo_test`
+    let stem = filename.split('.').next().unwrap_or("");
+    if stem.starts_with("test_") || stem.ends_with("_test") {
+        return true;
+    }
+
+    false
+}
+
 /// Merge two ranked result lists using Reciprocal Rank Fusion.
 ///
 /// Each result receives a score of `1 / (RRF_K + rank)` from each list it
 /// appears in.  The scores are summed, and the top `limit` results by fused
 /// score are returned.
+///
+/// Results from test files are penalised by [`TEST_FILE_PENALTY`] before the
+/// final sort so that production code consistently ranks above test helpers
+/// when both are equally relevant.
 pub fn rrf_fuse(
     semantic: Vec<SearchResult>,
     text: Vec<SearchResult>,
@@ -36,6 +94,14 @@ pub fn rrf_fuse(
     }
 
     let mut fused: Vec<(SearchResult, f32)> = scores.into_values().collect();
+
+    // Apply test-file penalty before sorting so test results are ranked lower.
+    for (result, score) in &mut fused {
+        if is_test_file(result.chunk().file_path()) {
+            *score *= TEST_FILE_PENALTY;
+        }
+    }
+
     fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     fused
         .into_iter()
@@ -52,9 +118,13 @@ mod tests {
     /// Build a minimal SearchResult with a known ID; the raw score is irrelevant
     /// because rrf_fuse re-scores everything by rank position.
     fn make_result(id: &str) -> SearchResult {
+        make_result_at(id, "file.rs")
+    }
+
+    fn make_result_at(id: &str, path: &str) -> SearchResult {
         let chunk = CodeChunk::reconstitute(
             id.to_string(),
-            "file.rs".to_string(),
+            path.to_string(),
             "fn foo() {}".to_string(),
             1,
             1,
@@ -65,6 +135,92 @@ mod tests {
             "repo".to_string(),
         );
         SearchResult::new(chunk, 1.0)
+    }
+
+    // --- is_test_file ---
+
+    #[test]
+    fn non_test_files_are_not_matched() {
+        assert!(!is_test_file("src/lib.rs"));
+        assert!(!is_test_file("src/foo/bar.rs"));
+        assert!(!is_test_file("main.py"));
+        assert!(!is_test_file("src/testing_utils.rs")); // "testing_" ≠ "test_"
+        assert!(!is_test_file("service/test.go")); // stem named "test" is not a dot-marker
+    }
+
+    #[test]
+    fn test_directory_segments_are_matched() {
+        assert!(is_test_file("tests/foo.rs"));
+        assert!(is_test_file("test/foo.rs"));
+        assert!(is_test_file("spec/bar.js"));
+        assert!(is_test_file("specs/bar.js"));
+        assert!(is_test_file("__tests__/baz.ts"));
+        assert!(is_test_file("__test__/baz.ts"));
+        assert!(is_test_file("testdata/fixture.json"));
+        assert!(is_test_file("src/module/tests/integration.rs"));
+    }
+
+    #[test]
+    fn test_dot_components_in_filename_are_matched() {
+        assert!(is_test_file("src/foo.test.ts"));
+        assert!(is_test_file("src/foo.spec.js"));
+        assert!(is_test_file("bar.test.rs"));
+    }
+
+    #[test]
+    fn test_stem_prefix_and_suffix_are_matched() {
+        assert!(is_test_file("src/test_foo.py"));
+        assert!(is_test_file("src/foo_test.rs"));
+        assert!(is_test_file("test_bar.go"));
+    }
+
+    #[test]
+    fn path_separators_are_normalised() {
+        // Windows-style backslashes should work too.
+        assert!(is_test_file("tests\\foo.rs"));
+        assert!(is_test_file("src\\module\\tests\\bar.rs"));
+    }
+
+    // --- rrf_fuse with penalty ---
+
+    #[test]
+    fn test_file_score_is_penalised() {
+        // "prod" and "test_result" start at the same rank (rank 0 each in their
+        // own list) so without penalty they would tie.  With the penalty applied
+        // to the test file, "prod" must end up first.
+        let semantic = vec![make_result_at("prod", "src/lib.rs")];
+        let text = vec![make_result_at("test_result", "tests/foo.rs")];
+        let fused = rrf_fuse(semantic, text, 10);
+
+        assert_eq!(fused.len(), 2);
+        assert_eq!(fused[0].chunk().id(), "prod");
+        assert!(fused[0].score() > fused[1].score());
+    }
+
+    #[test]
+    fn test_file_penalty_multiplies_score() {
+        // A single test-file result should have its RRF score × TEST_FILE_PENALTY.
+        let fused = rrf_fuse(
+            vec![make_result_at("x", "tests/foo.rs")],
+            vec![],
+            10,
+        );
+        let expected = (1.0 / (RRF_K + 1.0)) * TEST_FILE_PENALTY;
+        assert!((fused[0].score() - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_file_in_both_lists_score_is_additive_then_penalized() {
+        // Same test-file result at rank 0 in both legs:
+        // raw score = 2 × 1/(RRF_K + 1), then multiplied by TEST_FILE_PENALTY.
+        let fused = rrf_fuse(
+            vec![make_result_at("x", "tests/foo.rs")],
+            vec![make_result_at("x", "tests/foo.rs")],
+            10,
+        );
+        assert_eq!(fused.len(), 1);
+        let expected = (2.0 / (RRF_K + 1.0)) * TEST_FILE_PENALTY;
+        assert!((fused[0].score() - expected).abs() < 1e-6);
     }
 
     #[test]
