@@ -19,6 +19,8 @@ Invoke this skill **immediately** when:
 - User asks to explore **functionality** (e.g., "find error handling logic")
 - User asks about **implementation details** (e.g., "how are embeddings generated?")
 - You need to discover code related to a **concept** rather than an exact string
+- User asks about **blast radius** or **impact** of changing a function/symbol
+- User asks **who calls** a function or **what does a function call** (symbol context)
 
 ## When to Use Built-in Tools Instead
 
@@ -113,6 +115,36 @@ Codesearch uses Tree-sitter to extract and index these code constructs:
 - Modules, constants, and typedefs
 - Import statements
 
+## Call Graph Analysis
+
+Once a repository is indexed, the call graph is available for two complementary commands.
+
+### Impact Analysis — blast radius of a change
+
+```shell
+# Who breaks if `authenticate` changes? (default depth: 5 hops)
+codesearch impact authenticate
+
+# Limit to 2 hops
+codesearch impact authenticate --depth 2
+
+# Restrict to one repository; JSON output for scripts
+codesearch impact authenticate --repository my-api --format json
+```
+
+### Symbol Context — 360-degree callers + callees
+
+```shell
+# Who calls `authenticate`, and what does it call?
+codesearch context authenticate
+
+# Limit results per direction
+codesearch context authenticate --limit 10
+
+# JSON output
+codesearch context authenticate --format json
+```
+
 ## Repository Management
 
 ```shell
@@ -168,4 +200,4 @@ codesearch --no-rerank search "query"
 
 ## Keywords
 
-semantic search, hybrid search, code search, natural language search, find code, explore codebase, code understanding, intent search, AST analysis, embeddings, code discovery, code exploration, BM25, keyword search, RRF, reciprocal rank fusion
+semantic search, hybrid search, code search, natural language search, find code, explore codebase, code understanding, intent search, AST analysis, embeddings, code discovery, code exploration, BM25, keyword search, RRF, reciprocal rank fusion, call graph, impact analysis, blast radius, symbol context, callers, callees, dependency analysis

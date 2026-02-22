@@ -73,6 +73,8 @@ Contains use cases and interface definitions (ports):
 - **IndexRepositoryUseCase**: Indexes a code repository
 - **SearchCodeUseCase**: Performs hybrid search (semantic + BM25 keyword legs fused via RRF by default; semantic-only with `--no-text-search`)
 - **rrf_fuse**: Merges two ranked result lists using Reciprocal Rank Fusion (`score = 1 / (60 + rank)`, summed per leg)
+- **ImpactAnalysisUseCase**: BFS outward from a symbol through the call graph to compute the blast radius — every transitively affected symbol if the root symbol changes
+- **SymbolContextUseCase**: Returns a 360-degree view of a symbol's call-graph relationships (inbound callers + outbound callees) fetched in parallel
 - **ListRepositoriesUseCase**: Lists indexed repositories
 - **DeleteRepositoryUseCase**: Removes a repository from the index
 - **CallGraphUseCase**: Tracks and queries symbol references (callers, callees, cross-repo lookups)
