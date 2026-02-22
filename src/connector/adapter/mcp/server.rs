@@ -20,6 +20,8 @@ use super::tools::SearchResultOutput;
 
 /// Server-side maximum for the number of results a single search can return.
 const MAX_LIMIT: usize = 100;
+/// Hard cap on BFS depth for impact analysis to prevent unbounded traversal.
+const MAX_DEPTH: usize = 20;
 
 fn default_limit() -> usize {
     10
@@ -166,10 +168,11 @@ impl CodesearchMcpServer {
         params: Parameters<ImpactToolInput>,
     ) -> Result<CallToolResult, McpError> {
         let input = params.0;
+        let depth = input.depth.min(MAX_DEPTH);
 
         let use_case = self.container.impact_use_case();
         let analysis = use_case
-            .analyze(&input.symbol, input.depth, input.repository_id.as_deref())
+            .analyze(&input.symbol, depth, input.repository_id.as_deref())
             .await
             .map_err(|e| McpError::internal_error(format!("Impact analysis failed: {}", e), None))?;
 

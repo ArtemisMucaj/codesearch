@@ -72,11 +72,11 @@ impl<'a> SearchController<'a> {
             .await?;
 
         Ok(match format {
-            OutputFormat::Json => serde_json::to_string_pretty(&analysis).unwrap_or_else(|e| {
-                eprintln!("Failed to serialize impact analysis: {e}");
-                "{}".to_string()
-            }),
-            _ => self.format_impact(&analysis),
+            OutputFormat::Json => serde_json::to_string_pretty(&analysis)?,
+            OutputFormat::Vimgrep => {
+                anyhow::bail!("--format vimgrep is not supported for impact; use text or json")
+            }
+            OutputFormat::Text => self.format_impact(&analysis),
         })
     }
 
@@ -93,11 +93,11 @@ impl<'a> SearchController<'a> {
             .await?;
 
         Ok(match format {
-            OutputFormat::Json => serde_json::to_string_pretty(&ctx).unwrap_or_else(|e| {
-                eprintln!("Failed to serialize symbol context: {e}");
-                "{}".to_string()
-            }),
-            _ => self.format_context(&ctx),
+            OutputFormat::Json => serde_json::to_string_pretty(&ctx)?,
+            OutputFormat::Vimgrep => {
+                anyhow::bail!("--format vimgrep is not supported for context; use text or json")
+            }
+            OutputFormat::Text => self.format_context(&ctx),
         })
     }
 

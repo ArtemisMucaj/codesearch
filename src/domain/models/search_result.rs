@@ -163,6 +163,7 @@ impl SearchQuery {
         if let Some(ref types) = self.node_types {
             parts.push(format!("types={:?}", types));
         }
+        parts.push(format!("hybrid={}", self.hybrid));
 
         parts.join(", ")
     }
