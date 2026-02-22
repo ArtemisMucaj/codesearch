@@ -32,8 +32,11 @@ pub struct ContainerConfig {
     /// expanded into multiple variants before searching so that complementary
     /// results are surfaced and fused via RRF.
     ///
-    /// If `ANTHROPIC_API_KEY` is set in the environment, an LLM-based expander
-    /// (Claude) is used; otherwise the built-in rule-based expander is used.
+    /// If `ANTHROPIC_API_KEY` is set, an LLM-based expander is used. The target
+    /// server is controlled by `ANTHROPIC_BASE_URL` (default: Anthropic cloud).
+    /// Set `ANTHROPIC_BASE_URL=http://localhost:1234` to use LM Studio locally.
+    /// Override the model with `ANTHROPIC_MODEL`. Falls back to the built-in
+    /// rule-based expander when no API key is present.
     pub expand_query: bool,
 }
 
@@ -224,11 +227,19 @@ impl Container {
         ));
 
         // Initialise the query expander when --expand-query is requested.
-        // Prefer the LLM-based expander when ANTHROPIC_API_KEY is set; fall back
-        // to the rule-based expander so the flag always works even offline.
+        //
+        // Selection logic:
+        //  1. ANTHROPIC_API_KEY is set → LlmQueryExpander
+        //       - Targets ANTHROPIC_BASE_URL (default: https://api.anthropic.com)
+        //       - Set ANTHROPIC_BASE_URL=http://localhost:1234 to use a local
+        //         Anthropic-compatible server such as LM Studio with Ministral 3B.
+        //       - Override the model with ANTHROPIC_MODEL if desired.
+        //  2. No API key → RuleBasedQueryExpander (offline, zero latency)
         let query_expander: Option<Arc<dyn QueryExpander>> = if config.expand_query {
             if let Some(llm_expander) = LlmQueryExpander::from_env() {
-                debug!("Using LLM-based query expander (Claude API)");
+                let base = std::env::var("ANTHROPIC_BASE_URL")
+                    .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
+                debug!("Using LLM-based query expander (base_url={})", base);
                 Some(Arc::new(llm_expander))
             } else {
                 debug!("Using rule-based query expander (ANTHROPIC_API_KEY not set)");

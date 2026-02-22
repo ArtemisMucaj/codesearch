@@ -5,7 +5,8 @@ use tracing::{debug, warn};
 use crate::application::QueryExpander;
 use crate::domain::DomainError;
 
-const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
+const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+const MESSAGES_PATH: &str = "/v1/messages";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const DEFAULT_MODEL: &str = "claude-haiku-4-5";
 const MAX_TOKENS: u32 = 256;
@@ -62,28 +63,43 @@ struct ContentBlock {
 ///
 /// **API key**: read from the `ANTHROPIC_API_KEY` environment variable at construction
 /// time. If the key is absent the expander returns the original query unchanged.
+///
+/// **Base URL**: defaults to `https://api.anthropic.com`. Override with
+/// `ANTHROPIC_BASE_URL` to target any Anthropic-API-compatible server — e.g.
+/// a locally running LM Studio instance (`http://localhost:1234`).
 pub struct LlmQueryExpander {
     client: reqwest::Client,
     api_key: String,
     model: String,
+    url: String,
 }
 
 impl LlmQueryExpander {
-    /// Create a new expander using the given API key and model name.
-    pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+    /// Create a new expander with an explicit API key, model, and endpoint URL.
+    pub fn new(api_key: impl Into<String>, model: impl Into<String>, base_url: impl Into<String>) -> Self {
+        let base: String = base_url.into();
+        let url = format!("{}{}", base.trim_end_matches('/'), MESSAGES_PATH);
         Self {
             client: reqwest::Client::new(),
             api_key: api_key.into(),
             model: model.into(),
+            url,
         }
     }
 
-    /// Convenience constructor that reads `ANTHROPIC_API_KEY` from the environment.
-    /// Returns `None` when the variable is absent.
+    /// Convenience constructor that reads configuration from the environment:
+    /// - `ANTHROPIC_API_KEY`  — required; returns `None` when absent
+    /// - `ANTHROPIC_BASE_URL` — optional; defaults to `https://api.anthropic.com`
+    ///
+    /// Set `ANTHROPIC_BASE_URL=http://localhost:1234` to use a locally running
+    /// Anthropic-compatible server such as LM Studio with Ministral 3B.
     pub fn from_env() -> Option<Self> {
-        std::env::var("ANTHROPIC_API_KEY").ok().map(|key| {
-            Self::new(key, DEFAULT_MODEL)
-        })
+        let key = std::env::var("ANTHROPIC_API_KEY").ok()?;
+        let base = std::env::var("ANTHROPIC_BASE_URL")
+            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        let model = std::env::var("ANTHROPIC_MODEL")
+            .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        Some(Self::new(key, model, base))
     }
 
     /// Parse the raw text returned by the model into a `Vec<String>`.
@@ -128,7 +144,7 @@ impl QueryExpander for LlmQueryExpander {
 
         let response = match self
             .client
-            .post(ANTHROPIC_API_URL)
+            .post(&self.url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .json(&request)
