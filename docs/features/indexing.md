@@ -98,12 +98,6 @@ Data is stored using configurable backends:
 - Support for multiple namespaces (separate schemas per project/collection)
 - Lazy index creation: HNSW index is built on first query
 
-#### ChromaDB (Optional)
-Use `--chroma-url` to store vectors in ChromaDB instead:
-- Remote vector storage capability
-- Persistent collection management
-- Metadata storage still uses DuckDB
-
 #### In-Memory (Testing)
 Use `--memory-storage` for testing without persistence
 

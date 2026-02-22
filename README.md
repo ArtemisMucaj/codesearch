@@ -9,7 +9,6 @@ A semantic code search tool that indexes code repositories using embeddings and 
 - **AST-aware**: parses code using tree-sitter for structure-aware indexing
 - **Multi-language support**: supports Rust, Python, JavaScript, TypeScript, Go, HCL, PHP, C++
 - **Persistent storage**: DuckDB with VSS (Vector Similarity Search) acceleration
-- **Flexible backends**: supports ChromaDB and in-memory storage
 - **Fast indexing**: efficient batch processing with ONNX embedding generation
 
 ## Architecture
@@ -86,7 +85,6 @@ codesearch mcp --http 8080
 |------|---------|-------------|
 | `--data-dir` | `~/.codesearch` | Directory for DuckDB database files |
 | `--namespace` | `search` | DuckDB schema namespace for vector storage |
-| `--chroma-url` | (optional) | Use ChromaDB instead of DuckDB for vectors |
 | `--memory-storage` | `false` | Use in-memory storage (no persistence) |
 | `--mock-embeddings` | `false` | Use mock embeddings (for testing) |
 | `--no-rerank` | `false` | Disable reranking|
@@ -116,9 +114,6 @@ codesearch mcp --http 8080
 ```bash
 # Index with a custom data directory
 codesearch --data-dir /var/lib/codesearch index /path/to/repo --name my-repo
-
-# Use ChromaDB for vector storage instead of DuckDB
-codesearch --chroma-url http://chroma.internal:8000 index /path/to/repo --name my-repo
 
 # Use a separate namespace for different projects
 codesearch --namespace project-a index /path/to/repo-a --name repo-a
@@ -304,13 +299,11 @@ The HTTP server exposes the MCP endpoint at `/mcp`.
 | Mode | Persistence | Use Case |
 |------|-------------|----------|
 | **DuckDB** (default) | Persistent | Fast semantic search with VSS acceleration, no external dependencies |
-| **ChromaDB** | Persistent | Remote vector storage, useful for distributed systems |
 | **In-memory** (`--memory-storage`) | None | Testing, development, ephemeral indexing |
 
 **Storage Details:**
 - **Metadata**: Always stored in DuckDB locally via `DuckdbMetadataRepository` (repository info, chunks, file paths, statistics)
-- **Vectors**: DuckDB (default) or ChromaDB (with `--chroma-url`)
-- **Index**: DuckDB uses HNSW (Hierarchical Navigable Small World) for Vector Similarity Search with cosine distance
+- **Vectors**: DuckDB with HNSW (Hierarchical Navigable Small World) for Vector Similarity Search with cosine distance
 
 ## Hybrid Search
 
@@ -422,7 +415,6 @@ cargo clippy
 - [ort](https://github.com/pykeio/ort) - ONNX Runtime for ML embedding inference
 - [tree-sitter](https://tree-sitter.github.io/) - AST parsing and code extraction
 - [duckdb-rs](https://github.com/duckdb/duckdb-rs) - DuckDB Rust bindings with VSS extension
-- [chromadb](https://www.trychroma.com/) - Alternative vector database backend
 - [tokio](https://tokio.rs/) - Async runtime
 
 ## License

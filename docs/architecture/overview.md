@@ -41,7 +41,6 @@ graph TB
             DuckDBVec[DuckdbVectorRepository]
             DuckDBCallGraph[DuckdbCallGraphRepository]
             DuckDBFileHash[DuckdbFileHashRepository]
-            Chroma[ChromaVectorRepository]
             InMemory[InMemoryVectorRepository]
             Ort[OrtEmbedding]
             OrtRerank[OrtReranking]
@@ -108,7 +107,6 @@ Implements the application interfaces with concrete adapters:
 - **DuckdbVectorRepository**: DuckDB implementation of VectorRepository with VSS (Vector Similarity Search) acceleration using HNSW indexes and cosine distance
 - **DuckdbCallGraphRepository**: DuckDB implementation storing symbol references (callers, callees, reference kind, location) with indexes for efficient lookup
 - **DuckdbFileHashRepository**: DuckDB implementation storing SHA-256 file hashes for incremental indexing change detection
-- **ChromaVectorRepository**: ChromaDB implementation of VectorRepository for remote vector storage
 - **InMemoryVectorRepository**: In-memory implementation of VectorRepository for testing/ephemeral indexing
 - **OrtEmbedding**: ONNX Runtime implementation of EmbeddingService using sentence-transformers models
 - **OrtReranking**: ONNX Runtime cross-encoder implementation for reranking search results by query-document relevance
@@ -126,12 +124,10 @@ flowchart TB
     B --> C[Parse with Tree-sitter]
     C --> D[Generate Embeddings]
     D --> E[DuckDB]
-    D --> F[ChromaDB]
 
     C -.- C1[TreeSitterParser<br/>Extract functions, classes, etc.]
     D -.- D1[OrtEmbedding<br/>mxbai-embed-xsmall-v1]
     E -.- E1[DuckdbMetadataRepository<br/>+ DuckdbVectorRepository<br/>Metadata + Vectors]
-    F -.- F1[ChromaVectorRepository<br/>Vectors + chunks]
 ```
 
 ### Search Flow
@@ -147,7 +143,7 @@ flowchart TB
     F --> G[Search Results]
 
     B -.- B1[OrtEmbedding]
-    C -.- C1[DuckdbVectorRepository<br/>VSS HNSW cosine<br/>or ChromaVectorRepository<br/>or InMemoryVectorRepository]
+    C -.- C1[DuckdbVectorRepository<br/>VSS HNSW cosine<br/>or InMemoryVectorRepository]
     D -.- D1[DuckdbVectorRepository::run_text\nor InMemoryVectorRepository::search_text]
     E -.- E1[rrf_fuse: score = 1/(60+rank)<br/>summed across legs]
     F -.- F1[OrtReranking cross-encoder<br/>skip with --no-rerank]
@@ -192,9 +188,3 @@ Domain models encapsulate both data and behavior:
 - Supports multiple embedding models
 - No Python dependency required
 
-### Why ChromaDB?
-
-- Purpose-built for embeddings
-- Simple HTTP API
-- Supports persistence
-- Easy to deploy

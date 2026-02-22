@@ -16,11 +16,6 @@ impl<'a> IndexController<'a> {
     pub async fn index(&self, path: String, name: Option<String>, force: bool) -> Result<String> {
         let (vector_store, ns): (VectorStore, Option<String>) = if self.container.memory_storage() {
             (VectorStore::InMemory, None)
-        } else if self.container.chroma_url().is_some() {
-            (
-                VectorStore::ChromaDb,
-                Some(self.container.namespace().to_string()),
-            )
         } else {
             (
                 VectorStore::DuckDb,

@@ -35,9 +35,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Database
 duckdb = { version = "1.4", features = ["bundled"] }
 
-# Vector database (optional, for ChromaDB backend)
-chromadb = "2.3"
-
 # Tree-sitter for AST parsing
 tree-sitter = "0.26.3"
 tree-sitter-rust = "*"

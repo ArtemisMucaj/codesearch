@@ -4,7 +4,6 @@
 
 - Rust 1.70 or later
 - No external services required (DuckDB is bundled)
-- Optional: ChromaDB server (if you prefer remote vector storage)
 
 ## Installation
 
@@ -23,19 +22,6 @@ cp target/release/codesearch bin/
 
 # Or install system-wide
 cargo install --path .
-```
-
-### Storage Configuration (Optional)
-
-By default, CodeSearch uses DuckDB for both metadata and vectors. Optionally, you can use ChromaDB for remote vector storage:
-
-```bash
-# Use ChromaDB for vectors (metadata stays in DuckDB)
-# First start ChromaDB
-docker run -d -p 8000:8000 chromadb/chroma
-
-# Then use it with codesearch
-codesearch --chroma-url http://localhost:8000 index /path/to/repo
 ```
 
 ## Quick Start
