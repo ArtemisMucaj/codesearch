@@ -245,17 +245,17 @@ impl TreeSitterParser {
             Language::Kotlin => {
                 r#"
                 ; Top-level functions and methods
-                (function_declaration name: (identifier) @name) @function
+                (function_declaration (simple_identifier) @name) @function
 
                 ; Classes (includes data classes, sealed classes, abstract classes,
                 ; interfaces, enum classes, and annotation classes)
-                (class_declaration name: (identifier) @name) @class
+                (class_declaration (type_identifier) @name) @class
 
                 ; Object declarations (singletons and companion objects)
-                (object_declaration name: (identifier) @name) @struct
+                (object_declaration (type_identifier) @name) @struct
 
                 ; Type aliases
-                (type_alias type: (identifier) @name) @typedef
+                (type_alias (type_identifier) @name) @typedef
                 "#
             }
             Language::Unknown => "",
@@ -556,8 +556,8 @@ impl TreeSitterParser {
                 ; Type references in annotations, generics, supertypes, etc.
                 (user_type (identifier) @callee) @type_ref
 
-                ; Import statements — capture only the last segment of the path
-                (import (qualified_identifier (identifier) @callee .)) @import
+                ; Import statements — capture the identifier (full dotted path)
+                (import_header (identifier) @callee) @import
 
                 ; Class/interface inheritance and delegation
                 (delegation_specifier
