@@ -10,7 +10,7 @@ use crate::{
     DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
     ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
     ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding, MockReranking, OrtEmbedding,
-    OrtReranking, RerankingService, RuleBasedQueryExpander, SearchCodeUseCase,
+    OrtReranking, RerankingService, SearchCodeUseCase,
     SymbolContextUseCase, TreeSitterParser, VectorRepository,
 };
 
@@ -32,11 +32,11 @@ pub struct ContainerConfig {
     /// expanded into multiple variants before searching so that complementary
     /// results are surfaced and fused via RRF.
     ///
-    /// If `ANTHROPIC_API_KEY` is set, an LLM-based expander is used. The target
-    /// server is controlled by `ANTHROPIC_BASE_URL` (default: Anthropic cloud).
-    /// Set `ANTHROPIC_BASE_URL=http://localhost:1234` to use LM Studio locally.
-    /// Override the model with `ANTHROPIC_MODEL`. Falls back to the built-in
-    /// rule-based expander when no API key is present.
+    /// When `true`, uses an LLM-based expander targeting LM Studio on
+    /// `http://localhost:1234` by default (no API key required). Override with
+    /// `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and `ANTHROPIC_API_KEY` to point
+    /// at any Anthropic-compatible server including the cloud. Falls back to the
+    /// original query gracefully when the server is unreachable.
     pub expand_query: bool,
 }
 
@@ -228,23 +228,19 @@ impl Container {
 
         // Initialise the query expander when --expand-query is requested.
         //
-        // Selection logic:
-        //  1. ANTHROPIC_API_KEY is set → LlmQueryExpander
-        //       - Targets ANTHROPIC_BASE_URL (default: https://api.anthropic.com)
-        //       - Set ANTHROPIC_BASE_URL=http://localhost:1234 to use a local
-        //         Anthropic-compatible server such as LM Studio with Ministral 3B.
-        //       - Override the model with ANTHROPIC_MODEL if desired.
-        //  2. No API key → RuleBasedQueryExpander (offline, zero latency)
+        // Local-first: targets LM Studio at http://localhost:1234 by default.
+        // Override with ANTHROPIC_BASE_URL / ANTHROPIC_MODEL / ANTHROPIC_API_KEY
+        // to point at any other Anthropic-compatible server (including the cloud).
+        // If the server is unreachable the expander falls back to the original
+        // query gracefully, so search always returns results.
         let query_expander: Option<Arc<dyn QueryExpander>> = if config.expand_query {
-            if let Some(llm_expander) = LlmQueryExpander::from_env() {
-                let base = std::env::var("ANTHROPIC_BASE_URL")
-                    .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
-                debug!("Using LLM-based query expander (base_url={})", base);
-                Some(Arc::new(llm_expander))
-            } else {
-                debug!("Using rule-based query expander (ANTHROPIC_API_KEY not set)");
-                Some(Arc::new(RuleBasedQueryExpander::new()))
-            }
+            let expander = LlmQueryExpander::from_env();
+            debug!(
+                "Using LLM-based query expander (url={})",
+                std::env::var("ANTHROPIC_BASE_URL")
+                    .unwrap_or_else(|_| "http://localhost:1234".to_string())
+            );
+            Some(Arc::new(expander))
         } else {
             None
         };

@@ -5,10 +5,13 @@ use tracing::{debug, warn};
 use crate::application::QueryExpander;
 use crate::domain::DomainError;
 
-const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+/// Default target: LM Studio running locally on its standard port.
+const DEFAULT_BASE_URL: &str = "http://localhost:1234";
 const MESSAGES_PATH: &str = "/v1/messages";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
-const DEFAULT_MODEL: &str = "claude-haiku-4-5";
+/// Default model matches the LM Studio local-first default.
+/// Override with ANTHROPIC_MODEL when targeting the Anthropic cloud.
+const DEFAULT_MODEL: &str = "ministral-3b-2512";
 const MAX_TOKENS: u32 = 256;
 
 /// System prompt instructing the model to produce terse, code-oriented query variants.
@@ -54,19 +57,22 @@ struct ContentBlock {
     text: String,
 }
 
-/// A [`QueryExpander`] that calls the Anthropic Messages API (Claude) to generate
+/// A [`QueryExpander`] that calls any Anthropic-API-compatible server to generate
 /// semantically rich, code-oriented query variants.
 ///
-/// Falls back gracefully: if the API call fails or returns an unparseable response,
-/// the original query is returned as the sole variant rather than propagating an
-/// error. This keeps search working even when the API is unavailable.
+/// **Local-first**: defaults to `http://localhost:1234` (LM Studio) so that no
+/// cloud account or API key is needed out of the box. Just load Ministral 3B in
+/// LM Studio and pass `--expand-query`.
 ///
-/// **API key**: read from the `ANTHROPIC_API_KEY` environment variable at construction
-/// time. If the key is absent the expander returns the original query unchanged.
+/// To use the Anthropic cloud instead, set:
+/// ```text
+/// ANTHROPIC_BASE_URL=https://api.anthropic.com
+/// ANTHROPIC_API_KEY=sk-ant-...
+/// ANTHROPIC_MODEL=claude-haiku-4-5
+/// ```
 ///
-/// **Base URL**: defaults to `https://api.anthropic.com`. Override with
-/// `ANTHROPIC_BASE_URL` to target any Anthropic-API-compatible server — e.g.
-/// a locally running LM Studio instance (`http://localhost:1234`).
+/// Falls back gracefully: if the server is unreachable or returns an unparseable
+/// response, the original query is returned unchanged so search always succeeds.
 pub struct LlmQueryExpander {
     client: reqwest::Client,
     api_key: String,
@@ -87,19 +93,22 @@ impl LlmQueryExpander {
         }
     }
 
-    /// Convenience constructor that reads configuration from the environment:
-    /// - `ANTHROPIC_API_KEY`  — required; returns `None` when absent
-    /// - `ANTHROPIC_BASE_URL` — optional; defaults to `https://api.anthropic.com`
+    /// Construct from environment variables, with local-first defaults:
     ///
-    /// Set `ANTHROPIC_BASE_URL=http://localhost:1234` to use a locally running
-    /// Anthropic-compatible server such as LM Studio with Ministral 3B.
-    pub fn from_env() -> Option<Self> {
-        let key = std::env::var("ANTHROPIC_API_KEY").ok()?;
+    /// | Variable            | Default                    | Purpose                  |
+    /// |---------------------|----------------------------|--------------------------|
+    /// | `ANTHROPIC_BASE_URL`| `http://localhost:1234`    | LM Studio / any server   |
+    /// | `ANTHROPIC_MODEL`   | `ministral-3b-2512`        | Model loaded in LM Studio|
+    /// | `ANTHROPIC_API_KEY` | `""` (empty)               | Not required for local   |
+    ///
+    /// Override all three to target the Anthropic cloud with a real API key.
+    pub fn from_env() -> Self {
         let base = std::env::var("ANTHROPIC_BASE_URL")
             .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         let model = std::env::var("ANTHROPIC_MODEL")
             .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-        Some(Self::new(key, model, base))
+        let key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+        Self::new(key, model, base)
     }
 
     /// Parse the raw text returned by the model into a `Vec<String>`.
