@@ -31,6 +31,10 @@ fn default_depth() -> usize {
     5
 }
 
+fn default_hybrid() -> bool {
+    true
+}
+
 // ── Input types ──────────────────────────────────────────────────────────────
 
 /// Input parameters for the search_code tool
@@ -54,7 +58,8 @@ pub struct SearchToolInput {
 
     /// Combine keyword (BM25) and semantic search via Reciprocal Rank Fusion.
     /// Improves results for exact symbol names and rare identifiers.
-    #[serde(default)]
+    /// Defaults to true; set to false to use only semantic (vector) search.
+    #[serde(default = "default_hybrid")]
     pub hybrid: bool,
 }
 

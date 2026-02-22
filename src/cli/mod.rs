@@ -44,9 +44,9 @@ pub enum Commands {
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormat,
 
-        /// Combine keyword (BM25) and semantic search with Reciprocal Rank Fusion
+        /// Disable keyword (BM25) search and use only semantic (vector) search
         #[arg(long)]
-        hybrid: bool,
+        no_text_search: bool,
     },
 
     List,
