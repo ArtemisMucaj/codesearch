@@ -145,7 +145,7 @@ Callees (3 total) — what this symbol uses:
 }
 ```
 
-## Workflow: Combining Search and Call Graph
+## Workflow
 
 A typical refactoring workflow:
 
@@ -161,16 +161,4 @@ codesearch context authenticate
 
 # 4. Re-index after making changes (incremental — only changed files are re-parsed)
 codesearch index /path/to/repo
-```
-
-## Keeping the Call Graph Up to Date
-
-The call graph is rebuilt incrementally on every `index` run. Only files whose content has changed (detected via SHA-256) are re-parsed, so re-indexing a large repository after a small change is fast.
-
-```bash
-# Incremental update (default)
-codesearch index /path/to/repo
-
-# Force full rebuild (clears and rewrites all edges)
-codesearch index /path/to/repo --force
 ```
