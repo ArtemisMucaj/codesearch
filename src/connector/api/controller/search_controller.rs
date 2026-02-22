@@ -35,9 +35,9 @@ impl<'a> SearchController<'a> {
         languages: Option<Vec<String>>,
         repositories: Option<Vec<String>>,
         format: OutputFormat,
-        hybrid: bool,
+        text_search: bool,
     ) -> Result<String> {
-        let mut search_query = SearchQuery::new(&query).with_limit(num).with_hybrid(hybrid);
+        let mut search_query = SearchQuery::new(&query).with_limit(num).with_text_search(text_search);
 
         if let Some(score) = min_score {
             search_query = search_query.with_min_score(score);

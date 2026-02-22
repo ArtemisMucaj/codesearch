@@ -31,7 +31,7 @@ fn default_depth() -> usize {
     5
 }
 
-fn default_hybrid() -> bool {
+fn default_text_search() -> bool {
     true
 }
 
@@ -56,11 +56,10 @@ pub struct SearchToolInput {
     /// Filter results by repository IDs
     pub repositories: Option<Vec<String>>,
 
-    /// Combine keyword (BM25) and semantic search via Reciprocal Rank Fusion.
-    /// Improves results for exact symbol names and rare identifiers.
+    /// Enable keyword (BM25) search fused with semantic search via Reciprocal Rank Fusion.
     /// Defaults to true; set to false to use only semantic (vector) search.
-    #[serde(default = "default_hybrid")]
-    pub hybrid: bool,
+    #[serde(default = "default_text_search")]
+    pub text_search: bool,
 }
 
 /// Input parameters for the analyze_impact tool
@@ -111,8 +110,8 @@ impl CodesearchMcpServer {
     /// Search for code using semantic similarity. Returns relevant code snippets matching a
     /// natural language query. Use this to find functions, classes, implementations, or any
     /// code constructs by describing what you're looking for.
-    /// Set hybrid=true to also run keyword matching (BM25) fused via Reciprocal Rank Fusion —
-    /// this helps when searching for exact symbol names or rare identifiers.
+    /// Keyword matching (BM25) fused via Reciprocal Rank Fusion is on by default; set
+    /// text_search=false to use only semantic (vector) search.
     #[tool(name = "search_code")]
     async fn search_code(
         &self,
@@ -124,7 +123,7 @@ impl CodesearchMcpServer {
 
         let mut query = SearchQuery::new(&input.query)
             .with_limit(limit)
-            .with_hybrid(input.hybrid);
+            .with_text_search(input.text_search);
 
         if let Some(score) = input.min_score {
             query = query.with_min_score(score);
@@ -222,8 +221,8 @@ impl ServerHandler for CodesearchMcpServer {
             server_info: Implementation::from_build_env(),
             instructions: Some(
                 "Semantic code search server. Available tools:\n\
-                 • search_code — find code by natural language description (add hybrid=true \
-                   for keyword+semantic fusion)\n\
+                 • search_code — find code by natural language description (set text_search=false \
+                   to disable keyword+semantic fusion)\n\
                  • analyze_impact — blast-radius analysis: what breaks if symbol X changes?\n\
                  • get_symbol_context — 360° view of a symbol's callers and callees"
                     .into(),

@@ -525,9 +525,9 @@ impl VectorRepository for DuckdbVectorRepository {
 
         let array_lit = Self::vector_to_array_literal(query_embedding)?;
 
-        // When hybrid, fetch more candidates from each leg so RRF has a
-        // meaningful pool to rank. The final result is capped at query.limit().
-        let fetch_limit = if query.is_hybrid() {
+        // When text search is enabled, fetch more candidates from each leg so
+        // RRF has a meaningful pool to rank. The final result is capped at query.limit().
+        let fetch_limit = if query.is_text_search() {
             (query.limit() * 2).max(20)
         } else {
             query.limit()
@@ -537,7 +537,7 @@ impl VectorRepository for DuckdbVectorRepository {
 
         let semantic = Self::run_semantic(&conn, &self.namespace, &array_lit, query, fetch_limit)?;
 
-        if !query.is_hybrid() {
+        if !query.is_text_search() {
             return Ok(semantic);
         }
 
@@ -545,7 +545,7 @@ impl VectorRepository for DuckdbVectorRepository {
         let text = Self::run_text(&conn, &self.namespace, &terms, query, fetch_limit)?;
 
         debug!(
-            "Hybrid: {} semantic + {} text candidates → fusing",
+            "Text search: {} semantic + {} text candidates → fusing",
             semantic.len(),
             text.len()
         );

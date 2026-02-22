@@ -31,9 +31,9 @@ impl SearchCodeUseCase {
 
     pub async fn execute(&self, query: SearchQuery) -> Result<Vec<SearchResult>, DomainError> {
         info!(
-            "Searching for: {} (hybrid={})",
+            "Searching for: {} (text_search={})",
             query.query(),
-            query.is_hybrid()
+            query.is_text_search()
         );
 
         let start_time = Instant::now();
@@ -60,8 +60,8 @@ impl SearchCodeUseCase {
             query.clone()
         };
 
-        // The repository handles hybrid (BM25 + semantic + RRF) internally
-        // when query.is_hybrid() is true.
+        // The repository fuses keyword (BM25 + semantic + RRF) when
+        // query.is_text_search() is true.
         let mut results = self
             .vector_repo
             .search(&query_embedding, &search_query)

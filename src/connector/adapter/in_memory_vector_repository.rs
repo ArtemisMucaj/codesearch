@@ -109,7 +109,7 @@ impl VectorRepository for InMemoryVectorRepository {
         query_embedding: &[f32],
         query: &SearchQuery,
     ) -> Result<Vec<SearchResult>, DomainError> {
-        let fetch_limit = if query.is_hybrid() {
+        let fetch_limit = if query.is_text_search() {
             (query.limit() * 2).max(20)
         } else {
             query.limit()
@@ -117,7 +117,7 @@ impl VectorRepository for InMemoryVectorRepository {
 
         let semantic = self.search_semantic(query_embedding, query, fetch_limit).await;
 
-        if !query.is_hybrid() {
+        if !query.is_text_search() {
             return Ok(semantic);
         }
 
