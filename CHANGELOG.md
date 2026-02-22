@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Features
+
+* hybrid search enabled by default: every `search` query now runs both a semantic (vector) leg and a keyword (BM25-style LIKE) leg, then fuses them via Reciprocal Rank Fusion (RRF); use `--no-text-search` to opt back to pure semantic search
+* add `--no-text-search` flag to the `search` command to disable the keyword leg and use only vector similarity
+
+### Bug Fixes
+
+* pre-rerank score filter (`>= 0.1`) no longer silently drops hybrid results whose RRF scores (~0.016–0.033) are below the threshold; the filter is now bypassed when text search is enabled
+* LIKE escape character in DuckDB text search corrected from two-character `\\` to single-character `!`, fixing invalid SQL generated against DuckDB's `ESCAPE` clause
+* `min_score` pruning in the semantic leg no longer runs before `rrf_fuse` in hybrid mode, preventing an asymmetric candidate pool; post-fusion filtering is now applied once by the caller
+* misleading "Text search" label in the hybrid-path debug log renamed to "Hybrid search" to correctly reflect that both legs and RRF fusion are involved
+* redundant `array_cosine_distance` call in `ORDER BY` replaced with `ORDER BY score DESC` alias, eliminating a duplicate per-row vector computation
+
+### Tests
+
+* comprehensive unit tests for `rrf_fuse`: empty inputs, rank-order scoring, dual-membership boost, `limit` truncation, and formula correctness
+* unit tests for `SearchQuery.with_text_search` / `is_text_search`: default value, toggle behaviour, independence from other fields, and `summary()` output
+* unit tests for `InMemoryVectorRepository` hybrid paths: cosine vs RRF score ranges, dual-leg ranking, post-fusion `min_score` filtering, no early pruning, empty-term fallback, and limit enforcement
+* integration tests for end-to-end hybrid search: results returned with positive scores, keyword-matched chunk surfaces, special SQL characters (`%`, `_`, `!`) do not cause errors, and semantic-only baseline confirms the flag gates the BM25 leg
+
 ## [0.6.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.5.0...v0.6.0) (2026-02-16)
 
 

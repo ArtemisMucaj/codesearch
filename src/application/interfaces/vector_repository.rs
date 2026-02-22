@@ -23,6 +23,10 @@ pub trait VectorRepository: Send + Sync {
         file_path: &str,
     ) -> Result<u64, DomainError>;
 
+    /// Similarity search. When `query.is_text_search()` is true, implementations should
+    /// additionally run keyword (BM25-style) matching and fuse both result lists via
+    /// Reciprocal Rank Fusion before returning. Backends that cannot perform text
+    /// search may silently fall back to semantic-only results.
     async fn search(
         &self,
         query_embedding: &[f32],

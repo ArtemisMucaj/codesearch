@@ -3,13 +3,13 @@ name: codesearch
 description: Semantic code search using ML embeddings and AST analysis. Replaces built-in search tools for intent-based code exploration. Use when the user asks to find code by describing what it does, understand code relationships, or explore a codebase semantically.
 metadata:
   author: ArtemisMucaj
-  version: "0.5.0"
+  version: "0.6.0"
 compatibility: Requires the codesearch binary installed and a repository indexed with `codesearch index`.
 ---
 
 # Codesearch
 
-Semantic code search powered by ML embeddings and Tree-sitter AST analysis. Finds code by meaning, not just text matching.
+Hybrid code search powered by ML embeddings, BM25-style keyword matching, and Reciprocal Rank Fusion. Finds code by meaning **and** by exact keyword — both in a single query, by default.
 
 ## When to Use This Skill
 
@@ -19,6 +19,8 @@ Invoke this skill **immediately** when:
 - User asks to explore **functionality** (e.g., "find error handling logic")
 - User asks about **implementation details** (e.g., "how are embeddings generated?")
 - You need to discover code related to a **concept** rather than an exact string
+- User asks about **blast radius** or **impact** of changing a function/symbol
+- User asks **who calls** a function or **what does a function call** (symbol context)
 
 ## When to Use Built-in Tools Instead
 
@@ -63,22 +65,27 @@ codesearch index /path/to/repo --name my-project
 codesearch index /path/to/repo --force
 ```
 
-## Semantic Search
+## Search
 
-Use `codesearch search` to find code by describing what it does in natural language:
+Use `codesearch search` to find code. By default it runs **hybrid search** (semantic vector similarity + BM25 keyword matching, fused via RRF) for best precision and recall.
 
 ```shell
-# Search with natural language
+# Hybrid search — default, no flag needed
 codesearch search "user authentication flow"
 codesearch search "error handling middleware"
 codesearch search "database connection setup"
 codesearch search "API request validation"
 
+# Semantic-only search (disable keyword leg, pure vector similarity)
+codesearch search "user authentication flow" --no-text-search
+
 # Limit number of results (default: 10)
 codesearch search "error handling" --num 5
 
-# Filter by minimum relevance score (0.0-1.0)
-codesearch search "authentication" --min-score 0.5
+# Filter by minimum relevance score
+# Note: hybrid RRF scores are ~0.016–0.033; semantic cosine scores are 0.0–1.0
+codesearch search "authentication" --min-score 0.02   # for hybrid results
+codesearch search "authentication" --no-text-search --min-score 0.5  # for semantic-only
 
 # Filter by programming language
 codesearch search "struct definition" --language rust
@@ -87,6 +94,13 @@ codesearch search "class hierarchy" --language python --language typescript
 # Filter by repository (when multiple repos are indexed)
 codesearch search "config loading" --repository my-project
 ```
+
+### Hybrid vs Semantic-only
+
+| Mode | Flag | Best for |
+|------|------|----------|
+| Hybrid (default) | *(none)* | Most queries — combines meaning and keyword precision |
+| Semantic-only | `--no-text-search` | Abstract intent queries where exact keywords unlikely to match |
 
 ### Supported Languages
 
@@ -100,6 +114,36 @@ Codesearch uses Tree-sitter to extract and index these code constructs:
 - Traits and implementations
 - Modules, constants, and typedefs
 - Import statements
+
+## Call Graph Analysis
+
+Once a repository is indexed, the call graph is available for two complementary commands.
+
+### Impact Analysis — blast radius of a change
+
+```shell
+# Who breaks if `authenticate` changes? (default depth: 5 hops)
+codesearch impact authenticate
+
+# Limit to 2 hops
+codesearch impact authenticate --depth 2
+
+# Restrict to one repository; JSON output for scripts
+codesearch impact authenticate --repository my-api --format json
+```
+
+### Symbol Context — 360-degree callers + callees
+
+```shell
+# Who calls `authenticate`, and what does it call?
+codesearch context authenticate
+
+# Limit results per direction
+codesearch context authenticate --limit 10
+
+# JSON output
+codesearch context authenticate --format json
+```
 
 ## Repository Management
 
@@ -156,4 +200,4 @@ codesearch --no-rerank search "query"
 
 ## Keywords
 
-semantic search, code search, natural language search, find code, explore codebase, code understanding, intent search, AST analysis, embeddings, code discovery, code exploration
+semantic search, hybrid search, code search, natural language search, find code, explore codebase, code understanding, intent search, AST analysis, embeddings, code discovery, code exploration, BM25, keyword search, RRF, reciprocal rank fusion, call graph, impact analysis, blast radius, symbol context, callers, callees, dependency analysis

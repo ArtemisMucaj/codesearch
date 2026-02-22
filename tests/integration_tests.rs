@@ -315,3 +315,225 @@ pub fn subtract(a: i32, b: i32) -> i32 {
         "Top result should have positive score"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_hybrid_search_returns_results() {
+    let env = setup_test_env().await;
+
+    let temp_dir = tempdir().expect("Failed to create temp directory");
+    let src_dir = temp_dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("Failed to create src directory");
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        r#"
+pub fn compute(x: i32, y: i32) -> i32 {
+    x + y
+}
+
+pub fn render(frame: &str) -> String {
+    format!("frame: {}", frame)
+}
+"#,
+    )
+    .expect("Failed to write test file");
+
+    let embedding_service = Arc::new(MockEmbedding::new());
+    let index_use_case = IndexRepositoryUseCase::new(
+        env.metadata_repository.clone(),
+        env.vector_repo.clone(),
+        env.file_hash_repo.clone(),
+        env.call_graph_use_case.clone(),
+        env.parser.clone(),
+        embedding_service.clone(),
+    );
+    index_use_case
+        .execute(
+            temp_dir.path().to_str().unwrap(),
+            Some("hybrid-test-repo"),
+            VectorStore::InMemory,
+            None,
+            false,
+        )
+        .await
+        .expect("Indexing failed");
+
+    let search_use_case = SearchCodeUseCase::new(env.vector_repo.clone(), embedding_service);
+
+    // text_search=true activates the hybrid (semantic + BM25 + RRF) path
+    let query = SearchQuery::new("compute").with_limit(5).with_text_search(true);
+    let results = search_use_case
+        .execute(query)
+        .await
+        .expect("Hybrid search failed");
+
+    assert!(!results.is_empty(), "Hybrid search should return results");
+    assert!(
+        results[0].score() > 0.0,
+        "Hybrid results should have positive RRF scores"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_hybrid_search_result_contains_matched_chunk() {
+    // Verify that the chunk matching the keyword appears in the top results
+    // when hybrid search is enabled.
+    let env = setup_test_env().await;
+
+    let temp_dir = tempdir().expect("Failed to create temp directory");
+    let src_dir = temp_dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("Failed to create src directory");
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        r#"
+pub fn authenticate(user: &str, password: &str) -> bool {
+    user == "admin" && password == "secret"
+}
+
+pub fn compress_data(data: &[u8]) -> Vec<u8> {
+    data.to_vec()
+}
+"#,
+    )
+    .expect("Failed to write test file");
+
+    let embedding_service = Arc::new(MockEmbedding::new());
+    let index_use_case = IndexRepositoryUseCase::new(
+        env.metadata_repository.clone(),
+        env.vector_repo.clone(),
+        env.file_hash_repo.clone(),
+        env.call_graph_use_case.clone(),
+        env.parser.clone(),
+        embedding_service.clone(),
+    );
+    index_use_case
+        .execute(
+            temp_dir.path().to_str().unwrap(),
+            Some("keyword-test-repo"),
+            VectorStore::InMemory,
+            None,
+            false,
+        )
+        .await
+        .expect("Indexing failed");
+
+    let search_use_case = SearchCodeUseCase::new(env.vector_repo.clone(), embedding_service);
+
+    let query = SearchQuery::new("authenticate")
+        .with_limit(5)
+        .with_text_search(true);
+    let results = search_use_case.execute(query).await.expect("Search failed");
+
+    assert!(!results.is_empty(), "Should find at least one result");
+    // The authenticate function should appear in the results because it both
+    // matches the text query and has a semantic embedding close to the query.
+    let found = results
+        .iter()
+        .any(|r| r.chunk().content().contains("authenticate"));
+    assert!(found, "authenticate chunk should appear in hybrid results");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_hybrid_search_handles_special_chars_in_query() {
+    // Queries containing SQL LIKE special characters (%, _, !) must not panic
+    // or produce errors when text_search is enabled.
+    let env = setup_test_env().await;
+
+    let temp_dir = tempdir().expect("Failed to create temp directory");
+    let src_dir = temp_dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("Failed to create src directory");
+    std::fs::write(
+        src_dir.join("util.rs"),
+        "pub fn helper() -> bool { true }",
+    )
+    .expect("Failed to write test file");
+
+    let embedding_service = Arc::new(MockEmbedding::new());
+    let index_use_case = IndexRepositoryUseCase::new(
+        env.metadata_repository.clone(),
+        env.vector_repo.clone(),
+        env.file_hash_repo.clone(),
+        env.call_graph_use_case.clone(),
+        env.parser.clone(),
+        embedding_service.clone(),
+    );
+    index_use_case
+        .execute(
+            temp_dir.path().to_str().unwrap(),
+            Some("special-chars-repo"),
+            VectorStore::InMemory,
+            None,
+            false,
+        )
+        .await
+        .expect("Indexing failed");
+
+    let search_use_case = SearchCodeUseCase::new(env.vector_repo.clone(), embedding_service);
+
+    // Each of these contains characters that are special in SQL LIKE patterns
+    // or the escape character itself; none should cause an error.
+    for special_query in &[
+        "100% complete",
+        "user_name filter",
+        "path!to!file",
+        "a%b_c!d",
+        "score >= 0.5",
+    ] {
+        let query = SearchQuery::new(*special_query)
+            .with_limit(5)
+            .with_text_search(true);
+        search_use_case
+            .execute(query)
+            .await
+            .unwrap_or_else(|e| panic!("Hybrid search failed on query {:?}: {}", special_query, e));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_hybrid_search_with_text_search_disabled_returns_semantic_only() {
+    // Baseline: with text_search=false, results still come back (semantic path).
+    // This ensures the flag correctly gates the BM25 leg.
+    let env = setup_test_env().await;
+
+    let temp_dir = tempdir().expect("Failed to create temp directory");
+    let src_dir = temp_dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).expect("Failed to create src directory");
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }",
+    )
+    .expect("Failed to write test file");
+
+    let embedding_service = Arc::new(MockEmbedding::new());
+    let index_use_case = IndexRepositoryUseCase::new(
+        env.metadata_repository.clone(),
+        env.vector_repo.clone(),
+        env.file_hash_repo.clone(),
+        env.call_graph_use_case.clone(),
+        env.parser.clone(),
+        embedding_service.clone(),
+    );
+    index_use_case
+        .execute(
+            temp_dir.path().to_str().unwrap(),
+            Some("semantic-only-repo"),
+            VectorStore::InMemory,
+            None,
+            false,
+        )
+        .await
+        .expect("Indexing failed");
+
+    let search_use_case = SearchCodeUseCase::new(env.vector_repo.clone(), embedding_service);
+
+    let query = SearchQuery::new("add two numbers")
+        .with_limit(5)
+        .with_text_search(false);
+    let results = search_use_case.execute(query).await.expect("Search failed");
+
+    assert!(!results.is_empty(), "Semantic-only search should return results");
+    // Cosine-based scores are significantly higher than RRF scores
+    assert!(
+        results[0].score() > 0.1,
+        "Semantic scores should be larger than RRF scores"
+    );
+}

@@ -56,6 +56,7 @@ pub struct SearchQuery {
     languages: Option<Vec<String>>,
     repository_ids: Option<Vec<String>>,
     node_types: Option<Vec<String>>,
+    text_search: bool,
 }
 
 impl SearchQuery {
@@ -67,6 +68,7 @@ impl SearchQuery {
             languages: None,
             repository_ids: None,
             node_types: None,
+            text_search: false,
         }
     }
 
@@ -96,6 +98,11 @@ impl SearchQuery {
         self
     }
 
+    pub fn with_text_search(mut self, enabled: bool) -> Self {
+        self.text_search = enabled;
+        self
+    }
+
     pub fn query(&self) -> &str {
         &self.query
     }
@@ -118,6 +125,10 @@ impl SearchQuery {
 
     pub fn node_types(&self) -> Option<&[String]> {
         self.node_types.as_deref()
+    }
+
+    pub fn is_text_search(&self) -> bool {
+        self.text_search
     }
 
     pub fn has_filters(&self) -> bool {
@@ -152,6 +163,7 @@ impl SearchQuery {
         if let Some(ref types) = self.node_types {
             parts.push(format!("types={:?}", types));
         }
+        parts.push(format!("text_search={}", self.text_search));
 
         parts.join(", ")
     }
@@ -205,5 +217,45 @@ mod tests {
         assert!(query.filters_by_language("rust"));
         assert!(query.filters_by_language("python"));
         assert!(!query.filters_by_language("go"));
+    }
+
+    #[test]
+    fn test_text_search_defaults_to_false() {
+        let query = SearchQuery::new("find functions");
+        assert!(!query.is_text_search());
+    }
+
+    #[test]
+    fn test_with_text_search_enables_flag() {
+        let query = SearchQuery::new("find functions").with_text_search(true);
+        assert!(query.is_text_search());
+    }
+
+    #[test]
+    fn test_with_text_search_can_be_disabled() {
+        let query = SearchQuery::new("find functions")
+            .with_text_search(true)
+            .with_text_search(false);
+        assert!(!query.is_text_search());
+    }
+
+    #[test]
+    fn test_text_search_flag_is_independent_of_other_fields() {
+        let query = SearchQuery::new("compute")
+            .with_limit(7)
+            .with_min_score(0.3)
+            .with_text_search(true);
+        assert!(query.is_text_search());
+        assert_eq!(query.limit(), 7);
+        assert_eq!(query.min_score(), Some(0.3));
+    }
+
+    #[test]
+    fn test_summary_includes_text_search_field() {
+        let query = SearchQuery::new("q").with_text_search(true);
+        assert!(query.summary().contains("text_search=true"));
+
+        let query2 = SearchQuery::new("q");
+        assert!(query2.summary().contains("text_search=false"));
     }
 }

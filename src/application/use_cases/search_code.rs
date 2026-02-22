@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::application::{EmbeddingService, RerankingService, VectorRepository};
 use crate::domain::{DomainError, SearchQuery, SearchResult};
@@ -30,16 +30,15 @@ impl SearchCodeUseCase {
     }
 
     pub async fn execute(&self, query: SearchQuery) -> Result<Vec<SearchResult>, DomainError> {
-        info!("Searching for: {}", query.query());
+        info!(
+            "Searching for: {} (text_search={})",
+            query.query(),
+            query.is_text_search()
+        );
 
         let start_time = Instant::now();
 
         let query_embedding = self.embedding_service.embed_query(query.query()).await?;
-
-        debug!(
-            "Generated query embedding with {} dimensions",
-            query_embedding.len()
-        );
 
         let fetch_limit = if self.reranking_service.is_some() {
             // Use an inverse-log formula so the overhead shrinks as num grows:
@@ -61,6 +60,8 @@ impl SearchCodeUseCase {
             query.clone()
         };
 
+        // The repository fuses two legs — BM25 and semantic — using RRF when
+        // query.is_text_search() is true.
         let mut results = self
             .vector_repo
             .search(&query_embedding, &search_query)
@@ -69,14 +70,18 @@ impl SearchCodeUseCase {
         if let Some(ref reranker) = self.reranking_service {
             // Filter out very low-scoring results before reranking — they are
             // unlikely to resurface and just slow down the cross-encoder.
-            let before_filter = results.len();
-            results.retain(|r| r.score() >= 0.1);
-            let filtered = before_filter - results.len();
-            if filtered > 0 {
-                warn!(
-                    "Excluded {} candidates with score < 0.1 before reranking",
-                    filtered
-                );
+            // Skip this filter for hybrid/RRF results: RRF scores are ~0.016–0.033
+            // by design and would all be dropped by a hard >= 0.1 threshold.
+            if !search_query.is_text_search() {
+                let before_filter = results.len();
+                results.retain(|r| r.score() >= 0.1);
+                let filtered = before_filter - results.len();
+                if filtered > 0 {
+                    warn!(
+                        "Excluded {} candidates with score < 0.1 before reranking",
+                        filtered
+                    );
+                }
             }
 
             info!(

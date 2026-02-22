@@ -43,6 +43,10 @@ pub enum Commands {
         /// Output format: text, json, or vimgrep (for Neovim/Telescope)
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormat,
+
+        /// Disable keyword (BM25) search and use only semantic (vector) search
+        #[arg(long = "no-text-search", default_value_t = true, action = clap::ArgAction::SetFalse)]
+        text_search: bool,
     },
 
     List,
@@ -52,6 +56,42 @@ pub enum Commands {
     },
 
     Stats,
+
+    /// Show the blast radius of changing a symbol (BFS over the call graph).
+    Impact {
+        /// Symbol name to analyse (e.g. "authenticate" or "MyStruct::new")
+        symbol: String,
+
+        /// Maximum hop depth to traverse (default: 5)
+        #[arg(long, default_value = "5")]
+        depth: usize,
+
+        /// Restrict analysis to a specific repository ID
+        #[arg(short, long)]
+        repository: Option<String>,
+
+        /// Output format: text or json
+        #[arg(short = 'F', long, value_enum, default_value = "text")]
+        format: OutputFormat,
+    },
+
+    /// Show 360-degree context for a symbol: its callers and callees.
+    Context {
+        /// Symbol name to look up (e.g. "authenticate" or "MyStruct::new")
+        symbol: String,
+
+        /// Restrict context to a specific repository ID
+        #[arg(short, long)]
+        repository: Option<String>,
+
+        /// Maximum number of callers/callees to return per direction
+        #[arg(short, long)]
+        limit: Option<u32>,
+
+        /// Output format: text or json
+        #[arg(short = 'F', long, value_enum, default_value = "text")]
+        format: OutputFormat,
+    },
 
     /// Start MCP (Model Context Protocol) server for integration with AI tools
     Mcp {

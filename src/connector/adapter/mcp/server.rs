@@ -25,6 +25,16 @@ fn default_limit() -> usize {
     10
 }
 
+fn default_depth() -> usize {
+    5
+}
+
+fn default_text_search() -> bool {
+    true
+}
+
+// ── Input types ──────────────────────────────────────────────────────────────
+
 /// Input parameters for the search_code tool
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchToolInput {
@@ -43,7 +53,41 @@ pub struct SearchToolInput {
 
     /// Filter results by repository IDs
     pub repositories: Option<Vec<String>>,
+
+    /// Enable keyword (BM25) search fused with semantic search via Reciprocal Rank Fusion.
+    /// Defaults to true; set to false to use only semantic (vector) search.
+    #[serde(default = "default_text_search")]
+    pub text_search: bool,
 }
+
+/// Input parameters for the analyze_impact tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ImpactToolInput {
+    /// Symbol name to analyse (e.g. "authenticate" or "MyStruct::new")
+    pub symbol: String,
+
+    /// Maximum hop depth to traverse (default: 5)
+    #[serde(default = "default_depth")]
+    pub depth: usize,
+
+    /// Restrict analysis to a specific repository ID
+    pub repository_id: Option<String>,
+}
+
+/// Input parameters for the get_symbol_context tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ContextToolInput {
+    /// Symbol name to look up (e.g. "authenticate" or "MyStruct::new")
+    pub symbol: String,
+
+    /// Restrict context to a specific repository ID
+    pub repository_id: Option<String>,
+
+    /// Maximum number of callers/callees to return per direction
+    pub limit: Option<u32>,
+}
+
+// ── MCP Server ───────────────────────────────────────────────────────────────
 
 /// MCP Server that exposes codesearch functionality
 #[derive(Clone)]
@@ -61,8 +105,11 @@ impl CodesearchMcpServer {
         }
     }
 
-    /// Search for code using semantic similarity. Returns relevant code snippets matching a natural language query.
-    /// Use this to find functions, classes, implementations, or any code constructs by describing what you're looking for.
+    /// Search for code using semantic similarity. Returns relevant code snippets matching a
+    /// natural language query. Use this to find functions, classes, implementations, or any
+    /// code constructs by describing what you're looking for.
+    /// Keyword matching (BM25) fused via Reciprocal Rank Fusion is on by default; set
+    /// text_search=false to use only semantic (vector) search.
     #[tool(name = "search_code")]
     async fn search_code(
         &self,
@@ -70,11 +117,11 @@ impl CodesearchMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let input = params.0;
 
-        // Clamp to server-side maximum
         let limit = input.limit.min(MAX_LIMIT);
 
-        // Build SearchQuery from input
-        let mut query = SearchQuery::new(&input.query).with_limit(limit);
+        let mut query = SearchQuery::new(&input.query)
+            .with_limit(limit)
+            .with_text_search(input.text_search);
 
         if let Some(score) = input.min_score {
             query = query.with_min_score(score);
@@ -86,13 +133,11 @@ impl CodesearchMcpServer {
             query = query.with_repositories(repos);
         }
 
-        // Execute search
         let use_case = self.container.search_use_case();
         let results = use_case.execute(query).await.map_err(|e| {
             McpError::internal_error(format!("Search failed: {}", e), None)
         })?;
 
-        // Convert to output format
         let outputs: Vec<SearchResultOutput> = results
             .iter()
             .map(|r| SearchResultOutput {
@@ -108,9 +153,57 @@ impl CodesearchMcpServer {
             })
             .collect();
 
-        // Return as JSON content
         let json = serde_json::to_string_pretty(&outputs).map_err(|e| {
             McpError::internal_error(format!("Failed to serialize results: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Analyse the blast radius of changing a symbol.
+    /// Performs a BFS through the call graph to find every symbol that directly or
+    /// transitively calls (or depends on) the given symbol, grouped by hop depth.
+    /// Requires the repository to have been indexed with call-graph support.
+    #[tool(name = "analyze_impact")]
+    async fn analyze_impact(
+        &self,
+        params: Parameters<ImpactToolInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = params.0;
+        let depth = input.depth;
+
+        let use_case = self.container.impact_use_case();
+        let analysis = use_case
+            .analyze(&input.symbol, depth, input.repository_id.as_deref())
+            .await
+            .map_err(|e| McpError::internal_error(format!("Impact analysis failed: {}", e), None))?;
+
+        let json = serde_json::to_string_pretty(&analysis).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize impact analysis: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Get the 360-degree context for a symbol: who calls it (callers) and what it
+    /// calls (callees). Useful for understanding a symbol's role in the codebase
+    /// before refactoring or debugging.
+    /// Requires the repository to have been indexed with call-graph support.
+    #[tool(name = "get_symbol_context")]
+    async fn get_symbol_context(
+        &self,
+        params: Parameters<ContextToolInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = params.0;
+
+        let use_case = self.container.context_use_case();
+        let ctx = use_case
+            .get_context(&input.symbol, input.repository_id.as_deref(), input.limit)
+            .await
+            .map_err(|e| McpError::internal_error(format!("Context lookup failed: {}", e), None))?;
+
+        let json = serde_json::to_string_pretty(&ctx).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize context: {}", e), None)
         })?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -125,9 +218,11 @@ impl ServerHandler for CodesearchMcpServer {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation::from_build_env(),
             instructions: Some(
-                "Semantic code search server. Use the search_code tool to find relevant code \
-                 snippets by describing what you're looking for in natural language. The tool \
-                 searches across indexed repositories using ML embeddings for semantic similarity."
+                "Semantic code search server. Available tools:\n\
+                 • search_code — find code by natural language description (set text_search=false \
+                   to disable keyword+semantic fusion)\n\
+                 • analyze_impact — blast-radius analysis: what breaks if symbol X changes?\n\
+                 • get_symbol_context — 360° view of a symbol's callers and callees"
                     .into(),
             ),
         }

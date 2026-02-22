@@ -8,9 +8,9 @@ use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashReposito
 use crate::{
     ChromaVectorRepository, DeleteRepositoryUseCase, DuckdbCallGraphRepository,
     DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
-    InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, MockEmbedding,
-    MockReranking, OrtEmbedding, OrtReranking, RerankingService, SearchCodeUseCase,
-    TreeSitterParser, VectorRepository,
+    ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
+    ListRepositoriesUseCase, MockEmbedding, MockReranking, OrtEmbedding, OrtReranking,
+    RerankingService, SearchCodeUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -292,6 +292,14 @@ impl Container {
     /// Get the call graph use case for direct access to call graph functionality.
     pub fn call_graph_use_case(&self) -> Arc<CallGraphUseCase> {
         self.call_graph_use_case.clone()
+    }
+
+    pub fn impact_use_case(&self) -> ImpactAnalysisUseCase {
+        ImpactAnalysisUseCase::new(self.call_graph_use_case.clone())
+    }
+
+    pub fn context_use_case(&self) -> SymbolContextUseCase {
+        SymbolContextUseCase::new(self.call_graph_use_case.clone())
     }
 
     pub fn data_dir(&self) -> &str {

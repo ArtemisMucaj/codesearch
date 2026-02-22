@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::cli::OutputFormat;
-use crate::{Repository, SearchQuery, SearchResult};
+use crate::{SearchQuery, SearchResult};
 
 use super::super::Container;
 
@@ -35,17 +35,16 @@ impl<'a> SearchController<'a> {
         languages: Option<Vec<String>>,
         repositories: Option<Vec<String>>,
         format: OutputFormat,
+        text_search: bool,
     ) -> Result<String> {
-        let mut search_query = SearchQuery::new(&query).with_limit(num);
+        let mut search_query = SearchQuery::new(&query).with_limit(num).with_text_search(text_search);
 
         if let Some(score) = min_score {
             search_query = search_query.with_min_score(score);
         }
-
         if let Some(langs) = languages {
             search_query = search_query.with_languages(langs);
         }
-
         if let Some(repos) = repositories {
             search_query = search_query.with_repositories(repos);
         }
@@ -60,12 +59,7 @@ impl<'a> SearchController<'a> {
         })
     }
 
-    pub async fn stats(&self) -> Result<String> {
-        let use_case = self.container.list_use_case();
-        let repos = use_case.execute().await?;
-
-        Ok(self.format_stats(&repos))
-    }
+    // ── formatting helpers ────────────────────────────────────────────────────
 
     fn format_search_results(&self, results: &[SearchResult]) -> String {
         if results.is_empty() {
@@ -148,19 +142,5 @@ impl<'a> SearchController<'a> {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    fn format_stats(&self, repos: &[Repository]) -> String {
-        let total_repos = repos.len();
-        let total_files: u64 = repos.iter().map(|r| r.file_count()).sum();
-        let total_chunks: u64 = repos.iter().map(|r| r.chunk_count()).sum();
-
-        format!(
-            "CodeSearch Statistics\n=====================\nRepositories: {}\nTotal Files:  {}\nTotal Chunks: {}\nData Dir:     {}",
-            total_repos,
-            total_files,
-            total_chunks,
-            self.container.data_dir()
-        )
     }
 }
