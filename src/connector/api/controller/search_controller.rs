@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::cli::OutputFormat;
-use crate::{ImpactAnalysis, Repository, SearchQuery, SearchResult, SymbolContext};
+use crate::{SearchQuery, SearchResult};
 
 use super::super::Container;
 
@@ -57,54 +57,6 @@ impl<'a> SearchController<'a> {
             OutputFormat::Json => self.format_search_results_json(&results),
             OutputFormat::Vimgrep => self.format_search_results_vimgrep(&results),
         })
-    }
-
-    pub async fn impact(
-        &self,
-        symbol: String,
-        depth: usize,
-        repository: Option<String>,
-        format: OutputFormat,
-    ) -> Result<String> {
-        let use_case = self.container.impact_use_case();
-        let analysis = use_case
-            .analyze(&symbol, depth, repository.as_deref())
-            .await?;
-
-        Ok(match format {
-            OutputFormat::Json => serde_json::to_string_pretty(&analysis)?,
-            OutputFormat::Vimgrep => {
-                anyhow::bail!("--format vimgrep is not supported for impact; use text or json")
-            }
-            OutputFormat::Text => self.format_impact(&analysis),
-        })
-    }
-
-    pub async fn context(
-        &self,
-        symbol: String,
-        repository: Option<String>,
-        limit: Option<u32>,
-        format: OutputFormat,
-    ) -> Result<String> {
-        let use_case = self.container.context_use_case();
-        let ctx = use_case
-            .get_context(&symbol, repository.as_deref(), limit)
-            .await?;
-
-        Ok(match format {
-            OutputFormat::Json => serde_json::to_string_pretty(&ctx)?,
-            OutputFormat::Vimgrep => {
-                anyhow::bail!("--format vimgrep is not supported for context; use text or json")
-            }
-            OutputFormat::Text => self.format_context(&ctx),
-        })
-    }
-
-    pub async fn stats(&self) -> Result<String> {
-        let use_case = self.container.list_use_case();
-        let repos = use_case.execute().await?;
-        Ok(self.format_stats(&repos))
     }
 
     // ── formatting helpers ────────────────────────────────────────────────────
@@ -190,93 +142,5 @@ impl<'a> SearchController<'a> {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    fn format_impact(&self, analysis: &ImpactAnalysis) -> String {
-        if analysis.total_affected == 0 {
-            return format!(
-                "No callers found for '{}'. Either the symbol is a root entry point or \
-                 it hasn't been indexed yet.",
-                analysis.root_symbol
-            );
-        }
-
-        let mut out = format!(
-            "Impact analysis for '{}'\n\
-             ─────────────────────────────────────────\n\
-             Total affected symbols : {}\n\
-             Max depth reached      : {}\n\n",
-            analysis.root_symbol, analysis.total_affected, analysis.max_depth_reached
-        );
-
-        for (depth_idx, nodes) in analysis.by_depth.iter().enumerate() {
-            if nodes.is_empty() {
-                continue;
-            }
-            out.push_str(&format!("Depth {} ({} symbol(s)):\n", depth_idx + 1, nodes.len()));
-            for node in nodes {
-                out.push_str(&format!(
-                    "  • {} [{}]  {}\n",
-                    node.symbol, node.reference_kind, node.file_path
-                ));
-            }
-            out.push('\n');
-        }
-
-        out
-    }
-
-    fn format_context(&self, ctx: &SymbolContext) -> String {
-        let mut out = format!(
-            "Context for '{}'\n\
-             ─────────────────────────────────────────\n",
-            ctx.symbol
-        );
-
-        out.push_str(&format!(
-            "\nCallers ({} total) — who uses this symbol:\n",
-            ctx.caller_count
-        ));
-        if ctx.callers.is_empty() {
-            out.push_str("  (none found)\n");
-        } else {
-            for edge in &ctx.callers {
-                out.push_str(&format!(
-                    "  ← {} [{}]  {}:{}\n",
-                    edge.symbol, edge.reference_kind, edge.file_path, edge.line
-                ));
-            }
-        }
-
-        out.push_str(&format!(
-            "\nCallees ({} total) — what this symbol uses:\n",
-            ctx.callee_count
-        ));
-        if ctx.callees.is_empty() {
-            out.push_str("  (none found)\n");
-        } else {
-            for edge in &ctx.callees {
-                out.push_str(&format!(
-                    "  → {} [{}]  {}:{}\n",
-                    edge.symbol, edge.reference_kind, edge.file_path, edge.line
-                ));
-            }
-        }
-
-        out
-    }
-
-    fn format_stats(&self, repos: &[Repository]) -> String {
-        let total_repos = repos.len();
-        let total_files: u64 = repos.iter().map(|r| r.file_count()).sum();
-        let total_chunks: u64 = repos.iter().map(|r| r.chunk_count()).sum();
-
-        format!(
-            "CodeSearch Statistics\n=====================\nRepositories: {}\nTotal Files:  {}\nTotal Chunks: {}\nData Dir:     {}",
-            total_repos,
-            total_files,
-            total_chunks,
-            self.container.data_dir()
-        )
     }
 }
