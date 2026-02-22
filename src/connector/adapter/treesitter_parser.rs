@@ -870,6 +870,22 @@ impl ParserService for TreeSitterParser {
                             | "long"
                             | "usize"
                             | "isize"
+                            // Swift capitalized primitive / standard types
+                            | "String"
+                            | "Bool"
+                            | "Double"
+                            | "Float"
+                            | "Int"
+                            | "Int8"
+                            | "Int16"
+                            | "Int32"
+                            | "Int64"
+                            | "UInt"
+                            | "UInt8"
+                            | "UInt16"
+                            | "UInt32"
+                            | "UInt64"
+                            | "Character"
                     )
                 {
                     continue;
