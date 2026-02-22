@@ -4,7 +4,8 @@ A semantic code search tool that indexes code repositories using embeddings and 
 
 ## Features
 
-- **Semantic search**: uses ML embeddings to find semantically similar code
+- **Hybrid search** (default): combines semantic vector search with BM25-style keyword matching, fused via Reciprocal Rank Fusion (RRF) for best-of-both precision and recall
+- **Semantic search**: uses ML embeddings to find conceptually similar code even without exact keyword matches
 - **AST-aware**: parses code using tree-sitter for structure-aware indexing
 - **Multi-language support**: supports Rust, Python, JavaScript, TypeScript, Go, HCL, PHP, C++
 - **Persistent storage**: DuckDB with VSS (Vector Similarity Search) acceleration
@@ -94,6 +95,7 @@ codesearch mcp --http 8080
 | `-L, --language` | (none) | Filter by programming language (can specify multiple) |
 | `-r, --repository` | (none) | Filter by repository (can specify multiple) |
 | `-F, --format` | `text` | Output format: `text`, `json`, or `vimgrep` |
+| `--no-text-search` | (off) | Disable the keyword leg; use only vector/semantic search |
 
 ### Output Formats
 
@@ -222,14 +224,31 @@ The HTTP server exposes the MCP endpoint at `/mcp`.
 - **Vectors**: DuckDB (default) or ChromaDB (with `--chroma-url`)
 - **Index**: DuckDB uses HNSW (Hierarchical Navigable Small World) for Vector Similarity Search with cosine distance
 
+## Hybrid Search
+
+By default, every `search` query runs two complementary retrieval legs and fuses them with Reciprocal Rank Fusion (RRF):
+
+1. **Semantic leg** — vector similarity via HNSW cosine distance (finds conceptually related code)
+2. **Keyword leg** — BM25-style LIKE matching on content and symbol names (finds exact keyword occurrences)
+
+RRF assigns each result a score of `1 / (60 + rank)` from each leg it appears in; items found by both legs accumulate the highest fused scores. Final scores are in the ~0.016–0.033 range.
+
+```bash
+# Hybrid search (default — no flag needed)
+codesearch search "parse configuration file"
+
+# Semantic-only (disable keyword leg)
+codesearch search "parse configuration file" --no-text-search
+```
+
 ## Reranking
 
 CodeSearch supports optional reranking to improve search result relevance using cross-encoder models.
 
 ### How It Works
 
-1. Initial vector search retrieves candidates using inverse-log scaling: `num + ⌈num / ln(num)⌉` (defaults to 20 base candidates when `num ≤ 10`)
-2. Candidates with vector similarity score below 0.1 are excluded (too irrelevant to benefit from reranking)
+1. Initial hybrid/vector search retrieves candidates using inverse-log scaling: `num + ⌈num / ln(num)⌉` (defaults to 20 base candidates when `num ≤ 10`)
+2. For semantic-only results, candidates with vector similarity score below 0.1 are excluded (too irrelevant to benefit from reranking); hybrid RRF results bypass this filter because RRF scores are intentionally small (~0.016–0.033)
 3. A cross-encoder model (mxbai-rerank-xsmall-v1) reranks remaining candidates based on query-document relevance
 4. Top `num` reranked results are returned
 

@@ -2,39 +2,59 @@
 
 ## Overview
 
-CodeSearch uses semantic similarity to find relevant code. Unlike keyword search, it understands the meaning of your query and finds conceptually similar code.
+CodeSearch defaults to **hybrid search**: it combines semantic (vector) similarity with BM25-style keyword matching and fuses the two ranked lists using Reciprocal Rank Fusion (RRF). This gives you the recall of semantic search and the precision of keyword search in a single query.
 
 ## How It Works
 
 ```mermaid
 flowchart TB
-    A["Query: 'function to validate email addresses'"] --> B[Embed Query]
-    B --> C[Vector Search with VSS]
-    C --> D[Apply Filters]
-    D --> E[Fetch Details]
-    E --> F[Search Results]
+    A["Query string"] --> B[Embed Query]
+    A --> D[Keyword leg\nBM25 LIKE matching]
+    B --> C[Semantic leg\nVSS cosine search]
+    C --> E[RRF Fusion]
+    D --> E
+    E --> F[min_score filter]
+    F --> G[Reranking\noptional]
+    G --> H[Search Results]
 
-    B -.- B1[ONNX Runtime<br/>Same model as indexing]
-    C -.- C1[DuckDB VSS<br/>HNSW index<br/>Cosine distance]
-    D -.- D1[Language, score,<br/>repository filters]
-    E -.- E1[Get full chunk<br/>from DuckDB]
+    B -.- B1[ONNX Runtime<br/>384-dim embeddings]
+    C -.- C1[DuckDB VSS<br/>HNSW cosine distance]
+    D -.- D1[LIKE on content<br/>+ symbol_name]
+    E -.- E1[score = 1/(60+rank)<br/>summed across legs]
+    G -.- G1[Cross-encoder reranker<br/>skip with --no-rerank]
 ```
 
-**Search Pipeline**:
-1. **Query Embedding**: Input text is embedded using the same model as indexing (384 dimensions)
-2. **VSS Search**: DuckDB's Vector Similarity Search uses HNSW index to find similar vectors (fast approximate nearest neighbors)
-3. **Filtering**: Results filtered by language, node type, repository, and minimum score threshold
-4. **Reranking**: Enabled by default, skip using `--no-rerank`
-5. **Details Fetch**: Full code chunks reconstructed from DuckDB
-6. **Ranking**: Results ranked by cosine distance (0.0 = opposite, 1.0 = identical) or reranking score if enabled
+**Default (Hybrid) Search Pipeline**:
+1. **Query Embedding**: Input text is embedded with the same ONNX model used at indexing time (384 dimensions)
+2. **Semantic leg**: DuckDB VSS HNSW index finds nearest vectors by cosine distance
+3. **Keyword leg**: BM25-style `LIKE` matching on chunk content (1 pt) and symbol names (2 pts), normalised to [0, 1]
+4. **RRF Fusion**: Both ranked lists are merged — each result scores `1 / (60 + rank)` from each leg it appears in; items found by both legs accumulate the highest fused scores (range ~0.016–0.033)
+5. **Score filter**: `--min-score` applied once to the fused list
+6. **Reranking**: Enabled by default. Semantic-only candidates below 0.1 cosine similarity are excluded before reranking; RRF results bypass this threshold because their scores are intentionally small
+7. **Ranking**: Final order is fused RRF score (hybrid), cosine similarity (semantic-only), or cross-encoder score (reranked)
+
+Pass `--no-text-search` to skip steps 3–4 and use pure semantic/vector search.
 
 ## Search Query Options
 
 ### Basic Search
 
 ```bash
+# Hybrid search (default — semantic + keyword, fused via RRF)
 codesearch search "parse configuration file"
+
+# Semantic-only (vector similarity only, no keyword leg)
+codesearch search "parse configuration file" --no-text-search
 ```
+
+### Hybrid vs Semantic-only
+
+| Mode | Command | When to use |
+|------|---------|-------------|
+| Hybrid (default) | `codesearch search "..."` | Best overall recall and precision; catches both semantic matches and exact keyword hits |
+| Semantic-only | `codesearch search "..." --no-text-search` | Descriptive intent queries where keywords are unlikely to match; slightly faster |
+
+> **Scoring**: Hybrid results use RRF scores (~0.016–0.033). Semantic-only results use cosine similarity (0.0–1.0). `--min-score` thresholds should be tuned accordingly.
 
 ### Result Limit
 
@@ -59,8 +79,9 @@ codesearch search "validation" --no-rerank
 ```
 
 **How reranking works:**
-- Fetches candidates from vector search using an inverse-log formula: `num + ⌈num / ln(num)⌉` (defaults to 20 base candidates when `num ≤ 10`)
-- Filters out candidates with a vector similarity score below 0.1 (too irrelevant to benefit from reranking)
+- Fetches candidates from hybrid or vector search using an inverse-log formula: `num + ⌈num / ln(num)⌉` (defaults to 20 base candidates when `num ≤ 10`)
+- For **semantic-only** results, filters out candidates with vector similarity score below 0.1 (too irrelevant to benefit from reranking)
+- For **hybrid** results, the 0.1 threshold is bypassed — RRF scores are intentionally small (~0.016–0.033) and all fused results are passed to the reranker
 - Rescores remaining candidates using a cross-encoder model (mxbai-rerank-xsmall-v1)
 - Returns top `num` results by relevance score
 

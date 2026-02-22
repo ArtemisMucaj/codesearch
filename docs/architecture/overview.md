@@ -71,7 +71,8 @@ Contains use cases and interface definitions (ports):
 
 **Use Cases** (`src/application/use_cases/`):
 - **IndexRepositoryUseCase**: Indexes a code repository
-- **SearchCodeUseCase**: Performs semantic search
+- **SearchCodeUseCase**: Performs hybrid search (semantic + BM25 keyword legs fused via RRF by default; semantic-only with `--no-text-search`)
+- **rrf_fuse**: Merges two ranked result lists using Reciprocal Rank Fusion (`score = 1 / (60 + rank)`, summed per leg)
 - **ListRepositoriesUseCase**: Lists indexed repositories
 - **DeleteRepositoryUseCase**: Removes a repository from the index
 - **CallGraphUseCase**: Tracks and queries symbol references (callers, callees, cross-repo lookups)
@@ -136,14 +137,21 @@ flowchart TB
 ```mermaid
 flowchart TB
     A[Query String] --> B[Embed Query]
-    B --> C[Vector Search]
-    C --> D[Fetch Results]
-    D --> E[Search Results]
+    A --> D[Keyword leg\nBM25 LIKE]
+    B --> C[Semantic leg\nVector Search]
+    C --> E[rrf_fuse]
+    D --> E
+    E --> F[SearchCodeUseCase\nReranking optional]
+    F --> G[Search Results]
 
     B -.- B1[OrtEmbedding]
-    C -.- C1[DuckdbVectorRepository<br/>VSS with HNSW index<br/>or ChromaVectorRepository]
-    D -.- D1[Reconstruct CodeChunk<br/>domain objects]
+    C -.- C1[DuckdbVectorRepository<br/>VSS HNSW cosine<br/>or ChromaVectorRepository<br/>or InMemoryVectorRepository]
+    D -.- D1[DuckdbVectorRepository::run_text\nor InMemoryVectorRepository::search_text]
+    E -.- E1[rrf_fuse: score = 1/(60+rank)<br/>summed across legs]
+    F -.- F1[OrtReranking cross-encoder<br/>skip with --no-rerank]
 ```
+
+> **Note:** The keyword leg and RRF fusion are only active when `query.is_text_search()` is true (the default from the CLI). Pass `--no-text-search` to use semantic-only search and bypass `rrf_fuse`.
 
 ## Design Decisions
 
