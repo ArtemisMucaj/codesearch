@@ -5,10 +5,8 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::application::VectorRepository;
+use crate::application::{rrf_fuse, VectorRepository};
 use crate::domain::{CodeChunk, DomainError, Embedding, SearchQuery, SearchResult};
-
-const RRF_K: f32 = 60.0;
 
 pub struct InMemoryVectorRepository {
     chunks: Arc<Mutex<HashMap<String, CodeChunk>>>,
@@ -126,7 +124,7 @@ impl VectorRepository for InMemoryVectorRepository {
         let terms: Vec<&str> = query.query().split_whitespace().collect();
         let text = self.search_text(&terms, query, fetch_limit).await;
 
-        Ok(Self::rrf_fuse(semantic, text, query.limit()))
+        Ok(rrf_fuse(semantic, text, query.limit()))
     }
 
     async fn count(&self) -> Result<u64, DomainError> {
@@ -251,38 +249,6 @@ impl InMemoryVectorRepository {
         results
     }
 
-    fn rrf_fuse(
-        semantic: Vec<SearchResult>,
-        text: Vec<SearchResult>,
-        limit: usize,
-    ) -> Vec<SearchResult> {
-        let mut scores: HashMap<String, (SearchResult, f32)> = HashMap::new();
-
-        for (rank, result) in semantic.into_iter().enumerate() {
-            let rrf = 1.0 / (RRF_K + (rank + 1) as f32);
-            let id = result.chunk().id().to_string();
-            scores
-                .entry(id)
-                .and_modify(|(_, s)| *s += rrf)
-                .or_insert((result, rrf));
-        }
-        for (rank, result) in text.into_iter().enumerate() {
-            let rrf = 1.0 / (RRF_K + (rank + 1) as f32);
-            let id = result.chunk().id().to_string();
-            scores
-                .entry(id)
-                .and_modify(|(_, s)| *s += rrf)
-                .or_insert((result, rrf));
-        }
-
-        let mut fused: Vec<(SearchResult, f32)> = scores.into_values().collect();
-        fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        fused
-            .into_iter()
-            .take(limit)
-            .map(|(r, score)| SearchResult::new(r.chunk().clone(), score))
-            .collect()
-    }
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
