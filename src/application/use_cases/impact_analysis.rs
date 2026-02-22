@@ -17,6 +17,8 @@ pub struct ImpactNode {
     pub file_path: String,
     /// Kind of reference relationship (e.g. "call", "type_reference").
     pub reference_kind: String,
+    /// Repository that contains the caller symbol.
+    pub repository_id: String,
 }
 
 /// Full blast-radius report for a symbol.
@@ -102,6 +104,7 @@ impl ImpactAnalysisUseCase {
                     depth: next_depth,
                     file_path: reference.caller_file_path().to_string(),
                     reference_kind: reference.reference_kind().to_string(),
+                    repository_id: reference.repository_id().to_string(),
                 });
 
                 queue.push_back((caller_sym, next_depth));

@@ -59,8 +59,8 @@ impl<'a> ImpactController<'a> {
             out.push_str(&format!("Depth {} ({} symbol(s)):\n", depth_idx + 1, nodes.len()));
             for node in nodes {
                 out.push_str(&format!(
-                    "  • {} [{}]  {}\n",
-                    node.symbol, node.reference_kind, node.file_path
+                    "  • {} [{}]  {}  ({})\n",
+                    node.symbol, node.reference_kind, node.file_path, node.repository_id
                 ));
             }
             out.push('\n');
