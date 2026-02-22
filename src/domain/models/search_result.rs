@@ -218,4 +218,44 @@ mod tests {
         assert!(query.filters_by_language("python"));
         assert!(!query.filters_by_language("go"));
     }
+
+    #[test]
+    fn test_text_search_defaults_to_false() {
+        let query = SearchQuery::new("find functions");
+        assert!(!query.is_text_search());
+    }
+
+    #[test]
+    fn test_with_text_search_enables_flag() {
+        let query = SearchQuery::new("find functions").with_text_search(true);
+        assert!(query.is_text_search());
+    }
+
+    #[test]
+    fn test_with_text_search_can_be_disabled() {
+        let query = SearchQuery::new("find functions")
+            .with_text_search(true)
+            .with_text_search(false);
+        assert!(!query.is_text_search());
+    }
+
+    #[test]
+    fn test_text_search_flag_is_independent_of_other_fields() {
+        let query = SearchQuery::new("compute")
+            .with_limit(7)
+            .with_min_score(0.3)
+            .with_text_search(true);
+        assert!(query.is_text_search());
+        assert_eq!(query.limit(), 7);
+        assert_eq!(query.min_score(), Some(0.3));
+    }
+
+    #[test]
+    fn test_summary_includes_text_search_field() {
+        let query = SearchQuery::new("q").with_text_search(true);
+        assert!(query.summary().contains("text_search=true"));
+
+        let query2 = SearchQuery::new("q");
+        assert!(query2.summary().contains("text_search=false"));
+    }
 }
