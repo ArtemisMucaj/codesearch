@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use duckdb::{params, Connection};
+use duckdb::{params, AccessMode, Config, Connection};
 use tokio::sync::Mutex;
 use tracing::debug;
 
@@ -43,6 +43,33 @@ impl DuckdbVectorRepository {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             namespace: namespace.to_string(),
+        })
+    }
+
+    /// Opens the database in read-only mode.
+    ///
+    /// Read-only connections do not acquire the exclusive write lock, so multiple
+    /// processes can search the same database file concurrently without conflicts.
+    /// Schema initialization is skipped (tables must already exist from a prior
+    /// write-mode session); only the VSS extension is loaded for query support.
+    pub fn new_read_only_with_namespace(path: &Path, namespace: &str) -> Result<Self, DomainError> {
+        let config = Config::default()
+            .access_mode(AccessMode::ReadOnly)
+            .map_err(|e| DomainError::storage(format!("Failed to configure read-only access: {}", e)))?;
+
+        let conn = Connection::open_with_flags(path, config)
+            .map_err(|e| DomainError::storage(format!("Failed to open DuckDB (read-only): {}", e)))?;
+
+        // Load VSS for vector similarity queries; skip DDL (read-only mode forbids writes)
+        conn.execute_batch("LOAD vss; SET hnsw_enable_experimental_persistence = true;")
+            .map_err(|e| DomainError::storage(format!("Failed to load VSS extension: {}", e)))?;
+
+        let schema = namespace.trim();
+        let schema_name = if schema.is_empty() { "main" } else { schema };
+
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            namespace: schema_name.to_string(),
         })
     }
 
