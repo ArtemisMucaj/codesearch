@@ -89,25 +89,39 @@ impl ImpactAnalysisUseCase {
             }
 
             for reference in &callers {
-                let caller_sym = match reference.caller_symbol() {
-                    Some(s) => s.to_string(),
-                    None => continue,
-                };
+                match reference.caller_symbol() {
+                    None => {
+                        // Anonymous caller (top-level / module-level code with no enclosing
+                        // function).  Include it in the impact report so the user can see it,
+                        // but don't enqueue it for further traversal – there is no named
+                        // symbol to look up.
+                        by_depth[next_depth - 1].push(ImpactNode {
+                            symbol: "<anonymous>".to_string(),
+                            depth: next_depth,
+                            file_path: reference.caller_file_path().to_string(),
+                            reference_kind: reference.reference_kind().to_string(),
+                            repository_id: reference.repository_id().to_string(),
+                        });
+                    }
+                    Some(caller_sym) => {
+                        let caller_sym = caller_sym.to_string();
 
-                if visited.contains(&caller_sym) {
-                    continue;
+                        if visited.contains(&caller_sym) {
+                            continue;
+                        }
+                        visited.insert(caller_sym.clone());
+
+                        by_depth[next_depth - 1].push(ImpactNode {
+                            symbol: caller_sym.clone(),
+                            depth: next_depth,
+                            file_path: reference.caller_file_path().to_string(),
+                            reference_kind: reference.reference_kind().to_string(),
+                            repository_id: reference.repository_id().to_string(),
+                        });
+
+                        queue.push_back((caller_sym, next_depth));
+                    }
                 }
-                visited.insert(caller_sym.clone());
-
-                by_depth[next_depth - 1].push(ImpactNode {
-                    symbol: caller_sym.clone(),
-                    depth: next_depth,
-                    file_path: reference.caller_file_path().to_string(),
-                    reference_kind: reference.reference_kind().to_string(),
-                    repository_id: reference.repository_id().to_string(),
-                });
-
-                queue.push_back((caller_sym, next_depth));
             }
         }
 
