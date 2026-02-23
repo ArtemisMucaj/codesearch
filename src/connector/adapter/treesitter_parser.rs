@@ -48,6 +48,7 @@ impl TreeSitterParser {
                 Language::Php,
                 Language::Cpp,
                 Language::Swift,
+                Language::Kotlin,
             ],
         }
     }
@@ -63,6 +64,7 @@ impl TreeSitterParser {
             Language::Php => Some(tree_sitter_php::LANGUAGE_PHP.into()),
             Language::Cpp => Some(tree_sitter_cpp::LANGUAGE.into()),
             Language::Swift => Some(tree_sitter_swift::LANGUAGE.into()),
+            Language::Kotlin => Some(tree_sitter_kotlin_ng::LANGUAGE.into()),
             Language::Unknown => None,
         }
     }
@@ -238,6 +240,22 @@ impl TreeSitterParser {
 
                 ; Type aliases
                 (typealias_declaration name: (type_identifier) @name) @typedef
+                "#
+            }
+            Language::Kotlin => {
+                r#"
+                ; Top-level functions and methods
+                (function_declaration (identifier) @name) @function
+
+                ; Classes (includes data classes, sealed classes, abstract classes,
+                ; interfaces, enum classes, and annotation classes)
+                (class_declaration (identifier) @name) @class
+
+                ; Object declarations (singletons and companion objects)
+                (object_declaration (identifier) @name) @struct
+
+                ; Type aliases
+                (type_alias (identifier) @name) @typedef
                 "#
             }
             Language::Unknown => "",
@@ -524,6 +542,31 @@ impl TreeSitterParser {
 
                 ; Inheritance / protocol conformance
                 (inheritance_specifier (user_type (type_identifier) @callee)) @inheritance
+                "#
+            }
+            Language::Kotlin => {
+                r#"
+                ; Simple function calls: foo(...)
+                (call_expression (identifier) @callee) @call
+
+                ; Method calls: obj.bar(...) — anchor captures only the method name
+                (call_expression
+                    (navigation_expression (identifier) @callee .)) @method_call
+
+                ; Type references in annotations, generics, supertypes, etc.
+                (user_type (identifier) @callee) @type_ref
+
+                ; Import statements — capture the last segment of a dotted path
+                (import (qualified_identifier (identifier) @callee .)) @import
+                ; Single-segment imports (no dots)
+                (import (identifier) @callee) @import
+
+                ; Class/interface inheritance and delegation
+                (delegation_specifier
+                    (constructor_invocation
+                        (user_type (identifier) @callee))) @inheritance
+                (delegation_specifier
+                    (user_type (identifier) @callee)) @inheritance
                 "#
             }
             Language::Unknown => "",
@@ -886,6 +929,14 @@ impl ParserService for TreeSitterParser {
                             | "UInt32"
                             | "UInt64"
                             | "Character"
+                            // Kotlin core types
+                            | "Unit"
+                            | "Any"
+                            | "Nothing"
+                            | "Boolean"
+                            | "Long"
+                            | "Short"
+                            | "Byte"
                     )
                 {
                     continue;
@@ -1389,6 +1440,191 @@ int main() {
             .iter()
             .any(|c| c.symbol_name() == Some("Result"));
         assert!(has_enum, "Should find Result enum");
+    }
+
+    #[tokio::test]
+    async fn test_parse_kotlin_classes_and_functions() {
+        let parser = TreeSitterParser::new();
+        let content = std::fs::read_to_string("tests/fixtures/sample_kotlin.kt")
+            .expect("failed to read sample_kotlin.kt");
+
+        let chunks = parser
+            .parse_file(&content, "sample_kotlin.kt", Language::Kotlin, "test-repo")
+            .await
+            .unwrap();
+
+        assert!(!chunks.is_empty(), "Should extract chunks from Kotlin file");
+
+        let has_circle = chunks.iter().any(|c| c.symbol_name() == Some("Circle"));
+        assert!(has_circle, "Should find Circle class");
+
+        let has_rect = chunks.iter().any(|c| c.symbol_name() == Some("Rectangle"));
+        assert!(has_rect, "Should find Rectangle data class");
+
+        let has_shape = chunks.iter().any(|c| c.symbol_name() == Some("Shape"));
+        assert!(has_shape, "Should find Shape interface");
+    }
+
+    #[tokio::test]
+    async fn test_parse_kotlin_object_and_enum() {
+        let parser = TreeSitterParser::new();
+        let content = std::fs::read_to_string("tests/fixtures/sample_kotlin.kt")
+            .expect("failed to read sample_kotlin.kt");
+
+        let chunks = parser
+            .parse_file(&content, "sample_kotlin.kt", Language::Kotlin, "test-repo")
+            .await
+            .unwrap();
+
+        let has_math_utils = chunks.iter().any(|c| c.symbol_name() == Some("MathUtils"));
+        assert!(has_math_utils, "Should find MathUtils singleton object");
+
+        let has_color = chunks.iter().any(|c| c.symbol_name() == Some("Color"));
+        assert!(has_color, "Should find Color enum class");
+
+        let has_print_fn = chunks.iter().any(|c| c.symbol_name() == Some("printShapeInfo"));
+        assert!(has_print_fn, "Should find printShapeInfo top-level function");
+    }
+
+    #[tokio::test]
+    async fn test_parse_kotlin_type_alias() {
+        let parser = TreeSitterParser::new();
+        let content = std::fs::read_to_string("tests/fixtures/sample_kotlin.kt")
+            .expect("failed to read sample_kotlin.kt");
+
+        let chunks = parser
+            .parse_file(&content, "sample_kotlin.kt", Language::Kotlin, "test-repo")
+            .await
+            .unwrap();
+
+        let typedef_chunks: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.node_type() == NodeType::TypeDef)
+            .collect();
+        assert!(!typedef_chunks.is_empty(), "Should find at least one type alias");
+
+        let has_shape_list = chunks.iter().any(|c| c.symbol_name() == Some("ShapeList"));
+        assert!(has_shape_list, "Should find ShapeList type alias");
+    }
+
+    #[tokio::test]
+    async fn test_extract_kotlin_imports_and_calls() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+package com.example
+
+import kotlin.math.sqrt
+import java.util.ArrayList
+
+fun hypotenuse(a: Double, b: Double): Double {
+    return sqrt(a * a + b * b)
+}
+
+fun buildList(): ArrayList<String> {
+    val list = ArrayList<String>()
+    list.add("hello")
+    return list
+}
+"#;
+
+        let references = parser
+            .extract_references(content, "test.kt", Language::Kotlin, "test-repo")
+            .await
+            .unwrap();
+
+        assert!(!references.is_empty(), "Should extract references from Kotlin");
+
+        let sqrt_imports: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "sqrt" && r.reference_kind() == ReferenceKind::Import
+            })
+            .collect();
+        assert!(!sqrt_imports.is_empty(), "Should find import of sqrt");
+
+        let sqrt_calls: Vec<_> = references
+            .iter()
+            .filter(|r| r.callee_symbol() == "sqrt" && r.reference_kind() == ReferenceKind::Call)
+            .collect();
+        assert!(!sqrt_calls.is_empty(), "Should find call to sqrt");
+    }
+
+    #[tokio::test]
+    async fn test_extract_kotlin_inheritance() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+interface Animal {
+    fun speak(): String
+}
+
+class Dog : Animal {
+    override fun speak(): String = "Woof"
+}
+
+open class Vehicle(val speed: Int)
+
+class Car(speed: Int) : Vehicle(speed) {
+    fun drive() {
+        println("Driving at $speed km/h")
+    }
+}
+"#;
+
+        let references = parser
+            .extract_references(content, "test.kt", Language::Kotlin, "test-repo")
+            .await
+            .unwrap();
+
+        let animal_refs: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "Animal"
+                    && r.reference_kind() == ReferenceKind::Inheritance
+            })
+            .collect();
+        assert!(
+            !animal_refs.is_empty(),
+            "Should find Animal as an inheritance target"
+        );
+
+        let vehicle_refs: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "Vehicle"
+                    && r.reference_kind() == ReferenceKind::Inheritance
+            })
+            .collect();
+        assert!(
+            !vehicle_refs.is_empty(),
+            "Should find Vehicle as an inheritance target"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_extract_kotlin_method_calls() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+fun example() {
+    val list = mutableListOf<String>()
+    list.add("hello")
+    list.add("world")
+    println(list.size)
+}
+"#;
+
+        let references = parser
+            .extract_references(content, "test.kt", Language::Kotlin, "test-repo")
+            .await
+            .unwrap();
+
+        let add_calls: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "add"
+                    && r.reference_kind() == ReferenceKind::MethodCall
+            })
+            .collect();
+        assert!(!add_calls.is_empty(), "Should find method calls to add");
     }
 
     #[tokio::test]

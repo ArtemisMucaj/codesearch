@@ -13,6 +13,7 @@ pub enum Language {
     Php,
     Cpp,
     Swift,
+    Kotlin,
     Unknown,
 }
 
@@ -28,6 +29,7 @@ impl Language {
             "php" => Language::Php,
             "cpp" | "cc" | "cxx" | "c" | "h" | "hpp" => Language::Cpp,
             "swift" => Language::Swift,
+            "kt" | "kts" => Language::Kotlin,
             _ => Language::Unknown,
         }
     }
@@ -50,6 +52,7 @@ impl Language {
             "php" => Language::Php,
             "cpp" | "c++" => Language::Cpp,
             "swift" => Language::Swift,
+            "kotlin" => Language::Kotlin,
             _ => Language::Unknown,
         }
     }
@@ -65,6 +68,7 @@ impl Language {
             Language::Php => "php",
             Language::Cpp => "cpp",
             Language::Swift => "swift",
+            Language::Kotlin => "kotlin",
             Language::Unknown => "unknown",
         }
     }
@@ -84,6 +88,7 @@ impl Language {
             Language::Php => &["php"],
             Language::Cpp => &["cpp", "cc", "cxx", "c", "h", "hpp"],
             Language::Swift => &["swift"],
+            Language::Kotlin => &["kt", "kts"],
             Language::Unknown => &[],
         }
     }
@@ -99,6 +104,7 @@ impl Language {
                 | Language::Php
                 | Language::Cpp
                 | Language::Swift
+                | Language::Kotlin
         )
     }
 
@@ -111,6 +117,7 @@ impl Language {
                 | Language::Php
                 | Language::Cpp
                 | Language::Swift
+                | Language::Kotlin
         )
     }
 
@@ -123,7 +130,9 @@ impl Language {
             Language::Go,
             Language::HCL,
             Language::Php,
+            Language::Cpp,
             Language::Swift,
+            Language::Kotlin,
         ]
     }
 }
@@ -147,6 +156,8 @@ mod tests {
         assert_eq!(Language::from_extension("go"), Language::Go);
         assert_eq!(Language::from_extension("hcl"), Language::HCL);
         assert_eq!(Language::from_extension("php"), Language::Php);
+        assert_eq!(Language::from_extension("kt"), Language::Kotlin);
+        assert_eq!(Language::from_extension("kts"), Language::Kotlin);
         assert_eq!(Language::from_extension("txt"), Language::Unknown);
     }
 
@@ -192,6 +203,7 @@ mod tests {
         assert!(supported.contains(&Language::Python));
         assert!(supported.contains(&Language::HCL));
         assert!(supported.contains(&Language::Php));
+        assert!(supported.contains(&Language::Kotlin));
         assert!(!supported.contains(&Language::Unknown));
     }
 }

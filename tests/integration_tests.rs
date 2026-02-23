@@ -158,6 +158,14 @@ async fn test_language_detection() {
     );
     assert_eq!(Language::from_path(Path::new("main.go")), Language::Go);
     assert_eq!(
+        Language::from_path(Path::new("Main.kt")),
+        Language::Kotlin
+    );
+    assert_eq!(
+        Language::from_path(Path::new("build.gradle.kts")),
+        Language::Kotlin
+    );
+    assert_eq!(
         Language::from_path(Path::new("readme.md")),
         Language::Unknown
     );
