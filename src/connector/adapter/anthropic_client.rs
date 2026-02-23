@@ -12,7 +12,7 @@ pub const DEFAULT_BASE_URL: &str = "http://localhost:1234";
 const MESSAGES_PATH: &str = "/v1/messages";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 /// Default model matches the LM Studio local-first default.
-const DEFAULT_MODEL: &str = "ministral-3b-2512";
+const DEFAULT_MODEL: &str = "mistralai/ministral-3-3b";
 const MAX_TOKENS: u32 = 256;
 
 #[derive(Serialize)]
@@ -104,7 +104,7 @@ impl AnthropicClient {
     /// | Variable             | Default                   | Purpose                   |
     /// |----------------------|---------------------------|---------------------------|
     /// | `ANTHROPIC_BASE_URL` | `http://localhost:1234`   | LM Studio / any server    |
-    /// | `ANTHROPIC_MODEL`    | `ministral-3b-2512`       | Model in LM Studio        |
+    /// | `ANTHROPIC_MODEL`    | `mistralai/ministral-3-3b` | Model in LM Studio       |
     /// | `ANTHROPIC_API_KEY`  | `""` (empty)              | Not required for local    |
     pub fn from_env() -> Self {
         let base = std::env::var("ANTHROPIC_BASE_URL")
