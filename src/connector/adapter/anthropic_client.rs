@@ -53,11 +53,20 @@ struct ContentBlock {
 /// ANTHROPIC_API_KEY=sk-ant-...
 /// ANTHROPIC_MODEL=claude-haiku-4-5
 /// ```
+///
+/// Before each request the client sends a lightweight `HEAD /` probe with a
+/// 2-second timeout.  If the server isn't reachable (connection refused or
+/// probe timeout) the call fails immediately instead of hanging for 30 s.
 pub struct AnthropicClient {
     client: reqwest::Client,
+    /// Cheap connectivity check — short timeout, discards the response body.
+    probe_client: reqwest::Client,
     api_key: String,
     model: String,
+    /// Full endpoint URL (base + MESSAGES_PATH).
     url: String,
+    /// Base URL used for the probe (e.g. `http://localhost:1234/`).
+    base_url: String,
 }
 
 impl AnthropicClient {
@@ -67,15 +76,23 @@ impl AnthropicClient {
         base_url: impl Into<String>,
     ) -> Self {
         let base: String = base_url.into();
-        let url = format!("{}{}", base.trim_end_matches('/'), MESSAGES_PATH);
+        let trimmed = base.trim_end_matches('/');
+        let url = format!("{trimmed}{MESSAGES_PATH}");
+        let base_url = format!("{trimmed}/");
         Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
                 .unwrap_or_default(),
+            probe_client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(2))
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap_or_default(),
             api_key: api_key.into(),
             model: model.into(),
             url,
+            base_url,
         }
     }
 
@@ -104,6 +121,20 @@ impl AnthropicClient {
 #[async_trait]
 impl ChatClient for AnthropicClient {
     async fn complete(&self, system: &str, user: &str) -> Result<String, DomainError> {
+        // Fast connectivity probe: HEAD / with a 2-second timeout.
+        // Fails immediately on connection-refused or probe timeout so callers
+        // don't wait 30 s when LM Studio (or any local server) isn't running.
+        // Any HTTP response — even 4xx/5xx — means the server is up; proceed.
+        match self.probe_client.head(&self.base_url).send().await {
+            Err(e) if e.is_connect() || e.is_timeout() => {
+                return Err(DomainError::StorageError(format!(
+                    "AnthropicClient: server not reachable at {}: {e}",
+                    self.base_url.trim_end_matches('/')
+                )));
+            }
+            _ => {}
+        }
+
         let request = ApiRequest {
             model: &self.model,
             max_tokens: MAX_TOKENS,
