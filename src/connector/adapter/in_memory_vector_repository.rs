@@ -124,7 +124,7 @@ impl VectorRepository for InMemoryVectorRepository {
         let terms: Vec<&str> = query.query().split_whitespace().collect();
         let text = self.search_text(&terms, query, fetch_limit).await;
 
-        let mut fused = rrf_fuse(semantic, text, query.limit());
+        let mut fused = rrf_fuse(vec![semantic, text], query.limit());
         if let Some(min) = query.min_score() {
             fused.retain(|r| r.score() >= min);
         }

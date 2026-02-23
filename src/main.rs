@@ -30,6 +30,15 @@ struct Cli {
     #[arg(long, global = true)]
     no_rerank: bool,
 
+    /// Enable query expansion: the search query is automatically expanded into
+    /// multiple variants before searching. Results are fused via RRF for better
+    /// recall. The LLM service is determined by ANTHROPIC_BASE_URL (default:
+    /// http://localhost:1234, targeting a local LM Studio instance).
+    /// ANTHROPIC_API_KEY is not required when targeting a local endpoint.
+    /// If expansion fails for any reason the original query is used as-is.
+    #[arg(long, global = true)]
+    expand_query: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -85,6 +94,7 @@ async fn main() -> Result<()> {
         namespace: cli.namespace,
         memory_storage: cli.memory_storage,
         no_rerank: cli.no_rerank,
+        expand_query: cli.expand_query,
         read_only,
     };
 

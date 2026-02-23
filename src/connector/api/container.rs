@@ -4,13 +4,14 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::debug;
 
-use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, ParserService};
+use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, ParserService, QueryExpander};
 use crate::{
     DeleteRepositoryUseCase, DuckdbCallGraphRepository,
-    DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
-    ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
-    ListRepositoriesUseCase, MockEmbedding, MockReranking, OrtEmbedding, OrtReranking,
-    RerankingService, SearchCodeUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
+    AnthropicClient, DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository,
+    EmbeddingService, ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
+    ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding, MockReranking, OrtEmbedding,
+    OrtReranking, RerankingService, SearchCodeUseCase,
+    SymbolContextUseCase, TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -27,12 +28,23 @@ pub struct ContainerConfig {
     ///
     /// Set this to `true` for commands that never write: `search`, `list`, `stats`.
     pub read_only: bool,
+    /// Enable query expansion. When `true`, the search query is automatically
+    /// expanded into multiple variants before searching so that complementary
+    /// results are surfaced and fused via RRF.
+    ///
+    /// When `true`, uses an LLM-based expander targeting LM Studio on
+    /// `http://localhost:1234` by default (no API key required). Override with
+    /// `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and `ANTHROPIC_API_KEY` to point
+    /// at any Anthropic-compatible server including the cloud. Falls back to the
+    /// original query gracefully when the server is unreachable.
+    pub expand_query: bool,
 }
 
 pub struct Container {
     parser: Arc<TreeSitterParser>,
     embedding_service: Arc<dyn EmbeddingService>,
     reranking_service: Option<Arc<dyn RerankingService>>,
+    query_expander: Option<Arc<dyn QueryExpander>>,
     vector_repo: Arc<dyn VectorRepository>,
     repo_adapter: Arc<DuckdbMetadataRepository>,
     file_hash_repo: Arc<dyn FileHashRepository>,
@@ -214,10 +226,29 @@ impl Container {
             call_graph_repo,
         ));
 
+        // Initialise the query expander when --expand-query is requested.
+        //
+        // Local-first: targets LM Studio at http://localhost:1234 by default.
+        // Override with ANTHROPIC_BASE_URL / ANTHROPIC_MODEL / ANTHROPIC_API_KEY
+        // to point at any other Anthropic-compatible server (including the cloud).
+        // If the server is unreachable the expander falls back to the original
+        // query gracefully, so search always returns results.
+        let query_expander: Option<Arc<dyn QueryExpander>> = if config.expand_query {
+            let anthropic = AnthropicClient::from_env();
+            debug!(
+                "Using LLM-based query expander (url={})",
+                anthropic.configured_base_url()
+            );
+            Some(Arc::new(LlmQueryExpander::new(Arc::new(anthropic))))
+        } else {
+            None
+        };
+
         Ok(Self {
             parser,
             embedding_service,
             reranking_service,
+            query_expander,
             vector_repo,
             repo_adapter,
             file_hash_repo,
@@ -243,6 +274,10 @@ impl Container {
 
         if let Some(reranker) = self.reranking_service.clone() {
             use_case = use_case.with_reranking(reranker);
+        }
+
+        if let Some(expander) = self.query_expander.clone() {
+            use_case = use_case.with_query_expansion(expander);
         }
 
         use_case

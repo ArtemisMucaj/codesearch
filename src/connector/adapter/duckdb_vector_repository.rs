@@ -580,7 +580,7 @@ impl VectorRepository for DuckdbVectorRepository {
             text.len()
         );
 
-        let mut fused = rrf_fuse(semantic, text, query.limit());
+        let mut fused = rrf_fuse(vec![semantic, text], query.limit());
         if let Some(min) = query.min_score() {
             fused.retain(|r| r.score() >= min);
         }

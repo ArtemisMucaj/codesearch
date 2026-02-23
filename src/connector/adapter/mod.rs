@@ -1,8 +1,11 @@
+mod anthropic_client;
+mod chat_client;
 mod duckdb_call_graph_repository;
 mod duckdb_file_hash_repository;
 mod duckdb_metadata_repository;
 mod duckdb_vector_repository;
 mod in_memory_vector_repository;
+mod llm_query_expander;
 pub mod mcp;
 mod mock_embedding;
 mod mock_reranking;
@@ -10,11 +13,14 @@ mod ort_embedding;
 mod ort_reranking;
 mod treesitter_parser;
 
+pub use anthropic_client::*;
+pub use chat_client::*;
 pub use duckdb_call_graph_repository::*;
 pub use duckdb_file_hash_repository::*;
 pub use duckdb_metadata_repository::*;
 pub use duckdb_vector_repository::*;
 pub use in_memory_vector_repository::*;
+pub use llm_query_expander::*;
 pub use mock_embedding::*;
 pub use mock_reranking::*;
 pub use ort_embedding::*;
