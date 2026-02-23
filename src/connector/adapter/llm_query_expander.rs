@@ -22,17 +22,18 @@ Rules:
 4. Make each variant approach the concept from a DIFFERENT angle:
    - Variant 1 — Behavioral: describe what the code *does* or *returns* \
      (e.g. \"validate and sanitize incoming HTTP request body\").
-   - Variant 2 — Nominal: space-separated identifiers a developer would use \
-     when naming the symbol (e.g. \"sanitize_request validate_body parse_input\").
-   - Variant 3 — Conceptual: the broader design pattern, domain, or abstraction \
+   - Variant 2 — Conceptual: the broader design pattern, domain, or abstraction \
      the code belongs to (e.g. \"input validation middleware guard clause\").
+   - Variant 3 — Nominal: space-separated identifiers a developer would use \
+     when naming the symbol, mixing snake_case and camelCase as appropriate \
+     (e.g. \"sanitize_request validateBody parse_input RequestValidator\").
 5. Do NOT repeat the same words across variants; maximize vocabulary spread.
 
 Example input:  \"find the function that handles user authentication errors\"
 Example output: [\
 \"authenticate credentials and propagate login failure to caller\", \
-\"handle_auth_error validate_credentials reject_unauthorized_user\", \
-\"authentication error handling middleware access control guard\"]";
+\"authentication error handling middleware access control guard\", \
+\"handle_auth_error validateCredentials AuthErrorHandler reject_unauthorized\"]";
 
 /// A [`QueryExpander`] that delegates to a [`ChatClient`] to generate
 /// semantically rich, code-oriented query variants.
