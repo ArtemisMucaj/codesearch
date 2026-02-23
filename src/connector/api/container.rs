@@ -234,12 +234,12 @@ impl Container {
         // If the server is unreachable the expander falls back to the original
         // query gracefully, so search always returns results.
         let query_expander: Option<Arc<dyn QueryExpander>> = if config.expand_query {
-            let chat_client = Arc::new(AnthropicClient::from_env());
+            let anthropic = AnthropicClient::from_env();
             debug!(
                 "Using LLM-based query expander (url={})",
-                AnthropicClient::configured_base_url()
+                anthropic.configured_base_url()
             );
-            Some(Arc::new(LlmQueryExpander::new(chat_client)))
+            Some(Arc::new(LlmQueryExpander::new(Arc::new(anthropic))))
         } else {
             None
         };

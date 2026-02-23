@@ -85,12 +85,12 @@ impl AnthropicClient {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
-                .unwrap_or_default(),
+                .expect("reqwest::Client with 30-second timeout failed to build"),
             probe_client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(2))
                 .timeout(Duration::from_secs(2))
                 .build()
-                .unwrap_or_default(),
+                .expect("reqwest::Client with 2-second probe timeout failed to build"),
             api_key: api_key.into(),
             model: model.into(),
             url,
@@ -115,9 +115,9 @@ impl AnthropicClient {
         Self::new(key, model, base)
     }
 
-    /// Return the configured base URL (for logging purposes).
-    pub fn configured_base_url() -> String {
-        std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
+    /// Return the base URL this instance was constructed with (for logging).
+    pub fn configured_base_url(&self) -> &str {
+        self.base_url.trim_end_matches('/')
     }
 }
 
