@@ -54,19 +54,21 @@ struct ContentBlock {
 /// ANTHROPIC_MODEL=claude-haiku-4-5
 /// ```
 ///
-/// Before each request the client sends a lightweight `HEAD /` probe with a
-/// 2-second timeout.  If the server isn't reachable (connection refused or
-/// probe timeout) the call fails immediately instead of hanging for 30 s.
+/// The first call to `complete` probes the base URL with a 2-second timeout.
+/// The result is cached: reachable → all future calls skip the probe; not
+/// reachable → all future calls fail immediately without touching the network.
 pub struct AnthropicClient {
     client: reqwest::Client,
-    /// Cheap connectivity check — short timeout, discards the response body.
+    /// Short-timeout client used only for the one-time connectivity probe.
     probe_client: reqwest::Client,
     api_key: String,
     model: String,
     /// Full endpoint URL (base + MESSAGES_PATH).
     url: String,
-    /// Base URL used for the probe (e.g. `http://localhost:1234/`).
+    /// Base URL sent to the probe (e.g. `http://localhost:1234/`).
     base_url: String,
+    /// Cached probe outcome: `Ok(())` = reachable, `Err(msg)` = not reachable.
+    reachable: tokio::sync::OnceCell<Result<(), String>>,
 }
 
 impl AnthropicClient {
@@ -93,6 +95,7 @@ impl AnthropicClient {
             model: model.into(),
             url,
             base_url,
+            reachable: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -121,18 +124,23 @@ impl AnthropicClient {
 #[async_trait]
 impl ChatClient for AnthropicClient {
     async fn complete(&self, system: &str, user: &str) -> Result<String, DomainError> {
-        // Fast connectivity probe: HEAD / with a 2-second timeout.
-        // Fails immediately on connection-refused or probe timeout so callers
-        // don't wait 30 s when LM Studio (or any local server) isn't running.
-        // Any HTTP response — even 4xx/5xx — means the server is up; proceed.
-        match self.probe_client.head(&self.base_url).send().await {
-            Err(e) if e.is_connect() || e.is_timeout() => {
-                return Err(DomainError::StorageError(format!(
-                    "AnthropicClient: server not reachable at {}: {e}",
-                    self.base_url.trim_end_matches('/')
-                )));
+        // Connectivity probe — runs exactly once; result is cached for all
+        // subsequent calls.  On connection-refused / timeout we fail fast
+        // instead of hanging for the full 30-second request timeout.
+        // Any HTTP response (even 4xx/5xx) means the server is up.
+        let probe_client = &self.probe_client;
+        let base_url = &self.base_url;
+        let probe = self.reachable.get_or_init(|| async move {
+            match probe_client.head(base_url).send().await {
+                Err(e) if e.is_connect() || e.is_timeout() => Err(format!(
+                    "server not reachable at {}: {e}",
+                    base_url.trim_end_matches('/')
+                )),
+                _ => Ok(()),
             }
-            _ => {}
+        }).await;
+        if let Err(msg) = probe {
+            return Err(DomainError::StorageError(format!("AnthropicClient: {msg}")));
         }
 
         let request = ApiRequest {
