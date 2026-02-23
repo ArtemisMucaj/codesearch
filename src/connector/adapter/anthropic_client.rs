@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::connector::adapter::ChatClient;
@@ -15,7 +15,7 @@ const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const DEFAULT_MODEL: &str = "ministral-3b-2512";
 const MAX_TOKENS: u32 = 256;
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct ApiRequest<'a> {
     model: &'a str,
     max_tokens: u32,
@@ -23,7 +23,7 @@ struct ApiRequest<'a> {
     messages: Vec<ApiMessage<'a>>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct ApiMessage<'a> {
     role: &'a str,
     content: &'a str,
@@ -132,11 +132,21 @@ impl ChatClient for AnthropicClient {
         let base_url = &self.base_url;
         let probe = self.reachable.get_or_init(|| async move {
             match probe_client.head(base_url).send().await {
+                Ok(_) => Ok(()),
                 Err(e) if e.is_connect() || e.is_timeout() => Err(format!(
                     "server not reachable at {}: {e}",
                     base_url.trim_end_matches('/')
                 )),
-                _ => Ok(()),
+                Err(e) => {
+                    warn!(
+                        "AnthropicClient: probe to {} failed unexpectedly: {e}",
+                        base_url.trim_end_matches('/')
+                    );
+                    Err(format!(
+                        "probe to {} failed: {e}",
+                        base_url.trim_end_matches('/')
+                    ))
+                }
             }
         }).await;
         if let Err(msg) = probe {
@@ -166,7 +176,12 @@ impl ChatClient for AnthropicClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            warn!("AnthropicClient: API returned {status}: {body}");
+            let total = body.len();
+            let snippet = match body.char_indices().nth(1000) {
+                Some((i, _)) => format!("{}...(truncated, total {total} bytes)", &body[..i]),
+                None => body,
+            };
+            warn!("AnthropicClient: API returned {status}: {snippet}");
             return Err(DomainError::StorageError(format!(
                 "AnthropicClient: API returned {status}"
             )));
