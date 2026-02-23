@@ -4,7 +4,7 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 use crate::application::{EmbeddingService, QueryExpander, RerankingService, VectorRepository};
-use crate::application::use_cases::rrf_fuse::rrf_fuse_many;
+use crate::application::use_cases::rrf_fuse::rrf_fuse;
 use crate::domain::{DomainError, SearchQuery, SearchResult};
 
 pub struct SearchCodeUseCase {
@@ -83,7 +83,7 @@ impl SearchCodeUseCase {
                 all_results.push(variant_results);
             }
 
-            rrf_fuse_many(all_results, fetch_limit)
+            rrf_fuse(all_results, fetch_limit)
         } else {
             // --- Standard single-query path ---
             let query_embedding = self.embedding_service.embed_query(query.query()).await?;

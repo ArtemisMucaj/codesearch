@@ -60,34 +60,16 @@ pub fn is_test_file(path: &str) -> bool {
     false
 }
 
-/// Merge two ranked result lists using Reciprocal Rank Fusion.
-///
-/// Each result receives a score of `1 / (RRF_K + rank)` from each list it
-/// appears in.  The scores are summed, and the top `limit` results by fused
-/// score are returned.
-///
-/// Results from test files are penalised by [`TEST_FILE_PENALTY`] before the
-/// final sort so that production code consistently ranks above test helpers
-/// when both are equally relevant.
-pub fn rrf_fuse(
-    semantic: Vec<SearchResult>,
-    text: Vec<SearchResult>,
-    limit: usize,
-) -> Vec<SearchResult> {
-    rrf_fuse_many(vec![semantic, text], limit)
-}
-
-/// Merge N ranked result lists using Reciprocal Rank Fusion.
+/// Merge ranked result lists using Reciprocal Rank Fusion.
 ///
 /// Each result receives a score of `1 / (RRF_K + rank)` from every list it
-/// appears in; scores are summed across lists.  This is the natural extension
-/// of [`rrf_fuse`] to an arbitrary number of candidate lists, e.g. when
-/// multiple query variants are searched independently and their results need
-/// to be combined (query expansion).
+/// appears in; scores are summed across lists.  Pass one list for a single
+/// search leg, two for a hybrid semantic + text search, or N for query
+/// expansion where each variant was searched independently.
 ///
 /// Results from test files are penalised by [`TEST_FILE_PENALTY`] before the
 /// final sort so that production code consistently ranks above test helpers.
-pub fn rrf_fuse_many(lists: Vec<Vec<SearchResult>>, limit: usize) -> Vec<SearchResult> {
+pub fn rrf_fuse(lists: Vec<Vec<SearchResult>>, limit: usize) -> Vec<SearchResult> {
     let mut scores: HashMap<String, (SearchResult, f32)> = HashMap::new();
 
     for list in lists {
@@ -198,7 +180,7 @@ mod tests {
         // to the test file, "prod" must end up first.
         let semantic = vec![make_result_at("prod", "src/lib.rs")];
         let text = vec![make_result_at("test_result", "tests/foo.rs")];
-        let fused = rrf_fuse(semantic, text, 10);
+        let fused = rrf_fuse(vec![semantic, text], 10);
 
         assert_eq!(fused.len(), 2);
         assert_eq!(fused[0].chunk().id(), "prod");
@@ -208,11 +190,7 @@ mod tests {
     #[test]
     fn test_file_penalty_multiplies_score() {
         // A single test-file result should have its RRF score × TEST_FILE_PENALTY.
-        let fused = rrf_fuse(
-            vec![make_result_at("x", "tests/foo.rs")],
-            vec![],
-            10,
-        );
+        let fused = rrf_fuse(vec![vec![make_result_at("x", "tests/foo.rs")]], 10);
         let expected = (1.0 / (RRF_K + 1.0)) * TEST_FILE_PENALTY;
         assert!((fused[0].score() - expected).abs() < 1e-6);
     }
@@ -222,8 +200,10 @@ mod tests {
         // Same test-file result at rank 0 in both legs:
         // raw score = 2 × 1/(RRF_K + 1), then multiplied by TEST_FILE_PENALTY.
         let fused = rrf_fuse(
-            vec![make_result_at("x", "tests/foo.rs")],
-            vec![make_result_at("x", "tests/foo.rs")],
+            vec![
+                vec![make_result_at("x", "tests/foo.rs")],
+                vec![make_result_at("x", "tests/foo.rs")],
+            ],
             10,
         );
         assert_eq!(fused.len(), 1);
@@ -233,14 +213,14 @@ mod tests {
 
     #[test]
     fn empty_inputs_return_empty() {
-        assert!(rrf_fuse(vec![], vec![], 10).is_empty());
+        assert!(rrf_fuse(vec![], 10).is_empty());
     }
 
     #[test]
     fn semantic_only_results_sorted_by_rank() {
         // Item at rank 0 (first) should receive a higher RRF score than rank 1.
         let semantic = vec![make_result("top"), make_result("bottom")];
-        let fused = rrf_fuse(semantic, vec![], 10);
+        let fused = rrf_fuse(vec![semantic], 10);
         assert_eq!(fused.len(), 2);
         assert!(fused[0].score() > fused[1].score());
         assert_eq!(fused[0].chunk().id(), "top");
@@ -252,27 +232,27 @@ mod tests {
         // Fused score of "shared" must exceed that of "only_semantic".
         let semantic = vec![make_result("shared"), make_result("only_semantic")];
         let text = vec![make_result("shared"), make_result("only_text")];
-        let fused = rrf_fuse(semantic, text, 10);
+        let fused = rrf_fuse(vec![semantic, text], 10);
         assert_eq!(fused[0].chunk().id(), "shared");
     }
 
     #[test]
     fn limit_truncates_output() {
         let semantic: Vec<_> = (0..10).map(|i| make_result(&format!("item{i}"))).collect();
-        let fused = rrf_fuse(semantic, vec![], 3);
+        let fused = rrf_fuse(vec![semantic], 3);
         assert_eq!(fused.len(), 3);
     }
 
     #[test]
     fn limit_zero_returns_empty() {
         let semantic = vec![make_result("x")];
-        assert!(rrf_fuse(semantic, vec![], 0).is_empty());
+        assert!(rrf_fuse(vec![semantic], 0).is_empty());
     }
 
     #[test]
     fn single_item_score_matches_rrf_formula() {
         // Rank 0 → 1-based rank 1 → score = 1 / (RRF_K + 1)
-        let fused = rrf_fuse(vec![make_result("x")], vec![], 10);
+        let fused = rrf_fuse(vec![vec![make_result("x")]], 10);
         let expected = 1.0 / (RRF_K + 1.0);
         assert!((fused[0].score() - expected).abs() < 1e-6);
     }
@@ -280,7 +260,7 @@ mod tests {
     #[test]
     fn item_in_both_lists_score_is_additive() {
         // Same item at rank 0 in both legs: score = 2 × 1/(RRF_K + 1)
-        let fused = rrf_fuse(vec![make_result("x")], vec![make_result("x")], 10);
+        let fused = rrf_fuse(vec![vec![make_result("x")], vec![make_result("x")]], 10);
         assert_eq!(fused.len(), 1);
         let expected = 2.0 / (RRF_K + 1.0);
         assert!((fused[0].score() - expected).abs() < 1e-6);
@@ -289,7 +269,7 @@ mod tests {
     #[test]
     fn text_only_results_sorted_by_rank() {
         let text = vec![make_result("first"), make_result("second")];
-        let fused = rrf_fuse(vec![], text, 10);
+        let fused = rrf_fuse(vec![text], 10);
         assert_eq!(fused.len(), 2);
         assert!(fused[0].score() > fused[1].score());
         assert_eq!(fused[0].chunk().id(), "first");
