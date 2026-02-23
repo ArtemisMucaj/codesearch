@@ -32,9 +32,10 @@ struct Cli {
 
     /// Enable query expansion: the search query is automatically expanded into
     /// multiple variants before searching. Results are fused via RRF for better
-    /// recall. Requires ANTHROPIC_API_KEY; set ANTHROPIC_BASE_URL to target a
-    /// local LM Studio instance (e.g. http://localhost:1234) instead of the
-    /// Anthropic cloud. Falls back to rule-based expansion when no key is set.
+    /// recall. The LLM service is determined by ANTHROPIC_BASE_URL (default:
+    /// http://localhost:1234, targeting a local LM Studio instance).
+    /// ANTHROPIC_API_KEY is not required when targeting a local endpoint.
+    /// If expansion fails for any reason the original query is used as-is.
     #[arg(long, global = true)]
     expand_query: bool,
 

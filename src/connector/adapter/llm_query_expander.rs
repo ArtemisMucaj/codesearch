@@ -63,12 +63,14 @@ impl LlmQueryExpander {
         let end = text.rfind(']');
 
         if let (Some(s), Some(e)) = (start, end) {
-            if let Ok(variants) = serde_json::from_str::<Vec<String>>(&text[s..=e]) {
-                return variants
-                    .into_iter()
-                    .map(|v| v.trim().to_string())
-                    .filter(|v| !v.is_empty())
-                    .collect();
+            if s <= e {
+                if let Ok(variants) = serde_json::from_str::<Vec<String>>(&text[s..=e]) {
+                    return variants
+                        .into_iter()
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .collect();
+                }
             }
         }
 

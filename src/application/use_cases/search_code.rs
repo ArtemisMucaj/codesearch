@@ -76,11 +76,22 @@ impl SearchCodeUseCase {
             let variants = expander.expand(query.query()).await?;
             info!("Query expanded into {} variants", variants.len());
 
-            let mut all_results: Vec<Vec<SearchResult>> = Vec::with_capacity(variants.len());
-            for variant in &variants {
-                let embedding = self.embedding_service.embed_query(variant).await?;
-                let variant_results = self.vector_repo.search(&embedding, &search_query).await?;
-                all_results.push(variant_results);
+            let mut set = tokio::task::JoinSet::new();
+            for variant in variants {
+                let embedding_service = self.embedding_service.clone();
+                let vector_repo = self.vector_repo.clone();
+                let search_query = search_query.clone();
+                set.spawn(async move {
+                    let embedding = embedding_service.embed_query(&variant).await?;
+                    vector_repo.search(&embedding, &search_query).await
+                });
+            }
+
+            let mut all_results: Vec<Vec<SearchResult>> = Vec::with_capacity(set.len());
+            while let Some(res) = set.join_next().await {
+                all_results.push(
+                    res.map_err(|e| DomainError::StorageError(e.to_string()))??
+                );
             }
 
             rrf_fuse(all_results, fetch_limit)

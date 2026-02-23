@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use serde::Deserialize;
 use tracing::warn;
@@ -67,7 +69,10 @@ impl AnthropicClient {
         let base: String = base_url.into();
         let url = format!("{}{}", base.trim_end_matches('/'), MESSAGES_PATH);
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
             api_key: api_key.into(),
             model: model.into(),
             url,
