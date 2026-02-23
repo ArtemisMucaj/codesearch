@@ -1,3 +1,5 @@
+mod anthropic_client;
+mod chat_client;
 mod duckdb_call_graph_repository;
 mod duckdb_file_hash_repository;
 mod duckdb_metadata_repository;
@@ -11,6 +13,8 @@ mod ort_embedding;
 mod ort_reranking;
 mod treesitter_parser;
 
+pub use anthropic_client::*;
+pub use chat_client::*;
 pub use duckdb_call_graph_repository::*;
 pub use duckdb_file_hash_repository::*;
 pub use duckdb_metadata_repository::*;

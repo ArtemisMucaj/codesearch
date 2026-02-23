@@ -15,7 +15,7 @@ pub use application::{
 pub use cli::{Commands, OutputFormat};
 
 pub use connector::{
-    DuckdbCallGraphRepository, DuckdbFileHashRepository,
+    AnthropicClient, ChatClient, DuckdbCallGraphRepository, DuckdbFileHashRepository,
     DuckdbMetadataRepository, DuckdbVectorRepository, InMemoryVectorRepository, LlmQueryExpander,
     MockEmbedding, MockReranking, OrtEmbedding, OrtReranking, TreeSitterParser,
 };

@@ -1,18 +1,11 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
-use serde::Deserialize;
 use tracing::{debug, warn};
 
 use crate::application::QueryExpander;
+use crate::connector::adapter::ChatClient;
 use crate::domain::DomainError;
-
-/// Default target: LM Studio running locally on its standard port.
-const DEFAULT_BASE_URL: &str = "http://localhost:1234";
-const MESSAGES_PATH: &str = "/v1/messages";
-const ANTHROPIC_API_VERSION: &str = "2023-06-01";
-/// Default model matches the LM Studio local-first default.
-/// Override with ANTHROPIC_MODEL when targeting the Anthropic cloud.
-const DEFAULT_MODEL: &str = "ministral-3b-2512";
-const MAX_TOKENS: u32 = 256;
 
 /// System prompt instructing the model to produce terse, code-oriented query variants.
 const SYSTEM_PROMPT: &str = "\
@@ -31,84 +24,23 @@ Rules:
 Example input:  \"find the function that handles user authentication errors\"
 Example output: [\"authentication error handler\", \"handle_auth_error user_login_failure\"]";
 
-/// Anthropic Messages API request payload.
-#[derive(serde::Serialize)]
-struct ApiRequest<'a> {
-    model: &'a str,
-    max_tokens: u32,
-    system: &'a str,
-    messages: Vec<ApiMessage<'a>>,
-}
-
-#[derive(serde::Serialize)]
-struct ApiMessage<'a> {
-    role: &'a str,
-    content: &'a str,
-}
-
-/// Minimal subset of the Anthropic Messages API response we care about.
-#[derive(Deserialize)]
-struct ApiResponse {
-    content: Vec<ContentBlock>,
-}
-
-#[derive(Deserialize)]
-struct ContentBlock {
-    text: String,
-}
-
-/// A [`QueryExpander`] that calls any Anthropic-API-compatible server to generate
+/// A [`QueryExpander`] that delegates to a [`ChatClient`] to generate
 /// semantically rich, code-oriented query variants.
 ///
-/// **Local-first**: defaults to `http://localhost:1234` (LM Studio) so that no
-/// cloud account or API key is needed out of the box. Just load Ministral 3B in
-/// LM Studio and pass `--expand-query`.
+/// All transport, serialization, and API-vendor details are handled by the
+/// injected client.  This struct only knows the [`ChatClient`] interface and
+/// the prompt engineering needed for code search.
 ///
-/// To use the Anthropic cloud instead, set:
-/// ```text
-/// ANTHROPIC_BASE_URL=https://api.anthropic.com
-/// ANTHROPIC_API_KEY=sk-ant-...
-/// ANTHROPIC_MODEL=claude-haiku-4-5
-/// ```
-///
-/// Falls back gracefully: if the server is unreachable or returns an unparseable
-/// response, the original query is returned unchanged so search always succeeds.
+/// Falls back gracefully to the original query when the client returns an error
+/// or an unparseable response, so search always succeeds even if the LLM is
+/// unavailable.
 pub struct LlmQueryExpander {
-    client: reqwest::Client,
-    api_key: String,
-    model: String,
-    url: String,
+    client: Arc<dyn ChatClient>,
 }
 
 impl LlmQueryExpander {
-    /// Create a new expander with an explicit API key, model, and endpoint URL.
-    pub fn new(api_key: impl Into<String>, model: impl Into<String>, base_url: impl Into<String>) -> Self {
-        let base: String = base_url.into();
-        let url = format!("{}{}", base.trim_end_matches('/'), MESSAGES_PATH);
-        Self {
-            client: reqwest::Client::new(),
-            api_key: api_key.into(),
-            model: model.into(),
-            url,
-        }
-    }
-
-    /// Construct from environment variables, with local-first defaults:
-    ///
-    /// | Variable            | Default                    | Purpose                  |
-    /// |---------------------|----------------------------|--------------------------|
-    /// | `ANTHROPIC_BASE_URL`| `http://localhost:1234`    | LM Studio / any server   |
-    /// | `ANTHROPIC_MODEL`   | `ministral-3b-2512`        | Model loaded in LM Studio|
-    /// | `ANTHROPIC_API_KEY` | `""` (empty)               | Not required for local   |
-    ///
-    /// Override all three to target the Anthropic cloud with a real API key.
-    pub fn from_env() -> Self {
-        let base = std::env::var("ANTHROPIC_BASE_URL")
-            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        let model = std::env::var("ANTHROPIC_MODEL")
-            .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-        let key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-        Self::new(key, model, base)
+    pub fn new(client: Arc<dyn ChatClient>) -> Self {
+        Self { client }
     }
 
     /// Parse the raw text returned by the model into a `Vec<String>`.
@@ -117,7 +49,6 @@ impl LlmQueryExpander {
     /// Any text outside a `[…]` block is ignored to be resilient to minor
     /// formatting deviations.
     fn parse_variants(text: &str) -> Vec<String> {
-        // Extract the first JSON array from the response.
         let start = text.find('[');
         let end = text.rfind(']');
 
@@ -141,51 +72,14 @@ impl QueryExpander for LlmQueryExpander {
     async fn expand(&self, query: &str) -> Result<Vec<String>, DomainError> {
         let mut variants = vec![query.to_string()];
 
-        let request = ApiRequest {
-            model: &self.model,
-            max_tokens: MAX_TOKENS,
-            system: SYSTEM_PROMPT,
-            messages: vec![ApiMessage {
-                role: "user",
-                content: query,
-            }],
-        };
-
-        let response = match self
-            .client
-            .post(&self.url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_API_VERSION)
-            .json(&request)
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("LlmQueryExpander: API request failed: {e}. Falling back to original query.");
-                return Ok(variants);
+        match self.client.complete(SYSTEM_PROMPT, query).await {
+            Ok(text) => {
+                debug!("LlmQueryExpander raw response: {text}");
+                variants.extend(Self::parse_variants(&text));
             }
-        };
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            warn!("LlmQueryExpander: API returned {status}: {body}. Falling back to original query.");
-            return Ok(variants);
-        }
-
-        let api_response: ApiResponse = match response.json().await {
-            Ok(r) => r,
             Err(e) => {
-                warn!("LlmQueryExpander: failed to deserialize API response: {e}.");
-                return Ok(variants);
+                warn!("LlmQueryExpander: client error: {e}. Falling back to original query.");
             }
-        };
-
-        if let Some(block) = api_response.content.first() {
-            debug!("LlmQueryExpander raw response: {}", block.text);
-            let parsed = Self::parse_variants(&block.text);
-            variants.extend(parsed);
         }
 
         Ok(variants)

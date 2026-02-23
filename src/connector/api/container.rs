@@ -7,8 +7,8 @@ use tracing::debug;
 use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, ParserService, QueryExpander};
 use crate::{
     DeleteRepositoryUseCase, DuckdbCallGraphRepository,
-    DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
-    ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
+    AnthropicClient, DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository,
+    EmbeddingService, ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
     ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding, MockReranking, OrtEmbedding,
     OrtReranking, RerankingService, SearchCodeUseCase,
     SymbolContextUseCase, TreeSitterParser, VectorRepository,
@@ -234,13 +234,12 @@ impl Container {
         // If the server is unreachable the expander falls back to the original
         // query gracefully, so search always returns results.
         let query_expander: Option<Arc<dyn QueryExpander>> = if config.expand_query {
-            let expander = LlmQueryExpander::from_env();
+            let chat_client = Arc::new(AnthropicClient::from_env());
             debug!(
                 "Using LLM-based query expander (url={})",
-                std::env::var("ANTHROPIC_BASE_URL")
-                    .unwrap_or_else(|_| "http://localhost:1234".to_string())
+                AnthropicClient::configured_base_url()
             );
-            Some(Arc::new(expander))
+            Some(Arc::new(LlmQueryExpander::new(chat_client)))
         } else {
             None
         };
