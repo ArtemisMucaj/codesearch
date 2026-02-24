@@ -2,7 +2,6 @@
   {
     "label": "codesearch: search (prompt)",
     "command": "bash -c 'read -rp \"Search query: \" q && codesearch search \"$q\" --format text'",
-    "tags": ["codesearch"],
     "reveal": "always",
     "use_new_terminal": true,
     "allow_concurrent_runs": true
