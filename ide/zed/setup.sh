@@ -56,7 +56,7 @@ printf "  ctrl-shift-i  →  codesearch: impact analysis\n"
 printf "  ctrl-shift-x  →  codesearch: symbol context\n\n"
 read -r -p "Add these keybindings to keymap.json? [y/N] " yn
 
-if [[ "${yn,,}" == y* ]]; then
+if [[ "$yn" == [yY]* ]]; then
     KEYMAP="$ZED_DIR/keymap.json"
     [[ -f "$KEYMAP" ]] || printf '[]\n' > "$KEYMAP"
     new_keys=$(jq '.' "$HERE/keybindings.json")
