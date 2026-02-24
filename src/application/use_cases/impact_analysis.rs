@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::application::{CallGraphQuery, CallGraphUseCase};
 use crate::domain::DomainError;
 
+pub const ANONYMOUS_SYMBOL: &str = "<anonymous>";
+
 /// A single node in the impact (blast-radius) graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImpactNode {
@@ -95,8 +97,17 @@ impl ImpactAnalysisUseCase {
                         // function).  Include it in the impact report so the user can see it,
                         // but don't enqueue it for further traversal – there is no named
                         // symbol to look up.
+                        let anon_key = format!(
+                            "anon:{}:{}",
+                            reference.repository_id(),
+                            reference.caller_file_path()
+                        );
+                        if visited.contains(&anon_key) {
+                            continue;
+                        }
+                        visited.insert(anon_key);
                         by_depth[next_depth - 1].push(ImpactNode {
-                            symbol: "<anonymous>".to_string(),
+                            symbol: ANONYMOUS_SYMBOL.to_string(),
                             depth: next_depth,
                             file_path: reference.caller_file_path().to_string(),
                             reference_kind: reference.reference_kind().to_string(),
