@@ -1,0 +1,10 @@
+[
+  {
+    "context": "Editor",
+    "bindings": {
+      "ctrl-shift-f": ["task::Spawn", { "task_name": "codesearch: search selected text" }],
+      "ctrl-shift-i": ["task::Spawn", { "task_name": "codesearch: impact analysis" }],
+      "ctrl-shift-x": ["task::Spawn", { "task_name": "codesearch: symbol context" }]
+    }
+  }
+]

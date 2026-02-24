@@ -12,6 +12,44 @@ The `--format` (`-F`) flag on the `search` command controls output:
 | `json` | Structured JSON array for programmatic consumption |
 | `vimgrep` | `file:line:col:text` for Neovim quickfix list and Telescope |
 
+## Zed
+
+### MCP Context Server (AI assistant integration)
+
+Add the following block to `~/.config/zed/settings.json` (see [`ide/zed/settings.json`](../../ide/zed/settings.json) for a copy-pasteable snippet):
+
+```json
+{
+  "context_servers": {
+    "codesearch": {
+      "command": {
+        "path": "codesearch",
+        "args": ["mcp"]
+      },
+      "settings": {}
+    }
+  }
+}
+```
+
+Restart Zed and open the AI assistant — the server will be listed in the context-server panel. The assistant can then call `search_code`, `analyze_impact`, and `get_symbol_context` autonomously while you chat.
+
+### Tasks (command palette integration)
+
+Tasks let you run searches from Zed's command palette (`cmd-shift-p` → "task: spawn") and display results in the terminal panel. They use Zed's built-in task variables:
+
+| Variable | Value |
+|---|---|
+| `$ZED_SELECTED_TEXT` | Currently selected text |
+| `$ZED_SYMBOL` | Symbol under the cursor (from the language server) |
+| `$ZED_WORKTREE_ROOT` | Absolute path of the project root |
+
+Run [`ide/zed/setup.sh`](../../ide/zed/setup.sh) for an automated install, or manually copy [`ide/zed/tasks.json`](../../ide/zed/tasks.json) to your project's `.zed/tasks.json` (or merge it into `~/.config/zed/tasks.json` for a global install).
+
+#### Keybindings
+
+Copy [`ide/zed/keybindings.json`](../../ide/zed/keybindings.json) into `~/.config/zed/keymap.json` to add keyboard shortcuts (`ctrl-shift-f` search, `ctrl-shift-i` impact, `ctrl-shift-x` context), or let `setup.sh` handle it interactively.
+
 ## Neovim
 
 ### Telescope Extension

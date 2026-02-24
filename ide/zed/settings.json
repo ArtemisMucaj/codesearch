@@ -1,0 +1,11 @@
+{
+  "context_servers": {
+    "codesearch": {
+      "command": {
+        "path": "codesearch",
+        "args": ["mcp"]
+      },
+      "settings": {}
+    }
+  }
+}

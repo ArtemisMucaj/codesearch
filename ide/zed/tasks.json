@@ -1,0 +1,34 @@
+[
+  {
+    "label": "codesearch: search selected text",
+    "command": "codesearch search \"$ZED_SELECTED_TEXT\" --format text",
+    "tags": ["codesearch"],
+    "reveal": "always",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": true
+  },
+  {
+    "label": "codesearch: symbol context",
+    "command": "codesearch context \"$ZED_SYMBOL\"",
+    "tags": ["codesearch"],
+    "reveal": "always",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": true
+  },
+  {
+    "label": "codesearch: impact analysis",
+    "command": "codesearch impact \"$ZED_SYMBOL\"",
+    "tags": ["codesearch"],
+    "reveal": "always",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": true
+  },
+  {
+    "label": "codesearch: index current directory",
+    "command": "codesearch index $ZED_WORKTREE_ROOT",
+    "tags": ["codesearch"],
+    "reveal": "always",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false
+  }
+]
