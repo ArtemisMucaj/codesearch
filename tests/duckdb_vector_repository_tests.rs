@@ -36,7 +36,7 @@ async fn duckdb_vector_repository_can_save_and_search() {
         "mock".to_string(),
     );
 
-    repo.save_batch(&[chunk.clone()], &[embedding])
+    repo.save_batch(std::slice::from_ref(&chunk), &[embedding])
         .await
         .expect("save_batch");
 
@@ -127,7 +127,7 @@ async fn duckdb_vector_repository_schema_namespaces_tables() {
     );
 
     repo_a
-        .save_batch(&[chunk.clone()], &[embedding])
+        .save_batch(std::slice::from_ref(&chunk), &[embedding])
         .await
         .expect("save_batch");
 

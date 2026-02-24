@@ -1,0 +1,134 @@
+# clippy.toml
+#
+# Clippy configuration for the codesearch project.
+# Controls thresholds and behaviour for cargo clippy.
+#
+# Reference: https://doc.rust-lang.org/clippy/configuration.html
+# Run linting: cargo clippy --all-targets --all-features -- -D warnings
+
+# ---------------------------------------------------------------------------
+# Rust version
+# ---------------------------------------------------------------------------
+# Minimum Supported Rust Version. Clippy will not suggest APIs that are
+# unavailable below this version.
+msrv = "1.93.0"
+
+# ---------------------------------------------------------------------------
+# Library / API surface
+# ---------------------------------------------------------------------------
+# Do not suggest refactors that would break the public API of the library
+# crate. This is important because codesearch exposes a public Rust API in
+# addition to the CLI binary.
+avoid-breaking-exported-api = true
+
+# ---------------------------------------------------------------------------
+# Complexity thresholds
+# ---------------------------------------------------------------------------
+# Maximum cognitive complexity score before the `cognitive_complexity` lint
+# fires. Default: 25. Raised slightly to accommodate the inherently stateful
+# async indexing and search pipelines.
+cognitive-complexity-threshold = 30
+
+# Maximum number of lines in a single function body before `too_many_lines`
+# fires. Default: 100. Raised to allow moderately long async handlers and
+# repository implementations without forcing premature decomposition.
+too-many-lines-threshold = 150
+
+# Maximum number of function parameters before `too_many_arguments` fires.
+# Default: 7. Raised by one to accommodate dependency-injection constructors
+# (e.g. adapters that receive multiple repository / service handles).
+too-many-arguments-threshold = 8
+
+# Maximum type complexity score before `type_complexity` fires. Default: 250.
+# Raised to handle generic async-trait return types and nested Result/Option
+# wrappers common in this codebase.
+type-complexity-threshold = 350
+
+# ---------------------------------------------------------------------------
+# Identifiers and naming
+# ---------------------------------------------------------------------------
+# Single-character binding names are only flagged when a pattern contains more
+# than this many bindings. Default: 4.
+single-char-binding-names-threshold = 4
+
+# Identifiers that Clippy should accept as correctly spelled inside doc
+# comments, extending the built-in allow-list.
+doc-valid-idents = [
+    # Project / domain terminology
+    "CodeSearch",
+    "DuckDB",
+    "BM25",
+    "ONNX",
+    "MCP",
+    "RRF",
+    "VSS",
+    "AST",
+    "HuggingFace",
+    "LLM",
+    # Cryptography / identity
+    "SHA256",
+    "UUID",
+    "UUIDs",
+    "HMAC",
+    # Common technical acronyms
+    "APIs",
+    "gRPC",
+    "WebSocket",
+    "NaN",
+    "NaNs",
+    "JSON",
+    "TOML",
+    "YAML",
+    "HTTP",
+    "HTTPS",
+    "IoT",
+    "OK",
+]
+
+# ---------------------------------------------------------------------------
+# Async / Futures
+# ---------------------------------------------------------------------------
+# Maximum size of a Future (in bytes) before `large_futures` fires.
+# Default: 16 384. Kept at the default; the async indexing pipeline can
+# produce moderately large futures, but anything above 16 KiB should still
+# be investigated.
+future-size-threshold = 16384
+
+# ---------------------------------------------------------------------------
+# Error types
+# ---------------------------------------------------------------------------
+# Maximum size (bytes) for a type returned in Err(_) before `result_large_err`
+# fires. Default: 128. Raised to 256 to accommodate the rich DomainError and
+# anyhow::Error wrappers used throughout the application layer.
+large-error-threshold = 256
+
+# ---------------------------------------------------------------------------
+# Test code
+# ---------------------------------------------------------------------------
+# Allow `dbg!`, `print!`, `unwrap()`, and `expect()` inside test modules.
+# These are idiomatic in Rust test code and failing loudly is intentional.
+allow-dbg-in-tests = true
+allow-print-in-tests = true
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
+# ---------------------------------------------------------------------------
+# Collections
+# ---------------------------------------------------------------------------
+# Minimum heap allocation size (bytes) for the element type T in Vec<Box<T>>
+# before the `vec_box` lint suggests switching to Vec<T>. Default: 4 096.
+vec-box-size-threshold = 4096
+
+# ---------------------------------------------------------------------------
+# Copy types
+# ---------------------------------------------------------------------------
+# Maximum size (bytes) for a type to be considered "trivially Copy" when
+# evaluating pass-by-value vs. pass-by-reference suggestions. Default: unset.
+trivial-copy-size-limit = 128
+
+# ---------------------------------------------------------------------------
+# Stack usage
+# ---------------------------------------------------------------------------
+# Maximum estimated stack frame size (bytes) before `large_stack_frames`
+# fires. Default: 512 000.
+stack-size-threshold = 512000

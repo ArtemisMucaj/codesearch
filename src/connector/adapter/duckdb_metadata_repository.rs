@@ -169,7 +169,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
                 row.get(4)?,
                 row.get::<_, i64>(5)? as u64,
                 row.get::<_, i64>(6)? as u64,
-                VectorStore::from_str(&store_str),
+                store_str.parse::<VectorStore>().unwrap(),
                 namespace,
                 Self::deserialize_languages(languages_json),
             ))
@@ -205,7 +205,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
                 row.get(4)?,
                 row.get::<_, i64>(5)? as u64,
                 row.get::<_, i64>(6)? as u64,
-                VectorStore::from_str(&store_str),
+                store_str.parse::<VectorStore>().unwrap(),
                 namespace,
                 Self::deserialize_languages(languages_json),
             ))
@@ -242,7 +242,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
                     row.get(4)?,
                     row.get::<_, i64>(5)? as u64,
                     row.get::<_, i64>(6)? as u64,
-                    VectorStore::from_str(&store_str),
+                    store_str.parse::<VectorStore>().unwrap(),
                     namespace,
                     Self::deserialize_languages(languages_json),
                 ))

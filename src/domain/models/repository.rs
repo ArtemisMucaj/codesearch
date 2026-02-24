@@ -20,9 +20,13 @@ impl VectorStore {
             VectorStore::InMemory => "memory",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
+impl std::str::FromStr for VectorStore {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_lowercase().as_str() {
             "duckdb" => VectorStore::DuckDb,
             "memory" | "inmemory" | "in_memory" => VectorStore::InMemory,
             unknown => {
@@ -32,7 +36,7 @@ impl VectorStore {
                 );
                 VectorStore::DuckDb
             }
-        }
+        })
     }
 }
 
@@ -109,6 +113,7 @@ impl Repository {
     }
 
     /// Reconstitutes from persisted data (used by adapters).
+    #[allow(clippy::too_many_arguments)]
     pub fn reconstitute(
         id: String,
         name: String,
