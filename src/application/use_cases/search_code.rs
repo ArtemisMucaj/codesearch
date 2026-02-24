@@ -61,6 +61,15 @@ impl SearchCodeUseCase {
             query.limit()
         };
 
+        if fetch_limit != query.limit() {
+            info!(
+                "fetch_limit={} (target={}, +{} extra for reranking headroom)",
+                fetch_limit,
+                query.limit(),
+                fetch_limit - query.limit()
+            );
+        }
+
         let search_query = if fetch_limit != query.limit() {
             query.clone().with_limit(fetch_limit)
         } else {
@@ -75,6 +84,9 @@ impl SearchCodeUseCase {
             // for each independently, then fuse all result lists with RRF.
             let variants = expander.expand(query.query()).await?;
             info!("Query expanded into {} variants", variants.len());
+            for (i, variant) in variants.iter().enumerate() {
+                info!("  expanded query[{}]: {}", i, variant);
+            }
 
             let mut set = tokio::task::JoinSet::new();
             for variant in variants {
@@ -94,7 +106,17 @@ impl SearchCodeUseCase {
                 );
             }
 
-            rrf_fuse(all_results, fetch_limit)
+            let total_pre_fusion: usize = all_results.iter().map(|r| r.len()).sum();
+            let num_searches = all_results.len();
+            let fused = rrf_fuse(all_results, fetch_limit);
+            info!(
+                "RRF fusion: {} candidates across {} variant searches -> {} fused results (capped at fetch_limit={})",
+                total_pre_fusion,
+                num_searches,
+                fused.len(),
+                fetch_limit,
+            );
+            fused
         } else {
             // --- Standard single-query path ---
             let query_embedding = self.embedding_service.embed_query(query.query()).await?;
