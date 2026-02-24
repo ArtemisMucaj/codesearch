@@ -52,6 +52,7 @@ info "Tasks merged → $TASKS_FILE"
 # ── 2. Keybindings ── keymap.json (optional) ──────────────────────────────
 printf "\n${BOLD}Suggested keybindings:${NC}\n"
 printf "  ctrl-shift-f  →  codesearch: search selected text\n"
+printf "  ctrl-shift-g  →  codesearch: search (prompt)\n"
 printf "  ctrl-shift-i  →  codesearch: impact analysis\n"
 printf "  ctrl-shift-x  →  codesearch: symbol context\n\n"
 read -r -p "Add these keybindings to keymap.json? [y/N] " yn
