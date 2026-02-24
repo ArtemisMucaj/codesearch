@@ -1,10 +1,11 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use duckdb::{params, AccessMode, Config, Connection, Row};
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::application::{rrf_fuse, VectorRepository};
 use crate::domain::{CodeChunk, DomainError, Embedding, SearchQuery, SearchResult};
@@ -14,6 +15,9 @@ const VECTOR_DIMENSIONS: usize = 384;
 pub struct DuckdbVectorRepository {
     conn: Arc<Mutex<Connection>>,
     namespace: String,
+    /// Set to `true` whenever chunk data changes (inserts or deletes).
+    /// The FTS index is rebuilt lazily before the next BM25 search.
+    fts_dirty: AtomicBool,
 }
 
 impl DuckdbVectorRepository {
@@ -26,9 +30,17 @@ impl DuckdbVectorRepository {
             .map_err(|e| DomainError::storage(format!("Failed to open DuckDB database: {}", e)))?;
         Self::initialize(&conn, namespace)?;
 
+        let schema = namespace.trim();
+        let schema_name = if schema.is_empty() { "main" } else { schema };
+
+        // Only rebuild the FTS index on startup if it has never been created.
+        // If it already exists (from a previous session), assume it is valid.
+        let fts_already_exists = Self::fts_index_exists(&conn, schema_name);
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
-            namespace: namespace.to_string(),
+            namespace: schema_name.to_string(),
+            fts_dirty: AtomicBool::new(!fts_already_exists),
         })
     }
 
@@ -40,9 +52,11 @@ impl DuckdbVectorRepository {
         let namespace = "main";
         Self::initialize(&conn, namespace)?;
 
+        // In-memory databases are always fresh; no prior FTS index can exist.
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             namespace: namespace.to_string(),
+            fts_dirty: AtomicBool::new(true),
         })
     }
 
@@ -51,7 +65,7 @@ impl DuckdbVectorRepository {
     /// Read-only connections do not acquire the exclusive write lock, so multiple
     /// processes can search the same database file concurrently without conflicts.
     /// Schema initialization is skipped (tables must already exist from a prior
-    /// write-mode session); only the VSS extension is loaded for query support.
+    /// write-mode session); only the VSS and FTS extensions are loaded for query support.
     pub fn new_read_only_with_namespace(path: &Path, namespace: &str) -> Result<Self, DomainError> {
         let config = Config::default()
             .access_mode(AccessMode::ReadOnly)
@@ -60,16 +74,22 @@ impl DuckdbVectorRepository {
         let conn = Connection::open_with_flags(path, config)
             .map_err(|e| DomainError::storage(format!("Failed to open DuckDB (read-only): {}", e)))?;
 
-        // Load VSS for vector similarity queries; skip DDL (read-only mode forbids writes)
-        conn.execute_batch("LOAD vss; SET hnsw_enable_experimental_persistence = true;")
-            .map_err(|e| DomainError::storage(format!("Failed to load VSS extension: {}", e)))?;
+        // Load VSS and FTS for query support; skip INSTALL (DDL forbidden in read-only mode).
+        conn.execute_batch(
+            "LOAD vss; SET hnsw_enable_experimental_persistence = true; LOAD fts;",
+        )
+        .map_err(|e| DomainError::storage(format!("Failed to load extensions: {}", e)))?;
 
         let schema = namespace.trim();
         let schema_name = if schema.is_empty() { "main" } else { schema };
 
+        // In read-only mode we cannot rebuild the FTS index. The dirty flag is
+        // intentionally set to false so we never attempt a rebuild; if the index
+        // is missing the search method will fall back gracefully.
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             namespace: schema_name.to_string(),
+            fts_dirty: AtomicBool::new(false),
         })
     }
 
@@ -80,15 +100,19 @@ impl DuckdbVectorRepository {
         Arc::clone(&self.conn)
     }
 
-    /// Initializes tables and enables VSS extension.
+    /// Initializes tables, VSS, and FTS extensions.
     fn initialize(conn: &Connection, schema: &str) -> Result<(), DomainError> {
         let schema = schema.trim();
         let schema_name = if schema.is_empty() { "main" } else { schema };
         debug!("Initializing DuckDB with schema: {}", schema_name);
 
-        // Install and load VSS extension first (required for vector type)
-        conn.execute_batch("INSTALL vss; LOAD vss; SET hnsw_enable_experimental_persistence = true;")
-            .map_err(|e| DomainError::storage(format!("Failed to initialize VSS extension: {}", e)))?;
+        // Install and load VSS (vector similarity search) and FTS (full-text search).
+        // `INSTALL` downloads the extension on first use; subsequent runs load from cache.
+        conn.execute_batch(
+            "INSTALL vss; LOAD vss; SET hnsw_enable_experimental_persistence = true; \
+             INSTALL fts; LOAD fts;",
+        )
+        .map_err(|e| DomainError::storage(format!("Failed to initialize extensions: {}", e)))?;
 
         // Create all tables in a single batch
         let schema_sql = format!(
@@ -139,6 +163,51 @@ impl DuckdbVectorRepository {
         Ok(())
     }
 
+    // ── FTS helpers ──────────────────────────────────────────────────────────
+
+    /// Returns the DuckDB schema name that the FTS extension creates for our
+    /// chunks table, e.g. `fts_main_chunks` for namespace `main`.
+    fn fts_schema_name(namespace: &str) -> String {
+        format!("fts_{}_chunks", namespace)
+    }
+
+    /// Returns `true` if the FTS index for this namespace already exists in
+    /// the database (queried via `information_schema.schemata`).
+    fn fts_index_exists(conn: &Connection, namespace: &str) -> bool {
+        let fts_schema = Self::fts_schema_name(namespace);
+        match conn.query_row(
+            "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?",
+            params![fts_schema],
+            |row| row.get::<_, i64>(0),
+        ) {
+            Ok(count) => count > 0,
+            Err(e) => {
+                debug!(
+                    "Failed to query FTS index existence for namespace '{}' (schema '{}'): {}",
+                    namespace, fts_schema, e
+                );
+                false
+            }
+        }
+    }
+
+    /// Rebuilds the FTS index from scratch for the given namespace.
+    ///
+    /// Uses `stemmer='none'` so that code identifiers are not stemmed — exact
+    /// token matching is more appropriate for source code than natural-language
+    /// stemming. The `overwrite=1` flag drops any existing index and recreates it.
+    fn rebuild_fts_index(conn: &Connection, namespace: &str) -> Result<(), DomainError> {
+        let sql = format!(
+            "PRAGMA create_fts_index('{ns}.chunks', 'id', 'content', 'symbol_name', \
+             stemmer='none', overwrite=1);",
+            ns = namespace
+        );
+        conn.execute_batch(&sql)
+            .map_err(|e| DomainError::storage(format!("Failed to rebuild FTS index: {e}")))
+    }
+
+    // ── Private query helpers (synchronous, take &Connection) ────────────────
+
     fn vector_to_array_literal(vector: &[f32]) -> Result<String, DomainError> {
         if vector.len() != VECTOR_DIMENSIONS {
             return Err(DomainError::invalid_input(format!(
@@ -160,8 +229,6 @@ impl DuckdbVectorRepository {
         s.push_str("::FLOAT[384]");
         Ok(s)
     }
-
-    // ── Private query helpers (synchronous, take &Connection) ────────────────
 
     fn row_to_chunk(row: &Row) -> Result<CodeChunk, duckdb::Error> {
         Ok(CodeChunk::reconstitute(
@@ -261,52 +328,44 @@ impl DuckdbVectorRepository {
         Ok(results)
     }
 
+    /// Performs real Okapi BM25 full-text search using DuckDB's FTS extension.
+    ///
+    /// The `match_bm25` macro function is called as
+    /// `fts_<namespace>_chunks.match_bm25(id, query_string)` and returns a BM25
+    /// relevance score for each matching document. Documents that do not match
+    /// any query token receive a NULL score and are excluded.
+    ///
+    /// `stemmer='none'` is used at index time so code identifiers are matched
+    /// exactly rather than reduced to their English stem root.
     fn run_text(
         conn: &Connection,
         namespace: &str,
-        terms: &[&str],
         query: &SearchQuery,
         limit: usize,
     ) -> Result<Vec<SearchResult>, DomainError> {
-        if terms.is_empty() {
+        let query_str = query.query().trim().to_string();
+        if query_str.is_empty() {
             return Ok(vec![]);
         }
 
-        let max_score = (terms.len() * 3) as f64;
-        let mut score_parts: Vec<String> = Vec::new();
-        let mut where_parts: Vec<String> = Vec::new();
+        let fts = Self::fts_schema_name(namespace);
 
-        for term in terms {
-            // Use '!' as the single-character LIKE escape so the SQL is valid.
-            // DuckDB requires exactly one character for ESCAPE; '\\' (two chars) is not accepted.
-            let safe = term.to_lowercase()
-                .replace('!', "!!")
-                .replace('\'', "''")
-                .replace('%', "!%")
-                .replace('_', "!_");
-            score_parts.push(format!(
-                "(CASE WHEN LOWER(c.content) LIKE '%{s}%' ESCAPE '!' THEN 1.0 ELSE 0.0 END \
-                 + CASE WHEN LOWER(c.symbol_name) LIKE '%{s}%' ESCAPE '!' THEN 2.0 ELSE 0.0 END)",
-                s = safe
-            ));
-            where_parts.push(format!(
-                "LOWER(c.content) LIKE '%{s}%' ESCAPE '!' OR LOWER(c.symbol_name) LIKE '%{s}%' ESCAPE '!'",
-                s = safe
-            ));
-        }
-
-        let score_expr = format!("({}) / {:.1}", score_parts.join(" + "), max_score);
-        let where_expr = where_parts.join(" OR ");
-
+        // The subquery computes the BM25 score for every chunk; the outer query
+        // filters out non-matching rows (NULL score) and applies optional column
+        // filters before sorting and limiting.
         let mut sql = format!(
-            "SELECT c.id, c.file_path, c.content, c.start_line, c.end_line, \
-             c.language, c.node_type, c.symbol_name, c.parent_symbol, c.repository_id, \
-             CAST({score} AS FLOAT) AS score \
-             FROM \"{ns}\".chunks c \
-             WHERE ({where_clause})",
-            score = score_expr,
+            "SELECT sq.id, sq.file_path, sq.content, sq.start_line, sq.end_line, \
+             sq.language, sq.node_type, sq.symbol_name, sq.parent_symbol, sq.repository_id, \
+             CAST(sq.score AS FLOAT) AS score \
+             FROM ( \
+                 SELECT c.id, c.file_path, c.content, c.start_line, c.end_line, \
+                        c.language, c.node_type, c.symbol_name, c.parent_symbol, c.repository_id, \
+                        {fts}.match_bm25(c.id, ?) AS score \
+                 FROM \"{ns}\".chunks c \
+             ) sq \
+             WHERE sq.score IS NOT NULL",
+            fts = fts,
             ns = namespace,
-            where_clause = where_expr,
         );
 
         let mut extra: Vec<String> = Vec::new();
@@ -316,7 +375,7 @@ impl DuckdbVectorRepository {
                 .map(|l| format!("'{}'", l.replace('\'', "''")))
                 .collect::<Vec<_>>()
                 .join(", ");
-            extra.push(format!("c.language IN ({})", quoted));
+            extra.push(format!("sq.language IN ({})", quoted));
         }
         if let Some(node_types) = query.node_types() {
             let quoted = node_types
@@ -324,7 +383,7 @@ impl DuckdbVectorRepository {
                 .map(|t| format!("'{}'", t.replace('\'', "''")))
                 .collect::<Vec<_>>()
                 .join(", ");
-            extra.push(format!("c.node_type IN ({})", quoted));
+            extra.push(format!("sq.node_type IN ({})", quoted));
         }
         if let Some(repo_ids) = query.repository_ids() {
             let quoted = repo_ids
@@ -332,38 +391,34 @@ impl DuckdbVectorRepository {
                 .map(|r| format!("'{}'", r.replace('\'', "''")))
                 .collect::<Vec<_>>()
                 .join(", ");
-            extra.push(format!("c.repository_id IN ({})", quoted));
+            extra.push(format!("sq.repository_id IN ({})", quoted));
         }
         if !extra.is_empty() {
             sql.push_str(&format!(" AND ({})", extra.join(" AND ")));
         }
-        sql.push_str(" ORDER BY score DESC LIMIT ?");
+        sql.push_str(" ORDER BY sq.score DESC LIMIT ?");
 
         let mut stmt = conn
             .prepare(&sql)
-            .map_err(|e| DomainError::storage(format!("Failed to prepare text search: {}", e)))?;
+            .map_err(|e| DomainError::storage(format!("Failed to prepare BM25 search: {e}")))?;
         let mut rows = stmt
-            .query(params![limit as i64])
-            .map_err(|e| DomainError::storage(format!("Failed to run text search: {}", e)))?;
+            .query(params![query_str, limit as i64])
+            .map_err(|e| DomainError::storage(format!("Failed to run BM25 search: {e}")))?;
 
         let mut results = Vec::new();
         while let Some(row) = rows
             .next()
-            .map_err(|e| DomainError::storage(format!("Failed to read text row: {}", e)))?
+            .map_err(|e| DomainError::storage(format!("Failed to read BM25 row: {e}")))?
         {
             let score: f32 = row
                 .get(10)
-                .map_err(|e| DomainError::storage(format!("Failed to read text score: {}", e)))?;
-            if score == 0.0 {
-                continue;
-            }
+                .map_err(|e| DomainError::storage(format!("Failed to read BM25 score: {e}")))?;
             let chunk = Self::row_to_chunk(row)
-                .map_err(|e| DomainError::storage(format!("Failed to parse text chunk row: {}", e)))?;
+                .map_err(|e| DomainError::storage(format!("Failed to parse BM25 chunk row: {e}")))?;
             results.push(SearchResult::new(chunk, score));
         }
         Ok(results)
     }
-
 }
 
 #[async_trait]
@@ -441,6 +496,9 @@ impl VectorRepository for DuckdbVectorRepository {
         tx.commit()
             .map_err(|e| DomainError::storage(format!("Failed to commit: {}", e)))?;
 
+        // Mark the FTS index as stale; it will be rebuilt lazily on the next BM25 search.
+        self.fts_dirty.store(true, Ordering::Release);
+
         debug!(
             "Saved {} chunks and {} embeddings to DuckDB",
             chunks.len(),
@@ -469,6 +527,7 @@ impl VectorRepository for DuckdbVectorRepository {
         .map_err(|e| DomainError::storage(format!("Failed to delete chunk: {}", e)))?;
         tx.commit()
             .map_err(|e| DomainError::storage(format!("Failed to commit: {}", e)))?;
+        self.fts_dirty.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -498,6 +557,7 @@ impl VectorRepository for DuckdbVectorRepository {
 
         tx.commit()
             .map_err(|e| DomainError::storage(format!("Failed to commit: {}", e)))?;
+        self.fts_dirty.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -532,6 +592,7 @@ impl VectorRepository for DuckdbVectorRepository {
 
         tx.commit()
             .map_err(|e| DomainError::storage(format!("Failed to commit: {}", e)))?;
+        self.fts_dirty.store(true, Ordering::Release);
 
         debug!(
             "Deleted {} chunks for file {} in repository {}",
@@ -571,11 +632,43 @@ impl VectorRepository for DuckdbVectorRepository {
             return Ok(semantic);
         }
 
-        let terms: Vec<&str> = query.query().split_whitespace().collect();
-        let text = Self::run_text(&conn, &self.namespace, &terms, query, fetch_limit)?;
+        // Rebuild the FTS index if the chunk data has changed since last search.
+        // This is a lazy rebuild strategy: we pay the rebuild cost once per "dirty"
+        // window (i.e., after any sequence of inserts/deletes) rather than after
+        // every individual write.
+        if self.fts_dirty.load(Ordering::Acquire) {
+            match Self::rebuild_fts_index(&conn, &self.namespace) {
+                Ok(()) => {
+                    self.fts_dirty.store(false, Ordering::Release);
+                    debug!("FTS index rebuilt for namespace '{}'", self.namespace);
+                }
+                Err(e) => {
+                    // This can happen in read-only mode or if the FTS extension is
+                    // unavailable. Fall back to semantic-only results with a warning.
+                    warn!(
+                        "Failed to rebuild FTS index (falling back to semantic-only): {}",
+                        e
+                    );
+                    return Ok(semantic);
+                }
+            }
+        }
+
+        let text = match Self::run_text(&conn, &self.namespace, query, fetch_limit) {
+            Ok(results) => results,
+            Err(e) => {
+                // If BM25 query fails (e.g. FTS schema missing in read-only DB),
+                // degrade gracefully to semantic-only results.
+                warn!(
+                    "BM25 text search failed (falling back to semantic-only): {}",
+                    e
+                );
+                return Ok(semantic);
+            }
+        };
 
         debug!(
-            "Hybrid search: {} semantic + {} text candidates → fusing",
+            "Hybrid search: {} semantic + {} BM25 candidates → fusing",
             semantic.len(),
             text.len()
         );
