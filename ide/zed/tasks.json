@@ -1,7 +1,5 @@
 [
   {
-    "_comment": "Copy this file to your project's .zed/tasks.json, or merge its contents into your global ~/.config/zed/tasks.json.",
-
     "label": "codesearch: search selected text",
     "command": "codesearch search \"$ZED_SELECTED_TEXT\" --format text",
     "tags": ["codesearch"],

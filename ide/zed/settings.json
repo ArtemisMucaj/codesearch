@@ -1,5 +1,4 @@
 {
-  "_comment": "Add this block to your ~/.config/zed/settings.json to enable CodeSearch as an MCP context server in Zed's AI assistant.",
   "context_servers": {
     "codesearch": {
       "command": {
