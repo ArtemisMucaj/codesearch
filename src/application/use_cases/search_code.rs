@@ -63,7 +63,7 @@ impl SearchCodeUseCase {
 
         if fetch_limit != query.limit() {
             info!(
-                "fetch_limit={} (target={}, +{} extra for reranking headroom)",
+                "Using fetch_limit={} (target={}, +{} extra for reranking headroom)",
                 fetch_limit,
                 query.limit(),
                 fetch_limit - query.limit()

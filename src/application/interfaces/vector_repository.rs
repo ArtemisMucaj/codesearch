@@ -34,4 +34,11 @@ pub trait VectorRepository: Send + Sync {
     ) -> Result<Vec<SearchResult>, DomainError>;
 
     async fn count(&self) -> Result<u64, DomainError>;
+
+    /// Called once after a batch of writes to finalise any deferred work
+    /// (e.g. rebuilding a full-text search index). The default implementation
+    /// is a no-op; backends that maintain auxiliary indexes should override it.
+    async fn flush(&self) -> Result<(), DomainError> {
+        Ok(())
+    }
 }
