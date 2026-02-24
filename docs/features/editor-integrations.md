@@ -14,11 +14,7 @@ The `--format` (`-F`) flag on the `search` command controls output:
 
 ## Zed
 
-Two integration layers are available:
-
-### 1. MCP Context Server (AI assistant integration)
-
-This is the most powerful option. Zed's AI assistant gains direct access to `search_code`, `analyze_impact`, and `get_symbol_context` as AI tools — no slash commands needed; the assistant can call them autonomously while you chat.
+### MCP Context Server (AI assistant integration)
 
 Add the following block to `~/.config/zed/settings.json` (see [`ide/zed/settings.json`](../../ide/zed/settings.json) for a copy-pasteable snippet):
 
@@ -36,9 +32,9 @@ Add the following block to `~/.config/zed/settings.json` (see [`ide/zed/settings
 }
 ```
 
-The `codesearch` binary must be on your `PATH`. Once added, restart Zed and open the AI assistant — the server will be listed in the context-server panel.
+Restart Zed and open the AI assistant — the server will be listed in the context-server panel. The assistant can then call `search_code`, `analyze_impact`, and `get_symbol_context` autonomously while you chat.
 
-### 2. Tasks (command palette integration)
+### Tasks (command palette integration)
 
 Tasks let you run searches from Zed's command palette (`cmd-shift-p` → "task: spawn") and display results in the terminal panel. They use Zed's built-in task variables:
 
@@ -48,7 +44,7 @@ Tasks let you run searches from Zed's command palette (`cmd-shift-p` → "task: 
 | `$ZED_SYMBOL` | Symbol under the cursor (from the language server) |
 | `$ZED_WORKTREE_ROOT` | Absolute path of the project root |
 
-Copy [`ide/zed/tasks.json`](../../ide/zed/tasks.json) to your project's `.zed/tasks.json`, or merge it into `~/.config/zed/tasks.json` for a global installation:
+Run [`ide/zed/setup.sh`](../../ide/zed/setup.sh) for an automated install, or manually copy [`ide/zed/tasks.json`](../../ide/zed/tasks.json) to your project's `.zed/tasks.json` (or merge it into `~/.config/zed/tasks.json` for a global install):
 
 ```json
 [

@@ -2,9 +2,8 @@
 # setup.sh — Install CodeSearch integration into Zed
 #
 # What it does:
-#   1. Adds the codesearch MCP context server to ~/.config/zed/settings.json
-#   2. Merges the four codesearch tasks into ~/.config/zed/tasks.json
-#   3. Optionally adds keybindings to ~/.config/zed/keymap.json
+#   1. Merges the four codesearch tasks into ~/.config/zed/tasks.json
+#   2. Optionally adds keybindings to ~/.config/zed/keymap.json
 #
 # Requirements: jq (brew install jq | apt install jq)
 
@@ -35,22 +34,7 @@ write_json() {
     mv "$tmp" "$dest"
 }
 
-# ── 1. MCP context server ── settings.json ────────────────────────────────
-SETTINGS="$ZED_DIR/settings.json"
-[[ -f "$SETTINGS" ]] || printf '{}\n' > "$SETTINGS"
-
-if jq -e '.context_servers.codesearch' "$SETTINGS" >/dev/null 2>&1; then
-    warn "MCP context server already configured in $SETTINGS — skipping."
-else
-    server=$(jq '.context_servers.codesearch' "$HERE/settings.json")
-    updated=$(jq --argjson v "$server" \
-        '.context_servers //= {} | .context_servers.codesearch = $v' \
-        "$SETTINGS")
-    write_json "$SETTINGS" "$updated"
-    info "MCP context server added → $SETTINGS"
-fi
-
-# ── 2. Tasks ── tasks.json ────────────────────────────────────────────────
+# ── 1. Tasks ── tasks.json ────────────────────────────────────────────────
 TASKS_FILE="$ZED_DIR/tasks.json"
 [[ -f "$TASKS_FILE" ]] || printf '[]\n' > "$TASKS_FILE"
 
@@ -65,7 +49,7 @@ merged_tasks=$(jq -n \
 write_json "$TASKS_FILE" "$merged_tasks"
 info "Tasks merged → $TASKS_FILE"
 
-# ── 3. Keybindings ── keymap.json (optional) ──────────────────────────────
+# ── 2. Keybindings ── keymap.json (optional) ──────────────────────────────
 printf "\n${BOLD}Suggested keybindings:${NC}\n"
 printf "  ctrl-shift-f  →  codesearch: search selected text\n"
 printf "  ctrl-shift-i  →  codesearch: impact analysis\n"
