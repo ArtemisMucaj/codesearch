@@ -11,7 +11,7 @@
 # ---------------------------------------------------------------------------
 # Minimum Supported Rust Version. Clippy will not suggest APIs that are
 # unavailable below this version.
-msrv = "1.75.0"
+msrv = "1.82.0"
 
 # ---------------------------------------------------------------------------
 # Library / API surface
@@ -92,7 +92,7 @@ doc-valid-idents = [
 # Default: 16 384. Kept at the default; the async indexing pipeline can
 # produce moderately large futures, but anything above 16 KiB should still
 # be investigated.
-large-futures-size-threshold = 16384
+future-size-threshold = 16384
 
 # ---------------------------------------------------------------------------
 # Error types
