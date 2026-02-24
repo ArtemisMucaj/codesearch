@@ -12,6 +12,133 @@ The `--format` (`-F`) flag on the `search` command controls output:
 | `json` | Structured JSON array for programmatic consumption |
 | `vimgrep` | `file:line:col:text` for Neovim quickfix list and Telescope |
 
+## Zed
+
+Three integration layers are available, from lightest to tightest:
+
+### 1. MCP Context Server (AI assistant integration)
+
+This is the most powerful option. Zed's AI assistant gains direct access to `search_code`, `analyze_impact`, and `get_symbol_context` as AI tools — no slash commands needed; the assistant can call them autonomously while you chat.
+
+Add the following block to `~/.config/zed/settings.json` (see [`ide/zed/settings.json`](../../ide/zed/settings.json) for a copy-pasteable snippet):
+
+```json
+{
+  "context_servers": {
+    "codesearch": {
+      "command": {
+        "path": "codesearch",
+        "args": ["mcp"]
+      },
+      "settings": {}
+    }
+  }
+}
+```
+
+The `codesearch` binary must be on your `PATH`. Once added, restart Zed and open the AI assistant — the server will be listed in the context-server panel.
+
+### 2. Tasks (command palette integration)
+
+Tasks let you run searches from Zed's command palette (`cmd-shift-p` → "task: spawn") and display results in the terminal panel. They use Zed's built-in task variables:
+
+| Variable | Value |
+|---|---|
+| `$ZED_SELECTED_TEXT` | Currently selected text |
+| `$ZED_SYMBOL` | Symbol under the cursor (from the language server) |
+| `$ZED_WORKTREE_ROOT` | Absolute path of the project root |
+
+Copy [`ide/zed/tasks.json`](../../ide/zed/tasks.json) to your project's `.zed/tasks.json`, or merge it into `~/.config/zed/tasks.json` for a global installation:
+
+```json
+[
+  {
+    "label": "codesearch: search selected text",
+    "command": "codesearch search \"$ZED_SELECTED_TEXT\" --format text",
+    "tags": ["codesearch"],
+    "reveal": "always",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": true
+  },
+  {
+    "label": "codesearch: symbol context",
+    "command": "codesearch context \"$ZED_SYMBOL\"",
+    "tags": ["codesearch"],
+    "reveal": "always",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": true
+  },
+  {
+    "label": "codesearch: impact analysis",
+    "command": "codesearch impact \"$ZED_SYMBOL\"",
+    "tags": ["codesearch"],
+    "reveal": "always",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": true
+  },
+  {
+    "label": "codesearch: index current directory",
+    "command": "codesearch index $ZED_WORKTREE_ROOT",
+    "tags": ["codesearch"],
+    "reveal": "always",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false
+  }
+]
+```
+
+#### Keybindings
+
+Copy [`ide/zed/keybindings.json`](../../ide/zed/keybindings.json) into `~/.config/zed/keymap.json` to add keyboard shortcuts:
+
+```json
+[
+  {
+    "context": "Editor",
+    "bindings": {
+      "ctrl-shift-f": ["task::Spawn", { "task_name": "codesearch: search selected text" }],
+      "ctrl-shift-i": ["task::Spawn", { "task_name": "codesearch: impact analysis" }],
+      "ctrl-shift-x": ["task::Spawn", { "task_name": "codesearch: symbol context" }]
+    }
+  }
+]
+```
+
+### 3. Zed Extension (slash commands in AI assistant)
+
+The extension at [`ide/zed/extension/`](../../ide/zed/extension/) registers three slash commands directly inside Zed's AI assistant panel, so you can inject search results into your conversation context without leaving the chat:
+
+| Slash command | What it does |
+|---|---|
+| `/codesearch <query>` | Semantic search — top 10 results rendered as fenced code blocks |
+| `/codesearch-impact <symbol>` | Blast-radius analysis for a symbol |
+| `/codesearch-context <symbol>` | Callers and callees of a symbol |
+
+#### Building and installing
+
+Prerequisites: Rust stable toolchain, `wasm32-wasi` target.
+
+```bash
+rustup target add wasm32-wasi
+
+cd ide/zed/extension
+cargo build --release --target wasm32-wasi
+```
+
+Then install into Zed via **Extensions → Install Dev Extension** and point it at the `ide/zed/extension/` directory. Zed will pick up the compiled WASM binary and register the slash commands automatically.
+
+#### Usage
+
+Open the AI assistant panel and type:
+
+```
+/codesearch error handling for database connections
+/codesearch-impact authenticate
+/codesearch-context validate_email
+```
+
+Results are inserted into the conversation as collapsible context sections that the assistant can reference when answering follow-up questions.
+
 ## Neovim
 
 ### Telescope Extension
