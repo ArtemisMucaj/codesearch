@@ -14,7 +14,7 @@ The `--format` (`-F`) flag on the `search` command controls output:
 
 ## Zed
 
-Three integration layers are available, from lightest to tightest:
+Two integration layers are available:
 
 ### 1. MCP Context Server (AI assistant integration)
 
@@ -103,41 +103,6 @@ Copy [`ide/zed/keybindings.json`](../../ide/zed/keybindings.json) into `~/.confi
   }
 ]
 ```
-
-### 3. Zed Extension (slash commands in AI assistant)
-
-The extension at [`ide/zed/extension/`](../../ide/zed/extension/) registers three slash commands directly inside Zed's AI assistant panel, so you can inject search results into your conversation context without leaving the chat:
-
-| Slash command | What it does |
-|---|---|
-| `/codesearch <query>` | Semantic search — top 10 results rendered as fenced code blocks |
-| `/codesearch-impact <symbol>` | Blast-radius analysis for a symbol |
-| `/codesearch-context <symbol>` | Callers and callees of a symbol |
-
-#### Building and installing
-
-Prerequisites: Rust stable toolchain, `wasm32-wasi` target.
-
-```bash
-rustup target add wasm32-wasi
-
-cd ide/zed/extension
-cargo build --release --target wasm32-wasi
-```
-
-Then install into Zed via **Extensions → Install Dev Extension** and point it at the `ide/zed/extension/` directory. Zed will pick up the compiled WASM binary and register the slash commands automatically.
-
-#### Usage
-
-Open the AI assistant panel and type:
-
-```
-/codesearch error handling for database connections
-/codesearch-impact authenticate
-/codesearch-context validate_email
-```
-
-Results are inserted into the conversation as collapsible context sections that the assistant can reference when answering follow-up questions.
 
 ## Neovim
 
