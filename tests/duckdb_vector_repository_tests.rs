@@ -98,6 +98,93 @@ async fn duckdb_vector_repository_delete_by_repository_removes_all() {
 }
 
 #[tokio::test]
+async fn duckdb_vector_repository_bm25_text_search_finds_matching_chunks() {
+    // Verify that the DuckDB FTS-backed BM25 path finds chunks whose content
+    // contains the query terms, even when the query embedding is unrelated to
+    // the stored embedding (so semantic similarity alone would not find it).
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("bm25.duckdb");
+
+    let repo = Arc::new(DuckdbVectorRepository::new(&db_path).expect("duckdb init"));
+
+    let auth_chunk = CodeChunk::new(
+        "src/auth.rs".to_string(),
+        "pub fn authenticate_user(username: &str, password: &str) -> bool { \
+         username == \"admin\" && password == \"secret\" }"
+            .to_string(),
+        1,
+        3,
+        Language::Rust,
+        NodeType::Function,
+        "repo-bm25".to_string(),
+    )
+    .with_symbol_name("authenticate_user");
+
+    let unrelated_chunk = CodeChunk::new(
+        "src/math.rs".to_string(),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }".to_string(),
+        1,
+        1,
+        Language::Rust,
+        NodeType::Function,
+        "repo-bm25".to_string(),
+    )
+    .with_symbol_name("add");
+
+    // Give the auth chunk a unit vector at index 5, the unrelated chunk at index 6.
+    let auth_emb = Embedding::new(auth_chunk.id().to_string(), unit_vector(384, 5), "mock".to_string());
+    let math_emb = Embedding::new(unrelated_chunk.id().to_string(), unit_vector(384, 6), "mock".to_string());
+
+    repo.save_batch(&[auth_chunk.clone(), unrelated_chunk], &[auth_emb, math_emb])
+        .await
+        .expect("save_batch");
+
+    // Query with a unit vector that is orthogonal to both stored vectors so
+    // semantic scores are ~0; BM25 must carry the result.
+    let query_vec = unit_vector(384, 42);
+    let query = SearchQuery::new("authenticate user")
+        .with_limit(5)
+        .with_text_search(true);
+
+    let results = repo.search(&query_vec, &query).await.expect("BM25 search");
+
+    assert!(!results.is_empty(), "BM25 search should return results");
+    assert!(
+        results.iter().any(|r| r.chunk().content().contains("authenticate")),
+        "authenticate_user chunk should appear in BM25 results"
+    );
+}
+
+#[tokio::test]
+async fn duckdb_vector_repository_bm25_handles_empty_query() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("bm25_empty.duckdb");
+
+    let repo = Arc::new(DuckdbVectorRepository::new(&db_path).expect("duckdb init"));
+
+    let chunk = CodeChunk::new(
+        "src/lib.rs".to_string(),
+        "pub fn hello() {}".to_string(),
+        1,
+        1,
+        Language::Rust,
+        NodeType::Function,
+        "repo-empty".to_string(),
+    );
+    let emb = Embedding::new(chunk.id().to_string(), unit_vector(384, 0), "mock".to_string());
+    repo.save_batch(&[chunk], &[emb]).await.expect("save_batch");
+
+    // An empty query string should not panic or error.
+    let query = SearchQuery::new("   ").with_limit(5).with_text_search(true);
+    let results = repo
+        .search(&unit_vector(384, 0), &query)
+        .await
+        .expect("search with empty query");
+    // Empty query produces no BM25 hits; result comes from semantic leg only.
+    assert!(results[0].score().is_finite());
+}
+
+#[tokio::test]
 async fn duckdb_vector_repository_schema_namespaces_tables() {
     let dir = tempdir().expect("tempdir");
     let db_path = dir.path().join("codesearch.duckdb");
