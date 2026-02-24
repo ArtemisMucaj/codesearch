@@ -22,6 +22,18 @@
 * unit tests for `InMemoryVectorRepository` hybrid paths: cosine vs RRF score ranges, dual-leg ranking, post-fusion `min_score` filtering, no early pruning, empty-term fallback, and limit enforcement
 * integration tests for end-to-end hybrid search: results returned with positive scores, keyword-matched chunk surfaces, special SQL characters (`%`, `_`, `!`) do not cause errors, and semantic-only baseline confirms the flag gates the BM25 leg
 
+## [0.10.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.9.0...v0.10.0) (2026-02-24)
+
+
+### Features
+
+* add Zed editor integration ([#70](https://github.com/ArtemisMucaj/codesearch/issues/70)) ([c9c0717](https://github.com/ArtemisMucaj/codesearch/commit/c9c07179c053873cfdc5afb31db4fb3b887de733))
+
+
+### Bug Fixes
+
+* include anonymous callers in impact analysis results ([#66](https://github.com/ArtemisMucaj/codesearch/issues/66)) ([e513822](https://github.com/ArtemisMucaj/codesearch/commit/e51382220834aa1b4bdff3b9cb4058c488106078))
+
 ## [0.9.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.8.0...v0.9.0) (2026-02-23)
 
 
