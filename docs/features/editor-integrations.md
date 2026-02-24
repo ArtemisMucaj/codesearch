@@ -44,61 +44,11 @@ Tasks let you run searches from Zed's command palette (`cmd-shift-p` → "task: 
 | `$ZED_SYMBOL` | Symbol under the cursor (from the language server) |
 | `$ZED_WORKTREE_ROOT` | Absolute path of the project root |
 
-Run [`ide/zed/setup.sh`](../../ide/zed/setup.sh) for an automated install, or manually copy [`ide/zed/tasks.json`](../../ide/zed/tasks.json) to your project's `.zed/tasks.json` (or merge it into `~/.config/zed/tasks.json` for a global install):
-
-```json
-[
-  {
-    "label": "codesearch: search selected text",
-    "command": "codesearch search \"$ZED_SELECTED_TEXT\" --format text",
-    "tags": ["codesearch"],
-    "reveal": "always",
-    "use_new_terminal": false,
-    "allow_concurrent_runs": true
-  },
-  {
-    "label": "codesearch: symbol context",
-    "command": "codesearch context \"$ZED_SYMBOL\"",
-    "tags": ["codesearch"],
-    "reveal": "always",
-    "use_new_terminal": false,
-    "allow_concurrent_runs": true
-  },
-  {
-    "label": "codesearch: impact analysis",
-    "command": "codesearch impact \"$ZED_SYMBOL\"",
-    "tags": ["codesearch"],
-    "reveal": "always",
-    "use_new_terminal": false,
-    "allow_concurrent_runs": true
-  },
-  {
-    "label": "codesearch: index current directory",
-    "command": "codesearch index $ZED_WORKTREE_ROOT",
-    "tags": ["codesearch"],
-    "reveal": "always",
-    "use_new_terminal": false,
-    "allow_concurrent_runs": false
-  }
-]
-```
+Run [`ide/zed/setup.sh`](../../ide/zed/setup.sh) for an automated install, or manually copy [`ide/zed/tasks.json`](../../ide/zed/tasks.json) to your project's `.zed/tasks.json` (or merge it into `~/.config/zed/tasks.json` for a global install).
 
 #### Keybindings
 
-Copy [`ide/zed/keybindings.json`](../../ide/zed/keybindings.json) into `~/.config/zed/keymap.json` to add keyboard shortcuts:
-
-```json
-[
-  {
-    "context": "Editor",
-    "bindings": {
-      "ctrl-shift-f": ["task::Spawn", { "task_name": "codesearch: search selected text" }],
-      "ctrl-shift-i": ["task::Spawn", { "task_name": "codesearch: impact analysis" }],
-      "ctrl-shift-x": ["task::Spawn", { "task_name": "codesearch: symbol context" }]
-    }
-  }
-]
-```
+Copy [`ide/zed/keybindings.json`](../../ide/zed/keybindings.json) into `~/.config/zed/keymap.json` to add keyboard shortcuts (`ctrl-shift-f` search, `ctrl-shift-i` impact, `ctrl-shift-x` context), or let `setup.sh` handle it interactively.
 
 ## Neovim
 
