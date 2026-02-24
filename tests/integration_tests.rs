@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use codesearch::{
-    CallGraphRepository, CallGraphUseCase, CodeChunk, DuckdbCallGraphRepository,
+    CallGraphQuery, CallGraphRepository, CallGraphUseCase, CodeChunk, DuckdbCallGraphRepository,
     DuckdbFileHashRepository, DuckdbMetadataRepository, FileHashRepository,
     InMemoryVectorRepository, IndexRepositoryUseCase, Language, ListRepositoriesUseCase,
-    MockEmbedding, NodeType, ParserService, SearchCodeUseCase, SearchQuery, TreeSitterParser,
-    VectorStore,
+    MockEmbedding, NodeType, ParserService, ReferenceKind, SearchCodeUseCase, SearchQuery,
+    TreeSitterParser, VectorStore,
 };
 use tempfile::tempdir;
 
@@ -553,5 +553,106 @@ async fn test_hybrid_search_with_text_search_disabled_returns_semantic_only() {
         results[0].score().is_finite(),
         "Expected a finite cosine similarity score, got {}",
         results[0].score()
+    );
+}
+
+/// Integration test: verifies that CommonJS `require()` bindings are recorded as
+/// Import edges in the call graph after a full index run.
+///
+/// Scenario (mirrors the user-reported bug):
+///   - `sample_middleware.js` defines and exports `appApplicationSource`
+///   - `sample_router.js` imports it as `const addSource = require(...)`
+///
+/// Before the fix, only ES6 `import` statements were captured; `require()` calls
+/// were silently dropped. After the fix, both `express` and `addSource` bindings
+/// should appear as `Import` references in the call graph.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_commonjs_require_captured_as_import_in_call_graph() {
+    let env = setup_test_env().await;
+
+    let temp_dir = tempdir().expect("Failed to create temp directory");
+    let middlewares_dir = temp_dir.path().join("middlewares");
+    let routes_dir = temp_dir.path().join("routes");
+    std::fs::create_dir_all(&middlewares_dir).expect("Failed to create middlewares dir");
+    std::fs::create_dir_all(&routes_dir).expect("Failed to create routes dir");
+
+    // Copy fixture files into the temp repo so IndexRepositoryUseCase can find them.
+    let middleware_src = std::path::Path::new("tests/fixtures/sample_middleware.js");
+    let router_src = std::path::Path::new("tests/fixtures/sample_router.js");
+    let middleware_dest = middlewares_dir.join("sample_middleware.js");
+    let router_dest = routes_dir.join("sample_router.js");
+    std::fs::copy(middleware_src, &middleware_dest).expect("Failed to copy middleware fixture");
+    std::fs::copy(router_src, &router_dest).expect("Failed to copy router fixture");
+
+    let embedding_service = Arc::new(MockEmbedding::new());
+    let index_use_case = IndexRepositoryUseCase::new(
+        env.metadata_repository.clone(),
+        env.vector_repo.clone(),
+        env.file_hash_repo.clone(),
+        env.call_graph_use_case.clone(),
+        env.parser.clone(),
+        embedding_service,
+    );
+    let repository = index_use_case
+        .execute(
+            temp_dir.path().to_str().unwrap(),
+            Some("cjs-test-repo"),
+            VectorStore::InMemory,
+            None,
+            false,
+        )
+        .await
+        .expect("Indexing failed");
+
+    // The repository ID is a UUID generated at creation time, not the name string.
+    let query = CallGraphQuery::new().with_repository(repository.id());
+
+    // `const express = require('express')` → Import with callee "express"
+    let express_callers = env
+        .call_graph_use_case
+        .find_callers("express", &query)
+        .await
+        .expect("find_callers failed for 'express'");
+
+    let express_imports: Vec<_> = express_callers
+        .iter()
+        .filter(|r| r.reference_kind() == ReferenceKind::Import)
+        .collect();
+
+    assert!(
+        !express_imports.is_empty(),
+        "Expected at least one Import reference with callee 'express' (from `const express = require('express')`)"
+    );
+
+    // `const addSource = require('./sample_middleware.js')` → Import with callee "addSource".
+    // This is the key regression: before the fix, this produced 0 results.
+    let add_source_callers = env
+        .call_graph_use_case
+        .find_callers("addSource", &query)
+        .await
+        .expect("find_callers failed for 'addSource'");
+
+    let add_source_imports: Vec<_> = add_source_callers
+        .iter()
+        .filter(|r| r.reference_kind() == ReferenceKind::Import)
+        .collect();
+
+    assert!(
+        !add_source_imports.is_empty(),
+        "Expected at least one Import reference with callee 'addSource' \
+         (from `const addSource = require('./sample_middleware.js')`). \
+         This was the reported bug: require() bindings were not captured."
+    );
+
+    // The middleware file itself should have been indexed (sanity check).
+    let middleware_refs = env
+        .call_graph_use_case
+        .find_callers("next", &query)
+        .await
+        .expect("find_callers failed for 'next'");
+
+    assert!(
+        !middleware_refs.is_empty(),
+        "Expected calls to 'next()' from appApplicationSource in sample_middleware.js"
     );
 }

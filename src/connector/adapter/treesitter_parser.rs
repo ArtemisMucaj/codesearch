@@ -369,6 +369,14 @@ impl TreeSitterParser {
                             (import_specifier
                                 name: (identifier) @callee)))) @import
 
+                ; CommonJS require() — captures the local binding name as the callee.
+                ; @fn_name is used to validate the call is actually require().
+                (variable_declarator
+                    name: (identifier) @callee
+                    value: (call_expression
+                        function: (identifier) @fn_name
+                        arguments: (arguments (string)))) @require_import
+
                 ; JSX elements (React components)
                 (jsx_element
                     open_tag: (jsx_opening_element
@@ -401,6 +409,14 @@ impl TreeSitterParser {
                         (named_imports
                             (import_specifier
                                 name: (identifier) @callee)))) @import
+
+                ; CommonJS require() — captures the local binding name as the callee.
+                ; @fn_name is used to validate the call is actually require().
+                (variable_declarator
+                    name: (identifier) @callee
+                    value: (call_expression
+                        function: (identifier) @fn_name
+                        arguments: (arguments (string)))) @require_import
 
                 ; Type annotations
                 (type_annotation
@@ -579,6 +595,8 @@ impl TreeSitterParser {
             "method_call" => ReferenceKind::MethodCall,
             "type_ref" => ReferenceKind::TypeReference,
             "import" => ReferenceKind::Import,
+            // CommonJS require() binding — validated separately by the fn_name filter
+            "require_import" => ReferenceKind::Import,
             "instantiation" => ReferenceKind::Instantiation,
             "macro" => ReferenceKind::MacroInvocation,
             "decorator" => ReferenceKind::MacroInvocation,
@@ -837,6 +855,10 @@ impl ParserService for TreeSitterParser {
             let mut callee_name: Option<String> = None;
             let mut reference_kind = ReferenceKind::Unknown;
             let mut ref_node = None;
+            // Auxiliary capture used by the require_import pattern to record the
+            // called function identifier so we can validate it is actually "require".
+            let mut fn_name: Option<String> = None;
+            let mut is_require_import = false;
 
             for capture in query_match.captures {
                 let capture_name = capture_names
@@ -855,12 +877,25 @@ impl ParserService for TreeSitterParser {
                         callee_name = Some(content[capture.node.byte_range()].to_string());
                         ref_node = Some(capture.node);
                     }
+                } else if capture_name == "fn_name" {
+                    // Auxiliary: records the function identifier for require_import filtering.
+                    fn_name = Some(content[capture.node.byte_range()].to_string());
                 } else {
                     // This is the outer capture (call, method_call, etc.)
                     if reference_kind == ReferenceKind::Unknown {
                         reference_kind = Self::capture_to_reference_kind(capture_name);
                     }
+                    if capture_name == "require_import" {
+                        is_require_import = true;
+                    }
                 }
+            }
+
+            // For require_import patterns the called function must be "require".
+            // Any other function that happens to match the variable_declarator
+            // pattern (e.g. `const x = someFactory("path")`) is discarded.
+            if is_require_import && fn_name.as_deref() != Some("require") {
+                continue;
             }
 
             if let (Some(mut name), Some(node)) = (callee_name, ref_node) {
@@ -1659,6 +1694,103 @@ print(message)
         assert!(
             !foundation_imports.is_empty(),
             "Should find import of Foundation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_extract_js_commonjs_require_import() {
+        let parser = TreeSitterParser::new();
+        // Simulates a Node.js router file that require()s a middleware module.
+        let content = r#"
+const express = require('express');
+const addSource = require('../middlewares/add-application-source.js');
+
+const router = express.Router();
+
+function setupRoutes(app) {
+    router.use(addSource);
+    app.use('/api', router);
+}
+
+module.exports = setupRoutes;
+"#;
+
+        let references = parser
+            .extract_references(content, "routes/na-api-router.js", Language::JavaScript, "test-repo")
+            .await
+            .unwrap();
+
+        // require('express') should be captured as an Import with callee "express"
+        let express_imports: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "express"
+                    && r.reference_kind() == ReferenceKind::Import
+            })
+            .collect();
+        assert!(
+            !express_imports.is_empty(),
+            "Should capture `const express = require('express')` as an Import reference"
+        );
+
+        // require('../middlewares/add-application-source.js') should be captured
+        // as an Import with callee equal to the local binding name "addSource".
+        let add_source_imports: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "addSource"
+                    && r.reference_kind() == ReferenceKind::Import
+            })
+            .collect();
+        assert!(
+            !add_source_imports.is_empty(),
+            "Should capture `const addSource = require(...)` as an Import reference with callee 'addSource'"
+        );
+
+        // `router.use(addSource)` passes addSource as an argument — it is not a
+        // direct function call and should NOT produce a separate Call reference for "addSource".
+        // (The `use` method call is captured separately.)
+        let use_method_calls: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "use"
+                    && r.reference_kind() == ReferenceKind::MethodCall
+            })
+            .collect();
+        assert!(
+            !use_method_calls.is_empty(),
+            "Should capture router.use(...) as a MethodCall with callee 'use'"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_extract_js_require_does_not_capture_non_require_calls() {
+        let parser = TreeSitterParser::new();
+        // A pattern like `const x = factory("path")` should NOT be treated as an import.
+        let content = r#"
+const handler = createHandler('config');
+
+function setupRoutes() {
+    handler.listen(3000);
+}
+"#;
+
+        let references = parser
+            .extract_references(content, "server.js", Language::JavaScript, "test-repo")
+            .await
+            .unwrap();
+
+        // createHandler is called, not require — should NOT appear as an Import.
+        let handler_imports: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "handler"
+                    && r.reference_kind() == ReferenceKind::Import
+            })
+            .collect();
+        assert!(
+            handler_imports.is_empty(),
+            "`const handler = createHandler(...)` must NOT be captured as an Import (only require() counts)"
         );
     }
 }
