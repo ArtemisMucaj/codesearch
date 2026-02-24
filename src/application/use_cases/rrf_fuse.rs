@@ -11,6 +11,13 @@ pub const RRF_K: f32 = 60.0;
 /// production code in search rankings.
 pub const TEST_FILE_PENALTY: f32 = 0.5;
 
+/// Minimum RRF score a result must reach to be included in the output.
+/// With RRF_K=60, scores range from 1/61 ≈ 0.0164 (rank 0, single list)
+/// up to ~0.13 (rank 0 in all 4 variants × 2 legs).
+/// This threshold drops results that appear only once and below rank ~15
+/// in their list (1/76 ≈ 0.0132), keeping only well-ranked or multi-list hits.
+pub const RRF_MIN_SCORE: f32 = 0.013;
+
 /// Returns `true` if the file path looks like a test file.
 ///
 /// Matches common conventions across languages:
@@ -95,6 +102,7 @@ pub fn rrf_fuse(lists: Vec<Vec<SearchResult>>, limit: usize) -> Vec<SearchResult
     fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     fused
         .into_iter()
+        .filter(|(_, score)| *score >= RRF_MIN_SCORE)
         .take(limit)
         .map(|(r, score)| SearchResult::new(r.chunk().clone(), score))
         .collect()
@@ -175,24 +183,23 @@ mod tests {
 
     #[test]
     fn test_file_score_is_penalised() {
-        // "prod" and "test_result" start at the same rank (rank 0 each in their
-        // own list) so without penalty they would tie.  With the penalty applied
-        // to the test file, "prod" must end up first.
+        // "prod" at rank 0 scores 1/61 ≈ 0.0164 — above RRF_MIN_SCORE.
+        // "test_result" at rank 0 scores 1/61 × TEST_FILE_PENALTY ≈ 0.0082 —
+        // below RRF_MIN_SCORE, so it is filtered out entirely.
         let semantic = vec![make_result_at("prod", "src/lib.rs")];
         let text = vec![make_result_at("test_result", "tests/foo.rs")];
         let fused = rrf_fuse(vec![semantic, text], 10);
 
-        assert_eq!(fused.len(), 2);
+        assert_eq!(fused.len(), 1);
         assert_eq!(fused[0].chunk().id(), "prod");
-        assert!(fused[0].score() > fused[1].score());
     }
 
     #[test]
-    fn test_file_penalty_multiplies_score() {
-        // A single test-file result should have its RRF score × TEST_FILE_PENALTY.
+    fn test_file_penalty_drops_weak_result() {
+        // A single test-file result at rank 0: penalised score ≈ 0.0082 < RRF_MIN_SCORE.
+        // It should be filtered out entirely.
         let fused = rrf_fuse(vec![vec![make_result_at("x", "tests/foo.rs")]], 10);
-        let expected = (1.0 / (RRF_K + 1.0)) * TEST_FILE_PENALTY;
-        assert!((fused[0].score() - expected).abs() < 1e-6);
+        assert!(fused.is_empty());
     }
 
     #[test]

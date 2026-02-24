@@ -258,6 +258,8 @@ impl IndexRepositoryUseCase {
             duration.as_secs_f64()
         );
 
+        self.vector_repo.flush().await?;
+
         self.repository_repo
             .find_by_id(repository.id())
             .await?
@@ -527,6 +529,8 @@ impl IndexRepositoryUseCase {
             new_reference_count,
             duration.as_secs_f64()
         );
+
+        self.vector_repo.flush().await?;
 
         self.repository_repo
             .find_by_id(repository.id())

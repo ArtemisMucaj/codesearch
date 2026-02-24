@@ -5,12 +5,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use duckdb::{params, AccessMode, Config, Connection, Row};
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::application::{rrf_fuse, VectorRepository};
 use crate::domain::{CodeChunk, DomainError, Embedding, SearchQuery, SearchResult};
 
 const VECTOR_DIMENSIONS: usize = 384;
+/// Maximum number of BM25 candidates fetched per search leg.
+/// BM25 is exact keyword matching so a small pool is sufficient;
+/// the semantic leg handles broader recall.
+const BM25_FETCH_LIMIT: usize = 10;
 
 pub struct DuckdbVectorRepository {
     conn: Arc<Mutex<Connection>>,
@@ -18,6 +22,10 @@ pub struct DuckdbVectorRepository {
     /// Set to `true` whenever chunk data changes (inserts or deletes).
     /// The FTS index is rebuilt lazily before the next BM25 search.
     fts_dirty: AtomicBool,
+    /// `true` when the connection was opened in read-only mode.
+    /// In this mode DDL (including `PRAGMA create_fts_index`) is forbidden,
+    /// so we never attempt a rebuild and degrade silently when the index is absent.
+    read_only: bool,
 }
 
 impl DuckdbVectorRepository {
@@ -41,6 +49,7 @@ impl DuckdbVectorRepository {
             conn: Arc::new(Mutex::new(conn)),
             namespace: schema_name.to_string(),
             fts_dirty: AtomicBool::new(!fts_already_exists),
+            read_only: false,
         })
     }
 
@@ -57,6 +66,7 @@ impl DuckdbVectorRepository {
             conn: Arc::new(Mutex::new(conn)),
             namespace: namespace.to_string(),
             fts_dirty: AtomicBool::new(true),
+            read_only: false,
         })
     }
 
@@ -83,13 +93,24 @@ impl DuckdbVectorRepository {
         let schema = namespace.trim();
         let schema_name = if schema.is_empty() { "main" } else { schema };
 
-        // In read-only mode we cannot rebuild the FTS index. The dirty flag is
-        // intentionally set to false so we never attempt a rebuild; if the index
-        // is missing the search method will fall back gracefully.
+        // In read-only mode we cannot rebuild the FTS index.
+        // Check whether the index was already built by a prior write session.
+        // If it exists, fts_dirty=false lets run_text() use it directly.
+        // If it is missing, fts_dirty=true — but the read_only flag prevents
+        // any rebuild attempt; search() will degrade to semantic-only.
+        let fts_already_exists = Self::fts_index_exists(&conn, schema_name);
+        if !fts_already_exists {
+            warn!(
+                "BM25 index not found for namespace '{}'; keyword search is disabled. \
+                 Run 'codesearch index' to build it.",
+                schema_name
+            );
+        }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             namespace: schema_name.to_string(),
-            fts_dirty: AtomicBool::new(false),
+            fts_dirty: AtomicBool::new(!fts_already_exists),
+            read_only: true,
         })
     }
 
@@ -616,17 +637,9 @@ impl VectorRepository for DuckdbVectorRepository {
 
         let array_lit = Self::vector_to_array_literal(query_embedding)?;
 
-        // When text search is enabled, fetch more candidates from each leg so
-        // RRF has a meaningful pool to rank. The final result is capped at query.limit().
-        let fetch_limit = if query.is_text_search() {
-            (query.limit() * 2).max(20)
-        } else {
-            query.limit()
-        };
-
         let conn = self.conn.lock().await;
 
-        let semantic = Self::run_semantic(&conn, &self.namespace, &array_lit, query, fetch_limit)?;
+        let semantic = Self::run_semantic(&conn, &self.namespace, &array_lit, query, query.limit())?;
 
         if !query.is_text_search() {
             return Ok(semantic);
@@ -637,14 +650,23 @@ impl VectorRepository for DuckdbVectorRepository {
         // window (i.e., after any sequence of inserts/deletes) rather than after
         // every individual write.
         if self.fts_dirty.load(Ordering::Acquire) {
+            if self.read_only {
+                // DDL is forbidden in read-only mode; the FTS index was not built
+                // during a prior write session. Degrade silently to semantic-only.
+                debug!(
+                    "FTS index unavailable in read-only mode for namespace '{}'; \
+                     run 'codesearch index' to build it. Falling back to semantic-only.",
+                    self.namespace
+                );
+                return Ok(semantic);
+            }
             match Self::rebuild_fts_index(&conn, &self.namespace) {
                 Ok(()) => {
                     self.fts_dirty.store(false, Ordering::Release);
                     debug!("FTS index rebuilt for namespace '{}'", self.namespace);
                 }
                 Err(e) => {
-                    // This can happen in read-only mode or if the FTS extension is
-                    // unavailable. Fall back to semantic-only results with a warning.
+                    // FTS extension unavailable or another unexpected failure.
                     warn!(
                         "Failed to rebuild FTS index (falling back to semantic-only): {}",
                         e
@@ -654,7 +676,7 @@ impl VectorRepository for DuckdbVectorRepository {
             }
         }
 
-        let text = match Self::run_text(&conn, &self.namespace, query, fetch_limit) {
+        let text = match Self::run_text(&conn, &self.namespace, query, BM25_FETCH_LIMIT) {
             Ok(results) => results,
             Err(e) => {
                 // If BM25 query fails (e.g. FTS schema missing in read-only DB),
@@ -667,17 +689,30 @@ impl VectorRepository for DuckdbVectorRepository {
             }
         };
 
-        debug!(
-            "Hybrid search: {} semantic + {} BM25 candidates → fusing",
-            semantic.len(),
-            text.len()
-        );
-
+        let semantic_len = semantic.len();
+        let text_len = text.len();
         let mut fused = rrf_fuse(vec![semantic, text], query.limit());
+        info!(
+            "Hybrid search: {} semantic + {} BM25 candidates → {} after fusion",
+            semantic_len,
+            text_len,
+            fused.len()
+        );
         if let Some(min) = query.min_score() {
             fused.retain(|r| r.score() >= min);
         }
         Ok(fused)
+    }
+
+    async fn flush(&self) -> Result<(), DomainError> {
+        if self.read_only || !self.fts_dirty.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let conn = self.conn.lock().await;
+        Self::rebuild_fts_index(&conn, &self.namespace)?;
+        self.fts_dirty.store(false, Ordering::Release);
+        info!("BM25 index built for namespace '{}'", self.namespace);
+        Ok(())
     }
 
     async fn count(&self) -> Result<u64, DomainError> {
