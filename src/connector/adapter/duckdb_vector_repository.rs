@@ -175,13 +175,20 @@ impl DuckdbVectorRepository {
     /// the database (queried via `information_schema.schemata`).
     fn fts_index_exists(conn: &Connection, namespace: &str) -> bool {
         let fts_schema = Self::fts_schema_name(namespace);
-        conn.query_row(
+        match conn.query_row(
             "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?",
             params![fts_schema],
             |row| row.get::<_, i64>(0),
-        )
-        .map(|count| count > 0)
-        .unwrap_or(false)
+        ) {
+            Ok(count) => count > 0,
+            Err(e) => {
+                debug!(
+                    "Failed to query FTS index existence for namespace '{}' (schema '{}'): {}",
+                    namespace, fts_schema, e
+                );
+                false
+            }
+        }
     }
 
     /// Rebuilds the FTS index from scratch for the given namespace.

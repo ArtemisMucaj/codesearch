@@ -181,6 +181,7 @@ async fn duckdb_vector_repository_bm25_handles_empty_query() {
         .await
         .expect("search with empty query");
     // Empty query produces no BM25 hits; result comes from semantic leg only.
+    assert!(!results.is_empty(), "expected at least one result from semantic leg");
     assert!(results[0].score().is_finite());
 }
 
