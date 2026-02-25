@@ -7,7 +7,7 @@ use tracing::{info, warn};
 /// returned to the caller, regardless of the search path taken (semantic,
 /// text-search, RRF, or reranked).  Results below this value are consistently
 /// uninformative and only add noise to the output.
-const MIN_RESULT_SCORE: f32 = 0.09;
+const MIN_RESULT_SCORE: f32 = 0.1;
 
 use crate::application::{EmbeddingService, QueryExpander, RerankingService, VectorRepository};
 use crate::application::use_cases::rrf_fuse::rrf_fuse;
