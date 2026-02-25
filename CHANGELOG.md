@@ -22,6 +22,21 @@
 * unit tests for `InMemoryVectorRepository` hybrid paths: cosine vs RRF score ranges, dual-leg ranking, post-fusion `min_score` filtering, no early pruning, empty-term fallback, and limit enforcement
 * integration tests for end-to-end hybrid search: results returned with positive scores, keyword-matched chunk surfaces, special SQL characters (`%`, `_`, `!`) do not cause errors, and semantic-only baseline confirms the flag gates the BM25 leg
 
+## [0.12.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.11.0...v0.12.0) (2026-02-25)
+
+
+### Features
+
+* filter out global search results with score &lt; 0.09 ([#85](https://github.com/ArtemisMucaj/codesearch/issues/85)) ([d3fd344](https://github.com/ArtemisMucaj/codesearch/commit/d3fd344a610f963df8e33457101fa79a3ba2984a))
+
+
+### Bug Fixes
+
+* bm25 wasn't executed ([#80](https://github.com/ArtemisMucaj/codesearch/issues/80)) ([456be08](https://github.com/ArtemisMucaj/codesearch/commit/456be0845ace0fa0773fab9c7ad909f6fb51076f))
+* capture CommonJS require() bindings as import references in JS/TS ([283f0a2](https://github.com/ArtemisMucaj/codesearch/commit/283f0a2411549d6a196b78c25674b70fe94e420d))
+* codesearch task spawn is always spanwn (not only on text editor focus) ([#76](https://github.com/ArtemisMucaj/codesearch/issues/76)) ([63f170c](https://github.com/ArtemisMucaj/codesearch/commit/63f170c671f4edbe9cd8a7087649773714326056))
+* improve impact cmd output clarity and add line numbers ([#87](https://github.com/ArtemisMucaj/codesearch/issues/87)) ([bbbfd7e](https://github.com/ArtemisMucaj/codesearch/commit/bbbfd7eb091e85b1efdfb1300fe054592eb38311))
+
 ## [0.11.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.10.0...v0.11.0) (2026-02-24)
 
 
