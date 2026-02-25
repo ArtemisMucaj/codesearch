@@ -70,6 +70,9 @@ impl<'a> ImpactController<'a> {
                     node.symbol, node.reference_kind, alias_suffix, node.file_path,
                     node.repository_id
                 ));
+            }
+        }
+
         // Build a parent-symbol → children map using via_symbol.
         let all_nodes: Vec<&ImpactNode> = analysis.by_depth.iter().flatten().collect();
         let mut children_map: HashMap<&str, Vec<&ImpactNode>> = HashMap::new();
