@@ -46,8 +46,12 @@ impl DuckdbCallGraphRepository {
                 language TEXT NOT NULL,
                 repository_id TEXT NOT NULL,
                 caller_node_type TEXT,
-                enclosing_scope TEXT
+                enclosing_scope TEXT,
+                import_alias TEXT
             );
+
+            -- Migrate existing databases: add import_alias column if absent.
+            ALTER TABLE symbol_references ADD COLUMN IF NOT EXISTS import_alias TEXT;
 
             -- Index for finding callers of a symbol
             CREATE INDEX IF NOT EXISTS idx_symbol_refs_callee
@@ -96,6 +100,7 @@ impl DuckdbCallGraphRepository {
             row.get::<_, String>(9)?,                                  // repository_id
             row.get::<_, Option<String>>(10)?,                         // caller_node_type
             row.get::<_, Option<String>>(11)?,                         // enclosing_scope
+            row.get::<_, Option<String>>(12)?,                         // import_alias
         ))
     }
 
@@ -135,8 +140,8 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
                         id, caller_symbol, callee_symbol, caller_file_path,
                         reference_file_path, reference_line, reference_column,
                         reference_kind, language, repository_id,
-                        caller_node_type, enclosing_scope
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        caller_node_type, enclosing_scope, import_alias
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT (id) DO UPDATE SET
                         caller_symbol = excluded.caller_symbol,
                         callee_symbol = excluded.callee_symbol,
@@ -148,7 +153,8 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
                         language = excluded.language,
                         repository_id = excluded.repository_id,
                         caller_node_type = excluded.caller_node_type,
-                        enclosing_scope = excluded.enclosing_scope
+                        enclosing_scope = excluded.enclosing_scope,
+                        import_alias = excluded.import_alias
                     "#,
                 )
                 .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
@@ -167,6 +173,7 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
                     reference.repository_id(),
                     reference.caller_node_type(),
                     reference.enclosing_scope(),
+                    reference.import_alias(),
                 ])
                 .map_err(|e| {
                     DomainError::storage(format!("Failed to save symbol reference: {}", e))
@@ -195,7 +202,7 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
             r#"SELECT id, caller_symbol, callee_symbol, caller_file_path,
                       reference_file_path, reference_line, reference_column,
                       reference_kind, language, repository_id,
-                      caller_node_type, enclosing_scope
+                      caller_node_type, enclosing_scope, import_alias
                FROM symbol_references
                WHERE {}
                ORDER BY reference_file_path, reference_line{}"#,
@@ -249,7 +256,7 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
             r#"SELECT id, caller_symbol, callee_symbol, caller_file_path,
                       reference_file_path, reference_line, reference_column,
                       reference_kind, language, repository_id,
-                      caller_node_type, enclosing_scope
+                      caller_node_type, enclosing_scope, import_alias
                FROM symbol_references
                WHERE {}
                ORDER BY reference_file_path, reference_line{}"#,
@@ -302,7 +309,7 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
             r#"SELECT id, caller_symbol, callee_symbol, caller_file_path,
                       reference_file_path, reference_line, reference_column,
                       reference_kind, language, repository_id,
-                      caller_node_type, enclosing_scope
+                      caller_node_type, enclosing_scope, import_alias
                FROM symbol_references
                WHERE {}
                ORDER BY reference_line{}"#,
@@ -351,7 +358,7 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
                 r#"SELECT id, caller_symbol, callee_symbol, caller_file_path,
                           reference_file_path, reference_line, reference_column,
                           reference_kind, language, repository_id,
-                          caller_node_type, enclosing_scope
+                          caller_node_type, enclosing_scope, import_alias
                    FROM symbol_references
                    WHERE repository_id = ?
                    ORDER BY reference_file_path, reference_line"#,
@@ -504,7 +511,7 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
                 r#"SELECT id, caller_symbol, callee_symbol, caller_file_path,
                           reference_file_path, reference_line, reference_column,
                           reference_kind, language, repository_id,
-                          caller_node_type, enclosing_scope
+                          caller_node_type, enclosing_scope, import_alias
                    FROM symbol_references
                    WHERE callee_symbol = ?
                    ORDER BY repository_id, reference_file_path, reference_line"#,

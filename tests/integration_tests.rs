@@ -656,3 +656,228 @@ async fn test_commonjs_require_captured_as_import_in_call_graph() {
         "Expected calls to 'next()' from appApplicationSource in sample_middleware.js"
     );
 }
+
+/// Integration test: ES6 named import with alias is captured with the original
+/// exported name as the callee and the local alias stored in import_alias.
+///
+/// Scenario:
+///   `import { processRequest as handleReq } from './handler'`
+///
+/// `context processRequest` must find the import with import_alias = "handleReq".
+#[tokio::test(flavor = "multi_thread")]
+async fn test_es6_renamed_import_alias_recorded_in_call_graph() {
+    let env = setup_test_env().await;
+
+    let temp_dir = tempdir().expect("Failed to create temp directory");
+
+    // Handler module that exports processRequest
+    let handler_content = r#"
+export function processRequest(req) {
+    return req;
+}
+"#;
+    // Consumer module that imports processRequest under a local alias
+    let consumer_content = r#"
+import { processRequest as handleReq } from './handler';
+
+function main() {
+    handleReq({ method: 'GET' });
+}
+"#;
+
+    let handler_path = temp_dir.path().join("handler.ts");
+    let consumer_path = temp_dir.path().join("consumer.ts");
+    std::fs::write(&handler_path, handler_content).unwrap();
+    std::fs::write(&consumer_path, consumer_content).unwrap();
+
+    let embedding_service = Arc::new(MockEmbedding::new());
+    let index_use_case = IndexRepositoryUseCase::new(
+        env.metadata_repository.clone(),
+        env.vector_repo.clone(),
+        env.file_hash_repo.clone(),
+        env.call_graph_use_case.clone(),
+        env.parser.clone(),
+        embedding_service,
+    );
+    let repository = index_use_case
+        .execute(
+            temp_dir.path().to_str().unwrap(),
+            Some("alias-test-repo"),
+            VectorStore::InMemory,
+            None,
+            false,
+        )
+        .await
+        .expect("Indexing failed");
+
+    let query = CallGraphQuery::new().with_repository(repository.id());
+
+    // `find_callers("processRequest")` must return the import reference.
+    let callers = env
+        .call_graph_use_case
+        .find_callers("processRequest", &query)
+        .await
+        .expect("find_callers failed");
+
+    let import_refs: Vec<_> = callers
+        .iter()
+        .filter(|r| r.reference_kind() == ReferenceKind::Import)
+        .collect();
+
+    assert!(
+        !import_refs.is_empty(),
+        "Expected an Import reference with callee 'processRequest' \
+         from `import {{ processRequest as handleReq }}`"
+    );
+
+    // The import_alias must identify the local binding name.
+    let alias_refs: Vec<_> = import_refs
+        .iter()
+        .filter(|r| r.import_alias() == Some("handleReq"))
+        .collect();
+    assert!(
+        !alias_refs.is_empty(),
+        "Expected import_alias = 'handleReq' on the Import reference for 'processRequest', \
+         got aliases: {:?}",
+        import_refs.iter().map(|r| r.import_alias()).collect::<Vec<_>>()
+    );
+}
+
+/// Integration test: CommonJS renamed destructure is captured correctly.
+///
+/// Scenario:
+///   `const { createServer: makeServer } = require('http')`
+///
+/// `context createServer` must find the import with import_alias = "makeServer".
+/// `context makeServer` must NOT find an import (the local alias is not stored separately).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_commonjs_renamed_destructure_alias_recorded_in_call_graph() {
+    let env = setup_test_env().await;
+
+    let temp_dir = tempdir().expect("Failed to create temp directory");
+
+    let content = r#"
+const { createServer: makeServer } = require('http');
+
+makeServer((req, res) => { res.end('ok'); }).listen(3000);
+"#;
+
+    let file_path = temp_dir.path().join("server.js");
+    std::fs::write(&file_path, content).unwrap();
+
+    let embedding_service = Arc::new(MockEmbedding::new());
+    let index_use_case = IndexRepositoryUseCase::new(
+        env.metadata_repository.clone(),
+        env.vector_repo.clone(),
+        env.file_hash_repo.clone(),
+        env.call_graph_use_case.clone(),
+        env.parser.clone(),
+        embedding_service,
+    );
+    let repository = index_use_case
+        .execute(
+            temp_dir.path().to_str().unwrap(),
+            Some("cjs-destructure-test"),
+            VectorStore::InMemory,
+            None,
+            false,
+        )
+        .await
+        .expect("Indexing failed");
+
+    let query = CallGraphQuery::new().with_repository(repository.id());
+
+    // Searching by original property name must find the import.
+    let callers = env
+        .call_graph_use_case
+        .find_callers("createServer", &query)
+        .await
+        .expect("find_callers failed");
+
+    let import_refs: Vec<_> = callers
+        .iter()
+        .filter(|r| r.reference_kind() == ReferenceKind::Import)
+        .collect();
+
+    assert!(
+        !import_refs.is_empty(),
+        "Expected Import reference with callee 'createServer' \
+         from `const {{ createServer: makeServer }} = require('http')`"
+    );
+
+    let alias_refs: Vec<_> = import_refs
+        .iter()
+        .filter(|r| r.import_alias() == Some("makeServer"))
+        .collect();
+    assert!(
+        !alias_refs.is_empty(),
+        "Expected import_alias = 'makeServer' on the Import reference for 'createServer', \
+         got aliases: {:?}",
+        import_refs.iter().map(|r| r.import_alias()).collect::<Vec<_>>()
+    );
+}
+
+/// Integration test: CommonJS shorthand destructure (no rename) is captured
+/// with the property name as callee and import_alias = None.
+///
+/// Scenario: `const { createServer } = require('http')`
+#[tokio::test(flavor = "multi_thread")]
+async fn test_commonjs_shorthand_destructure_captured_without_alias() {
+    let env = setup_test_env().await;
+
+    let temp_dir = tempdir().expect("Failed to create temp directory");
+
+    let content = r#"
+const { createServer } = require('http');
+
+createServer((req, res) => { res.end('ok'); }).listen(3000);
+"#;
+
+    let file_path = temp_dir.path().join("server.js");
+    std::fs::write(&file_path, content).unwrap();
+
+    let embedding_service = Arc::new(MockEmbedding::new());
+    let index_use_case = IndexRepositoryUseCase::new(
+        env.metadata_repository.clone(),
+        env.vector_repo.clone(),
+        env.file_hash_repo.clone(),
+        env.call_graph_use_case.clone(),
+        env.parser.clone(),
+        embedding_service,
+    );
+    let repository = index_use_case
+        .execute(
+            temp_dir.path().to_str().unwrap(),
+            Some("cjs-shorthand-test"),
+            VectorStore::InMemory,
+            None,
+            false,
+        )
+        .await
+        .expect("Indexing failed");
+
+    let query = CallGraphQuery::new().with_repository(repository.id());
+
+    let callers = env
+        .call_graph_use_case
+        .find_callers("createServer", &query)
+        .await
+        .expect("find_callers failed");
+
+    let import_refs: Vec<_> = callers
+        .iter()
+        .filter(|r| r.reference_kind() == ReferenceKind::Import)
+        .collect();
+
+    assert!(
+        !import_refs.is_empty(),
+        "Expected Import reference with callee 'createServer' \
+         from `const {{ createServer }} = require('http')`"
+    );
+
+    assert_eq!(
+        import_refs[0].import_alias(),
+        None,
+        "Shorthand destructure (no rename) must have import_alias = None"
+    );
+}

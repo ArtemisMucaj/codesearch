@@ -21,6 +21,10 @@ pub struct ImpactNode {
     pub reference_kind: String,
     /// Repository that contains the caller symbol.
     pub repository_id: String,
+    /// Local alias at the import/require site, if the root symbol was renamed.
+    /// For example `bar` in `import { foo as bar }` or `const { foo: bar } = require(...)`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub import_alias: Option<String>,
 }
 
 /// Full blast-radius report for a symbol.
@@ -112,6 +116,7 @@ impl ImpactAnalysisUseCase {
                             file_path: reference.caller_file_path().to_string(),
                             reference_kind: reference.reference_kind().to_string(),
                             repository_id: reference.repository_id().to_string(),
+                            import_alias: reference.import_alias().map(str::to_string),
                         });
                     }
                     Some(caller_sym) => {
@@ -128,6 +133,7 @@ impl ImpactAnalysisUseCase {
                             file_path: reference.caller_file_path().to_string(),
                             reference_kind: reference.reference_kind().to_string(),
                             repository_id: reference.repository_id().to_string(),
+                            import_alias: reference.import_alias().map(str::to_string),
                         });
 
                         queue.push_back((caller_sym, next_depth));

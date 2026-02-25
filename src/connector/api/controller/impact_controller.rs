@@ -58,9 +58,15 @@ impl<'a> ImpactController<'a> {
             }
             out.push_str(&format!("Depth {} ({} symbol(s)):\n", depth_idx + 1, nodes.len()));
             for node in nodes {
+                let alias_suffix = node
+                    .import_alias
+                    .as_ref()
+                    .map(|a| format!(", as {}", a))
+                    .unwrap_or_default();
                 out.push_str(&format!(
-                    "  • {} [{}]  {}  ({})\n",
-                    node.symbol, node.reference_kind, node.file_path, node.repository_id
+                    "  • {} [{}{}]  {}  ({})\n",
+                    node.symbol, node.reference_kind, alias_suffix, node.file_path,
+                    node.repository_id
                 ));
             }
             out.push('\n');

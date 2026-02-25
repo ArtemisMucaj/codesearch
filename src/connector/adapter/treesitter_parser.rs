@@ -377,6 +377,27 @@ impl TreeSitterParser {
                         function: (identifier) @fn_name
                         arguments: (arguments (string)))) @require_import
 
+                ; CommonJS shorthand destructure: const { foo } = require('...')
+                ; The property name is both the original and local name.
+                (variable_declarator
+                    name: (object_pattern
+                        (shorthand_property_identifier_pattern) @callee)
+                    value: (call_expression
+                        function: (identifier) @fn_name
+                        arguments: (arguments (string)))) @require_import
+
+                ; CommonJS renamed destructure: const { foo: bar } = require('...')
+                ; @callee captures the original exported name; @import_alias captures
+                ; the local binding so callers of `bar` can be traced back to `foo`.
+                (variable_declarator
+                    name: (object_pattern
+                        (pair_pattern
+                            key: (property_identifier) @callee
+                            value: (identifier) @import_alias))
+                    value: (call_expression
+                        function: (identifier) @fn_name
+                        arguments: (arguments (string)))) @require_import_renamed
+
                 ; JSX elements (React components)
                 (jsx_element
                     open_tag: (jsx_opening_element
@@ -417,6 +438,24 @@ impl TreeSitterParser {
                     value: (call_expression
                         function: (identifier) @fn_name
                         arguments: (arguments (string)))) @require_import
+
+                ; CommonJS shorthand destructure: const { foo } = require('...')
+                (variable_declarator
+                    name: (object_pattern
+                        (shorthand_property_identifier_pattern) @callee)
+                    value: (call_expression
+                        function: (identifier) @fn_name
+                        arguments: (arguments (string)))) @require_import
+
+                ; CommonJS renamed destructure: const { foo: bar } = require('...')
+                (variable_declarator
+                    name: (object_pattern
+                        (pair_pattern
+                            key: (property_identifier) @callee
+                            value: (identifier) @import_alias))
+                    value: (call_expression
+                        function: (identifier) @fn_name
+                        arguments: (arguments (string)))) @require_import_renamed
 
                 ; Type annotations
                 (type_annotation
@@ -595,8 +634,10 @@ impl TreeSitterParser {
             "method_call" => ReferenceKind::MethodCall,
             "type_ref" => ReferenceKind::TypeReference,
             "import" => ReferenceKind::Import,
-            // CommonJS require() binding — validated separately by the fn_name filter
-            "require_import" => ReferenceKind::Import,
+            // CommonJS require() bindings — validated separately by the fn_name filter.
+            // `require_import_renamed` also carries an @import_alias capture for renamed
+            // destructured properties (e.g. `const { foo: bar } = require(...)`).
+            "require_import" | "require_import_renamed" => ReferenceKind::Import,
             "instantiation" => ReferenceKind::Instantiation,
             "macro" => ReferenceKind::MacroInvocation,
             "decorator" => ReferenceKind::MacroInvocation,
@@ -859,6 +900,8 @@ impl ParserService for TreeSitterParser {
             // called function identifier so we can validate it is actually "require".
             let mut fn_name: Option<String> = None;
             let mut is_require_import = false;
+            // Local alias from a renamed import/require (e.g. `bar` in `{ foo: bar }`).
+            let mut query_import_alias: Option<String> = None;
 
             for capture in query_match.captures {
                 let capture_name = capture_names
@@ -870,6 +913,11 @@ impl ParserService for TreeSitterParser {
                     // "callee" always takes priority - set name and node unconditionally
                     callee_name = Some(content[capture.node.byte_range()].to_string());
                     ref_node = Some(capture.node);
+                } else if capture_name == "import_alias" {
+                    // Local alias captured directly by the query pattern (CommonJS
+                    // renamed destructure: `const { foo: bar } = require(...)`).
+                    query_import_alias =
+                        Some(content[capture.node.byte_range()].to_string());
                 } else if capture_name == "type_ref" {
                     // For type_ref, set the kind but only set name/node if not already set by "callee"
                     reference_kind = ReferenceKind::TypeReference;
@@ -885,7 +933,7 @@ impl ParserService for TreeSitterParser {
                     if reference_kind == ReferenceKind::Unknown {
                         reference_kind = Self::capture_to_reference_kind(capture_name);
                     }
-                    if capture_name == "require_import" {
+                    if capture_name == "require_import" || capture_name == "require_import_renamed" {
                         is_require_import = true;
                     }
                 }
@@ -980,6 +1028,26 @@ impl ParserService for TreeSitterParser {
                 let line = node.start_position().row as u32 + 1;
                 let column = node.start_position().column as u32 + 1;
 
+                // Determine the import alias:
+                // 1. For CommonJS renamed destructure (`const { foo: bar } = require(...)`),
+                //    the alias was captured directly in the query as @import_alias.
+                // 2. For ES6 named imports with alias (`import { foo as bar } from '...'`),
+                //    the alias is recorded on the import_specifier node's `alias` field.
+                //    We inspect the node's parent to detect this without needing a separate
+                //    query pattern (which would cause duplicate matches).
+                let import_alias = if reference_kind == ReferenceKind::Import {
+                    query_import_alias.clone().or_else(|| {
+                        node.parent()
+                            .filter(|p| p.kind() == "import_specifier")
+                            .and_then(|p| p.child_by_field_name("alias"))
+                            .map(|alias_node| {
+                                content[alias_node.byte_range()].to_string()
+                            })
+                    })
+                } else {
+                    None
+                };
+
                 // Find enclosing scope (function/class that contains this reference)
                 let (caller_symbol, enclosing_scope) = lookup_enclosing_scope(&scopes, line)
                     .map(|(name, parent)| (Some(name), parent))
@@ -999,6 +1067,10 @@ impl ParserService for TreeSitterParser {
 
                 if let Some(scope) = enclosing_scope {
                     reference = reference.with_enclosing_scope(scope);
+                }
+
+                if let Some(alias) = import_alias {
+                    reference = reference.with_import_alias(alias);
                 }
 
                 references.push(reference);
@@ -1791,6 +1863,218 @@ function setupRoutes() {
         assert!(
             handler_imports.is_empty(),
             "`const handler = createHandler(...)` must NOT be captured as an Import (only require() counts)"
+        );
+    }
+
+    // ── Renamed-import tests ────────────────────────────────────────────────
+
+    /// ES6 named import with alias: `import { foo as bar } from './module'`
+    /// The callee should be the original exported name ("foo") and the local
+    /// alias ("bar") must be recorded in import_alias.
+    #[tokio::test]
+    async fn test_extract_es6_named_import_with_alias() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+import { processRequest as handleReq } from './request-handler';
+
+function main() {
+    handleReq({ method: 'GET' });
+}
+"#;
+
+        let references = parser
+            .extract_references(content, "main.ts", Language::TypeScript, "test-repo")
+            .await
+            .unwrap();
+
+        // The import statement should record the original exported name as callee.
+        let import_refs: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "processRequest"
+                    && r.reference_kind() == ReferenceKind::Import
+            })
+            .collect();
+        assert!(
+            !import_refs.is_empty(),
+            "Expected Import reference with callee 'processRequest' \
+             from `import {{ processRequest as handleReq }}`"
+        );
+
+        // The import_alias must be the local binding name ("handleReq").
+        let alias = import_refs[0].import_alias();
+        assert_eq!(
+            alias,
+            Some("handleReq"),
+            "Expected import_alias = 'handleReq' for the renamed import, got {:?}",
+            alias
+        );
+    }
+
+    /// ES6 named import WITHOUT alias: `import { foo } from './module'`
+    /// The callee is "foo" and import_alias must be None.
+    #[tokio::test]
+    async fn test_extract_es6_named_import_no_alias() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+import { processRequest } from './request-handler';
+
+function main() {
+    processRequest({ method: 'GET' });
+}
+"#;
+
+        let references = parser
+            .extract_references(content, "main.ts", Language::TypeScript, "test-repo")
+            .await
+            .unwrap();
+
+        let import_refs: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "processRequest"
+                    && r.reference_kind() == ReferenceKind::Import
+            })
+            .collect();
+        assert!(!import_refs.is_empty(), "Should find import of 'processRequest'");
+        assert_eq!(
+            import_refs[0].import_alias(),
+            None,
+            "Non-aliased import must have import_alias = None"
+        );
+    }
+
+    /// CommonJS shorthand destructure: `const { foo } = require('./module')`
+    /// The property name "foo" is both the original and local name; import_alias is None.
+    #[tokio::test]
+    async fn test_extract_js_commonjs_shorthand_destructure() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+const { createServer } = require('http');
+
+createServer((req, res) => { res.end('ok'); }).listen(3000);
+"#;
+
+        let references = parser
+            .extract_references(content, "server.js", Language::JavaScript, "test-repo")
+            .await
+            .unwrap();
+
+        let import_refs: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "createServer"
+                    && r.reference_kind() == ReferenceKind::Import
+            })
+            .collect();
+        assert!(
+            !import_refs.is_empty(),
+            "Expected Import reference with callee 'createServer' \
+             from `const {{ createServer }} = require('http')`"
+        );
+        assert_eq!(
+            import_refs[0].import_alias(),
+            None,
+            "Shorthand destructure (no rename) must have import_alias = None"
+        );
+    }
+
+    /// CommonJS renamed destructure: `const { foo: bar } = require('./module')`
+    /// The callee is the original property name ("foo") and import_alias is the
+    /// local binding ("bar").
+    #[tokio::test]
+    async fn test_extract_js_commonjs_renamed_destructure() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+const { createServer: makeServer } = require('http');
+
+makeServer((req, res) => { res.end('ok'); }).listen(3000);
+"#;
+
+        let references = parser
+            .extract_references(content, "server.js", Language::JavaScript, "test-repo")
+            .await
+            .unwrap();
+
+        let import_refs: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "createServer"
+                    && r.reference_kind() == ReferenceKind::Import
+            })
+            .collect();
+        assert!(
+            !import_refs.is_empty(),
+            "Expected Import reference with callee 'createServer' \
+             from `const {{ createServer: makeServer }} = require('http')`"
+        );
+
+        let alias = import_refs[0].import_alias();
+        assert_eq!(
+            alias,
+            Some("makeServer"),
+            "Expected import_alias = 'makeServer' for renamed destructure, got {:?}",
+            alias
+        );
+    }
+
+    /// TypeScript renamed destructure: `const { foo: bar } = require('./module')`
+    #[tokio::test]
+    async fn test_extract_ts_commonjs_renamed_destructure() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+const { Router: ExpressRouter } = require('express');
+
+const router = new ExpressRouter();
+"#;
+
+        let references = parser
+            .extract_references(content, "router.ts", Language::TypeScript, "test-repo")
+            .await
+            .unwrap();
+
+        let import_refs: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "Router"
+                    && r.reference_kind() == ReferenceKind::Import
+            })
+            .collect();
+        assert!(
+            !import_refs.is_empty(),
+            "Expected Import reference with callee 'Router' \
+             from `const {{ Router: ExpressRouter }} = require('express')`"
+        );
+
+        let alias = import_refs[0].import_alias();
+        assert_eq!(
+            alias,
+            Some("ExpressRouter"),
+            "Expected import_alias = 'ExpressRouter', got {:?}",
+            alias
+        );
+    }
+
+    /// CommonJS renamed destructure must still be rejected when the call is not `require()`.
+    #[tokio::test]
+    async fn test_extract_js_destructure_non_require_not_captured() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+const { createServer: makeServer } = someOtherFactory('config');
+"#;
+
+        let references = parser
+            .extract_references(content, "server.js", Language::JavaScript, "test-repo")
+            .await
+            .unwrap();
+
+        let import_refs: Vec<_> = references
+            .iter()
+            .filter(|r| r.reference_kind() == ReferenceKind::Import)
+            .collect();
+        assert!(
+            import_refs.is_empty(),
+            "Destructured non-require() call must NOT be captured as Import"
         );
     }
 }

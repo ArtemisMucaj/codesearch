@@ -16,6 +16,10 @@ pub struct ContextEdge {
     pub line: u32,
     /// Kind of reference (e.g. "call", "type_reference").
     pub reference_kind: String,
+    /// Local alias at the import/require site, if the symbol was renamed.
+    /// For example `bar` in `import { foo as bar }` or `const { foo: bar } = require(...)`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub import_alias: Option<String>,
 }
 
 /// 360-degree view of a symbol's call-graph relationships.
@@ -89,6 +93,7 @@ impl SymbolContextUseCase {
             file_path: r.caller_file_path().to_string(),
             line: r.reference_line(),
             reference_kind: r.reference_kind().to_string(),
+            import_alias: r.import_alias().map(str::to_string),
         }
     }
 
@@ -98,6 +103,7 @@ impl SymbolContextUseCase {
             file_path: r.reference_file_path().to_string(),
             line: r.reference_line(),
             reference_kind: r.reference_kind().to_string(),
+            import_alias: r.import_alias().map(str::to_string),
         }
     }
 }
