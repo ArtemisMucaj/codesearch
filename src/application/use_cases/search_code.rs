@@ -131,6 +131,7 @@ impl SearchCodeUseCase {
                 .await?
         };
 
+        let mut reranked = false;
         if let Some(ref reranker) = self.reranking_service {
             // Filter out very low-scoring results before reranking — they are
             // unlikely to resurface and just slow down the cross-encoder.
@@ -138,12 +139,12 @@ impl SearchCodeUseCase {
             // by design and would all be dropped by a hard >= 0.1 threshold.
             if !search_query.is_text_search() && self.query_expander.is_none() {
                 let before_filter = results.len();
-                results.retain(|r| r.score() >= 0.1);
+                results.retain(|r| r.score() >= MIN_RESULT_SCORE);
                 let filtered = before_filter - results.len();
                 if filtered > 0 {
                     warn!(
-                        "Excluded {} candidates with score < 0.1 before reranking",
-                        filtered
+                        "Excluded {} candidates with score < {:.2} before reranking",
+                        filtered, MIN_RESULT_SCORE
                     );
                 }
             }
@@ -157,19 +158,23 @@ impl SearchCodeUseCase {
             results = reranker
                 .rerank(query.query(), results, Some(query.limit()))
                 .await?;
+            reranked = true;
         }
 
-        // Drop anything that fell below the global quality floor.  This applies
-        // after reranking (when enabled) so that cross-encoder scores are also
-        // subject to the threshold.
-        let before_global_filter = results.len();
-        results.retain(|r| r.score() >= MIN_RESULT_SCORE);
-        let global_filtered = before_global_filter - results.len();
-        if global_filtered > 0 {
-            warn!(
-                "Dropped {} low-value results with score < {:.2}",
-                global_filtered, MIN_RESULT_SCORE
-            );
+        // Drop anything that fell below the global quality floor.  Only applied
+        // after cross-encoder reranking, where all scores are on a comparable
+        // scale; raw RRF/hybrid scores are too low (~0.016–0.033) to use this
+        // threshold meaningfully.
+        if reranked {
+            let before_global_filter = results.len();
+            results.retain(|r| r.score() >= MIN_RESULT_SCORE);
+            let global_filtered = before_global_filter - results.len();
+            if global_filtered > 0 {
+                warn!(
+                    "Dropped {} low-value results with score < {:.2}",
+                    global_filtered, MIN_RESULT_SCORE
+                );
+            }
         }
 
         let duration = start_time.elapsed();
