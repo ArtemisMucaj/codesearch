@@ -60,11 +60,7 @@ impl<'a> ImpactController<'a> {
             }
             out.push_str(&format!("Depth {} ({} symbol(s)):\n", depth_idx + 1, nodes.len()));
             for node in nodes {
-                let alias_suffix = node
-                    .import_alias
-                    .as_ref()
-                    .map(|a| format!(", as {}", a))
-                    .unwrap_or_default();
+                let alias_suffix = Self::alias_suffix(&node.import_alias);
                 out.push_str(&format!(
                     "  • {} [{}{}]  {}  ({})\n",
                     node.symbol, node.reference_kind, alias_suffix, node.file_path,
@@ -94,6 +90,10 @@ impl<'a> ImpactController<'a> {
         out
     }
 
+    fn alias_suffix(alias: &Option<String>) -> String {
+        alias.as_ref().map(|a| format!(", as {}", a)).unwrap_or_default()
+    }
+
     fn render_tree<'n>(
         nodes: &[&'n ImpactNode],
         children_map: &HashMap<&str, Vec<&'n ImpactNode>>,
@@ -105,11 +105,7 @@ impl<'a> ImpactController<'a> {
             let connector = if is_last { "└── " } else { "├── " };
             let child_prefix = if is_last { "    " } else { "│   " };
 
-            let alias_suffix = node
-                .import_alias
-                .as_ref()
-                .map(|a| format!(", as {}", a))
-                .unwrap_or_default();
+            let alias_suffix = Self::alias_suffix(&node.import_alias);
             out.push_str(&format!(
                 "{}{}{} [{}{}] {}:{}\n",
                 prefix, connector, node.symbol, node.reference_kind, alias_suffix, node.file_path,

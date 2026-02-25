@@ -199,42 +199,45 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
     ) -> Result<Vec<SymbolReference>, DomainError> {
         let conn = self.conn.lock().await;
 
-        // Match by callee_symbol OR by import_alias so that searching by the local
-        // binding name (e.g. `addSource`) still finds references whose callee_symbol
-        // has been updated to the resolved exported name (e.g. `appApplicationSource`).
-        let base_condition = "(callee_symbol = ? OR import_alias = ?)";
-        let where_clause = Self::build_where_clause(query, base_condition);
+        // Use UNION ALL of two indexed queries instead of a single OR so the planner
+        // can use idx_symbol_refs_callee and idx_symbol_refs_import_alias independently.
+        let callee_where = Self::build_where_clause(query, "callee_symbol = ?");
+        let alias_where = Self::build_where_clause(query, "import_alias = ?");
         let limit_clause = query.limit.map_or(String::new(), |l| format!(" LIMIT {}", l));
 
+        let cols = "id, caller_symbol, callee_symbol, caller_file_path, \
+                    reference_file_path, reference_line, reference_column, \
+                    reference_kind, language, repository_id, \
+                    caller_node_type, enclosing_scope, import_alias";
+
         let sql = format!(
-            r#"SELECT id, caller_symbol, callee_symbol, caller_file_path,
-                      reference_file_path, reference_line, reference_column,
-                      reference_kind, language, repository_id,
-                      caller_node_type, enclosing_scope, import_alias
-               FROM symbol_references
-               WHERE {}
-               ORDER BY reference_file_path, reference_line{}"#,
-            where_clause, limit_clause
+            "SELECT {cols} FROM symbol_references WHERE {cw} \
+             UNION ALL \
+             SELECT {cols} FROM symbol_references WHERE {aw} \
+             ORDER BY reference_file_path, reference_line{limit}",
+            cols = cols,
+            cw = callee_where,
+            aw = alias_where,
+            limit = limit_clause,
         );
 
         let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
-        // Build parameter list dynamically.
-        // The base condition uses two placeholders for the same value.
+        // Build params for both legs (each leg uses the same filter values).
         let mut params_vec: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
-        params_vec.push(Box::new(callee_symbol.to_string()));
-        params_vec.push(Box::new(callee_symbol.to_string()));
-
-        if let Some(ref repo_id) = query.repository_id {
-            params_vec.push(Box::new(repo_id.clone()));
-        }
-        if let Some(ref lang) = query.language {
-            params_vec.push(Box::new(lang.clone()));
-        }
-        if let Some(ref kind) = query.reference_kind {
-            params_vec.push(Box::new(kind.clone()));
+        for _ in 0..2 {
+            params_vec.push(Box::new(callee_symbol.to_string()));
+            if let Some(ref repo_id) = query.repository_id {
+                params_vec.push(Box::new(repo_id.clone()));
+            }
+            if let Some(ref lang) = query.language {
+                params_vec.push(Box::new(lang.clone()));
+            }
+            if let Some(ref kind) = query.reference_kind {
+                params_vec.push(Box::new(kind.clone()));
+            }
         }
 
         let params_refs: Vec<&dyn duckdb::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
@@ -516,20 +519,27 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
         symbol_name: &str,
     ) -> Result<Vec<SymbolReference>, DomainError> {
         let conn = self.conn.lock().await;
+
+        // Mirror the find_callers UNION ALL strategy so alias-imported symbols
+        // are resolved the same way across repositories.
+        let cols = "id, caller_symbol, callee_symbol, caller_file_path, \
+                    reference_file_path, reference_line, reference_column, \
+                    reference_kind, language, repository_id, \
+                    caller_node_type, enclosing_scope, import_alias";
+        let sql = format!(
+            "SELECT {cols} FROM symbol_references WHERE callee_symbol = ? \
+             UNION ALL \
+             SELECT {cols} FROM symbol_references WHERE import_alias = ? \
+             ORDER BY repository_id, reference_file_path, reference_line",
+            cols = cols,
+        );
+
         let mut stmt = conn
-            .prepare(
-                r#"SELECT id, caller_symbol, callee_symbol, caller_file_path,
-                          reference_file_path, reference_line, reference_column,
-                          reference_kind, language, repository_id,
-                          caller_node_type, enclosing_scope, import_alias
-                   FROM symbol_references
-                   WHERE callee_symbol = ?
-                   ORDER BY repository_id, reference_file_path, reference_line"#,
-            )
+            .prepare(&sql)
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
         let rows = stmt
-            .query_map(params![symbol_name], Self::row_to_symbol_reference)
+            .query_map(params![symbol_name, symbol_name], Self::row_to_symbol_reference)
             .map_err(|e| {
                 DomainError::storage(format!("Failed to query cross-repo references: {}", e))
             })?;

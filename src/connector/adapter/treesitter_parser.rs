@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -741,7 +741,7 @@ impl TreeSitterParser {
     fn collect_exports_from_node(
         node: tree_sitter::Node<'_>,
         content: &str,
-        exports: &mut Vec<String>,
+        exports: &mut HashSet<String>,
     ) {
         match node.kind() {
             "assignment_expression" => {
@@ -750,10 +750,7 @@ impl TreeSitterParser {
                         // module.exports = someIdentifier
                         if let Some(right) = node.child_by_field_name("right") {
                             if right.kind() == "identifier" {
-                                let name = content[right.byte_range()].to_string();
-                                if !exports.contains(&name) {
-                                    exports.push(name);
-                                }
+                                exports.insert(content[right.byte_range()].to_string());
                             }
                         }
                     } else if left.kind() == "member_expression" {
@@ -761,10 +758,7 @@ impl TreeSitterParser {
                         if let Some(obj) = left.child_by_field_name("object") {
                             if Self::is_module_exports(obj, content) {
                                 if let Some(prop) = left.child_by_field_name("property") {
-                                    let name = content[prop.byte_range()].to_string();
-                                    if !exports.contains(&name) {
-                                        exports.push(name);
-                                    }
+                                    exports.insert(content[prop.byte_range()].to_string());
                                 }
                             }
                         }
@@ -775,19 +769,13 @@ impl TreeSitterParser {
                 // export default someIdentifier
                 if let Some(val) = node.child_by_field_name("value") {
                     if val.kind() == "identifier" {
-                        let name = content[val.byte_range()].to_string();
-                        if !exports.contains(&name) {
-                            exports.push(name);
-                        }
+                        exports.insert(content[val.byte_range()].to_string());
                     }
                 }
                 // export function foo / export class Foo
                 if let Some(decl) = node.child_by_field_name("declaration") {
                     if let Some(name_node) = decl.child_by_field_name("name") {
-                        let name = content[name_node.byte_range()].to_string();
-                        if !exports.contains(&name) {
-                            exports.push(name);
-                        }
+                        exports.insert(content[name_node.byte_range()].to_string());
                     }
                     // export const/let/var foo = ...
                     if matches!(decl.kind(), "lexical_declaration" | "variable_declaration") {
@@ -796,10 +784,7 @@ impl TreeSitterParser {
                                 if declarator.kind() == "variable_declarator" {
                                     if let Some(n) = declarator.child_by_field_name("name") {
                                         if n.kind() == "identifier" {
-                                            let name = content[n.byte_range()].to_string();
-                                            if !exports.contains(&name) {
-                                                exports.push(name);
-                                            }
+                                            exports.insert(content[n.byte_range()].to_string());
                                         }
                                     }
                                 }
@@ -814,11 +799,15 @@ impl TreeSitterParser {
                             for j in 0..child.child_count() {
                                 if let Some(spec) = child.child(j as u32) {
                                     if spec.kind() == "export_specifier" {
-                                        if let Some(n) = spec.child_by_field_name("name") {
-                                            let name = content[n.byte_range()].to_string();
-                                            if !exports.contains(&name) {
-                                                exports.push(name);
-                                            }
+                                        // Use the alias if present (e.g. `bar` in `export { foo as bar }`),
+                                        // falling back to the original name. The alias is the externally
+                                        // visible symbol that callers will reference.
+                                        let exported_name = spec
+                                            .child_by_field_name("alias")
+                                            .or_else(|| spec.child_by_field_name("name"))
+                                            .map(|n| content[n.byte_range()].to_string());
+                                        if let Some(name) = exported_name {
+                                            exports.insert(name);
                                         }
                                     }
                                 }
@@ -999,9 +988,9 @@ impl ParserService for TreeSitterParser {
             None => return Vec::new(),
         };
 
-        let mut exports: Vec<String> = Vec::new();
+        let mut exports: HashSet<String> = HashSet::new();
         Self::collect_exports_from_node(tree.root_node(), content, &mut exports);
-        exports
+        exports.into_iter().collect()
     }
 
     async fn extract_references_with_exports(

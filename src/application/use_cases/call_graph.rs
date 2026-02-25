@@ -128,37 +128,20 @@ impl CallGraphUseCase {
         repository_id: &str,
         exports_by_file: &HashMap<String, Vec<String>>,
     ) -> anyhow::Result<u64> {
-        let references = match self
+        match self
             .extractor
             .extract_with_exports(content, file_path, language, repository_id, exports_by_file)
             .await
         {
-            Ok(refs) => refs,
+            Ok(refs) => self.persist_references(refs, file_path).await,
             Err(e) => {
                 warn!(
                     "Failed to extract references from {}: {} (continuing)",
                     file_path, e
                 );
-                return Ok(0);
+                Ok(0)
             }
-        };
-
-        if references.is_empty() {
-            return Ok(0);
         }
-
-        let count = references.len() as u64;
-        self.repository
-            .save_batch(&references)
-            .await
-            .with_context(|| format!("failed to save {} references for indexing", count))?;
-
-        debug!(
-            "Extracted and saved {} references (with export resolution) from {}",
-            count, file_path
-        );
-
-        Ok(count)
     }
 
     /// Extract symbol references from content and save them to the repository.
@@ -170,21 +153,29 @@ impl CallGraphUseCase {
         language: Language,
         repository_id: &str,
     ) -> anyhow::Result<u64> {
-        let references = match self
+        match self
             .extractor
             .extract(content, file_path, language, repository_id)
             .await
         {
-            Ok(refs) => refs,
+            Ok(refs) => self.persist_references(refs, file_path).await,
             Err(e) => {
                 warn!(
                     "Failed to extract references from {}: {} (continuing)",
                     file_path, e
                 );
-                return Ok(0);
+                Ok(0)
             }
-        };
+        }
+    }
 
+    /// Save a batch of already-extracted references. Handles the empty-vec short-circuit,
+    /// the `save_batch` call with anyhow context, and the success debug log.
+    async fn persist_references(
+        &self,
+        references: Vec<SymbolReference>,
+        file_path: &str,
+    ) -> anyhow::Result<u64> {
         if references.is_empty() {
             return Ok(0);
         }
@@ -195,11 +186,7 @@ impl CallGraphUseCase {
             .await
             .with_context(|| format!("failed to save {} references for indexing", count))?;
 
-        debug!(
-            "Extracted and saved {} references from {}",
-            count, file_path
-        );
-
+        debug!("Saved {} references from {}", count, file_path);
         Ok(count)
     }
 

@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures::stream::{self, StreamExt};
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 use tracing::{debug, info, warn};
@@ -244,7 +245,7 @@ impl IndexRepositoryUseCase {
                     &exports_by_file,
                 )
                 .await
-                .map_err(|e| DomainError::internal(e.to_string()))?;
+                .map_err(|e| DomainError::internal(format!("{:#}", e)))?;
             reference_count += refs_count;
 
             file_count += 1;
@@ -297,31 +298,50 @@ impl IndexRepositoryUseCase {
 
     /// Pre-scan JS/TS files and build a map of relative file path → exported symbol names.
     /// Used by both the initial and incremental index paths for `require()` resolution.
+    /// Reads are performed in parallel up to `PRE_SCAN_CONCURRENCY` at a time.
     async fn pre_scan_exports(
         &self,
         absolute_path: &Path,
         relative_paths: &[String],
     ) -> HashMap<String, Vec<String>> {
-        let mut exports_by_file = HashMap::new();
-        for rel_path in relative_paths {
-            let lang = Language::from_path(Path::new(rel_path));
-            if !matches!(lang, Language::JavaScript | Language::TypeScript) {
-                continue;
-            }
-            let entry_path = absolute_path.join(rel_path);
-            match tokio::fs::read_to_string(&entry_path).await {
-                Ok(content) => {
-                    let exports = self.parser_service.extract_module_exports(&content, lang);
-                    if !exports.is_empty() {
-                        exports_by_file.insert(rel_path.clone(), exports);
+        const PRE_SCAN_CONCURRENCY: usize = 16;
+
+        let parser = self.parser_service.clone();
+        let absolute_path = absolute_path.to_path_buf();
+
+        stream::iter(relative_paths.iter().cloned())
+            .map(|rel_path| {
+                let parser = parser.clone();
+                let abs_path = absolute_path.clone();
+                async move {
+                    let lang = Language::from_path(Path::new(&rel_path));
+                    if !matches!(lang, Language::JavaScript | Language::TypeScript) {
+                        return None;
+                    }
+                    let entry_path = abs_path.join(&rel_path);
+                    match tokio::fs::read_to_string(&entry_path).await {
+                        Ok(content) => {
+                            let exports = parser.extract_module_exports(&content, lang);
+                            if exports.is_empty() {
+                                None
+                            } else {
+                                Some((rel_path, exports))
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to read file for export pre-scan {}: {}",
+                                rel_path, e
+                            );
+                            None
+                        }
                     }
                 }
-                Err(e) => {
-                    warn!("Failed to read file for export pre-scan {}: {}", rel_path, e);
-                }
-            }
-        }
-        exports_by_file
+            })
+            .buffer_unordered(PRE_SCAN_CONCURRENCY)
+            .filter_map(|x| async { x })
+            .collect::<HashMap<String, Vec<String>>>()
+            .await
     }
 
     async fn incremental_index(
@@ -531,7 +551,7 @@ impl IndexRepositoryUseCase {
                     &exports_by_file,
                 )
                 .await
-                .map_err(|e| DomainError::internal(e.to_string()))?;
+                .map_err(|e| DomainError::internal(format!("{:#}", e)))?;
             new_reference_count += refs_count;
 
             // Only add file hash after successful indexing
