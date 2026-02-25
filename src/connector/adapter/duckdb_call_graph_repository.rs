@@ -199,8 +199,9 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
     ) -> Result<Vec<SymbolReference>, DomainError> {
         let conn = self.conn.lock().await;
 
-        // Use UNION ALL of two indexed queries instead of a single OR so the planner
-        // can use idx_symbol_refs_callee and idx_symbol_refs_import_alias independently.
+        // Use UNION (deduplicating) of two indexed queries instead of UNION ALL so that a
+        // row whose callee_symbol and import_alias are both equal to the search value is not
+        // returned twice.  Each leg can still use its own index independently.
         let callee_where = Self::build_where_clause(query, "callee_symbol = ?");
         let alias_where = Self::build_where_clause(query, "import_alias = ?");
         let limit_clause = query.limit.map_or(String::new(), |l| format!(" LIMIT {}", l));
@@ -212,7 +213,7 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
 
         let sql = format!(
             "SELECT {cols} FROM symbol_references WHERE {cw} \
-             UNION ALL \
+             UNION \
              SELECT {cols} FROM symbol_references WHERE {aw} \
              ORDER BY reference_file_path, reference_line{limit}",
             cols = cols,
@@ -520,15 +521,15 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
     ) -> Result<Vec<SymbolReference>, DomainError> {
         let conn = self.conn.lock().await;
 
-        // Mirror the find_callers UNION ALL strategy so alias-imported symbols
-        // are resolved the same way across repositories.
+        // UNION (deduplicating) mirrors find_callers: matches by callee_symbol OR import_alias
+        // while preventing duplicate rows when a single row satisfies both conditions.
         let cols = "id, caller_symbol, callee_symbol, caller_file_path, \
                     reference_file_path, reference_line, reference_column, \
                     reference_kind, language, repository_id, \
                     caller_node_type, enclosing_scope, import_alias";
         let sql = format!(
             "SELECT {cols} FROM symbol_references WHERE callee_symbol = ? \
-             UNION ALL \
+             UNION \
              SELECT {cols} FROM symbol_references WHERE import_alias = ? \
              ORDER BY repository_id, reference_file_path, reference_line",
             cols = cols,

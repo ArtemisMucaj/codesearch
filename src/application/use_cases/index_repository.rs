@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures::stream::{self, StreamExt};
+use futures_util::stream::{self, StreamExt};
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 use tracing::{debug, info, warn};
@@ -319,22 +319,27 @@ impl IndexRepositoryUseCase {
                         return None;
                     }
                     let entry_path = abs_path.join(&rel_path);
-                    match tokio::fs::read_to_string(&entry_path).await {
-                        Ok(content) => {
-                            let exports = parser.extract_module_exports(&content, lang);
-                            if exports.is_empty() {
-                                None
-                            } else {
-                                Some((rel_path, exports))
-                            }
-                        }
+                    let content = match tokio::fs::read_to_string(&entry_path).await {
+                        Ok(c) => c,
                         Err(e) => {
                             warn!(
                                 "Failed to read file for export pre-scan {}: {}",
                                 rel_path, e
                             );
-                            None
+                            return None;
                         }
+                    };
+                    // extract_module_exports runs a full tree-sitter parse (CPU-bound);
+                    // offload it to the blocking thread pool so we don't stall the runtime.
+                    let exports = tokio::task::spawn_blocking(
+                        move || parser.extract_module_exports(&content, lang),
+                    )
+                    .await
+                    .unwrap_or_default();
+                    if exports.is_empty() {
+                        None
+                    } else {
+                        Some((rel_path, exports))
                     }
                 }
             })
