@@ -56,11 +56,31 @@ impl<'a> ImpactController<'a> {
             if nodes.is_empty() {
                 continue;
             }
-            out.push_str(&format!("Depth {} ({} symbol(s)):\n", depth_idx + 1, nodes.len()));
+            let depth = depth_idx + 1;
+            let label = if depth == 1 {
+                "direct callers".to_string()
+            } else {
+                format!("callers of depth-{} symbols", depth - 1)
+            };
+            out.push_str(&format!(
+                "Depth {} — {} ({} symbol(s)):\n",
+                depth,
+                label,
+                nodes.len()
+            ));
             for node in nodes {
+                let location = format!("{}:{}", node.file_path, node.line);
+                let via = if depth > 1 {
+                    node.via_symbol
+                        .as_deref()
+                        .map(|v| format!("  ← via {}", v))
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 out.push_str(&format!(
-                    "  • {} [{}]  {}  ({})\n",
-                    node.symbol, node.reference_kind, node.file_path, node.repository_id
+                    "  • {} [{}]  {}{}\n",
+                    node.symbol, node.reference_kind, location, via
                 ));
             }
             out.push('\n');
