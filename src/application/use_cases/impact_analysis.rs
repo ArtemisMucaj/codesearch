@@ -15,8 +15,10 @@ pub struct ImpactNode {
     pub symbol: String,
     /// Hop distance from the root symbol (1 = direct caller, 2 = caller of caller, …).
     pub depth: usize,
-    /// File where the caller symbol is declared.
+    /// File where the reference occurs.
     pub file_path: String,
+    /// Line number where the reference occurs in `file_path`.
+    pub line: u32,
     /// Kind of reference relationship (e.g. "call", "type_reference").
     pub reference_kind: String,
     /// Repository that contains the caller symbol.
@@ -25,6 +27,9 @@ pub struct ImpactNode {
     /// For example `bar` in `import { foo as bar }` or `const { foo: bar } = require(...)`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub import_alias: Option<String>,
+    /// The immediate parent symbol in the BFS traversal (i.e. the symbol that led to this one).
+    /// `None` only for the root symbol itself; always `Some` for every other node.
+    pub via_symbol: Option<String>,
 }
 
 /// Full blast-radius report for a symbol.
@@ -113,10 +118,12 @@ impl ImpactAnalysisUseCase {
                         by_depth[next_depth - 1].push(ImpactNode {
                             symbol: ANONYMOUS_SYMBOL.to_string(),
                             depth: next_depth,
-                            file_path: reference.caller_file_path().to_string(),
+                            file_path: reference.reference_file_path().to_string(),
+                            line: reference.reference_line(),
                             reference_kind: reference.reference_kind().to_string(),
                             repository_id: reference.repository_id().to_string(),
                             import_alias: reference.import_alias().map(str::to_string),
+                            via_symbol: Some(current.clone()),
                         });
                     }
                     Some(caller_sym) => {
@@ -130,10 +137,12 @@ impl ImpactAnalysisUseCase {
                         by_depth[next_depth - 1].push(ImpactNode {
                             symbol: caller_sym.clone(),
                             depth: next_depth,
-                            file_path: reference.caller_file_path().to_string(),
+                            file_path: reference.reference_file_path().to_string(),
+                            line: reference.reference_line(),
                             reference_kind: reference.reference_kind().to_string(),
                             repository_id: reference.repository_id().to_string(),
                             import_alias: reference.import_alias().map(str::to_string),
+                            via_symbol: Some(current.clone()),
                         });
 
                         queue.push_back((caller_sym, next_depth));

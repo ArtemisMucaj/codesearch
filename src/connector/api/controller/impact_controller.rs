@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 
 use crate::cli::OutputFormat;
-use crate::ImpactAnalysis;
+use crate::{ImpactAnalysis, ImpactNode};
 
 use super::super::Container;
 
@@ -68,10 +70,55 @@ impl<'a> ImpactController<'a> {
                     node.symbol, node.reference_kind, alias_suffix, node.file_path,
                     node.repository_id
                 ));
+        // Build a parent-symbol → children map using via_symbol.
+        let all_nodes: Vec<&ImpactNode> = analysis.by_depth.iter().flatten().collect();
+        let mut children_map: HashMap<&str, Vec<&ImpactNode>> = HashMap::new();
+        for node in &all_nodes {
+            if let Some(via) = node.via_symbol.as_deref() {
+                children_map.entry(via).or_default().push(node);
             }
-            out.push('\n');
         }
 
+        // Render root then recurse.
+        out.push_str(&analysis.root_symbol);
+        out.push('\n');
+        let root_children = children_map
+            .get(analysis.root_symbol.as_str())
+            .cloned()
+            .unwrap_or_default();
+        Self::render_tree(&root_children, &children_map, "", &mut out);
+
         out
+    }
+
+    fn render_tree<'n>(
+        nodes: &[&'n ImpactNode],
+        children_map: &HashMap<&str, Vec<&'n ImpactNode>>,
+        prefix: &str,
+        out: &mut String,
+    ) {
+        for (i, node) in nodes.iter().enumerate() {
+            let is_last = i == nodes.len() - 1;
+            let connector = if is_last { "└── " } else { "├── " };
+            let child_prefix = if is_last { "    " } else { "│   " };
+
+            out.push_str(&format!(
+                "{}{}{} [{}] {}:{}\n",
+                prefix, connector, node.symbol, node.reference_kind, node.file_path, node.line,
+            ));
+
+            let children = children_map
+                .get(node.symbol.as_str())
+                .cloned()
+                .unwrap_or_default();
+            if !children.is_empty() {
+                Self::render_tree(
+                    &children,
+                    children_map,
+                    &format!("{}{}", prefix, child_prefix),
+                    out,
+                );
+            }
+        }
     }
 }
