@@ -3,6 +3,12 @@ use std::time::Instant;
 
 use tracing::{info, warn};
 
+/// Global minimum score threshold applied to all search results before they are
+/// returned to the caller, regardless of the search path taken (semantic,
+/// text-search, RRF, or reranked).  Results below this value are consistently
+/// uninformative and only add noise to the output.
+const MIN_RESULT_SCORE: f32 = 0.09;
+
 use crate::application::{EmbeddingService, QueryExpander, RerankingService, VectorRepository};
 use crate::application::use_cases::rrf_fuse::rrf_fuse;
 use crate::domain::{DomainError, SearchQuery, SearchResult};
@@ -151,6 +157,19 @@ impl SearchCodeUseCase {
             results = reranker
                 .rerank(query.query(), results, Some(query.limit()))
                 .await?;
+        }
+
+        // Drop anything that fell below the global quality floor.  This applies
+        // after reranking (when enabled) so that cross-encoder scores are also
+        // subject to the threshold.
+        let before_global_filter = results.len();
+        results.retain(|r| r.score() >= MIN_RESULT_SCORE);
+        let global_filtered = before_global_filter - results.len();
+        if global_filtered > 0 {
+            warn!(
+                "Dropped {} low-value results with score < {:.2}",
+                global_filtered, MIN_RESULT_SCORE
+            );
         }
 
         let duration = start_time.elapsed();
