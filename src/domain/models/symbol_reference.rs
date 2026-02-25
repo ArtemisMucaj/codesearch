@@ -52,6 +52,13 @@ pub struct SymbolReference {
     /// Local alias used at the import/require site (e.g., `bar` in `import { foo as bar }`).
     /// `None` when the symbol is imported without renaming.
     import_alias: Option<String>,
+
+    /// The raw path argument of a `require()` call (e.g., `"./sample_middleware.js"`).
+    ///
+    /// Populated at parse time and used during index-time cross-file export resolution;
+    /// **not** persisted to the database and excluded from serialisation.
+    #[serde(skip)]
+    require_source_path: Option<String>,
 }
 
 impl SymbolReference {
@@ -81,6 +88,7 @@ impl SymbolReference {
             caller_node_type: None,
             enclosing_scope: None,
             import_alias: None,
+            require_source_path: None,
         }
     }
 
@@ -115,6 +123,7 @@ impl SymbolReference {
             caller_node_type,
             enclosing_scope,
             import_alias,
+            require_source_path: None,
         }
     }
 
@@ -130,6 +139,24 @@ impl SymbolReference {
 
     pub fn with_import_alias(mut self, alias: impl Into<String>) -> Self {
         self.import_alias = Some(alias.into());
+        self
+    }
+
+    /// Records the raw `require()` path argument for later cross-file resolution.
+    /// This value is **not** persisted to the database.
+    pub fn with_require_source_path(mut self, path: impl Into<String>) -> Self {
+        self.require_source_path = Some(path.into());
+        self
+    }
+
+    /// Replaces the callee symbol with the resolved exported name and promotes the
+    /// previous callee (the local binding) to `import_alias`.
+    ///
+    /// Used by the index-time export resolver when it determines that
+    /// `const localName = require('./file')` actually imports `exportedName`.
+    pub fn with_resolved_callee(mut self, exported_name: String, local_binding: String) -> Self {
+        self.callee_symbol = exported_name;
+        self.import_alias = Some(local_binding);
         self
     }
 
@@ -186,6 +213,12 @@ impl SymbolReference {
     /// For example, `bar` in `import { foo as bar }` or `const { foo: bar } = require(...)`.
     pub fn import_alias(&self) -> Option<&str> {
         self.import_alias.as_deref()
+    }
+
+    /// Returns the raw `require()` path argument captured at parse time.
+    /// This is a transient field used for cross-file resolution and is not persisted.
+    pub fn require_source_path(&self) -> Option<&str> {
+        self.require_source_path.as_deref()
     }
 
     /// Returns a formatted location string for this reference.

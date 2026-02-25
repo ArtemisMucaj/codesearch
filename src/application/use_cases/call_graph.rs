@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracing::debug;
@@ -18,6 +19,24 @@ pub trait CallGraphExtractor: Send + Sync {
         language: Language,
         repository_id: &str,
     ) -> Result<Vec<SymbolReference>, DomainError>;
+
+    /// Like `extract`, but also resolves relative `require()` paths against
+    /// `exports_by_file` to store the actual exported symbol name instead of the
+    /// local binding name.
+    ///
+    /// The default implementation ignores the map and delegates to `extract`.
+    async fn extract_with_exports(
+        &self,
+        content: &str,
+        file_path: &str,
+        language: Language,
+        repository_id: &str,
+        exports_by_file: &HashMap<String, Vec<String>>,
+    ) -> Result<Vec<SymbolReference>, DomainError> {
+        let _ = exports_by_file;
+        self.extract(content, file_path, language, repository_id)
+            .await
+    }
 }
 
 /// Default extractor using the ParserService.
@@ -42,6 +61,25 @@ impl CallGraphExtractor for ParserBasedExtractor {
     ) -> Result<Vec<SymbolReference>, DomainError> {
         self.parser_service
             .extract_references(content, file_path, language, repository_id)
+            .await
+    }
+
+    async fn extract_with_exports(
+        &self,
+        content: &str,
+        file_path: &str,
+        language: Language,
+        repository_id: &str,
+        exports_by_file: &HashMap<String, Vec<String>>,
+    ) -> Result<Vec<SymbolReference>, DomainError> {
+        self.parser_service
+            .extract_references_with_exports(
+                content,
+                file_path,
+                language,
+                repository_id,
+                exports_by_file,
+            )
             .await
     }
 }
@@ -74,6 +112,49 @@ impl CallGraphUseCase {
     ) -> Self {
         let extractor = Arc::new(ParserBasedExtractor::new(parser_service));
         Self::new(extractor, repository)
+    }
+
+    /// Like `extract_and_save`, but resolves relative `require()` paths in JS/TS
+    /// files against `exports_by_file` before saving.
+    ///
+    /// Call this instead of `extract_and_save` when a pre-scanned exports map is
+    /// available (populated during the indexing pre-scan phase).
+    pub async fn extract_and_save_resolved(
+        &self,
+        content: &str,
+        file_path: &str,
+        language: Language,
+        repository_id: &str,
+        exports_by_file: &HashMap<String, Vec<String>>,
+    ) -> Result<u64, DomainError> {
+        let references = match self
+            .extractor
+            .extract_with_exports(content, file_path, language, repository_id, exports_by_file)
+            .await
+        {
+            Ok(refs) => refs,
+            Err(e) => {
+                debug!(
+                    "Failed to extract references from {}: {} (continuing)",
+                    file_path, e
+                );
+                return Ok(0);
+            }
+        };
+
+        if references.is_empty() {
+            return Ok(0);
+        }
+
+        let count = references.len() as u64;
+        self.repository.save_batch(&references).await?;
+
+        debug!(
+            "Extracted and saved {} references (with export resolution) from {}",
+            count, file_path
+        );
+
+        Ok(count)
     }
 
     /// Extract symbol references from content and save them to the repository.

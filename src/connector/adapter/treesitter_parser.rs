@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::path::Path;
+
 use async_trait::async_trait;
 use streaming_iterator::StreamingIterator;
 use tracing::debug;
@@ -371,11 +374,13 @@ impl TreeSitterParser {
 
                 ; CommonJS require() — captures the local binding name as the callee.
                 ; @fn_name is used to validate the call is actually require().
+                ; @require_path captures the string argument so the indexer can
+                ; resolve relative paths to actual exported symbol names.
                 (variable_declarator
                     name: (identifier) @callee
                     value: (call_expression
                         function: (identifier) @fn_name
-                        arguments: (arguments (string)))) @require_import
+                        arguments: (arguments (string) @require_path))) @require_import
 
                 ; CommonJS shorthand destructure: const { foo } = require('...')
                 ; The property name is both the original and local name.
@@ -433,11 +438,13 @@ impl TreeSitterParser {
 
                 ; CommonJS require() — captures the local binding name as the callee.
                 ; @fn_name is used to validate the call is actually require().
+                ; @require_path captures the string argument so the indexer can
+                ; resolve relative paths to actual exported symbol names.
                 (variable_declarator
                     name: (identifier) @callee
                     value: (call_expression
                         function: (identifier) @fn_name
-                        arguments: (arguments (string)))) @require_import
+                        arguments: (arguments (string) @require_path))) @require_import
 
                 ; CommonJS shorthand destructure: const { foo } = require('...')
                 (variable_declarator
@@ -709,6 +716,126 @@ impl TreeSitterParser {
 
         scopes
     }
+
+    /// Returns `true` if `node` is a `member_expression` that represents `module.exports`.
+    fn is_module_exports(node: tree_sitter::Node<'_>, content: &str) -> bool {
+        node.kind() == "member_expression"
+            && node
+                .child_by_field_name("object")
+                .map(|n| &content[n.byte_range()] == "module")
+                .unwrap_or(false)
+            && node
+                .child_by_field_name("property")
+                .map(|n| &content[n.byte_range()] == "exports")
+                .unwrap_or(false)
+    }
+
+    /// Recursively walks `node` and appends exported symbol names to `exports`.
+    ///
+    /// Handles:
+    /// - `module.exports = identifier`
+    /// - `module.exports.key = expression`
+    /// - `export default identifier`
+    /// - `export function/class/const identifier`
+    /// - `export { identifier, identifier as alias }`
+    fn collect_exports_from_node(
+        node: tree_sitter::Node<'_>,
+        content: &str,
+        exports: &mut Vec<String>,
+    ) {
+        match node.kind() {
+            "assignment_expression" => {
+                if let Some(left) = node.child_by_field_name("left") {
+                    if Self::is_module_exports(left, content) {
+                        // module.exports = someIdentifier
+                        if let Some(right) = node.child_by_field_name("right") {
+                            if right.kind() == "identifier" {
+                                let name = content[right.byte_range()].to_string();
+                                if !exports.contains(&name) {
+                                    exports.push(name);
+                                }
+                            }
+                        }
+                    } else if left.kind() == "member_expression" {
+                        // module.exports.key = ...
+                        if let Some(obj) = left.child_by_field_name("object") {
+                            if Self::is_module_exports(obj, content) {
+                                if let Some(prop) = left.child_by_field_name("property") {
+                                    let name = content[prop.byte_range()].to_string();
+                                    if !exports.contains(&name) {
+                                        exports.push(name);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "export_statement" => {
+                // export default someIdentifier
+                if let Some(val) = node.child_by_field_name("value") {
+                    if val.kind() == "identifier" {
+                        let name = content[val.byte_range()].to_string();
+                        if !exports.contains(&name) {
+                            exports.push(name);
+                        }
+                    }
+                }
+                // export function foo / export class Foo
+                if let Some(decl) = node.child_by_field_name("declaration") {
+                    if let Some(name_node) = decl.child_by_field_name("name") {
+                        let name = content[name_node.byte_range()].to_string();
+                        if !exports.contains(&name) {
+                            exports.push(name);
+                        }
+                    }
+                    // export const/let/var foo = ...
+                    if matches!(decl.kind(), "lexical_declaration" | "variable_declaration") {
+                        for i in 0..decl.child_count() {
+                            if let Some(declarator) = decl.child(i as u32) {
+                                if declarator.kind() == "variable_declarator" {
+                                    if let Some(n) = declarator.child_by_field_name("name") {
+                                        if n.kind() == "identifier" {
+                                            let name = content[n.byte_range()].to_string();
+                                            if !exports.contains(&name) {
+                                                exports.push(name);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // export { foo, bar as baz }
+                for i in 0..node.child_count() {
+                    if let Some(child) = node.child(i as u32) {
+                        if child.kind() == "export_clause" {
+                            for j in 0..child.child_count() {
+                                if let Some(spec) = child.child(j as u32) {
+                                    if spec.kind() == "export_specifier" {
+                                        if let Some(n) = spec.child_by_field_name("name") {
+                                            let name = content[n.byte_range()].to_string();
+                                            if !exports.contains(&name) {
+                                                exports.push(name);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i as u32) {
+                Self::collect_exports_from_node(child, content, exports);
+            }
+        }
+    }
 }
 
 /// Look up the tightest enclosing scope for a given line.
@@ -853,6 +980,121 @@ impl ParserService for TreeSitterParser {
         self.supported_languages.clone()
     }
 
+    fn extract_module_exports(&self, content: &str, language: Language) -> Vec<String> {
+        if !matches!(language, Language::JavaScript | Language::TypeScript) {
+            return Vec::new();
+        }
+
+        let ts_language = match self.get_ts_language(language) {
+            Some(l) => l,
+            None => return Vec::new(),
+        };
+
+        let mut parser = Parser::new();
+        if parser.set_language(&ts_language).is_err() {
+            return Vec::new();
+        }
+        let tree = match parser.parse(content, None) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+
+        let mut exports: Vec<String> = Vec::new();
+        Self::collect_exports_from_node(tree.root_node(), content, &mut exports);
+        exports
+    }
+
+    async fn extract_references_with_exports(
+        &self,
+        content: &str,
+        file_path: &str,
+        language: Language,
+        repository_id: &str,
+        exports_by_file: &HashMap<String, Vec<String>>,
+    ) -> Result<Vec<SymbolReference>, DomainError> {
+        let mut references = self
+            .extract_references(content, file_path, language, repository_id)
+            .await?;
+
+        // Only attempt require-path resolution for JS/TS files.
+        if !matches!(language, Language::JavaScript | Language::TypeScript) {
+            return Ok(references);
+        }
+
+        // The base directory of the file currently being processed (repo-relative).
+        let file_dir = Path::new(file_path).parent().unwrap_or(Path::new(""));
+
+        for reference in &mut references {
+            // We only resolve simple `const X = require('./path')` bindings.
+            // Destructured requires already store the exported property name as
+            // callee_symbol, so they don't need cross-file resolution.
+            if reference.reference_kind() != crate::domain::ReferenceKind::Import {
+                continue;
+            }
+            // Skip if there's already an alias set — that means this is a
+            // destructured or ES6-aliased import that was already resolved.
+            if reference.import_alias().is_some() {
+                continue;
+            }
+
+            // We need to know the raw require path for this reference.
+            // It's available on the reference only when we captured @require_path.
+            let raw_require_path = match reference.require_source_path() {
+                Some(p) => p.to_string(),
+                None => continue,
+            };
+
+            let normalized = normalize_import_path(&raw_require_path);
+
+            // Only resolve relative paths (./  or ../).  External packages such as
+            // `require('express')` are not in the repo and cannot be resolved.
+            if !normalized.starts_with("./") && !normalized.starts_with("../") {
+                continue;
+            }
+
+            // Resolve the relative path against the requiring file's directory.
+            let resolved = file_dir.join(&normalized);
+            // Normalise to a forward-slash string (repo-relative, no leading ./).
+            let resolved_str = resolved.to_string_lossy().replace('\\', "/");
+            // Strip a leading "./" if Path::join left one.
+            let resolved_key = resolved_str
+                .strip_prefix("./")
+                .unwrap_or(&resolved_str)
+                .to_string();
+
+            // Look up in the exports map — try exact match first, then without extension.
+            let exported_symbols = exports_by_file
+                .get(&resolved_key)
+                .or_else(|| {
+                    // Try stripping the file extension (e.g. look up "foo/bar" when
+                    // the require was `require('./bar.js')` and the map key is "foo/bar").
+                    let without_ext = Path::new(&resolved_key)
+                        .with_extension("")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    exports_by_file.get(&without_ext)
+                });
+
+            let exported_symbols = match exported_symbols {
+                Some(s) if !s.is_empty() => s,
+                _ => continue,
+            };
+
+            // For a single default export, replace the local binding name with the
+            // actual exported symbol and promote the local binding to import_alias.
+            if exported_symbols.len() == 1 {
+                let local_binding = reference.callee_symbol().to_string();
+                *reference = reference
+                    .clone()
+                    .with_resolved_callee(exported_symbols[0].clone(), local_binding);
+            }
+            // If the file has multiple exports we cannot know which one this
+            // binding refers to — leave callee_symbol as the local name.
+        }
+
+        Ok(references)
+    }
+
     async fn extract_references(
         &self,
         content: &str,
@@ -902,6 +1144,9 @@ impl ParserService for TreeSitterParser {
             let mut is_require_import = false;
             // Local alias from a renamed import/require (e.g. `bar` in `{ foo: bar }`).
             let mut query_import_alias: Option<String> = None;
+            // Raw string argument of a require() call (e.g. `'./module.js'`).
+            // Used later by extract_references_with_exports for cross-file resolution.
+            let mut require_path_raw: Option<String> = None;
 
             for capture in query_match.captures {
                 let capture_name = capture_names
@@ -913,6 +1158,10 @@ impl ParserService for TreeSitterParser {
                     // "callee" always takes priority - set name and node unconditionally
                     callee_name = Some(content[capture.node.byte_range()].to_string());
                     ref_node = Some(capture.node);
+                } else if capture_name == "require_path" {
+                    // The string literal passed to require() — kept verbatim (including quotes)
+                    // so normalize_import_path can strip them later.
+                    require_path_raw = Some(content[capture.node.byte_range()].to_string());
                 } else if capture_name == "import_alias" {
                     // Local alias captured directly by the query pattern (CommonJS
                     // renamed destructure: `const { foo: bar } = require(...)`).
@@ -1071,6 +1320,14 @@ impl ParserService for TreeSitterParser {
 
                 if let Some(alias) = import_alias {
                     reference = reference.with_import_alias(alias);
+                }
+
+                // For simple require() bindings, record the raw path argument so that
+                // extract_references_with_exports can resolve it to the exported symbol name.
+                if is_require_import && query_import_alias.is_none() {
+                    if let Some(ref raw_path) = require_path_raw {
+                        reference = reference.with_require_source_path(raw_path.clone());
+                    }
                 }
 
                 references.push(reference);
@@ -2076,5 +2333,227 @@ const { createServer: makeServer } = someOtherFactory('config');
             import_refs.is_empty(),
             "Destructured non-require() call must NOT be captured as Import"
         );
+    }
+
+    // ── Export extraction tests ─────────────────────────────────────────────
+
+    /// `module.exports = identifier` — single default export.
+    #[test]
+    fn test_extract_module_exports_default() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+function appApplicationSource(req, res, next) { next(); }
+module.exports = appApplicationSource;
+"#;
+        let exports =
+            parser.extract_module_exports(content, Language::JavaScript);
+        assert_eq!(
+            exports,
+            vec!["appApplicationSource"],
+            "Expected single default export"
+        );
+    }
+
+    /// `module.exports.key = value` — named property export.
+    #[test]
+    fn test_extract_module_exports_named_property() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+function helper() {}
+module.exports.helper = helper;
+module.exports.other = function() {};
+"#;
+        let exports =
+            parser.extract_module_exports(content, Language::JavaScript);
+        assert!(
+            exports.contains(&"helper".to_string()),
+            "Expected 'helper' in named property exports"
+        );
+    }
+
+    /// ES6 `export default identifier` and `export function foo`.
+    #[test]
+    fn test_extract_module_exports_es6() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+export default myFunc;
+export function helperFn() {}
+export class MyClass {}
+"#;
+        let exports =
+            parser.extract_module_exports(content, Language::TypeScript);
+        assert!(exports.contains(&"myFunc".to_string()), "Expected 'myFunc'");
+        assert!(exports.contains(&"helperFn".to_string()), "Expected 'helperFn'");
+        assert!(exports.contains(&"MyClass".to_string()), "Expected 'MyClass'");
+    }
+
+    /// Non-JS language must return empty.
+    #[test]
+    fn test_extract_module_exports_unsupported_language() {
+        let parser = TreeSitterParser::new();
+        let content = "fn main() {}";
+        let exports = parser.extract_module_exports(content, Language::Rust);
+        assert!(
+            exports.is_empty(),
+            "Rust files should have no module exports"
+        );
+    }
+
+    // ── require() source path capture ───────────────────────────────────────
+
+    /// `const addSource = require('./sample_middleware.js')` must record
+    /// the raw require path in `require_source_path` so it can later be
+    /// resolved to the exported symbol name.
+    #[tokio::test]
+    async fn test_require_source_path_captured() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+const addSource = require('./sample_middleware.js');
+"#;
+
+        let references = parser
+            .extract_references(content, "router.js", Language::JavaScript, "test-repo")
+            .await
+            .unwrap();
+
+        let import_ref = references
+            .iter()
+            .find(|r| {
+                r.reference_kind() == ReferenceKind::Import && r.callee_symbol() == "addSource"
+            })
+            .expect("Expected Import reference for addSource");
+
+        assert_eq!(
+            import_ref.require_source_path(),
+            Some("'./sample_middleware.js'"),
+            "require_source_path must contain the raw string literal (with quotes)"
+        );
+    }
+
+    // ── Cross-file require resolution ───────────────────────────────────────
+
+    /// End-to-end: `const addSource = require('./sample_middleware.js')` where
+    /// `sample_middleware.js` has `module.exports = appApplicationSource`.
+    ///
+    /// After resolution, `callee_symbol` must be `appApplicationSource` and
+    /// `import_alias` must be `addSource`.
+    #[tokio::test]
+    async fn test_resolve_simple_require_to_exported_symbol() {
+        let parser = TreeSitterParser::new();
+
+        let router_content = r#"
+const addSource = require('./sample_middleware.js');
+"#;
+
+        // Build the exports map as the indexer would: pre-scan sample_middleware.js.
+        let middleware_content = r#"
+function appApplicationSource(req, res, next) { next(); }
+module.exports = appApplicationSource;
+"#;
+        let mut exports_by_file: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let middleware_exports =
+            parser.extract_module_exports(middleware_content, Language::JavaScript);
+        exports_by_file.insert("sample_middleware.js".to_string(), middleware_exports);
+
+        let references = parser
+            .extract_references_with_exports(
+                router_content,
+                "router.js",
+                Language::JavaScript,
+                "test-repo",
+                &exports_by_file,
+            )
+            .await
+            .unwrap();
+
+        let import_ref = references
+            .iter()
+            .find(|r| r.reference_kind() == ReferenceKind::Import)
+            .expect("Expected an Import reference");
+
+        assert_eq!(
+            import_ref.callee_symbol(),
+            "appApplicationSource",
+            "callee_symbol must be the resolved exported name"
+        );
+        assert_eq!(
+            import_ref.import_alias(),
+            Some("addSource"),
+            "import_alias must be the local binding name"
+        );
+    }
+
+    /// When the required file exports multiple symbols, we cannot resolve
+    /// unambiguously — the local binding name must be kept as callee_symbol.
+    #[tokio::test]
+    async fn test_require_multi_export_not_resolved() {
+        let parser = TreeSitterParser::new();
+
+        let content = r#"const utils = require('./utils.js');"#;
+
+        let mut exports_by_file: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        exports_by_file.insert(
+            "utils.js".to_string(),
+            vec!["helperA".to_string(), "helperB".to_string()],
+        );
+
+        let references = parser
+            .extract_references_with_exports(
+                content,
+                "main.js",
+                Language::JavaScript,
+                "test-repo",
+                &exports_by_file,
+            )
+            .await
+            .unwrap();
+
+        let import_ref = references
+            .iter()
+            .find(|r| r.reference_kind() == ReferenceKind::Import)
+            .expect("Expected an Import reference");
+
+        assert_eq!(
+            import_ref.callee_symbol(),
+            "utils",
+            "With multiple exports the local binding name must be kept"
+        );
+        assert!(
+            import_ref.import_alias().is_none(),
+            "No alias should be set when resolution is ambiguous"
+        );
+    }
+
+    /// External package requires (`require('express')`) must not be modified.
+    #[tokio::test]
+    async fn test_require_external_package_not_resolved() {
+        let parser = TreeSitterParser::new();
+
+        let content = r#"const express = require('express');"#;
+
+        let references = parser
+            .extract_references_with_exports(
+                content,
+                "app.js",
+                Language::JavaScript,
+                "test-repo",
+                &std::collections::HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let import_ref = references
+            .iter()
+            .find(|r| r.reference_kind() == ReferenceKind::Import)
+            .expect("Expected an Import reference");
+
+        assert_eq!(
+            import_ref.callee_symbol(),
+            "express",
+            "External package bindings must keep the local name"
+        );
+        assert!(import_ref.import_alias().is_none());
     }
 }

@@ -138,6 +138,38 @@ impl IndexRepositoryUseCase {
         let total_files = files_to_process.len() as u64;
         info!("Found {} files to index", total_files);
 
+        // Phase 0 — pre-scan JS/TS files to build a map of file → exported symbol names.
+        // This map is used during reference extraction to resolve `const X = require('./path')`
+        // to the actual exported symbol rather than the local binding name.
+        let mut exports_by_file: HashMap<String, Vec<String>> = HashMap::new();
+        for entry in &files_to_process {
+            let lang = Language::from_path(entry.path());
+            if !matches!(lang, Language::JavaScript | Language::TypeScript) {
+                continue;
+            }
+            let rel = entry
+                .path()
+                .strip_prefix(absolute_path)
+                .unwrap_or(entry.path())
+                .to_string_lossy()
+                .to_string();
+            match tokio::fs::read_to_string(entry.path()).await {
+                Ok(content) => {
+                    let exports = self.parser_service.extract_module_exports(&content, lang);
+                    if !exports.is_empty() {
+                        exports_by_file.insert(rel, exports);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to read file for export pre-scan {}: {}", rel, e);
+                }
+            }
+        }
+        debug!(
+            "Export pre-scan complete: {} JS/TS files with detectable exports",
+            exports_by_file.len()
+        );
+
         let progress_bar = ProgressBar::new(total_files);
         progress_bar.set_style(
             ProgressStyle::default_bar()
@@ -211,10 +243,18 @@ impl IndexRepositoryUseCase {
 
             self.vector_repo.save_batch(&chunks, &embeddings).await?;
 
-            // Extract and save symbol references (call graph)
+            // Extract and save symbol references (call graph).
+            // Pass the exports map so that simple `const X = require('./path')` bindings
+            // are resolved to the actual exported symbol name from the target file.
             let refs_count = self
                 .call_graph_use_case
-                .extract_and_save(&content, &relative_path, language, repository.id())
+                .extract_and_save_resolved(
+                    &content,
+                    &relative_path,
+                    language,
+                    repository.id(),
+                    &exports_by_file,
+                )
                 .await?;
             reference_count += refs_count;
 
@@ -385,6 +425,36 @@ impl IndexRepositoryUseCase {
                 .await?;
         }
 
+        // Phase 0 — pre-scan ALL JS/TS files in the repo (including unchanged ones) to build
+        // an exports map for require() resolution.  We need the full set because an added or
+        // modified file may import from an unchanged file.
+        let mut exports_by_file: HashMap<String, Vec<String>> = HashMap::new();
+        for (rel_path, _) in &current_files {
+            let lang = Language::from_path(Path::new(rel_path));
+            if !matches!(lang, Language::JavaScript | Language::TypeScript) {
+                continue;
+            }
+            let entry_path = absolute_path.join(rel_path);
+            match tokio::fs::read_to_string(&entry_path).await {
+                Ok(content) => {
+                    let exports = self.parser_service.extract_module_exports(&content, lang);
+                    if !exports.is_empty() {
+                        exports_by_file.insert(rel_path.clone(), exports);
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to read file for export pre-scan {}: {}",
+                        rel_path, e
+                    );
+                }
+            }
+        }
+        debug!(
+            "Incremental export pre-scan complete: {} JS/TS files with detectable exports",
+            exports_by_file.len()
+        );
+
         // Process added and modified files
         let files_to_process: Vec<&String> = added.iter().chain(modified.iter()).copied().collect();
         let total_to_process = files_to_process.len() as u64;
@@ -452,10 +522,16 @@ impl IndexRepositoryUseCase {
 
             self.vector_repo.save_batch(&chunks, &embeddings).await?;
 
-            // Extract and save symbol references (call graph)
+            // Extract and save symbol references (call graph).
             let refs_count = self
                 .call_graph_use_case
-                .extract_and_save(&content, relative_path, language, repository.id())
+                .extract_and_save_resolved(
+                    &content,
+                    relative_path,
+                    language,
+                    repository.id(),
+                    &exports_by_file,
+                )
                 .await?;
             new_reference_count += refs_count;
 

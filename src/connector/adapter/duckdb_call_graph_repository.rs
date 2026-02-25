@@ -195,7 +195,11 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
     ) -> Result<Vec<SymbolReference>, DomainError> {
         let conn = self.conn.lock().await;
 
-        let where_clause = Self::build_where_clause(query, "callee_symbol = ?");
+        // Match by callee_symbol OR by import_alias so that searching by the local
+        // binding name (e.g. `addSource`) still finds references whose callee_symbol
+        // has been updated to the resolved exported name (e.g. `appApplicationSource`).
+        let base_condition = "(callee_symbol = ? OR import_alias = ?)";
+        let where_clause = Self::build_where_clause(query, base_condition);
         let limit_clause = query.limit.map_or(String::new(), |l| format!(" LIMIT {}", l));
 
         let sql = format!(
@@ -213,8 +217,10 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
             .prepare(&sql)
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
-        // Build parameter list dynamically
+        // Build parameter list dynamically.
+        // The base condition uses two placeholders for the same value.
         let mut params_vec: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
+        params_vec.push(Box::new(callee_symbol.to_string()));
         params_vec.push(Box::new(callee_symbol.to_string()));
 
         if let Some(ref repo_id) = query.repository_id {
