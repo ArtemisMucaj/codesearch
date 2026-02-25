@@ -1086,7 +1086,8 @@ impl ParserService for TreeSitterParser {
                 let local_binding = reference.callee_symbol().to_string();
                 *reference = reference
                     .clone()
-                    .with_resolved_callee(exported_symbols[0].clone(), local_binding);
+                    .with_callee_symbol(exported_symbols[0].clone())
+                    .with_import_alias(local_binding);
             }
             // If the file has multiple exports we cannot know which one this
             // binding refers to — leave callee_symbol as the local name.

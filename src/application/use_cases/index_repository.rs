@@ -141,30 +141,18 @@ impl IndexRepositoryUseCase {
         // Phase 0 — pre-scan JS/TS files to build a map of file → exported symbol names.
         // This map is used during reference extraction to resolve `const X = require('./path')`
         // to the actual exported symbol rather than the local binding name.
-        let mut exports_by_file: HashMap<String, Vec<String>> = HashMap::new();
-        for entry in &files_to_process {
-            let lang = Language::from_path(entry.path());
-            if !matches!(lang, Language::JavaScript | Language::TypeScript) {
-                continue;
-            }
-            let rel = entry
-                .path()
-                .strip_prefix(absolute_path)
-                .unwrap_or(entry.path())
-                .to_string_lossy()
-                .to_string();
-            match tokio::fs::read_to_string(entry.path()).await {
-                Ok(content) => {
-                    let exports = self.parser_service.extract_module_exports(&content, lang);
-                    if !exports.is_empty() {
-                        exports_by_file.insert(rel, exports);
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to read file for export pre-scan {}: {}", rel, e);
-                }
-            }
-        }
+        let pre_scan_paths: Vec<String> = files_to_process
+            .iter()
+            .map(|entry| {
+                entry
+                    .path()
+                    .strip_prefix(absolute_path)
+                    .unwrap_or(entry.path())
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        let exports_by_file = self.pre_scan_exports(absolute_path, &pre_scan_paths).await;
         debug!(
             "Export pre-scan complete: {} JS/TS files with detectable exports",
             exports_by_file.len()
@@ -255,7 +243,8 @@ impl IndexRepositoryUseCase {
                     repository.id(),
                     &exports_by_file,
                 )
-                .await?;
+                .await
+                .map_err(|e| DomainError::internal(e.to_string()))?;
             reference_count += refs_count;
 
             file_count += 1;
@@ -304,6 +293,35 @@ impl IndexRepositoryUseCase {
             .find_by_id(repository.id())
             .await?
             .ok_or_else(|| DomainError::internal("Repository not found after indexing"))
+    }
+
+    /// Pre-scan JS/TS files and build a map of relative file path → exported symbol names.
+    /// Used by both the initial and incremental index paths for `require()` resolution.
+    async fn pre_scan_exports(
+        &self,
+        absolute_path: &Path,
+        relative_paths: &[String],
+    ) -> HashMap<String, Vec<String>> {
+        let mut exports_by_file = HashMap::new();
+        for rel_path in relative_paths {
+            let lang = Language::from_path(Path::new(rel_path));
+            if !matches!(lang, Language::JavaScript | Language::TypeScript) {
+                continue;
+            }
+            let entry_path = absolute_path.join(rel_path);
+            match tokio::fs::read_to_string(&entry_path).await {
+                Ok(content) => {
+                    let exports = self.parser_service.extract_module_exports(&content, lang);
+                    if !exports.is_empty() {
+                        exports_by_file.insert(rel_path.clone(), exports);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to read file for export pre-scan {}: {}", rel_path, e);
+                }
+            }
+        }
+        exports_by_file
     }
 
     async fn incremental_index(
@@ -428,28 +446,8 @@ impl IndexRepositoryUseCase {
         // Phase 0 — pre-scan ALL JS/TS files in the repo (including unchanged ones) to build
         // an exports map for require() resolution.  We need the full set because an added or
         // modified file may import from an unchanged file.
-        let mut exports_by_file: HashMap<String, Vec<String>> = HashMap::new();
-        for (rel_path, _) in &current_files {
-            let lang = Language::from_path(Path::new(rel_path));
-            if !matches!(lang, Language::JavaScript | Language::TypeScript) {
-                continue;
-            }
-            let entry_path = absolute_path.join(rel_path);
-            match tokio::fs::read_to_string(&entry_path).await {
-                Ok(content) => {
-                    let exports = self.parser_service.extract_module_exports(&content, lang);
-                    if !exports.is_empty() {
-                        exports_by_file.insert(rel_path.clone(), exports);
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to read file for export pre-scan {}: {}",
-                        rel_path, e
-                    );
-                }
-            }
-        }
+        let pre_scan_paths: Vec<String> = current_files.keys().cloned().collect();
+        let exports_by_file = self.pre_scan_exports(absolute_path, &pre_scan_paths).await;
         debug!(
             "Incremental export pre-scan complete: {} JS/TS files with detectable exports",
             exports_by_file.len()
@@ -532,7 +530,8 @@ impl IndexRepositoryUseCase {
                     repository.id(),
                     &exports_by_file,
                 )
-                .await?;
+                .await
+                .map_err(|e| DomainError::internal(e.to_string()))?;
             new_reference_count += refs_count;
 
             // Only add file hash after successful indexing

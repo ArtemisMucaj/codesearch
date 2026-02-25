@@ -149,14 +149,8 @@ impl SymbolReference {
         self
     }
 
-    /// Replaces the callee symbol with the resolved exported name and promotes the
-    /// previous callee (the local binding) to `import_alias`.
-    ///
-    /// Used by the index-time export resolver when it determines that
-    /// `const localName = require('./file')` actually imports `exportedName`.
-    pub fn with_resolved_callee(mut self, exported_name: String, local_binding: String) -> Self {
-        self.callee_symbol = exported_name;
-        self.import_alias = Some(local_binding);
+    pub fn with_callee_symbol(mut self, callee: impl Into<String>) -> Self {
+        self.callee_symbol = callee.into();
         self
     }
 

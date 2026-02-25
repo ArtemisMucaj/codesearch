@@ -105,9 +105,15 @@ impl<'a> ImpactController<'a> {
             let connector = if is_last { "└── " } else { "├── " };
             let child_prefix = if is_last { "    " } else { "│   " };
 
+            let alias_suffix = node
+                .import_alias
+                .as_ref()
+                .map(|a| format!(", as {}", a))
+                .unwrap_or_default();
             out.push_str(&format!(
-                "{}{}{} [{}] {}:{}\n",
-                prefix, connector, node.symbol, node.reference_kind, node.file_path, node.line,
+                "{}{}{} [{}{}] {}:{}\n",
+                prefix, connector, node.symbol, node.reference_kind, alias_suffix, node.file_path,
+                node.line,
             ));
 
             let children = children_map

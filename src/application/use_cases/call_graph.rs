@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tracing::debug;
+use anyhow::Context;
+use tracing::{debug, warn};
 
 use crate::application::{CallGraphQuery, CallGraphRepository, CallGraphStats, ParserService};
 use crate::domain::{DomainError, Language, SymbolReference};
@@ -126,7 +127,7 @@ impl CallGraphUseCase {
         language: Language,
         repository_id: &str,
         exports_by_file: &HashMap<String, Vec<String>>,
-    ) -> Result<u64, DomainError> {
+    ) -> anyhow::Result<u64> {
         let references = match self
             .extractor
             .extract_with_exports(content, file_path, language, repository_id, exports_by_file)
@@ -134,7 +135,7 @@ impl CallGraphUseCase {
         {
             Ok(refs) => refs,
             Err(e) => {
-                debug!(
+                warn!(
                     "Failed to extract references from {}: {} (continuing)",
                     file_path, e
                 );
@@ -147,7 +148,10 @@ impl CallGraphUseCase {
         }
 
         let count = references.len() as u64;
-        self.repository.save_batch(&references).await?;
+        self.repository
+            .save_batch(&references)
+            .await
+            .with_context(|| format!("failed to save {} references for indexing", count))?;
 
         debug!(
             "Extracted and saved {} references (with export resolution) from {}",
@@ -165,7 +169,7 @@ impl CallGraphUseCase {
         file_path: &str,
         language: Language,
         repository_id: &str,
-    ) -> Result<u64, DomainError> {
+    ) -> anyhow::Result<u64> {
         let references = match self
             .extractor
             .extract(content, file_path, language, repository_id)
@@ -173,7 +177,7 @@ impl CallGraphUseCase {
         {
             Ok(refs) => refs,
             Err(e) => {
-                debug!(
+                warn!(
                     "Failed to extract references from {}: {} (continuing)",
                     file_path, e
                 );
@@ -186,7 +190,10 @@ impl CallGraphUseCase {
         }
 
         let count = references.len() as u64;
-        self.repository.save_batch(&references).await?;
+        self.repository
+            .save_batch(&references)
+            .await
+            .with_context(|| format!("failed to save {} references for indexing", count))?;
 
         debug!(
             "Extracted and saved {} references from {}",

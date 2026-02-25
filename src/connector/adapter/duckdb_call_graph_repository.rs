@@ -76,6 +76,10 @@ impl DuckdbCallGraphRepository {
             -- Index for language filtering
             CREATE INDEX IF NOT EXISTS idx_symbol_refs_language
             ON symbol_references(language, repository_id);
+
+            -- Index for import_alias filtering (find_callers matches by alias OR callee)
+            CREATE INDEX IF NOT EXISTS idx_symbol_refs_import_alias
+            ON symbol_references(import_alias, repository_id);
             "#,
         )
         .map_err(|e| {
