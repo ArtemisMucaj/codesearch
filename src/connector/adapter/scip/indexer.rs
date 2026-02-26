@@ -61,7 +61,7 @@ impl IndexerKind {
             IndexerKind::TypeScript => {
                 "Install it with: npm install -g @sourcegraph/scip-typescript"
             }
-            IndexerKind::Php => "Install it from: https://github.com/sourcegraph/scip-php",
+            IndexerKind::Php => "Install it from: https://github.com/davidrjenni/scip-php",
         }
     }
 }
