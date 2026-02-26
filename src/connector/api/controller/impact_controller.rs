@@ -70,6 +70,13 @@ impl<'a> ImpactController<'a> {
             .collect();
 
         // Lookup by (depth, symbol) for unambiguous path tracing.
+        // or_insert keeps only the *first* ImpactNode seen for any (depth, symbol) pair.
+        // When the same symbol appears at the same depth via two different call paths, the
+        // duplicate is intentionally dropped so that each (depth, symbol) key maps to exactly
+        // one parent — giving the path-tracing loop a single, deterministic choice at every
+        // step.  The trade-off is that alternate routes to the same node are not rendered;
+        // this is acceptable here because the goal is to show one representative call chain
+        // from each leaf up to the queried symbol, not to enumerate every possible path.
         let mut node_by_depth_symbol: HashMap<(usize, &str), &ImpactNode> = HashMap::new();
         for node in &all_nodes {
             node_by_depth_symbol
@@ -112,6 +119,9 @@ impl<'a> ImpactController<'a> {
     /// `path[0]` is the most-upstream caller (tree root); the queried symbol
     /// is appended as the terminal leaf.
     fn render_reversed_path(path: &[&ImpactNode], root_symbol: &str, out: &mut String) {
+        if path.is_empty() {
+            return;
+        }
         for (depth, node) in path.iter().enumerate() {
             let alias_suffix = Self::alias_suffix(&node.import_alias);
             if depth == 0 {
