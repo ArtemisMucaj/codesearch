@@ -304,8 +304,9 @@ impl IndexRepositoryUseCase {
                 self.vector_repo.save_batch(&chunks, &embeddings).await?;
             }
 
-            let refs_count = if self.scip_phase.is_some() && Self::is_scip_language(language) {
-                // SCIP is configured for this language: use the pre-built symbol map.
+            let refs_count = if Self::is_scip_language(language) {
+                // SCIP languages: call graph comes from the SCIP index only.
+                // Tree-sitter is not used here — it only handles chunking above.
                 if let Some(scip_file_refs) = scip_refs.get(&relative_path) {
                     debug!(
                         "Using {} SCIP references for {}",
@@ -317,13 +318,10 @@ impl IndexRepositoryUseCase {
                         .await
                         .map_err(|e| DomainError::internal(format!("{:#}", e)))?
                 } else {
-                    // SCIP ran but produced no references for this file (e.g. the file
-                    // is outside the project's tsconfig/jsconfig scope).
-                    warn!("SCIP produced no references for {}", relative_path);
                     0
                 }
             } else {
-                // Tree-sitter: used for non-SCIP languages and when no SCIP phase is configured.
+                // Non-SCIP languages: call graph via tree-sitter.
                 self.call_graph_use_case
                     .extract_and_save(
                         &content,
@@ -606,8 +604,9 @@ impl IndexRepositoryUseCase {
                 self.vector_repo.save_batch(&chunks, &embeddings).await?;
             }
 
-            let refs_count = if self.scip_phase.is_some() && Self::is_scip_language(language) {
-                // SCIP is configured for this language: use the pre-built symbol map.
+            let refs_count = if Self::is_scip_language(language) {
+                // SCIP languages: call graph comes from the SCIP index only.
+                // Tree-sitter is not used here — it only handles chunking above.
                 if let Some(scip_file_refs) = scip_refs.get(relative_path) {
                     debug!(
                         "Using {} SCIP references for {}",
@@ -619,13 +618,10 @@ impl IndexRepositoryUseCase {
                         .await
                         .map_err(|e| DomainError::internal(format!("{:#}", e)))?
                 } else {
-                    // SCIP ran but produced no references for this file (e.g. the file
-                    // is outside the project's tsconfig/jsconfig scope).
-                    warn!("SCIP produced no references for {}", relative_path);
                     0
                 }
             } else {
-                // Tree-sitter: used for non-SCIP languages and when no SCIP phase is configured.
+                // Non-SCIP languages: call graph via tree-sitter.
                 self.call_graph_use_case
                     .extract_and_save(
                         &content,
