@@ -4,13 +4,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::debug;
 
-use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, ParserService, QueryExpander};
+use crate::application::{CallGraphExtractor, CallGraphRepository, CallGraphUseCase, FileHashRepository, ParserService, QueryExpander};
 use crate::{
     DeleteRepositoryUseCase, DuckdbCallGraphRepository,
     AnthropicClient, DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository,
     EmbeddingService, ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
     ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding, MockReranking, OrtEmbedding,
-    OrtReranking, RerankingService, SearchCodeUseCase,
+    OrtReranking, ParserBasedExtractor, RerankingService, SearchCodeUseCase,
     SymbolContextUseCase, TreeSitterParser, VectorRepository,
 };
 
@@ -220,11 +220,13 @@ impl Container {
             }
         };
 
-        // Create the call graph use case with parser-based extractor
-        let call_graph_use_case = Arc::new(CallGraphUseCase::with_parser(
+        // Create the call graph use case with the parser-based extractor.
+        // ParserBasedExtractor lives in the connector layer (it does file I/O);
+        // CallGraphUseCase only knows about the CallGraphExtractor trait.
+        let extractor = Arc::new(ParserBasedExtractor::new(
             parser.clone() as Arc<dyn ParserService>,
-            call_graph_repo,
-        ));
+        )) as Arc<dyn CallGraphExtractor>;
+        let call_graph_use_case = Arc::new(CallGraphUseCase::new(extractor, call_graph_repo));
 
         // Initialise the query expander when --expand-query is requested.
         //

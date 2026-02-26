@@ -152,14 +152,7 @@ impl IndexRepositoryUseCase {
                     .to_string()
             })
             .collect();
-        let exports_by_file = self
-            .call_graph_use_case
-            .build_export_index(absolute_path, &pre_scan_paths)
-            .await;
-        debug!(
-            "Export pre-scan complete: {} JS/TS files with detectable exports",
-            exports_by_file.len()
-        );
+        let exports_by_file = self.run_export_pre_scan(absolute_path, &pre_scan_paths).await;
 
         let progress_bar = ProgressBar::new(total_files);
         progress_bar.set_style(
@@ -295,6 +288,24 @@ impl IndexRepositoryUseCase {
             .ok_or_else(|| DomainError::internal("Repository not found after indexing"))
     }
 
+    /// Run the JS/TS export pre-scan and return the resulting map.
+    /// Shared by the initial and incremental index paths.
+    async fn run_export_pre_scan(
+        &self,
+        absolute_path: &Path,
+        pre_scan_paths: &[String],
+    ) -> HashMap<String, Vec<String>> {
+        let exports = self
+            .call_graph_use_case
+            .build_export_index(absolute_path, pre_scan_paths)
+            .await;
+        debug!(
+            "Export pre-scan complete: {} JS/TS files with detectable exports",
+            exports.len()
+        );
+        exports
+    }
+
     async fn incremental_index(
         &self,
         absolute_path: &Path,
@@ -418,14 +429,7 @@ impl IndexRepositoryUseCase {
         // an exports map for require() resolution.  We need the full set because an added or
         // modified file may import from an unchanged file.
         let pre_scan_paths: Vec<String> = current_files.keys().cloned().collect();
-        let exports_by_file = self
-            .call_graph_use_case
-            .build_export_index(absolute_path, &pre_scan_paths)
-            .await;
-        debug!(
-            "Incremental export pre-scan complete: {} JS/TS files with detectable exports",
-            exports_by_file.len()
-        );
+        let exports_by_file = self.run_export_pre_scan(absolute_path, &pre_scan_paths).await;
 
         // Process added and modified files
         let files_to_process: Vec<&String> = added.iter().chain(modified.iter()).copied().collect();
