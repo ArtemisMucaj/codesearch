@@ -656,6 +656,195 @@ async fn test_commonjs_require_captured_as_import_in_call_graph() {
     );
 }
 
+/// Integration test: same as test_require_with_dotdot_path_resolves_to_exported_symbol
+/// but the middleware uses an inline named function expression
+/// (`module.exports = function appApplicationSource(...) {}`) rather than
+/// a separate declaration + identifier export.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_require_resolves_inline_named_function_export() {
+    let env = setup_test_env().await;
+
+    let temp_dir = tempdir().expect("Failed to create temp directory");
+    let middlewares_dir = temp_dir.path().join("middlewares");
+    let routes_dir = temp_dir.path().join("routes");
+    std::fs::create_dir_all(&middlewares_dir).expect("Failed to create middlewares dir");
+    std::fs::create_dir_all(&routes_dir).expect("Failed to create routes dir");
+
+    // Middleware using the inline named function expression pattern
+    let middleware_content = r#"
+module.exports = function appApplicationSource(req, res, next) {
+  next();
+};
+"#;
+    let router_content = r#"
+const addSource = require('../middlewares/add-application-source.js');
+function setup(app) { app.use(addSource); }
+module.exports = setup;
+"#;
+
+    std::fs::write(
+        middlewares_dir.join("add-application-source.js"),
+        middleware_content,
+    )
+    .expect("Failed to write middleware");
+    std::fs::write(routes_dir.join("na-api-router.js"), router_content)
+        .expect("Failed to write router");
+
+    let embedding_service = Arc::new(MockEmbedding::new());
+    let index_use_case = IndexRepositoryUseCase::new(
+        env.metadata_repository.clone(),
+        env.vector_repo.clone(),
+        env.file_hash_repo.clone(),
+        env.call_graph_use_case.clone(),
+        env.parser.clone(),
+        embedding_service,
+    );
+    let repository = index_use_case
+        .execute(
+            temp_dir.path().to_str().unwrap(),
+            Some("inline-fn-export-test"),
+            VectorStore::InMemory,
+            None,
+            false,
+        )
+        .await
+        .expect("Indexing failed");
+
+    let query = CallGraphQuery::new().with_repository(repository.id());
+
+    let callers = env
+        .call_graph_use_case
+        .find_callers("appApplicationSource", &query)
+        .await
+        .expect("find_callers failed");
+
+    let import_refs: Vec<_> = callers
+        .iter()
+        .filter(|r| r.reference_kind() == ReferenceKind::Import)
+        .collect();
+
+    assert!(
+        !import_refs.is_empty(),
+        "find_callers('appApplicationSource') must find the import in routes/na-api-router.js \
+         even when the middleware uses `module.exports = function appApplicationSource(...) {{}}`. \
+         Got {} callers: {:?}",
+        callers.len(),
+        callers
+            .iter()
+            .map(|r| format!(
+                "{}:{} callee={} alias={:?}",
+                r.reference_file_path(),
+                r.reference_line(),
+                r.callee_symbol(),
+                r.import_alias()
+            ))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Integration test: `const addSource = require('../middlewares/add-application-source.js')`
+/// where the middleware exports `appApplicationSource` should result in
+/// `find_callers("appApplicationSource")` returning the import site — even though
+/// the local binding is `addSource` (a different name, with `../` in the path).
+///
+/// This is the exact real-world scenario reported by the user.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_require_with_dotdot_path_resolves_to_exported_symbol() {
+    let env = setup_test_env().await;
+
+    let temp_dir = tempdir().expect("Failed to create temp directory");
+    let middlewares_dir = temp_dir.path().join("middlewares");
+    let routes_dir = temp_dir.path().join("routes");
+    std::fs::create_dir_all(&middlewares_dir).expect("Failed to create middlewares dir");
+    std::fs::create_dir_all(&routes_dir).expect("Failed to create routes dir");
+
+    // Middleware: defines and exports appApplicationSource
+    let middleware_content = r#"
+function appApplicationSource(req, res, next) {
+  next();
+}
+module.exports = appApplicationSource;
+"#;
+    // Router: imports it under the local alias addSource using a ../ path
+    let router_content = r#"
+const addSource = require('../middlewares/add-application-source.js');
+
+function setupRoutes(app) {
+  app.use('/setstate', addSource);
+}
+module.exports = setupRoutes;
+"#;
+
+    std::fs::write(
+        middlewares_dir.join("add-application-source.js"),
+        middleware_content,
+    )
+    .expect("Failed to write middleware");
+    std::fs::write(routes_dir.join("na-api-router.js"), router_content)
+        .expect("Failed to write router");
+
+    let embedding_service = Arc::new(MockEmbedding::new());
+    let index_use_case = IndexRepositoryUseCase::new(
+        env.metadata_repository.clone(),
+        env.vector_repo.clone(),
+        env.file_hash_repo.clone(),
+        env.call_graph_use_case.clone(),
+        env.parser.clone(),
+        embedding_service,
+    );
+    let repository = index_use_case
+        .execute(
+            temp_dir.path().to_str().unwrap(),
+            Some("dotdot-require-test"),
+            VectorStore::InMemory,
+            None,
+            false,
+        )
+        .await
+        .expect("Indexing failed");
+
+    let query = CallGraphQuery::new().with_repository(repository.id());
+
+    // The primary assertion: find_callers("appApplicationSource") must return the
+    // import in routes/na-api-router.js even though it was imported as `addSource`.
+    let callers = env
+        .call_graph_use_case
+        .find_callers("appApplicationSource", &query)
+        .await
+        .expect("find_callers failed");
+
+    let import_refs: Vec<_> = callers
+        .iter()
+        .filter(|r| r.reference_kind() == ReferenceKind::Import)
+        .collect();
+
+    assert!(
+        !import_refs.is_empty(),
+        "Expected find_callers('appApplicationSource') to return the import from \
+         routes/na-api-router.js (local binding: addSource). \
+         Got {} total callers: {:?}",
+        callers.len(),
+        callers
+            .iter()
+            .map(|r| format!(
+                "{}:{} callee={} alias={:?}",
+                r.reference_file_path(),
+                r.reference_line(),
+                r.callee_symbol(),
+                r.import_alias()
+            ))
+            .collect::<Vec<_>>()
+    );
+
+    // The alias must be preserved so that `find_callers("addSource")` still works too.
+    let alias = import_refs[0].import_alias();
+    assert_eq!(
+        alias,
+        Some("addSource"),
+        "import_alias must be the local binding 'addSource'"
+    );
+}
+
 /// Integration test: ES6 named import with alias is captured with the original
 /// exported name as the callee and the local alias stored in import_alias.
 ///
