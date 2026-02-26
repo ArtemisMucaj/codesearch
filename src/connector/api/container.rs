@@ -269,7 +269,7 @@ impl Container {
     }
 
     pub fn index_use_case(&self) -> IndexRepositoryUseCase {
-        let scip_phase: Arc<dyn Scip> = Arc::new(ScipRunner);
+        let scip: Arc<dyn Scip> = Arc::new(ScipRunner);
         IndexRepositoryUseCase::new(
             self.repo_adapter.clone(),
             self.vector_repo.clone(),
@@ -278,7 +278,7 @@ impl Container {
             self.parser.clone(),
             self.embedding_service.clone(),
         )
-        .with_scip_phase(scip_phase)
+        .with_scip(scip)
     }
 
     pub fn search_use_case(&self) -> SearchCodeUseCase {

@@ -49,9 +49,9 @@ pub struct IndexRepositoryUseCase {
     call_graph_use_case: Arc<CallGraphUseCase>,
     parser_service: Arc<dyn ParserService>,
     embedding_service: Arc<dyn EmbeddingService>,
-    /// Optional SCIP phase.  When present, JS/TS/PHP files use SCIP-derived
+    /// Optional SCIP indexer.  When present, JS/TS/PHP files use SCIP-derived
     /// symbol references instead of (or as a fallback from) tree-sitter.
-    scip_phase: Option<Arc<dyn Scip>>,
+    scip: Option<Arc<dyn Scip>>,
 }
 
 impl IndexRepositoryUseCase {
@@ -70,30 +70,29 @@ impl IndexRepositoryUseCase {
             call_graph_use_case,
             parser_service,
             embedding_service,
-            scip_phase: None,
+            scip: None,
         }
     }
 
-    /// Attach an optional SCIP phase runner.
-    pub fn with_scip_phase(mut self, scip_phase: Arc<dyn Scip>) -> Self {
-        self.scip_phase = Some(scip_phase);
+    /// Attach an optional SCIP indexer.
+    pub fn with_scip(mut self, scip: Arc<dyn Scip>) -> Self {
+        self.scip = Some(scip);
         self
     }
 
-    /// Delegate to the injected [`Scip`], or return an empty map when
-    /// no SCIP phase is configured (e.g. in tests).
+    /// Delegate to the injected [`Scip`] indexer, or return an empty map when
+    /// none is configured (e.g. in tests).
     ///
-    /// Propagates errors from the phase so that a failed indexer aborts
-    /// indexing immediately.
-    async fn run_scip_phase(
+    /// Propagates errors so that a failed indexer aborts indexing immediately.
+    async fn run_scip(
         &self,
         absolute_path: &Path,
         repo_id: &str,
         has_js_ts: bool,
         has_php: bool,
     ) -> Result<HashMap<String, Vec<SymbolReference>>, DomainError> {
-        match &self.scip_phase {
-            Some(phase) => phase.run(absolute_path, repo_id, has_js_ts, has_php).await,
+        match &self.scip {
+            Some(scip) => scip.run(absolute_path, repo_id, has_js_ts, has_php).await,
             None => Ok(HashMap::new()),
         }
     }
@@ -206,7 +205,7 @@ impl IndexRepositoryUseCase {
             .iter()
             .any(|e| Language::from_path(e.path()) == Language::Php);
         let scip_refs = self
-            .run_scip_phase(absolute_path, repository.id(), has_js_ts, has_php)
+            .run_scip(absolute_path, repository.id(), has_js_ts, has_php)
             .await?;
 
         let progress_bar = ProgressBar::new(total_files);
@@ -469,7 +468,7 @@ impl IndexRepositoryUseCase {
             .keys()
             .any(|p| Language::from_path(Path::new(p)) == Language::Php);
         let scip_refs = self
-            .run_scip_phase(absolute_path, repository.id(), has_js_ts, has_php)
+            .run_scip(absolute_path, repository.id(), has_js_ts, has_php)
             .await?;
 
         // Process added and modified files
