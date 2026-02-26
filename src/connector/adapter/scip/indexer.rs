@@ -42,7 +42,7 @@ impl IndexerKind {
                 output_path.to_string_lossy().to_string(),
             ],
             IndexerKind::Php => vec![
-                "--output".to_string(),
+                "-o".to_string(),
                 output_path.to_string_lossy().to_string(),
             ],
         }
@@ -61,7 +61,7 @@ impl IndexerKind {
             IndexerKind::TypeScript => {
                 "Install it with: npm install -g @sourcegraph/scip-typescript"
             }
-            IndexerKind::Php => "Install it from: https://github.com/davidrjenni/scip-php",
+            IndexerKind::Php => "Install it from: https://github.com/ArtemisMucaj/scip-php",
         }
     }
 }
