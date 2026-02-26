@@ -23,16 +23,16 @@ use crate::domain::{
 ///
 /// The method is **fallible**: when a SCIP indexer binary is found on `PATH`
 /// but its execution fails, the implementation returns `Err` so that the
-/// error surfaces to the user instead of silently falling back to tree-sitter.
-/// When no indexer is installed the implementation returns `Ok(empty map)` and
-/// tree-sitter is used as before.
+/// error surfaces to the user.  Returns `Ok(empty map)` when the repository
+/// contains no files of a SCIP-supported language.
 #[async_trait::async_trait]
 pub trait ScipPhase: Send + Sync {
     /// Run SCIP indexers for `repo_path` and return a map of
     /// `relative_file_path → pre-extracted SymbolReferences`.
     ///
-    /// Returns `Err` only when an available indexer binary failed to produce
-    /// an index.  Returns `Ok(empty)` when no indexer is installed.
+    /// Returns `Err` when an available indexer binary failed to produce an
+    /// index.  Returns `Ok(empty)` when the repository has no SCIP-language
+    /// files (no indexer binary is invoked in that case).
     async fn run(
         &self,
         repo_path: &Path,
@@ -89,10 +89,10 @@ impl IndexRepositoryUseCase {
     }
 
     /// Delegate to the injected [`ScipPhase`], or return an empty map when
-    /// no SCIP phase is configured.
+    /// no SCIP phase is configured (e.g. in tests).
     ///
-    /// Propagates errors from the phase so that a failed-but-available
-    /// indexer aborts indexing rather than silently degrading to tree-sitter.
+    /// Propagates errors from the phase so that a failed indexer aborts
+    /// indexing immediately.
     async fn run_scip_phase(
         &self,
         absolute_path: &Path,
@@ -304,9 +304,9 @@ impl IndexRepositoryUseCase {
                 self.vector_repo.save_batch(&chunks, &embeddings).await?;
             }
 
-            let refs_count = if Self::is_scip_language(language) {
+            let refs_count = if self.scip_phase.is_some() && Self::is_scip_language(language) {
+                // SCIP is configured for this language: use the pre-built symbol map.
                 if let Some(scip_file_refs) = scip_refs.get(&relative_path) {
-                    // SCIP already extracted references for this file — save them directly.
                     debug!(
                         "Using {} SCIP references for {}",
                         scip_file_refs.len(),
@@ -317,21 +317,13 @@ impl IndexRepositoryUseCase {
                         .await
                         .map_err(|e| DomainError::internal(format!("{:#}", e)))?
                 } else {
-                    // SCIP indexer ran but didn't cover this file (e.g. JS in a TS-only
-                    // project, or PHP without scip-php installed) — fall back to tree-sitter.
-                    self.call_graph_use_case
-                        .extract_and_save(
-                            &content,
-                            &relative_path,
-                            language,
-                            repository.id(),
-                            &exports_by_file,
-                        )
-                        .await
-                        .map_err(|e| DomainError::internal(format!("{:#}", e)))?
+                    // SCIP ran but produced no references for this file (e.g. the file
+                    // is outside the project's tsconfig/jsconfig scope).
+                    warn!("SCIP produced no references for {}", relative_path);
+                    0
                 }
             } else {
-                // Non-SCIP language: always use tree-sitter.
+                // Tree-sitter: used for non-SCIP languages and when no SCIP phase is configured.
                 self.call_graph_use_case
                     .extract_and_save(
                         &content,
@@ -614,7 +606,8 @@ impl IndexRepositoryUseCase {
                 self.vector_repo.save_batch(&chunks, &embeddings).await?;
             }
 
-            let refs_count = if Self::is_scip_language(language) {
+            let refs_count = if self.scip_phase.is_some() && Self::is_scip_language(language) {
+                // SCIP is configured for this language: use the pre-built symbol map.
                 if let Some(scip_file_refs) = scip_refs.get(relative_path) {
                     debug!(
                         "Using {} SCIP references for {}",
@@ -626,18 +619,13 @@ impl IndexRepositoryUseCase {
                         .await
                         .map_err(|e| DomainError::internal(format!("{:#}", e)))?
                 } else {
-                    self.call_graph_use_case
-                        .extract_and_save(
-                            &content,
-                            relative_path,
-                            language,
-                            repository.id(),
-                            &exports_by_file,
-                        )
-                        .await
-                        .map_err(|e| DomainError::internal(format!("{:#}", e)))?
+                    // SCIP ran but produced no references for this file (e.g. the file
+                    // is outside the project's tsconfig/jsconfig scope).
+                    warn!("SCIP produced no references for {}", relative_path);
+                    0
                 }
             } else {
+                // Tree-sitter: used for non-SCIP languages and when no SCIP phase is configured.
                 self.call_graph_use_case
                     .extract_and_save(
                         &content,
