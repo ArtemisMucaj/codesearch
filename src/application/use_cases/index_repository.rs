@@ -20,23 +20,26 @@ use crate::domain::{
 ///
 /// Implementations live in the connector layer (e.g. `ScipPhaseRunner`) so
 /// that the application layer stays free of external tool dependencies.
-/// The method is intentionally infallible — failures are logged by the
-/// implementation and an empty map is returned so tree-sitter extraction
-/// acts as the fallback.
+///
+/// The method is **fallible**: when a SCIP indexer binary is found on `PATH`
+/// but its execution fails, the implementation returns `Err` so that the
+/// error surfaces to the user instead of silently falling back to tree-sitter.
+/// When no indexer is installed the implementation returns `Ok(empty map)` and
+/// tree-sitter is used as before.
 #[async_trait::async_trait]
 pub trait ScipPhase: Send + Sync {
     /// Run SCIP indexers for `repo_path` and return a map of
     /// `relative_file_path → pre-extracted SymbolReferences`.
     ///
-    /// Pass the language-presence hints so the implementation can decide which
-    /// indexer(s) to invoke.
+    /// Returns `Err` only when an available indexer binary failed to produce
+    /// an index.  Returns `Ok(empty)` when no indexer is installed.
     async fn run(
         &self,
         repo_path: &Path,
         repo_id: &str,
         has_js_ts: bool,
         has_php: bool,
-    ) -> HashMap<String, Vec<SymbolReference>>;
+    ) -> Result<HashMap<String, Vec<SymbolReference>>, DomainError>;
 }
 
 pub struct IndexRepositoryUseCase {
@@ -87,16 +90,19 @@ impl IndexRepositoryUseCase {
 
     /// Delegate to the injected [`ScipPhase`], or return an empty map when
     /// no SCIP phase is configured.
+    ///
+    /// Propagates errors from the phase so that a failed-but-available
+    /// indexer aborts indexing rather than silently degrading to tree-sitter.
     async fn run_scip_phase(
         &self,
         absolute_path: &Path,
         repo_id: &str,
         has_js_ts: bool,
         has_php: bool,
-    ) -> HashMap<String, Vec<SymbolReference>> {
+    ) -> Result<HashMap<String, Vec<SymbolReference>>, DomainError> {
         match &self.scip_phase {
             Some(phase) => phase.run(absolute_path, repo_id, has_js_ts, has_php).await,
-            None => HashMap::new(),
+            None => Ok(HashMap::new()),
         }
     }
 
@@ -227,7 +233,7 @@ impl IndexRepositoryUseCase {
             .any(|e| Language::from_path(e.path()) == Language::Php);
         let scip_refs = self
             .run_scip_phase(absolute_path, repository.id(), has_js_ts, has_php)
-            .await;
+            .await?;
 
         let progress_bar = ProgressBar::new(total_files);
         progress_bar.set_style(
@@ -543,7 +549,7 @@ impl IndexRepositoryUseCase {
             .any(|p| Language::from_path(Path::new(p)) == Language::Php);
         let scip_refs = self
             .run_scip_phase(absolute_path, repository.id(), has_js_ts, has_php)
-            .await;
+            .await?;
 
         // Process added and modified files
         let files_to_process: Vec<&String> = added.iter().chain(modified.iter()).copied().collect();

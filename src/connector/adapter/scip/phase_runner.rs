@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::application::use_cases::ScipPhase;
-use crate::domain::SymbolReference;
+use crate::domain::{DomainError, SymbolReference};
 
 use super::{run_applicable_indexers, ScipImporter};
 
@@ -12,8 +12,9 @@ use super::{run_applicable_indexers, ScipImporter};
 /// `scip-typescript` and/or `scip-php`, parses the resulting index files,
 /// and returns symbol references keyed by relative file path.
 ///
-/// When neither indexer is available the method returns an empty map so the
-/// caller falls back to tree-sitter extraction transparently.
+/// When neither indexer is installed the method returns `Ok(empty)` so the
+/// caller uses tree-sitter as before.  When an indexer **is** installed but
+/// fails, `Err` is returned — the failure is never silently swallowed.
 pub struct ScipPhaseRunner;
 
 #[async_trait::async_trait]
@@ -24,11 +25,13 @@ impl ScipPhase for ScipPhaseRunner {
         repo_id: &str,
         has_js_ts: bool,
         has_php: bool,
-    ) -> HashMap<String, Vec<SymbolReference>> {
-        let index_files = run_applicable_indexers(repo_path, has_js_ts, has_php).await;
+    ) -> Result<HashMap<String, Vec<SymbolReference>>, DomainError> {
+        let index_files = run_applicable_indexers(repo_path, has_js_ts, has_php)
+            .await
+            .map_err(|e| DomainError::internal(format!("SCIP indexer failed: {:#}", e)))?;
 
         if index_files.is_empty() {
-            return HashMap::new();
+            return Ok(HashMap::new());
         }
 
         let mut combined: HashMap<String, Vec<SymbolReference>> = HashMap::new();
@@ -48,11 +51,16 @@ impl ScipPhase for ScipPhaseRunner {
                     }
                 }
                 Err(e) => {
-                    warn!("SCIP import failed for {:?}: {:#}", scip_path, e);
+                    // Import failures (corrupt index, I/O error) are also hard errors
+                    // since the indexer was available and we expected a valid index.
+                    return Err(DomainError::internal(format!(
+                        "SCIP import failed for {:?}: {:#}",
+                        scip_path, e
+                    )));
                 }
             }
         }
 
-        combined
+        Ok(combined)
     }
 }
