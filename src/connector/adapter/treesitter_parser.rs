@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use streaming_iterator::StreamingIterator;
@@ -983,7 +983,7 @@ impl ParserService for TreeSitterParser {
         // A full tree-sitter parse is CPU-bound; offload it to the blocking thread pool
         // so we don't stall the async runtime.
         let content = content.to_string();
-        tokio::task::spawn_blocking(move || {
+        match tokio::task::spawn_blocking(move || {
             let mut parser = Parser::new();
             if parser.set_language(&ts_language).is_err() {
                 return Vec::new();
@@ -998,7 +998,13 @@ impl ParserService for TreeSitterParser {
             exports.into_iter().collect()
         })
         .await
-        .unwrap_or_default()
+        {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::warn!("failed to join export extraction task: {}", e);
+                Vec::new()
+            }
+        }
     }
 
     async fn extract_references(
@@ -1286,8 +1292,27 @@ impl ParserService for TreeSitterParser {
 
                 // Resolve the relative path against the requiring file's directory.
                 let resolved = file_dir.join(&normalized);
+                // Clean the path by resolving `.` and `..` components so that a path
+                // like `routes/../middlewares/x.js` becomes `middlewares/x.js` and
+                // matches the normalised keys stored in exports_by_file.
+                let resolved_clean =
+                    resolved
+                        .components()
+                        .fold(PathBuf::new(), |mut acc, component| {
+                            match component {
+                                std::path::Component::CurDir => acc,
+                                std::path::Component::ParentDir => {
+                                    acc.pop();
+                                    acc
+                                }
+                                other => {
+                                    acc.push(other);
+                                    acc
+                                }
+                            }
+                        });
                 // Normalise to a forward-slash string (repo-relative, no leading ./).
-                let resolved_str = resolved.to_string_lossy().replace('\\', "/");
+                let resolved_str = resolved_clean.to_string_lossy().replace('\\', "/");
                 // Strip a leading "./" if Path::join left one.
                 let resolved_key = resolved_str
                     .strip_prefix("./")
