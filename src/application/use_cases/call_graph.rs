@@ -23,14 +23,14 @@ impl CallGraphUseCase {
     ///
     /// Returns the number of references saved.
     pub async fn save_references(&self, references: &[SymbolReference]) -> anyhow::Result<u64> {
-        self.persist_references(references.to_vec(), "<scip>").await
+        self.persist_references(references, "<scip>").await
     }
 
-    /// Save a batch of already-extracted references. Handles the empty-vec short-circuit,
+    /// Save a batch of already-extracted references. Handles the empty-slice short-circuit,
     /// the `save_batch` call with anyhow context, and the success debug log.
     async fn persist_references(
         &self,
-        references: Vec<SymbolReference>,
+        references: &[SymbolReference],
         file_path: &str,
     ) -> anyhow::Result<u64> {
         if references.is_empty() {
@@ -39,7 +39,7 @@ impl CallGraphUseCase {
 
         let count = references.len() as u64;
         self.repository
-            .save_batch(&references)
+            .save_batch(references)
             .await
             .with_context(|| format!("failed to save {} references for indexing", count))?;
 

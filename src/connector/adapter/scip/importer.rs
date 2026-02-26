@@ -4,14 +4,16 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use protobuf::Message as ProtobufMessage;
 use scip::types::symbol_information::Kind as SymbolKind;
+use scip::types::SymbolRole;
 use tracing::debug;
 
 use crate::domain::{Language, ReferenceKind, SymbolReference};
 
-// SymbolRole bit-flags from scip.proto
-const ROLE_DEFINITION: i32 = 0x1;
-const ROLE_IMPORT: i32 = 0x2;
-const ROLE_READ_ACCESS: i32 = 0x8;
+// Bit-mask constants derived from the SCIP protobuf SymbolRole enum so that
+// they stay in sync with the upstream specification automatically.
+const ROLE_DEFINITION: i32 = SymbolRole::Definition as i32;
+const ROLE_IMPORT: i32 = SymbolRole::Import as i32;
+const ROLE_READ_ACCESS: i32 = SymbolRole::ReadAccess as i32;
 
 /// Parses a `.scip` index file and converts its occurrences into
 /// [`SymbolReference`] entries compatible with the existing DuckDB call graph
@@ -177,10 +179,17 @@ struct ScopeDef {
 
 /// Returns the innermost enclosing function definition at or before `line`.
 ///
-/// This is a "best predecessor" heuristic: among all scope definitions whose
-/// start line ≤ `line`, pick the one with the greatest (most recent) start
-/// line.  This correctly attributes calls inside nested functions because the
-/// nested function's definition line is greater than its parent's.
+/// **Heuristic (start-line only):** [`ScopeDef`] records only the start line
+/// of each callable definition because SCIP occurrence ranges cover the
+/// *identifier token*, not the full function body.  The algorithm therefore
+/// picks the candidate with the greatest start line that is still ≤ `line`
+/// ("best predecessor").
+///
+/// **Known limitation:** a reference that appears *after* a function's opening
+/// line but *outside* its body (e.g. a module-level statement between two
+/// function definitions) will be incorrectly attributed to the preceding
+/// function.  Fixing this would require end-line information, which SCIP does
+/// not provide for definition occurrences.
 fn find_enclosing_scope(scope_defs: &[ScopeDef], line: u32) -> Option<ScopeDef> {
     scope_defs
         .iter()
@@ -325,9 +334,9 @@ fn infer_reference_kind(
 
 /// Map the SCIP `Document.language` string to our domain [`Language`] enum.
 ///
-/// SCIP uses the language name as a string (e.g. `"JavaScript"`, `"PHP"`).
-/// The values come from <https://github.com/nickel-lang/tree-sitter-nickel> and
-/// follow the naming in the SCIP spec.
+/// SCIP encodes language as a free-form string (e.g. `"JavaScript"`, `"PHP"`)
+/// as defined by the SCIP specification
+/// (<https://github.com/sourcegraph/scip/blob/main/scip.proto>).
 fn scip_language_to_domain(lang: &str) -> Language {
     match lang.to_lowercase().as_str() {
         "javascript" | "javascriptreact" => Language::JavaScript,
