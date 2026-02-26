@@ -3,17 +3,16 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};
 use tracing::{debug, info};
 
-/// Shells out to an installed SCIP indexer binary and returns the path to the
-/// generated `index.scip` file.
+/// Shells out to a SCIP indexer binary and returns the path to the generated
+/// `index.scip` file.
 ///
-/// Supported indexers (tried in order when the repo contains matching files):
+/// Supported indexers:
 /// - `scip-typescript` — handles JavaScript and TypeScript
 /// - `scip-php`        — handles PHP
 ///
-/// Each indexer is **mandatory when available**: if the binary is found on
-/// `PATH` but the run fails, an error is returned and indexing is aborted for
-/// that language rather than silently falling back to tree-sitter.  If the
-/// binary is not installed at all, the language is skipped gracefully.
+/// Both indexers are **required** when the repository contains the matching
+/// language files.  If the binary is not on `PATH`, indexing fails with a
+/// clear install hint rather than silently degrading to tree-sitter.
 pub struct ScipIndexer;
 
 /// Which SCIP indexer to invoke.
@@ -34,7 +33,7 @@ impl IndexerKind {
         }
     }
 
-    /// Arguments passed to the binary once it has been confirmed to exist.
+    /// Arguments passed to the binary.
     fn args(&self, output_path: &Path) -> Vec<String> {
         match self {
             IndexerKind::TypeScript => vec![
@@ -55,32 +54,42 @@ impl IndexerKind {
             IndexerKind::Php => "scip-php",
         }
     }
+
+    /// Human-readable install instructions shown when the binary is missing.
+    fn install_hint(&self) -> &'static str {
+        match self {
+            IndexerKind::TypeScript => {
+                "Install it with: npm install -g @sourcegraph/scip-typescript"
+            }
+            IndexerKind::Php => "Install it from: https://github.com/sourcegraph/scip-php",
+        }
+    }
 }
 
 impl ScipIndexer {
-    /// Try to run the given SCIP indexer against `repo_path`.
+    /// Run `kind` against `repo_path` and return the path to the generated
+    /// index file.
     ///
-    /// Returns:
-    /// - `Ok(Some(path))` — binary found and ran successfully; `path` points to
-    ///   the generated index file.
-    /// - `Ok(None)` — binary not installed; caller should skip gracefully.
-    /// - `Err(e)` — binary **was** found on `PATH` but execution failed.
-    ///   Callers must surface this error; silent fallback is not acceptable.
-    pub async fn try_run(repo_path: &Path, kind: IndexerKind) -> Result<Option<PathBuf>> {
+    /// Returns `Err` in every failure case:
+    /// - binary not on `PATH` → actionable install hint
+    /// - non-zero exit code   → stderr forwarded to the user
+    /// - index file missing after a successful exit → bug report hint
+    pub async fn run(repo_path: &Path, kind: IndexerKind) -> Result<PathBuf> {
         if !Self::binary_available(kind).await {
-            debug!(
-                "SCIP indexer '{}' not found on PATH, skipping",
-                kind.binary()
-            );
-            return Ok(None);
+            return Err(anyhow!(
+                "'{}' was not found on PATH.\n  {}\n  \
+                 Alternatively, place a pre-generated index.scip in the repository root \
+                 to skip automatic indexing.",
+                kind.binary(),
+                kind.install_hint(),
+            ));
         }
 
         let output_path = repo_path.join("index.scip");
         info!("Running {} in {:?}", kind.display_name(), repo_path);
 
-        let args = kind.args(&output_path);
         let result = tokio::process::Command::new(kind.binary())
-            .args(&args)
+            .args(kind.args(&output_path))
             .current_dir(repo_path)
             .output()
             .await;
@@ -93,7 +102,7 @@ impl ScipIndexer {
                         kind.display_name(),
                         output_path
                     );
-                    Ok(Some(output_path))
+                    Ok(output_path)
                 } else {
                     Err(anyhow!(
                         "{} exited successfully but {:?} was not created",
@@ -115,10 +124,10 @@ impl ScipIndexer {
         }
     }
 
-    /// Try to load an already-generated `index.scip` file from the repo root.
+    /// Try to load an already-generated `index.scip` from the repo root.
     ///
-    /// This allows users to pre-generate the index (e.g. in CI) and have
-    /// codesearch consume it without needing the indexer installed locally.
+    /// When present this file takes precedence over running any indexer,
+    /// making it the recommended path for CI environments.
     pub fn find_existing(repo_path: &Path) -> Option<PathBuf> {
         let candidate = repo_path.join("index.scip");
         if candidate.exists() {
@@ -129,8 +138,7 @@ impl ScipIndexer {
         }
     }
 
-    /// Returns `true` if the indexer binary is present and responds to
-    /// `--version`.
+    /// Returns `true` if the binary is present and responds to `--version`.
     async fn binary_available(kind: IndexerKind) -> bool {
         tokio::process::Command::new(kind.binary())
             .arg("--version")
@@ -141,18 +149,18 @@ impl ScipIndexer {
     }
 }
 
-/// Run all applicable SCIP indexers for a repository.
+/// Run all required SCIP indexers for a repository.
 ///
-/// Returns `(IndexerKind, PathBuf)` pairs for every indexer that produced an
-/// index file.  Returns an error if any **available** indexer fails — "available"
-/// meaning the binary was found on `PATH` but the run itself did not succeed.
-/// Indexers whose binary is simply not installed are skipped silently.
+/// If a pre-existing `index.scip` is found in the repo root it is used as-is
+/// and no indexer binary is invoked.  Otherwise the appropriate indexer(s) are
+/// run and an error is returned if any of them are missing or fail.
 pub async fn run_applicable_indexers(
     repo_path: &Path,
     has_js_ts: bool,
     has_php: bool,
 ) -> Result<Vec<(IndexerKind, PathBuf)>> {
-    // A pre-existing index.scip takes precedence — no indexer invocation needed.
+    // Pre-existing index takes precedence; the importer determines languages
+    // per document so a single file covers both JS/TS and PHP.
     if let Some(existing) = ScipIndexer::find_existing(repo_path) {
         info!(
             "Using pre-existing index.scip at {:?} (skipping indexer invocation)",
@@ -164,17 +172,13 @@ pub async fn run_applicable_indexers(
     let mut results = Vec::new();
 
     if has_js_ts {
-        match ScipIndexer::try_run(repo_path, IndexerKind::TypeScript).await? {
-            Some(path) => results.push((IndexerKind::TypeScript, path)),
-            None => {} // binary not installed — skip
-        }
+        let path = ScipIndexer::run(repo_path, IndexerKind::TypeScript).await?;
+        results.push((IndexerKind::TypeScript, path));
     }
 
     if has_php {
-        match ScipIndexer::try_run(repo_path, IndexerKind::Php).await? {
-            Some(path) => results.push((IndexerKind::Php, path)),
-            None => {} // binary not installed — skip
-        }
+        let path = ScipIndexer::run(repo_path, IndexerKind::Php).await?;
+        results.push((IndexerKind::Php, path));
     }
 
     Ok(results)
