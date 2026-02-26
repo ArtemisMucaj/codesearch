@@ -80,14 +80,6 @@ impl IndexRepositoryUseCase {
         self
     }
 
-    /// Returns `true` for languages handled by SCIP indexers (JS/TS and PHP).
-    fn is_scip_language(language: Language) -> bool {
-        matches!(
-            language,
-            Language::JavaScript | Language::TypeScript | Language::Php
-        )
-    }
-
     /// Delegate to the injected [`ScipPhase`], or return an empty map when
     /// no SCIP phase is configured (e.g. in tests).
     ///
@@ -201,27 +193,9 @@ impl IndexRepositoryUseCase {
         let total_files = files_to_process.len() as u64;
         info!("Found {} files to index", total_files);
 
-        // Phase 0 — pre-scan JS/TS files to build a map of file → exported symbol names.
-        // This map is used during reference extraction to resolve `const X = require('./path')`
-        // to the actual exported symbol rather than the local binding name.
-        let pre_scan_paths: Vec<String> = files_to_process
-            .iter()
-            .map(|entry| {
-                entry
-                    .path()
-                    .strip_prefix(absolute_path)
-                    .unwrap_or(entry.path())
-                    .to_string_lossy()
-                    .to_string()
-            })
-            .collect();
-        let exports_by_file = self
-            .run_export_pre_scan(absolute_path, &pre_scan_paths)
-            .await;
-
-        // Phase 1 — SCIP: run any available SCIP indexers (scip-typescript / scip-php)
-        // and pre-load their symbol references.  Files covered by SCIP skip tree-sitter
-        // call graph extraction in the loop below, giving compiler-accurate resolution.
+        // SCIP: run any available SCIP indexers (scip-typescript / scip-php) and
+        // pre-load their symbol references.  Only SCIP-derived references are stored;
+        // tree-sitter is used solely for code chunking / vector-store indexing.
         let has_js_ts = files_to_process.iter().any(|e| {
             matches!(
                 Language::from_path(e.path()),
@@ -304,34 +278,18 @@ impl IndexRepositoryUseCase {
                 self.vector_repo.save_batch(&chunks, &embeddings).await?;
             }
 
-            let refs_count = if Self::is_scip_language(language) {
-                // SCIP languages: call graph comes from the SCIP index only.
-                // Tree-sitter is not used here — it only handles chunking above.
-                if let Some(scip_file_refs) = scip_refs.get(&relative_path) {
-                    debug!(
-                        "Using {} SCIP references for {}",
-                        scip_file_refs.len(),
-                        relative_path
-                    );
-                    self.call_graph_use_case
-                        .save_references(scip_file_refs)
-                        .await
-                        .map_err(|e| DomainError::internal(format!("{:#}", e)))?
-                } else {
-                    0
-                }
-            } else {
-                // Non-SCIP languages: call graph via tree-sitter.
+            let refs_count = if let Some(scip_file_refs) = scip_refs.get(&relative_path) {
+                debug!(
+                    "Using {} SCIP references for {}",
+                    scip_file_refs.len(),
+                    relative_path
+                );
                 self.call_graph_use_case
-                    .extract_and_save(
-                        &content,
-                        &relative_path,
-                        language,
-                        repository.id(),
-                        &exports_by_file,
-                    )
+                    .save_references(scip_file_refs)
                     .await
                     .map_err(|e| DomainError::internal(format!("{:#}", e)))?
+            } else {
+                0
             };
             reference_count += refs_count;
 
@@ -381,24 +339,6 @@ impl IndexRepositoryUseCase {
             .find_by_id(repository.id())
             .await?
             .ok_or_else(|| DomainError::internal("Repository not found after indexing"))
-    }
-
-    /// Run the JS/TS export pre-scan and return the resulting map.
-    /// Shared by the initial and incremental index paths.
-    async fn run_export_pre_scan(
-        &self,
-        absolute_path: &Path,
-        pre_scan_paths: &[String],
-    ) -> HashMap<String, Vec<String>> {
-        let exports = self
-            .call_graph_use_case
-            .build_export_index(absolute_path, pre_scan_paths)
-            .await;
-        debug!(
-            "Export pre-scan complete: {} JS/TS files with detectable exports",
-            exports.len()
-        );
-        exports
     }
 
     async fn incremental_index(
@@ -520,17 +460,8 @@ impl IndexRepositoryUseCase {
                 .await?;
         }
 
-        // Phase 0 — pre-scan ALL JS/TS files in the repo (including unchanged ones) to build
-        // an exports map for require() resolution.  We need the full set because an added or
-        // modified file may import from an unchanged file.
-        let pre_scan_paths: Vec<String> = current_files.keys().cloned().collect();
-        let exports_by_file = self
-            .run_export_pre_scan(absolute_path, &pre_scan_paths)
-            .await;
-
-        // Phase 1 — SCIP: same as the full-index path.  We re-run the indexer even for
-        // incremental updates because a JS/TS file that imports a modified module may have
-        // stale cross-file resolution in the old tree-sitter references.
+        // SCIP: same as the full-index path.  Re-run the indexer even for incremental
+        // updates because cross-file references may have changed.
         let has_js_ts = current_files
             .keys()
             .any(|p| matches!(Language::from_path(Path::new(p)), Language::JavaScript | Language::TypeScript));
@@ -604,34 +535,18 @@ impl IndexRepositoryUseCase {
                 self.vector_repo.save_batch(&chunks, &embeddings).await?;
             }
 
-            let refs_count = if Self::is_scip_language(language) {
-                // SCIP languages: call graph comes from the SCIP index only.
-                // Tree-sitter is not used here — it only handles chunking above.
-                if let Some(scip_file_refs) = scip_refs.get(relative_path) {
-                    debug!(
-                        "Using {} SCIP references for {}",
-                        scip_file_refs.len(),
-                        relative_path
-                    );
-                    self.call_graph_use_case
-                        .save_references(scip_file_refs)
-                        .await
-                        .map_err(|e| DomainError::internal(format!("{:#}", e)))?
-                } else {
-                    0
-                }
-            } else {
-                // Non-SCIP languages: call graph via tree-sitter.
+            let refs_count = if let Some(scip_file_refs) = scip_refs.get(relative_path) {
+                debug!(
+                    "Using {} SCIP references for {}",
+                    scip_file_refs.len(),
+                    relative_path
+                );
                 self.call_graph_use_case
-                    .extract_and_save(
-                        &content,
-                        relative_path,
-                        language,
-                        repository.id(),
-                        &exports_by_file,
-                    )
+                    .save_references(scip_file_refs)
                     .await
                     .map_err(|e| DomainError::internal(format!("{:#}", e)))?
+            } else {
+                0
             };
             new_reference_count += refs_count;
 
