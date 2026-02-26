@@ -43,7 +43,7 @@ impl<'a> SymbolContextController<'a> {
         );
 
         out.push_str(&format!(
-            "\nCallers ({} total) — who uses this symbol:\n",
+            "Callers ({} total) — who uses this symbol:\n",
             ctx.caller_count
         ));
         if ctx.callers.is_empty() {

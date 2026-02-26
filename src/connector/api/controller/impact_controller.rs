@@ -48,36 +48,13 @@ impl<'a> ImpactController<'a> {
 
         let mut out = format!(
             "Impact analysis for '{}'\n\
-             ─────────────────────────────────────────\n\
-             Total affected symbols : {}\n\
-             Max depth reached      : {}\n\n",
-            analysis.root_symbol, analysis.total_affected, analysis.max_depth_reached
+             ─────────────────────────────────────────\n",
+            analysis.root_symbol
         );
 
-        for (depth_idx, nodes) in analysis.by_depth.iter().enumerate() {
-            if nodes.is_empty() {
-                continue;
-            }
-            out.push_str(&format!(
-                "Depth {} ({} symbol(s)):\n",
-                depth_idx + 1,
-                nodes.len()
-            ));
-            for node in nodes {
-                let alias_suffix = Self::alias_suffix(&node.import_alias);
-                out.push_str(&format!(
-                    "  • {} [{}{}]  {}  ({})\n",
-                    node.symbol,
-                    node.reference_kind,
-                    alias_suffix,
-                    node.file_path,
-                    node.repository_id
-                ));
-            }
-        }
-
-        // Build a parent-symbol → children map using via_symbol.
         let all_nodes: Vec<&ImpactNode> = analysis.by_depth.iter().flatten().collect();
+
+        // Build children_map: symbol → nodes that list it as via_symbol.
         let mut children_map: HashMap<&str, Vec<&ImpactNode>> = HashMap::new();
         for node in &all_nodes {
             if let Some(via) = node.via_symbol.as_deref() {
@@ -85,14 +62,41 @@ impl<'a> ImpactController<'a> {
             }
         }
 
-        // Render root then recurse.
-        out.push_str(&analysis.root_symbol);
-        out.push('\n');
-        let root_children = children_map
-            .get(analysis.root_symbol.as_str())
-            .cloned()
-            .unwrap_or_default();
-        Self::render_tree(&root_children, &children_map, "", &mut out);
+        // Leaf nodes (no one calls them) become roots in the inverted tree.
+        let leaf_nodes: Vec<&ImpactNode> = all_nodes
+            .iter()
+            .copied()
+            .filter(|n| !children_map.contains_key(n.symbol.as_str()))
+            .collect();
+
+        // Lookup by (depth, symbol) for unambiguous path tracing.
+        let mut node_by_depth_symbol: HashMap<(usize, &str), &ImpactNode> = HashMap::new();
+        for node in &all_nodes {
+            node_by_depth_symbol
+                .entry((node.depth, node.symbol.as_str()))
+                .or_insert(node);
+        }
+
+        for (idx, &leaf) in leaf_nodes.iter().enumerate() {
+            // Trace from leaf back toward the root symbol.
+            let mut path: Vec<&ImpactNode> = vec![leaf];
+            let mut current = leaf;
+            while let Some(via) = current.via_symbol.as_deref() {
+                let parent_depth = current.depth.saturating_sub(1);
+                if let Some(&parent) = node_by_depth_symbol.get(&(parent_depth, via)) {
+                    path.push(parent);
+                    current = parent;
+                } else {
+                    break;
+                }
+            }
+
+            Self::render_reversed_path(&path, &analysis.root_symbol, &mut out);
+
+            if idx < leaf_nodes.len() - 1 {
+                out.push('\n');
+            }
+        }
 
         out
     }
@@ -104,41 +108,32 @@ impl<'a> ImpactController<'a> {
             .unwrap_or_default()
     }
 
-    fn render_tree<'n>(
-        nodes: &[&'n ImpactNode],
-        children_map: &HashMap<&str, Vec<&'n ImpactNode>>,
-        prefix: &str,
-        out: &mut String,
-    ) {
-        for (i, node) in nodes.iter().enumerate() {
-            let is_last = i == nodes.len() - 1;
-            let connector = if is_last { "└── " } else { "├── " };
-            let child_prefix = if is_last { "    " } else { "│   " };
-
+    /// Render a single path (leaf → … → root) as an indented tree.
+    /// `path[0]` is the most-upstream caller (tree root); the queried symbol
+    /// is appended as the terminal leaf.
+    fn render_reversed_path(path: &[&ImpactNode], root_symbol: &str, out: &mut String) {
+        for (depth, node) in path.iter().enumerate() {
             let alias_suffix = Self::alias_suffix(&node.import_alias);
-            out.push_str(&format!(
-                "{}{}{} [{}{}] {}:{}\n",
-                prefix,
-                connector,
-                node.symbol,
-                node.reference_kind,
-                alias_suffix,
-                node.file_path,
-                node.line,
-            ));
-
-            let children = children_map
-                .get(node.symbol.as_str())
-                .cloned()
-                .unwrap_or_default();
-            if !children.is_empty() {
-                Self::render_tree(
-                    &children,
-                    children_map,
-                    &format!("{}{}", prefix, child_prefix),
-                    out,
-                );
+            if depth == 0 {
+                out.push_str(&format!(
+                    "{} [{}{}] {}:{}\n",
+                    node.symbol, node.reference_kind, alias_suffix, node.file_path, node.line,
+                ));
+            } else {
+                let indent = "    ".repeat(depth - 1);
+                out.push_str(&format!(
+                    "{}└── {} [{}{}] {}:{}\n",
+                    indent,
+                    node.symbol,
+                    node.reference_kind,
+                    alias_suffix,
+                    node.file_path,
+                    node.line,
+                ));
             }
         }
+        // Queried symbol is always the terminal leaf.
+        let indent = "    ".repeat(path.len() - 1);
+        out.push_str(&format!("{}└── {}\n", indent, root_symbol));
     }
 }
