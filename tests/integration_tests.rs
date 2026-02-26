@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use codesearch::{
-    CallGraphQuery, CallGraphRepository, CallGraphUseCase, CodeChunk, DuckdbCallGraphRepository,
-    DuckdbFileHashRepository, DuckdbMetadataRepository, FileHashRepository,
-    InMemoryVectorRepository, IndexRepositoryUseCase, Language, ListRepositoriesUseCase,
-    MockEmbedding, NodeType, ParserService, ReferenceKind, SearchCodeUseCase, SearchQuery,
-    TreeSitterParser, VectorStore,
+    CallGraphExtractor, CallGraphQuery, CallGraphRepository, CallGraphUseCase, CodeChunk,
+    DuckdbCallGraphRepository, DuckdbFileHashRepository, DuckdbMetadataRepository,
+    FileHashRepository, InMemoryVectorRepository, IndexRepositoryUseCase, Language,
+    ListRepositoriesUseCase, MockEmbedding, NodeType, ParserBasedExtractor, ParserService,
+    ReferenceKind, SearchCodeUseCase, SearchQuery, TreeSitterParser, VectorStore,
 };
 use tempfile::tempdir;
 
@@ -27,10 +27,10 @@ async fn setup_test_env() -> TestEnv {
     let parser = Arc::new(TreeSitterParser::new());
 
     // Create CallGraphUseCase with parser-based extractor
-    let call_graph_use_case = Arc::new(CallGraphUseCase::with_parser(
+    let extractor = Arc::new(ParserBasedExtractor::new(
         parser.clone() as Arc<dyn ParserService>,
-        call_graph_repo,
-    ));
+    )) as Arc<dyn CallGraphExtractor>;
+    let call_graph_use_case = Arc::new(CallGraphUseCase::new(extractor, call_graph_repo));
 
     TestEnv {
         metadata_repository,
@@ -210,10 +210,10 @@ async fn test_vector_store_returns_chunk_documents() {
     let embedding_service = Arc::new(MockEmbedding::new());
 
     // Create CallGraphUseCase with parser-based extractor
-    let call_graph_use_case = Arc::new(CallGraphUseCase::with_parser(
+    let extractor = Arc::new(ParserBasedExtractor::new(
         parser.clone() as Arc<dyn ParserService>,
-        call_graph_repo,
-    ));
+    )) as Arc<dyn CallGraphExtractor>;
+    let call_graph_use_case = Arc::new(CallGraphUseCase::new(extractor, call_graph_repo));
 
     let temp_dir = tempdir().expect("Failed to create temp directory");
     let src_dir = temp_dir.path().join("src");
