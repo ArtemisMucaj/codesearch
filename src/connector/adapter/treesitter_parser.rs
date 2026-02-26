@@ -748,9 +748,15 @@ impl TreeSitterParser {
                 if let Some(left) = node.child_by_field_name("left") {
                     if Self::is_module_exports(left, content) {
                         // module.exports = someIdentifier
+                        // module.exports = function namedFn(...) { ... }
                         if let Some(right) = node.child_by_field_name("right") {
                             if right.kind() == "identifier" {
                                 exports.insert(content[right.byte_range()].to_string());
+                            } else if matches!(right.kind(), "function_expression" | "function") {
+                                // Named function expression: `module.exports = function foo() {}`
+                                if let Some(name_node) = right.child_by_field_name("name") {
+                                    exports.insert(content[name_node.byte_range()].to_string());
+                                }
                             }
                         }
                     } else if left.kind() == "member_expression" {
@@ -2508,6 +2514,26 @@ export class MyClass {}
         assert!(
             exports.contains(&"MyClass".to_string()),
             "Expected 'MyClass'"
+        );
+    }
+
+    /// `module.exports = function namedFn(...)` — inline named function expression.
+    /// This is a very common middleware pattern and must be captured.
+    #[tokio::test]
+    async fn test_extract_module_exports_inline_named_function() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+module.exports = function appApplicationSource(req, res, next) {
+  next();
+};
+"#;
+        let exports = parser
+            .extract_module_exports(content, Language::JavaScript)
+            .await;
+        assert_eq!(
+            exports,
+            vec!["appApplicationSource"],
+            "Inline named function export must be captured"
         );
     }
 

@@ -213,21 +213,17 @@ impl IndexRepositoryUseCase {
                 }
             };
 
-            if chunks.is_empty() {
-                progress_bar.inc(1);
-                continue;
+            if !chunks.is_empty() {
+                let embeddings = match self.embedding_service.embed_chunks(&chunks).await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        warn!("Failed to generate embeddings for {}: {}", relative_path, e);
+                        progress_bar.inc(1);
+                        continue;
+                    }
+                };
+                self.vector_repo.save_batch(&chunks, &embeddings).await?;
             }
-
-            let embeddings = match self.embedding_service.embed_chunks(&chunks).await {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!("Failed to generate embeddings for {}: {}", relative_path, e);
-                    progress_bar.inc(1);
-                    continue;
-                }
-            };
-
-            self.vector_repo.save_batch(&chunks, &embeddings).await?;
 
             let refs_count = self
                 .call_graph_use_case
@@ -486,21 +482,17 @@ impl IndexRepositoryUseCase {
                 }
             };
 
-            if chunks.is_empty() {
-                progress_bar.inc(1);
-                continue;
+            if !chunks.is_empty() {
+                let embeddings = match self.embedding_service.embed_chunks(&chunks).await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        warn!("Failed to generate embeddings for {}: {}", relative_path, e);
+                        progress_bar.inc(1);
+                        continue;
+                    }
+                };
+                self.vector_repo.save_batch(&chunks, &embeddings).await?;
             }
-
-            let embeddings = match self.embedding_service.embed_chunks(&chunks).await {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!("Failed to generate embeddings for {}: {}", relative_path, e);
-                    progress_bar.inc(1);
-                    continue;
-                }
-            };
-
-            self.vector_repo.save_batch(&chunks, &embeddings).await?;
 
             let refs_count = self
                 .call_graph_use_case
