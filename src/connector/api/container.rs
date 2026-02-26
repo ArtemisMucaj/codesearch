@@ -8,12 +8,14 @@ use crate::application::{
     CallGraphExtractor, CallGraphRepository, CallGraphUseCase, FileHashRepository, ParserService,
     QueryExpander,
 };
+use crate::connector::adapter::scip::ScipPhaseRunner;
 use crate::{
     AnthropicClient, DeleteRepositoryUseCase, DuckdbCallGraphRepository, DuckdbFileHashRepository,
     DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService, ImpactAnalysisUseCase,
     InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander,
     MockEmbedding, MockReranking, OrtEmbedding, OrtReranking, ParserBasedExtractor,
-    RerankingService, SearchCodeUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
+    RerankingService, ScipPhase, SearchCodeUseCase, SymbolContextUseCase, TreeSitterParser,
+    VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -277,6 +279,7 @@ impl Container {
     }
 
     pub fn index_use_case(&self) -> IndexRepositoryUseCase {
+        let scip_phase: Arc<dyn ScipPhase> = Arc::new(ScipPhaseRunner);
         IndexRepositoryUseCase::new(
             self.repo_adapter.clone(),
             self.vector_repo.clone(),
@@ -285,6 +288,7 @@ impl Container {
             self.parser.clone(),
             self.embedding_service.clone(),
         )
+        .with_scip_phase(scip_phase)
     }
 
     pub fn search_use_case(&self) -> SearchCodeUseCase {

@@ -7,8 +7,8 @@ pub use application::{
     CallGraphExtractor, CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase,
     ContextEdge, DeleteRepositoryUseCase, EmbeddingService, FileHashRepository, ImpactAnalysis,
     ImpactAnalysisUseCase, ImpactNode, IndexRepositoryUseCase, ListRepositoriesUseCase,
-    MetadataRepository, ParserService, QueryExpander, RerankingService, SearchCodeUseCase,
-    SymbolContext, SymbolContextUseCase, VectorRepository,
+    MetadataRepository, ParserService, QueryExpander, RerankingService, ScipPhase,
+    SearchCodeUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
 };
 
 pub use cli::{Commands, OutputFormat};

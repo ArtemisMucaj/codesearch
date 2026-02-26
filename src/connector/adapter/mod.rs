@@ -12,6 +12,7 @@ mod mock_reranking;
 mod ort_embedding;
 mod ort_reranking;
 mod parser_based_extractor;
+pub mod scip;
 mod treesitter_parser;
 
 pub use anthropic_client::*;

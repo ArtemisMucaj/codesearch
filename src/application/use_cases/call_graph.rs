@@ -109,6 +109,14 @@ impl CallGraphUseCase {
         }
     }
 
+    /// Persist a slice of pre-extracted [`SymbolReference`]s that were produced by an
+    /// external extractor (e.g. the SCIP importer) rather than by [`extract_and_save`].
+    ///
+    /// Returns the number of references saved.
+    pub async fn save_references(&self, references: &[SymbolReference]) -> anyhow::Result<u64> {
+        self.persist_references(references.to_vec(), "<scip>").await
+    }
+
     /// Save a batch of already-extracted references. Handles the empty-vec short-circuit,
     /// the `save_batch` call with anyhow context, and the success debug log.
     async fn persist_references(
