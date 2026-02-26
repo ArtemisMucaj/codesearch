@@ -18,7 +18,7 @@ use crate::domain::{
 
 /// Port trait for the SCIP indexing phase.
 ///
-/// Implementations live in the connector layer (e.g. `ScipPhaseRunner`) so
+/// Implementations live in the connector layer (e.g. `ScipRunner`) so
 /// that the application layer stays free of external tool dependencies.
 ///
 /// The method is **fallible**: when a SCIP indexer binary is found on `PATH`
@@ -26,7 +26,7 @@ use crate::domain::{
 /// error surfaces to the user.  Returns `Ok(empty map)` when the repository
 /// contains no files of a SCIP-supported language.
 #[async_trait::async_trait]
-pub trait ScipPhase: Send + Sync {
+pub trait Scip: Send + Sync {
     /// Run SCIP indexers for `repo_path` and return a map of
     /// `relative_file_path → pre-extracted SymbolReferences`.
     ///
@@ -51,7 +51,7 @@ pub struct IndexRepositoryUseCase {
     embedding_service: Arc<dyn EmbeddingService>,
     /// Optional SCIP phase.  When present, JS/TS/PHP files use SCIP-derived
     /// symbol references instead of (or as a fallback from) tree-sitter.
-    scip_phase: Option<Arc<dyn ScipPhase>>,
+    scip_phase: Option<Arc<dyn Scip>>,
 }
 
 impl IndexRepositoryUseCase {
@@ -75,12 +75,12 @@ impl IndexRepositoryUseCase {
     }
 
     /// Attach an optional SCIP phase runner.
-    pub fn with_scip_phase(mut self, scip_phase: Arc<dyn ScipPhase>) -> Self {
+    pub fn with_scip_phase(mut self, scip_phase: Arc<dyn Scip>) -> Self {
         self.scip_phase = Some(scip_phase);
         self
     }
 
-    /// Delegate to the injected [`ScipPhase`], or return an empty map when
+    /// Delegate to the injected [`Scip`], or return an empty map when
     /// no SCIP phase is configured (e.g. in tests).
     ///
     /// Propagates errors from the phase so that a failed indexer aborts

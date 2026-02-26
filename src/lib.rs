@@ -7,7 +7,7 @@ pub use application::{
     CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase, ContextEdge,
     DeleteRepositoryUseCase, EmbeddingService, FileHashRepository, ImpactAnalysis,
     ImpactAnalysisUseCase, ImpactNode, IndexRepositoryUseCase, ListRepositoriesUseCase,
-    MetadataRepository, ParserService, QueryExpander, RerankingService, ScipPhase,
+    MetadataRepository, ParserService, QueryExpander, RerankingService, Scip,
     SearchCodeUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
 };
 

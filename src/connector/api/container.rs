@@ -5,12 +5,12 @@ use anyhow::Result;
 use tracing::debug;
 
 use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, QueryExpander};
-use crate::connector::adapter::scip::ScipPhaseRunner;
+use crate::connector::adapter::scip::ScipRunner;
 use crate::{
     AnthropicClient, DeleteRepositoryUseCase, DuckdbCallGraphRepository, DuckdbFileHashRepository,
     DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService, ImpactAnalysisUseCase,
     InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander,
-    MockEmbedding, MockReranking, OrtEmbedding, OrtReranking, RerankingService, ScipPhase,
+    MockEmbedding, MockReranking, OrtEmbedding, OrtReranking, RerankingService, Scip,
     SearchCodeUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
 };
 
@@ -269,7 +269,7 @@ impl Container {
     }
 
     pub fn index_use_case(&self) -> IndexRepositoryUseCase {
-        let scip_phase: Arc<dyn ScipPhase> = Arc::new(ScipPhaseRunner);
+        let scip_phase: Arc<dyn Scip> = Arc::new(ScipRunner);
         IndexRepositoryUseCase::new(
             self.repo_adapter.clone(),
             self.vector_repo.clone(),

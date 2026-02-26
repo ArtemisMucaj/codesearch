@@ -3,22 +3,22 @@ use std::path::Path;
 
 use tracing::info;
 
-use crate::application::use_cases::ScipPhase;
+use crate::application::use_cases::Scip;
 use crate::domain::{DomainError, SymbolReference};
 
 use super::{run_applicable_indexers, ScipImporter};
 
-/// Concrete implementation of [`ScipPhase`] that shells out to
+/// Concrete implementation of [`Scip`] that shells out to
 /// `scip-typescript` and/or `scip-php`, parses the resulting index files,
 /// and returns symbol references keyed by relative file path.
 ///
 /// When neither indexer is installed the method returns `Ok(empty)` so the
 /// caller uses tree-sitter as before.  When an indexer **is** installed but
 /// fails, `Err` is returned — the failure is never silently swallowed.
-pub struct ScipPhaseRunner;
+pub struct ScipRunner;
 
 #[async_trait::async_trait]
-impl ScipPhase for ScipPhaseRunner {
+impl Scip for ScipRunner {
     async fn run(
         &self,
         repo_path: &Path,
