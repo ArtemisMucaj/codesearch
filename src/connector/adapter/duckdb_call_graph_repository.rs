@@ -83,7 +83,10 @@ impl DuckdbCallGraphRepository {
             "#,
         )
         .map_err(|e| {
-            DomainError::storage(format!("Failed to initialize symbol_references schema: {}", e))
+            DomainError::storage(format!(
+                "Failed to initialize symbol_references schema: {}",
+                e
+            ))
         })?;
 
         debug!("DuckDB symbol_references table initialized");
@@ -92,19 +95,19 @@ impl DuckdbCallGraphRepository {
 
     fn row_to_symbol_reference(row: &duckdb::Row<'_>) -> duckdb::Result<SymbolReference> {
         Ok(SymbolReference::reconstitute(
-            row.get::<_, String>(0)?,                                  // id
-            row.get::<_, Option<String>>(1)?,                          // caller_symbol
-            row.get::<_, String>(2)?,                                  // callee_symbol
-            row.get::<_, String>(3)?,                                  // caller_file_path
-            row.get::<_, String>(4)?,                                  // reference_file_path
-            row.get::<_, i32>(5)? as u32,                              // reference_line
-            row.get::<_, i32>(6)? as u32,                              // reference_column
-            ReferenceKind::parse(&row.get::<_, String>(7)?),          // reference_kind
-            Language::parse(&row.get::<_, String>(8)?),               // language
-            row.get::<_, String>(9)?,                                  // repository_id
-            row.get::<_, Option<String>>(10)?,                         // caller_node_type
-            row.get::<_, Option<String>>(11)?,                         // enclosing_scope
-            row.get::<_, Option<String>>(12)?,                         // import_alias
+            row.get::<_, String>(0)?,                        // id
+            row.get::<_, Option<String>>(1)?,                // caller_symbol
+            row.get::<_, String>(2)?,                        // callee_symbol
+            row.get::<_, String>(3)?,                        // caller_file_path
+            row.get::<_, String>(4)?,                        // reference_file_path
+            row.get::<_, i32>(5)? as u32,                    // reference_line
+            row.get::<_, i32>(6)? as u32,                    // reference_column
+            ReferenceKind::parse(&row.get::<_, String>(7)?), // reference_kind
+            Language::parse(&row.get::<_, String>(8)?),      // language
+            row.get::<_, String>(9)?,                        // repository_id
+            row.get::<_, Option<String>>(10)?,               // caller_node_type
+            row.get::<_, Option<String>>(11)?,               // enclosing_scope
+            row.get::<_, Option<String>>(12)?,               // import_alias
         ))
     }
 
@@ -204,7 +207,9 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
         // returned twice.  Each leg can still use its own index independently.
         let callee_where = Self::build_where_clause(query, "callee_symbol = ?");
         let alias_where = Self::build_where_clause(query, "import_alias = ?");
-        let limit_clause = query.limit.map_or(String::new(), |l| format!(" LIMIT {}", l));
+        let limit_clause = query
+            .limit
+            .map_or(String::new(), |l| format!(" LIMIT {}", l));
 
         let cols = "id, caller_symbol, callee_symbol, caller_file_path, \
                     reference_file_path, reference_line, reference_column, \
@@ -264,7 +269,9 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
         let conn = self.conn.lock().await;
 
         let where_clause = Self::build_where_clause(query, "caller_symbol = ?");
-        let limit_clause = query.limit.map_or(String::new(), |l| format!(" LIMIT {}", l));
+        let limit_clause = query
+            .limit
+            .map_or(String::new(), |l| format!(" LIMIT {}", l));
 
         let sql = format!(
             r#"SELECT id, caller_symbol, callee_symbol, caller_file_path,
@@ -317,7 +324,9 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
         let conn = self.conn.lock().await;
 
         let where_clause = Self::build_where_clause(query, "reference_file_path = ?");
-        let limit_clause = query.limit.map_or(String::new(), |l| format!(" LIMIT {}", l));
+        let limit_clause = query
+            .limit
+            .map_or(String::new(), |l| format!(" LIMIT {}", l));
 
         let sql = format!(
             r#"SELECT id, caller_symbol, callee_symbol, caller_file_path,
@@ -540,7 +549,10 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
         let rows = stmt
-            .query_map(params![symbol_name, symbol_name], Self::row_to_symbol_reference)
+            .query_map(
+                params![symbol_name, symbol_name],
+                Self::row_to_symbol_reference,
+            )
             .map_err(|e| {
                 DomainError::storage(format!("Failed to query cross-repo references: {}", e))
             })?;

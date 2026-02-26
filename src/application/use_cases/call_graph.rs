@@ -247,7 +247,10 @@ mod tests {
     #[async_trait::async_trait]
     impl CallGraphRepository for MockCallGraphRepository {
         async fn save_batch(&self, references: &[SymbolReference]) -> Result<(), DomainError> {
-            self.saved.lock().unwrap().extend(references.iter().cloned());
+            self.saved
+                .lock()
+                .unwrap()
+                .extend(references.iter().cloned());
             Ok(())
         }
 

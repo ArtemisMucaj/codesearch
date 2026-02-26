@@ -86,10 +86,7 @@ impl SymbolContextUseCase {
 
     fn to_edge_caller(r: &SymbolReference) -> ContextEdge {
         ContextEdge {
-            symbol: r
-                .caller_symbol()
-                .unwrap_or("<anonymous>")
-                .to_string(),
+            symbol: r.caller_symbol().unwrap_or("<anonymous>").to_string(),
             file_path: r.caller_file_path().to_string(),
             line: r.reference_line(),
             reference_kind: r.reference_kind().to_string(),

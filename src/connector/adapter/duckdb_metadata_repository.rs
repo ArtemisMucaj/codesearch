@@ -33,10 +33,13 @@ impl DuckdbMetadataRepository {
     pub fn new_read_only(db_path: &Path) -> Result<Self, DomainError> {
         let config = Config::default()
             .access_mode(AccessMode::ReadOnly)
-            .map_err(|e| DomainError::storage(format!("Failed to configure read-only access: {}", e)))?;
+            .map_err(|e| {
+                DomainError::storage(format!("Failed to configure read-only access: {}", e))
+            })?;
 
-        let conn = Connection::open_with_flags(db_path, config)
-            .map_err(|e| DomainError::storage(format!("Failed to open DuckDB (read-only): {}", e)))?;
+        let conn = Connection::open_with_flags(db_path, config).map_err(|e| {
+            DomainError::storage(format!("Failed to open DuckDB (read-only): {}", e))
+        })?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),

@@ -1075,8 +1075,7 @@ impl ParserService for TreeSitterParser {
                 } else if capture_name == "import_alias" {
                     // Local alias captured directly by the query pattern (CommonJS
                     // renamed destructure: `const { foo: bar } = require(...)`).
-                    query_import_alias =
-                        Some(content[capture.node.byte_range()].to_string());
+                    query_import_alias = Some(content[capture.node.byte_range()].to_string());
                 } else if capture_name == "type_ref" {
                     // For type_ref, set the kind but only set name/node if not already set by "callee"
                     reference_kind = ReferenceKind::TypeReference;
@@ -1092,7 +1091,8 @@ impl ParserService for TreeSitterParser {
                     if reference_kind == ReferenceKind::Unknown {
                         reference_kind = Self::capture_to_reference_kind(capture_name);
                     }
-                    if capture_name == "require_import" || capture_name == "require_import_renamed" {
+                    if capture_name == "require_import" || capture_name == "require_import_renamed"
+                    {
                         is_require_import = true;
                     }
                 }
@@ -1199,9 +1199,7 @@ impl ParserService for TreeSitterParser {
                         node.parent()
                             .filter(|p| p.kind() == "import_specifier")
                             .and_then(|p| p.child_by_field_name("alias"))
-                            .map(|alias_node| {
-                                content[alias_node.byte_range()].to_string()
-                            })
+                            .map(|alias_node| content[alias_node.byte_range()].to_string())
                     })
                 } else {
                     None
@@ -1260,9 +1258,7 @@ impl ParserService for TreeSitterParser {
         {
             let file_dir = Path::new(file_path).parent().unwrap_or(Path::new(""));
 
-            for (reference, maybe_require_path) in
-                references.iter_mut().zip(require_paths.iter())
-            {
+            for (reference, maybe_require_path) in references.iter_mut().zip(require_paths.iter()) {
                 // We only resolve simple `const X = require('./path')` bindings.
                 // Destructured requires already store the exported property name as
                 // callee_symbol, so they don't need cross-file resolution.
@@ -1474,7 +1470,13 @@ fn main() {
 "#;
 
         let references = parser
-            .extract_references(content, "test.rs", Language::Rust, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "test.rs",
+                Language::Rust,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -1512,7 +1514,13 @@ def main():
 "#;
 
         let references = parser
-            .extract_references(content, "test.py", Language::Python, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "test.py",
+                Language::Python,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -1545,7 +1553,13 @@ function greet(user: User): string {
 "#;
 
         let references = parser
-            .extract_references(content, "test.ts", Language::TypeScript, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "test.ts",
+                Language::TypeScript,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -1554,10 +1568,7 @@ function greet(user: User): string {
             .iter()
             .filter(|r| r.callee_symbol() == "User")
             .collect();
-        assert!(
-            !user_refs.is_empty(),
-            "Should find type reference to User"
-        );
+        assert!(!user_refs.is_empty(), "Should find type reference to User");
     }
 
     #[tokio::test]
@@ -1574,7 +1585,13 @@ fn caller() {
 "#;
 
         let references = parser
-            .extract_references(content, "test.rs", Language::Rust, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "test.rs",
+                Language::Rust,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -1608,7 +1625,13 @@ func main() {
 "#;
 
         let references = parser
-            .extract_references(content, "main.go", Language::Go, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "main.go",
+                Language::Go,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -1658,7 +1681,13 @@ func main() {
 "#;
 
         let references = parser
-            .extract_references(content, "main.go", Language::Go, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "main.go",
+                Language::Go,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -1688,7 +1717,13 @@ int main() {
 "#;
 
         let references = parser
-            .extract_references(content, "main.cpp", Language::Cpp, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "main.cpp",
+                Language::Cpp,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -1706,7 +1741,9 @@ int main() {
 
         let vector_imports: Vec<_> = references
             .iter()
-            .filter(|r| r.callee_symbol() == "vector" && r.reference_kind() == ReferenceKind::Import)
+            .filter(|r| {
+                r.callee_symbol() == "vector" && r.reference_kind() == ReferenceKind::Import
+            })
             .collect();
         assert!(
             !vector_imports.is_empty(),
@@ -1755,19 +1792,13 @@ int main() {
 
         assert!(!chunks.is_empty(), "Should extract chunks from Swift file");
 
-        let has_circle = chunks
-            .iter()
-            .any(|c| c.symbol_name() == Some("Circle"));
+        let has_circle = chunks.iter().any(|c| c.symbol_name() == Some("Circle"));
         assert!(has_circle, "Should find Circle class");
 
-        let has_rect = chunks
-            .iter()
-            .any(|c| c.symbol_name() == Some("Rectangle"));
+        let has_rect = chunks.iter().any(|c| c.symbol_name() == Some("Rectangle"));
         assert!(has_rect, "Should find Rectangle struct");
 
-        let has_shape = chunks
-            .iter()
-            .any(|c| c.symbol_name() == Some("Shape"));
+        let has_shape = chunks.iter().any(|c| c.symbol_name() == Some("Shape"));
         assert!(has_shape, "Should find Shape protocol");
     }
 
@@ -1787,9 +1818,7 @@ int main() {
             .any(|c| c.symbol_name() == Some("printShapeInfo"));
         assert!(has_fn, "Should find printShapeInfo function");
 
-        let has_enum = chunks
-            .iter()
-            .any(|c| c.symbol_name() == Some("Result"));
+        let has_enum = chunks.iter().any(|c| c.symbol_name() == Some("Result"));
         assert!(has_enum, "Should find Result enum");
     }
 
@@ -1833,8 +1862,13 @@ int main() {
         let has_color = chunks.iter().any(|c| c.symbol_name() == Some("Color"));
         assert!(has_color, "Should find Color enum class");
 
-        let has_print_fn = chunks.iter().any(|c| c.symbol_name() == Some("printShapeInfo"));
-        assert!(has_print_fn, "Should find printShapeInfo top-level function");
+        let has_print_fn = chunks
+            .iter()
+            .any(|c| c.symbol_name() == Some("printShapeInfo"));
+        assert!(
+            has_print_fn,
+            "Should find printShapeInfo top-level function"
+        );
     }
 
     #[tokio::test]
@@ -1852,7 +1886,10 @@ int main() {
             .iter()
             .filter(|c| c.node_type() == NodeType::TypeDef)
             .collect();
-        assert!(!typedef_chunks.is_empty(), "Should find at least one type alias");
+        assert!(
+            !typedef_chunks.is_empty(),
+            "Should find at least one type alias"
+        );
 
         let has_shape_list = chunks.iter().any(|c| c.symbol_name() == Some("ShapeList"));
         assert!(has_shape_list, "Should find ShapeList type alias");
@@ -1879,17 +1916,24 @@ fun buildList(): ArrayList<String> {
 "#;
 
         let references = parser
-            .extract_references(content, "test.kt", Language::Kotlin, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "test.kt",
+                Language::Kotlin,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
-        assert!(!references.is_empty(), "Should extract references from Kotlin");
+        assert!(
+            !references.is_empty(),
+            "Should extract references from Kotlin"
+        );
 
         let sqrt_imports: Vec<_> = references
             .iter()
-            .filter(|r| {
-                r.callee_symbol() == "sqrt" && r.reference_kind() == ReferenceKind::Import
-            })
+            .filter(|r| r.callee_symbol() == "sqrt" && r.reference_kind() == ReferenceKind::Import)
             .collect();
         assert!(!sqrt_imports.is_empty(), "Should find import of sqrt");
 
@@ -1922,15 +1966,20 @@ class Car(speed: Int) : Vehicle(speed) {
 "#;
 
         let references = parser
-            .extract_references(content, "test.kt", Language::Kotlin, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "test.kt",
+                Language::Kotlin,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
         let animal_refs: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "Animal"
-                    && r.reference_kind() == ReferenceKind::Inheritance
+                r.callee_symbol() == "Animal" && r.reference_kind() == ReferenceKind::Inheritance
             })
             .collect();
         assert!(
@@ -1941,8 +1990,7 @@ class Car(speed: Int) : Vehicle(speed) {
         let vehicle_refs: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "Vehicle"
-                    && r.reference_kind() == ReferenceKind::Inheritance
+                r.callee_symbol() == "Vehicle" && r.reference_kind() == ReferenceKind::Inheritance
             })
             .collect();
         assert!(
@@ -1964,15 +2012,20 @@ fun example() {
 "#;
 
         let references = parser
-            .extract_references(content, "test.kt", Language::Kotlin, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "test.kt",
+                Language::Kotlin,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
         let add_calls: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "add"
-                    && r.reference_kind() == ReferenceKind::MethodCall
+                r.callee_symbol() == "add" && r.reference_kind() == ReferenceKind::MethodCall
             })
             .collect();
         assert!(!add_calls.is_empty(), "Should find method calls to add");
@@ -1994,17 +2047,25 @@ print(message)
 "#;
 
         let references = parser
-            .extract_references(content, "test.swift", Language::Swift, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "test.swift",
+                Language::Swift,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
-        assert!(!references.is_empty(), "Should extract references from Swift");
+        assert!(
+            !references.is_empty(),
+            "Should extract references from Swift"
+        );
 
         let foundation_imports: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "Foundation"
-                    && r.reference_kind() == ReferenceKind::Import
+                r.callee_symbol() == "Foundation" && r.reference_kind() == ReferenceKind::Import
             })
             .collect();
         assert!(
@@ -2032,7 +2093,13 @@ module.exports = setupRoutes;
 "#;
 
         let references = parser
-            .extract_references(content, "routes/na-api-router.js", Language::JavaScript, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "routes/na-api-router.js",
+                Language::JavaScript,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -2040,8 +2107,7 @@ module.exports = setupRoutes;
         let express_imports: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "express"
-                    && r.reference_kind() == ReferenceKind::Import
+                r.callee_symbol() == "express" && r.reference_kind() == ReferenceKind::Import
             })
             .collect();
         assert!(
@@ -2054,8 +2120,7 @@ module.exports = setupRoutes;
         let add_source_imports: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "addSource"
-                    && r.reference_kind() == ReferenceKind::Import
+                r.callee_symbol() == "addSource" && r.reference_kind() == ReferenceKind::Import
             })
             .collect();
         assert!(
@@ -2069,8 +2134,7 @@ module.exports = setupRoutes;
         let use_method_calls: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "use"
-                    && r.reference_kind() == ReferenceKind::MethodCall
+                r.callee_symbol() == "use" && r.reference_kind() == ReferenceKind::MethodCall
             })
             .collect();
         assert!(
@@ -2092,7 +2156,13 @@ function setupRoutes() {
 "#;
 
         let references = parser
-            .extract_references(content, "server.js", Language::JavaScript, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "server.js",
+                Language::JavaScript,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -2100,8 +2170,7 @@ function setupRoutes() {
         let handler_imports: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "handler"
-                    && r.reference_kind() == ReferenceKind::Import
+                r.callee_symbol() == "handler" && r.reference_kind() == ReferenceKind::Import
             })
             .collect();
         assert!(
@@ -2127,7 +2196,13 @@ function main() {
 "#;
 
         let references = parser
-            .extract_references(content, "main.ts", Language::TypeScript, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "main.ts",
+                Language::TypeScript,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -2135,8 +2210,7 @@ function main() {
         let import_refs: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "processRequest"
-                    && r.reference_kind() == ReferenceKind::Import
+                r.callee_symbol() == "processRequest" && r.reference_kind() == ReferenceKind::Import
             })
             .collect();
         assert!(
@@ -2169,18 +2243,26 @@ function main() {
 "#;
 
         let references = parser
-            .extract_references(content, "main.ts", Language::TypeScript, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "main.ts",
+                Language::TypeScript,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
         let import_refs: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "processRequest"
-                    && r.reference_kind() == ReferenceKind::Import
+                r.callee_symbol() == "processRequest" && r.reference_kind() == ReferenceKind::Import
             })
             .collect();
-        assert!(!import_refs.is_empty(), "Should find import of 'processRequest'");
+        assert!(
+            !import_refs.is_empty(),
+            "Should find import of 'processRequest'"
+        );
         assert_eq!(
             import_refs[0].import_alias(),
             None,
@@ -2200,15 +2282,20 @@ createServer((req, res) => { res.end('ok'); }).listen(3000);
 "#;
 
         let references = parser
-            .extract_references(content, "server.js", Language::JavaScript, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "server.js",
+                Language::JavaScript,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
         let import_refs: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "createServer"
-                    && r.reference_kind() == ReferenceKind::Import
+                r.callee_symbol() == "createServer" && r.reference_kind() == ReferenceKind::Import
             })
             .collect();
         assert!(
@@ -2236,15 +2323,20 @@ makeServer((req, res) => { res.end('ok'); }).listen(3000);
 "#;
 
         let references = parser
-            .extract_references(content, "server.js", Language::JavaScript, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "server.js",
+                Language::JavaScript,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
         let import_refs: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "createServer"
-                    && r.reference_kind() == ReferenceKind::Import
+                r.callee_symbol() == "createServer" && r.reference_kind() == ReferenceKind::Import
             })
             .collect();
         assert!(
@@ -2273,15 +2365,20 @@ const router = new ExpressRouter();
 "#;
 
         let references = parser
-            .extract_references(content, "router.ts", Language::TypeScript, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "router.ts",
+                Language::TypeScript,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
         let import_refs: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "Router"
-                    && r.reference_kind() == ReferenceKind::Import
+                r.callee_symbol() == "Router" && r.reference_kind() == ReferenceKind::Import
             })
             .collect();
         assert!(
@@ -2308,7 +2405,13 @@ const { createServer: makeServer } = someOtherFactory('config');
 "#;
 
         let references = parser
-            .extract_references(content, "server.js", Language::JavaScript, "test-repo", &HashMap::new())
+            .extract_references(
+                content,
+                "server.js",
+                Language::JavaScript,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -2377,7 +2480,10 @@ export class MyClass {}
             exports.contains(&"helperFn".to_string()),
             "Expected 'helperFn'"
         );
-        assert!(exports.contains(&"MyClass".to_string()), "Expected 'MyClass'");
+        assert!(
+            exports.contains(&"MyClass".to_string()),
+            "Expected 'MyClass'"
+        );
     }
 
     /// Non-JS language must return empty.
@@ -2385,9 +2491,7 @@ export class MyClass {}
     async fn test_extract_module_exports_unsupported_language() {
         let parser = TreeSitterParser::new();
         let content = "fn main() {}";
-        let exports = parser
-            .extract_module_exports(content, Language::Rust)
-            .await;
+        let exports = parser.extract_module_exports(content, Language::Rust).await;
         assert!(
             exports.is_empty(),
             "Rust files should have no module exports"

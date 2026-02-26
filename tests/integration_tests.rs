@@ -28,7 +28,7 @@ async fn setup_test_env() -> TestEnv {
 
     // Create CallGraphUseCase with parser-based extractor
     let extractor = Arc::new(ParserBasedExtractor::new(
-        parser.clone() as Arc<dyn ParserService>,
+        parser.clone() as Arc<dyn ParserService>
     )) as Arc<dyn CallGraphExtractor>;
     let call_graph_use_case = Arc::new(CallGraphUseCase::new(extractor, call_graph_repo));
 
@@ -157,10 +157,7 @@ async fn test_language_detection() {
         Language::TypeScript
     );
     assert_eq!(Language::from_path(Path::new("main.go")), Language::Go);
-    assert_eq!(
-        Language::from_path(Path::new("Main.kt")),
-        Language::Kotlin
-    );
+    assert_eq!(Language::from_path(Path::new("Main.kt")), Language::Kotlin);
     assert_eq!(
         Language::from_path(Path::new("build.gradle.kts")),
         Language::Kotlin
@@ -211,7 +208,7 @@ async fn test_vector_store_returns_chunk_documents() {
 
     // Create CallGraphUseCase with parser-based extractor
     let extractor = Arc::new(ParserBasedExtractor::new(
-        parser.clone() as Arc<dyn ParserService>,
+        parser.clone() as Arc<dyn ParserService>
     )) as Arc<dyn CallGraphExtractor>;
     let call_graph_use_case = Arc::new(CallGraphUseCase::new(extractor, call_graph_repo));
 
@@ -371,7 +368,9 @@ pub fn render(frame: &str) -> String {
     let search_use_case = SearchCodeUseCase::new(env.vector_repo.clone(), embedding_service);
 
     // text_search=true activates the hybrid (semantic + BM25 + RRF) path
-    let query = SearchQuery::new("compute").with_limit(5).with_text_search(true);
+    let query = SearchQuery::new("compute")
+        .with_limit(5)
+        .with_text_search(true);
     let results = search_use_case
         .execute(query)
         .await
@@ -455,11 +454,8 @@ async fn test_hybrid_search_handles_special_chars_in_query() {
     let temp_dir = tempdir().expect("Failed to create temp directory");
     let src_dir = temp_dir.path().join("src");
     std::fs::create_dir_all(&src_dir).expect("Failed to create src directory");
-    std::fs::write(
-        src_dir.join("util.rs"),
-        "pub fn helper() -> bool { true }",
-    )
-    .expect("Failed to write test file");
+    std::fs::write(src_dir.join("util.rs"), "pub fn helper() -> bool { true }")
+        .expect("Failed to write test file");
 
     let embedding_service = Arc::new(MockEmbedding::new());
     let index_use_case = IndexRepositoryUseCase::new(
@@ -544,7 +540,10 @@ async fn test_hybrid_search_with_text_search_disabled_returns_semantic_only() {
         .with_text_search(false);
     let results = search_use_case.execute(query).await.expect("Search failed");
 
-    assert!(!results.is_empty(), "Semantic-only search should return results");
+    assert!(
+        !results.is_empty(),
+        "Semantic-only search should return results"
+    );
     // MockEmbedding produces hash-seeded random unit vectors, so cosine similarity
     // is pseudo-random in [-1, 1] — no fixed threshold is reliable here.
     // We verify only that the score is a real numeric value; range correctness is
@@ -739,7 +738,10 @@ function main() {
         !alias_refs.is_empty(),
         "Expected import_alias = 'handleReq' on the Import reference for 'processRequest', \
          got aliases: {:?}",
-        import_refs.iter().map(|r| r.import_alias()).collect::<Vec<_>>()
+        import_refs
+            .iter()
+            .map(|r| r.import_alias())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -813,7 +815,10 @@ makeServer((req, res) => { res.end('ok'); }).listen(3000);
         !alias_refs.is_empty(),
         "Expected import_alias = 'makeServer' on the Import reference for 'createServer', \
          got aliases: {:?}",
-        import_refs.iter().map(|r| r.import_alias()).collect::<Vec<_>>()
+        import_refs
+            .iter()
+            .map(|r| r.import_alias())
+            .collect::<Vec<_>>()
     );
 }
 

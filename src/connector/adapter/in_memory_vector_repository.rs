@@ -115,7 +115,9 @@ impl VectorRepository for InMemoryVectorRepository {
             query.limit()
         };
 
-        let semantic = self.search_semantic(query_embedding, query, fetch_limit).await;
+        let semantic = self
+            .search_semantic(query_embedding, query, fetch_limit)
+            .await;
 
         if !query.is_text_search() {
             return Ok(semantic);
@@ -198,7 +200,12 @@ impl InMemoryVectorRepository {
         results
     }
 
-    async fn search_text(&self, terms: &[&str], query: &SearchQuery, limit: usize) -> Vec<SearchResult> {
+    async fn search_text(
+        &self,
+        terms: &[&str],
+        query: &SearchQuery,
+        limit: usize,
+    ) -> Vec<SearchResult> {
         if terms.is_empty() {
             return vec![];
         }
@@ -219,8 +226,16 @@ impl InMemoryVectorRepository {
                     .iter()
                     .map(|t| {
                         let t = t.to_lowercase();
-                        let c = if content_lower.contains(&t) { 1.0_f32 } else { 0.0 };
-                        let s = if symbol_lower.contains(&t) { 2.0_f32 } else { 0.0 };
+                        let c = if content_lower.contains(&t) {
+                            1.0_f32
+                        } else {
+                            0.0
+                        };
+                        let s = if symbol_lower.contains(&t) {
+                            2.0_f32
+                        } else {
+                            0.0
+                        };
                         c + s
                     })
                     .sum::<f32>()
@@ -256,7 +271,6 @@ impl InMemoryVectorRepository {
         results.truncate(limit);
         results
     }
-
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -312,7 +326,11 @@ mod tests {
         let alpha = make_chunk("chunk-alpha", "fn alpha() { alpha() }", Some("alpha"));
         let beta = make_chunk("chunk-beta", "fn beta() { beta() }", Some("beta"));
 
-        let alpha_emb = Embedding::new("chunk-alpha".to_string(), unit_vec(4, 0), "test".to_string());
+        let alpha_emb = Embedding::new(
+            "chunk-alpha".to_string(),
+            unit_vec(4, 0),
+            "test".to_string(),
+        );
         let beta_emb = Embedding::new("chunk-beta".to_string(), unit_vec(4, 1), "test".to_string());
 
         let repo = Arc::new(InMemoryVectorRepository::new());
@@ -343,18 +361,16 @@ mod tests {
     async fn hybrid_mode_produces_rrf_scores() {
         let repo = seeded_repo().await;
         let query_embedding = unit_vec(4, 0);
-        let query = SearchQuery::new("alpha").with_limit(5).with_text_search(true);
+        let query = SearchQuery::new("alpha")
+            .with_limit(5)
+            .with_text_search(true);
 
         let results = repo.search(&query_embedding, &query).await.unwrap();
 
         assert!(!results.is_empty());
         // RRF scores are always < 1/(RRF_K+1) * 2 ≈ 0.033
         for r in &results {
-            assert!(
-                r.score() < 0.1,
-                "expected RRF score, got {:.4}",
-                r.score()
-            );
+            assert!(r.score() < 0.1, "expected RRF score, got {:.4}", r.score());
         }
     }
 
@@ -366,7 +382,9 @@ mod tests {
         // After fusion "alpha" must be ranked first.
         let repo = seeded_repo().await;
         let query_embedding = unit_vec(4, 0);
-        let query = SearchQuery::new("alpha").with_limit(5).with_text_search(true);
+        let query = SearchQuery::new("alpha")
+            .with_limit(5)
+            .with_text_search(true);
 
         let results = repo.search(&query_embedding, &query).await.unwrap();
 
@@ -428,7 +446,10 @@ mod tests {
         let results = repo.search(&query_embedding, &query).await.unwrap();
 
         // Should still return results from the semantic leg via rrf_fuse
-        assert!(!results.is_empty(), "semantic leg should provide fallback results");
+        assert!(
+            !results.is_empty(),
+            "semantic leg should provide fallback results"
+        );
     }
 
     #[tokio::test]

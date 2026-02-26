@@ -107,10 +107,9 @@ impl AnthropicClient {
     /// | `ANTHROPIC_MODEL`    | `mistralai/ministral-3-3b` | Model in LM Studio       |
     /// | `ANTHROPIC_API_KEY`  | `""` (empty)              | Not required for local    |
     pub fn from_env() -> Self {
-        let base = std::env::var("ANTHROPIC_BASE_URL")
-            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        let model = std::env::var("ANTHROPIC_MODEL")
-            .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let base =
+            std::env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        let model = std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         let key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
         Self::new(key, model, base)
     }
@@ -130,25 +129,28 @@ impl ChatClient for AnthropicClient {
         // Any HTTP response (even 4xx/5xx) means the server is up.
         let probe_client = &self.probe_client;
         let base_url = &self.base_url;
-        let probe = self.reachable.get_or_init(|| async move {
-            match probe_client.head(base_url).send().await {
-                Ok(_) => Ok(()),
-                Err(e) if e.is_connect() || e.is_timeout() => Err(format!(
-                    "server not reachable at {}: {e}",
-                    base_url.trim_end_matches('/')
-                )),
-                Err(e) => {
-                    warn!(
-                        "AnthropicClient: probe to {} failed unexpectedly: {e}",
+        let probe = self
+            .reachable
+            .get_or_init(|| async move {
+                match probe_client.head(base_url).send().await {
+                    Ok(_) => Ok(()),
+                    Err(e) if e.is_connect() || e.is_timeout() => Err(format!(
+                        "server not reachable at {}: {e}",
                         base_url.trim_end_matches('/')
-                    );
-                    Err(format!(
-                        "probe to {} failed: {e}",
-                        base_url.trim_end_matches('/')
-                    ))
+                    )),
+                    Err(e) => {
+                        warn!(
+                            "AnthropicClient: probe to {} failed unexpectedly: {e}",
+                            base_url.trim_end_matches('/')
+                        );
+                        Err(format!(
+                            "probe to {} failed: {e}",
+                            base_url.trim_end_matches('/')
+                        ))
+                    }
                 }
-            }
-        }).await;
+            })
+            .await;
         if let Err(msg) = probe {
             return Err(DomainError::StorageError(format!("AnthropicClient: {msg}")));
         }
@@ -171,7 +173,9 @@ impl ChatClient for AnthropicClient {
             .json(&request)
             .send()
             .await
-            .map_err(|e| DomainError::StorageError(format!("AnthropicClient: request failed: {e}")))?;
+            .map_err(|e| {
+                DomainError::StorageError(format!("AnthropicClient: request failed: {e}"))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -187,10 +191,9 @@ impl ChatClient for AnthropicClient {
             )));
         }
 
-        let api_response: ApiResponse = response
-            .json()
-            .await
-            .map_err(|e| DomainError::StorageError(format!("AnthropicClient: failed to parse response: {e}")))?;
+        let api_response: ApiResponse = response.json().await.map_err(|e| {
+            DomainError::StorageError(format!("AnthropicClient: failed to parse response: {e}"))
+        })?;
 
         Ok(api_response
             .content

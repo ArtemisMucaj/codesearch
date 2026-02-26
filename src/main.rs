@@ -155,7 +155,10 @@ async fn run_http_server(container: Arc<Container>, port: u16, public: bool) -> 
         config,
     );
 
-    let app = Router::new().route("/mcp", any(move |req| async move { mcp_service.handle(req).await }));
+    let app = Router::new().route(
+        "/mcp",
+        any(move |req| async move { mcp_service.handle(req).await }),
+    );
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
 

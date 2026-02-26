@@ -152,7 +152,9 @@ impl IndexRepositoryUseCase {
                     .to_string()
             })
             .collect();
-        let exports_by_file = self.run_export_pre_scan(absolute_path, &pre_scan_paths).await;
+        let exports_by_file = self
+            .run_export_pre_scan(absolute_path, &pre_scan_paths)
+            .await;
 
         let progress_bar = ProgressBar::new(total_files);
         progress_bar.set_style(
@@ -429,7 +431,9 @@ impl IndexRepositoryUseCase {
         // an exports map for require() resolution.  We need the full set because an added or
         // modified file may import from an unchanged file.
         let pre_scan_paths: Vec<String> = current_files.keys().cloned().collect();
-        let exports_by_file = self.run_export_pre_scan(absolute_path, &pre_scan_paths).await;
+        let exports_by_file = self
+            .run_export_pre_scan(absolute_path, &pre_scan_paths)
+            .await;
 
         // Process added and modified files
         let files_to_process: Vec<&String> = added.iter().chain(modified.iter()).copied().collect();

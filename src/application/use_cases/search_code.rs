@@ -9,8 +9,8 @@ use tracing::{info, warn};
 /// uninformative and only add noise to the output.
 const MIN_RESULT_SCORE: f32 = 0.1;
 
-use crate::application::{EmbeddingService, QueryExpander, RerankingService, VectorRepository};
 use crate::application::use_cases::rrf_fuse::rrf_fuse;
+use crate::application::{EmbeddingService, QueryExpander, RerankingService, VectorRepository};
 use crate::domain::{DomainError, SearchQuery, SearchResult};
 
 pub struct SearchCodeUseCase {
@@ -60,7 +60,11 @@ impl SearchCodeUseCase {
             //   num=50           -> 50 + 13  = 63  (+26%)
             //   num=100          -> 100 + 22 = 122 (+22%)
             // Default to 20 base candidates when not specified (i.e. when limit <= 10)
-            let base = if query.limit() <= 10 { 20 } else { query.limit() };
+            let base = if query.limit() <= 10 {
+                20
+            } else {
+                query.limit()
+            };
             let extra = ((base as f64) / (base as f64).ln()).ceil() as usize;
             base + extra
         } else {
@@ -107,9 +111,7 @@ impl SearchCodeUseCase {
 
             let mut all_results: Vec<Vec<SearchResult>> = Vec::with_capacity(set.len());
             while let Some(res) = set.join_next().await {
-                all_results.push(
-                    res.map_err(|e| DomainError::StorageError(e.to_string()))??
-                );
+                all_results.push(res.map_err(|e| DomainError::StorageError(e.to_string()))??);
             }
 
             let total_pre_fusion: usize = all_results.iter().map(|r| r.len()).sum();

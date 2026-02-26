@@ -58,12 +58,19 @@ impl<'a> ImpactController<'a> {
             if nodes.is_empty() {
                 continue;
             }
-            out.push_str(&format!("Depth {} ({} symbol(s)):\n", depth_idx + 1, nodes.len()));
+            out.push_str(&format!(
+                "Depth {} ({} symbol(s)):\n",
+                depth_idx + 1,
+                nodes.len()
+            ));
             for node in nodes {
                 let alias_suffix = Self::alias_suffix(&node.import_alias);
                 out.push_str(&format!(
                     "  • {} [{}{}]  {}  ({})\n",
-                    node.symbol, node.reference_kind, alias_suffix, node.file_path,
+                    node.symbol,
+                    node.reference_kind,
+                    alias_suffix,
+                    node.file_path,
                     node.repository_id
                 ));
             }
@@ -91,7 +98,10 @@ impl<'a> ImpactController<'a> {
     }
 
     fn alias_suffix(alias: &Option<String>) -> String {
-        alias.as_ref().map(|a| format!(", as {}", a)).unwrap_or_default()
+        alias
+            .as_ref()
+            .map(|a| format!(", as {}", a))
+            .unwrap_or_default()
     }
 
     fn render_tree<'n>(
@@ -108,7 +118,12 @@ impl<'a> ImpactController<'a> {
             let alias_suffix = Self::alias_suffix(&node.import_alias);
             out.push_str(&format!(
                 "{}{}{} [{}{}] {}:{}\n",
-                prefix, connector, node.symbol, node.reference_kind, alias_suffix, node.file_path,
+                prefix,
+                connector,
+                node.symbol,
+                node.reference_kind,
+                alias_suffix,
+                node.file_path,
                 node.line,
             ));
 
