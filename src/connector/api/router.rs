@@ -46,7 +46,15 @@ impl<'a> Router<'a> {
                 text_search,
             } => {
                 self.search_controller
-                    .search(query, num, min_score, language, repository, format, text_search)
+                    .search(
+                        query,
+                        num,
+                        min_score,
+                        language,
+                        repository,
+                        format,
+                        text_search,
+                    )
                     .await
             }
             Commands::List => self.list_repositories_controller.list().await,

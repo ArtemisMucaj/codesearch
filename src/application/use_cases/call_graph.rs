@@ -1,8 +1,11 @@
+use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
-use tracing::debug;
+use anyhow::Context;
+use tracing::{debug, warn};
 
-use crate::application::{CallGraphQuery, CallGraphRepository, CallGraphStats, ParserService};
+use crate::application::{CallGraphQuery, CallGraphRepository, CallGraphStats};
 use crate::domain::{DomainError, Language, SymbolReference};
 
 /// Trait for call graph extraction strategies.
@@ -11,38 +14,32 @@ use crate::domain::{DomainError, Language, SymbolReference};
 #[async_trait::async_trait]
 pub trait CallGraphExtractor: Send + Sync {
     /// Extract symbol references from source code.
+    ///
+    /// `exports_by_file` maps repo-relative file paths to the exported symbol names of
+    /// that file.  Pass an empty map for languages that don't need cross-file resolution.
     async fn extract(
         &self,
         content: &str,
         file_path: &str,
         language: Language,
         repository_id: &str,
+        exports_by_file: &HashMap<String, Vec<String>>,
     ) -> Result<Vec<SymbolReference>, DomainError>;
-}
 
-/// Default extractor using the ParserService.
-pub struct ParserBasedExtractor {
-    parser_service: Arc<dyn ParserService>,
-}
-
-impl ParserBasedExtractor {
-    pub fn new(parser_service: Arc<dyn ParserService>) -> Self {
-        Self { parser_service }
-    }
-}
-
-#[async_trait::async_trait]
-impl CallGraphExtractor for ParserBasedExtractor {
-    async fn extract(
+    /// Build an export index for JS/TS files so that `extract` can resolve
+    /// relative `require()` paths to actual exported symbol names.
+    ///
+    /// Reads each JS/TS file under `absolute_path` / `relative_path` and returns
+    /// a map of repo-relative path → exported symbol names.
+    ///
+    /// The default implementation returns an empty map (no pre-scan needed for
+    /// languages that don't use cross-file import resolution).
+    async fn build_export_index(
         &self,
-        content: &str,
-        file_path: &str,
-        language: Language,
-        repository_id: &str,
-    ) -> Result<Vec<SymbolReference>, DomainError> {
-        self.parser_service
-            .extract_references(content, file_path, language, repository_id)
-            .await
+        _absolute_path: &Path,
+        _relative_paths: &[String],
+    ) -> HashMap<String, Vec<String>> {
+        HashMap::new()
     }
 }
 
@@ -67,16 +64,26 @@ impl CallGraphUseCase {
         }
     }
 
-    /// Create a CallGraphUseCase using the default parser-based extractor.
-    pub fn with_parser(
-        parser_service: Arc<dyn ParserService>,
-        repository: Arc<dyn CallGraphRepository>,
-    ) -> Self {
-        let extractor = Arc::new(ParserBasedExtractor::new(parser_service));
-        Self::new(extractor, repository)
+    /// Build an export index for a set of files.
+    ///
+    /// Delegates to the extractor's pre-scan implementation; returns an empty
+    /// map for extractors that don't need cross-file export resolution.
+    pub async fn build_export_index(
+        &self,
+        absolute_path: &Path,
+        relative_paths: &[String],
+    ) -> HashMap<String, Vec<String>> {
+        self.extractor
+            .build_export_index(absolute_path, relative_paths)
+            .await
     }
 
     /// Extract symbol references from content and save them to the repository.
+    ///
+    /// `exports_by_file` is used to resolve relative `require()` paths in JS/TS
+    /// files to the actual exported symbol names.  Pass an empty map when no
+    /// pre-scan has been performed or for languages that don't need it.
+    ///
     /// Returns the number of references saved.
     pub async fn extract_and_save(
         &self,
@@ -84,34 +91,42 @@ impl CallGraphUseCase {
         file_path: &str,
         language: Language,
         repository_id: &str,
-    ) -> Result<u64, DomainError> {
-        let references = match self
+        exports_by_file: &HashMap<String, Vec<String>>,
+    ) -> anyhow::Result<u64> {
+        match self
             .extractor
-            .extract(content, file_path, language, repository_id)
+            .extract(content, file_path, language, repository_id, exports_by_file)
             .await
         {
-            Ok(refs) => refs,
+            Ok(refs) => self.persist_references(refs, file_path).await,
             Err(e) => {
-                debug!(
+                warn!(
                     "Failed to extract references from {}: {} (continuing)",
                     file_path, e
                 );
-                return Ok(0);
+                Ok(0)
             }
-        };
+        }
+    }
 
+    /// Save a batch of already-extracted references. Handles the empty-vec short-circuit,
+    /// the `save_batch` call with anyhow context, and the success debug log.
+    async fn persist_references(
+        &self,
+        references: Vec<SymbolReference>,
+        file_path: &str,
+    ) -> anyhow::Result<u64> {
         if references.is_empty() {
             return Ok(0);
         }
 
         let count = references.len() as u64;
-        self.repository.save_batch(&references).await?;
+        self.repository
+            .save_batch(&references)
+            .await
+            .with_context(|| format!("failed to save {} references for indexing", count))?;
 
-        debug!(
-            "Extracted and saved {} references from {}",
-            count, file_path
-        );
-
+        debug!("Saved {} references from {}", count, file_path);
         Ok(count)
     }
 
@@ -207,6 +222,7 @@ mod tests {
             _file_path: &str,
             _language: Language,
             _repository_id: &str,
+            _exports_by_file: &HashMap<String, Vec<String>>,
         ) -> Result<Vec<SymbolReference>, DomainError> {
             Ok(self.references.clone())
         }
@@ -231,7 +247,10 @@ mod tests {
     #[async_trait::async_trait]
     impl CallGraphRepository for MockCallGraphRepository {
         async fn save_batch(&self, references: &[SymbolReference]) -> Result<(), DomainError> {
-            self.saved.lock().unwrap().extend(references.iter().cloned());
+            self.saved
+                .lock()
+                .unwrap()
+                .extend(references.iter().cloned());
             Ok(())
         }
 
@@ -310,7 +329,13 @@ mod tests {
         let use_case = CallGraphUseCase::new(extractor, repository.clone());
 
         let count = use_case
-            .extract_and_save("fn main() {}", "test.rs", Language::Rust, "repo-1")
+            .extract_and_save(
+                "fn main() {}",
+                "test.rs",
+                Language::Rust,
+                "repo-1",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -326,7 +351,13 @@ mod tests {
         let use_case = CallGraphUseCase::new(extractor, repository.clone());
 
         let count = use_case
-            .extract_and_save("fn main() {}", "test.rs", Language::Rust, "repo-1")
+            .extract_and_save(
+                "fn main() {}",
+                "test.rs",
+                Language::Rust,
+                "repo-1",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 

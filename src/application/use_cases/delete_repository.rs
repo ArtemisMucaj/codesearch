@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use tracing::info;
 
-use crate::application::{CallGraphUseCase, FileHashRepository, MetadataRepository, VectorRepository};
+use crate::application::{
+    CallGraphUseCase, FileHashRepository, MetadataRepository, VectorRepository,
+};
 use crate::domain::DomainError;
 
 pub struct DeleteRepositoryUseCase {

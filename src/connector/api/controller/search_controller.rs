@@ -37,7 +37,9 @@ impl<'a> SearchController<'a> {
         format: OutputFormat,
         text_search: bool,
     ) -> Result<String> {
-        let mut search_query = SearchQuery::new(&query).with_limit(num).with_text_search(text_search);
+        let mut search_query = SearchQuery::new(&query)
+            .with_limit(num)
+            .with_text_search(text_search);
 
         if let Some(score) = min_score {
             search_query = search_query.with_min_score(score);

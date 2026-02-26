@@ -46,8 +46,12 @@ impl DuckdbCallGraphRepository {
                 language TEXT NOT NULL,
                 repository_id TEXT NOT NULL,
                 caller_node_type TEXT,
-                enclosing_scope TEXT
+                enclosing_scope TEXT,
+                import_alias TEXT
             );
+
+            -- Migrate existing databases: add import_alias column if absent.
+            ALTER TABLE symbol_references ADD COLUMN IF NOT EXISTS import_alias TEXT;
 
             -- Index for finding callers of a symbol
             CREATE INDEX IF NOT EXISTS idx_symbol_refs_callee
@@ -72,10 +76,17 @@ impl DuckdbCallGraphRepository {
             -- Index for language filtering
             CREATE INDEX IF NOT EXISTS idx_symbol_refs_language
             ON symbol_references(language, repository_id);
+
+            -- Index for import_alias filtering (find_callers matches by alias OR callee)
+            CREATE INDEX IF NOT EXISTS idx_symbol_refs_import_alias
+            ON symbol_references(import_alias, repository_id);
             "#,
         )
         .map_err(|e| {
-            DomainError::storage(format!("Failed to initialize symbol_references schema: {}", e))
+            DomainError::storage(format!(
+                "Failed to initialize symbol_references schema: {}",
+                e
+            ))
         })?;
 
         debug!("DuckDB symbol_references table initialized");
@@ -84,18 +95,19 @@ impl DuckdbCallGraphRepository {
 
     fn row_to_symbol_reference(row: &duckdb::Row<'_>) -> duckdb::Result<SymbolReference> {
         Ok(SymbolReference::reconstitute(
-            row.get::<_, String>(0)?,                                  // id
-            row.get::<_, Option<String>>(1)?,                          // caller_symbol
-            row.get::<_, String>(2)?,                                  // callee_symbol
-            row.get::<_, String>(3)?,                                  // caller_file_path
-            row.get::<_, String>(4)?,                                  // reference_file_path
-            row.get::<_, i32>(5)? as u32,                              // reference_line
-            row.get::<_, i32>(6)? as u32,                              // reference_column
-            ReferenceKind::parse(&row.get::<_, String>(7)?),          // reference_kind
-            Language::parse(&row.get::<_, String>(8)?),               // language
-            row.get::<_, String>(9)?,                                  // repository_id
-            row.get::<_, Option<String>>(10)?,                         // caller_node_type
-            row.get::<_, Option<String>>(11)?,                         // enclosing_scope
+            row.get::<_, String>(0)?,                        // id
+            row.get::<_, Option<String>>(1)?,                // caller_symbol
+            row.get::<_, String>(2)?,                        // callee_symbol
+            row.get::<_, String>(3)?,                        // caller_file_path
+            row.get::<_, String>(4)?,                        // reference_file_path
+            row.get::<_, i32>(5)? as u32,                    // reference_line
+            row.get::<_, i32>(6)? as u32,                    // reference_column
+            ReferenceKind::parse(&row.get::<_, String>(7)?), // reference_kind
+            Language::parse(&row.get::<_, String>(8)?),      // language
+            row.get::<_, String>(9)?,                        // repository_id
+            row.get::<_, Option<String>>(10)?,               // caller_node_type
+            row.get::<_, Option<String>>(11)?,               // enclosing_scope
+            row.get::<_, Option<String>>(12)?,               // import_alias
         ))
     }
 
@@ -135,8 +147,8 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
                         id, caller_symbol, callee_symbol, caller_file_path,
                         reference_file_path, reference_line, reference_column,
                         reference_kind, language, repository_id,
-                        caller_node_type, enclosing_scope
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        caller_node_type, enclosing_scope, import_alias
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT (id) DO UPDATE SET
                         caller_symbol = excluded.caller_symbol,
                         callee_symbol = excluded.callee_symbol,
@@ -148,7 +160,8 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
                         language = excluded.language,
                         repository_id = excluded.repository_id,
                         caller_node_type = excluded.caller_node_type,
-                        enclosing_scope = excluded.enclosing_scope
+                        enclosing_scope = excluded.enclosing_scope,
+                        import_alias = excluded.import_alias
                     "#,
                 )
                 .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
@@ -167,6 +180,7 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
                     reference.repository_id(),
                     reference.caller_node_type(),
                     reference.enclosing_scope(),
+                    reference.import_alias(),
                 ])
                 .map_err(|e| {
                     DomainError::storage(format!("Failed to save symbol reference: {}", e))
@@ -188,36 +202,48 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
     ) -> Result<Vec<SymbolReference>, DomainError> {
         let conn = self.conn.lock().await;
 
-        let where_clause = Self::build_where_clause(query, "callee_symbol = ?");
-        let limit_clause = query.limit.map_or(String::new(), |l| format!(" LIMIT {}", l));
+        // Use UNION (deduplicating) of two indexed queries instead of UNION ALL so that a
+        // row whose callee_symbol and import_alias are both equal to the search value is not
+        // returned twice.  Each leg can still use its own index independently.
+        let callee_where = Self::build_where_clause(query, "callee_symbol = ?");
+        let alias_where = Self::build_where_clause(query, "import_alias = ?");
+        let limit_clause = query
+            .limit
+            .map_or(String::new(), |l| format!(" LIMIT {}", l));
+
+        let cols = "id, caller_symbol, callee_symbol, caller_file_path, \
+                    reference_file_path, reference_line, reference_column, \
+                    reference_kind, language, repository_id, \
+                    caller_node_type, enclosing_scope, import_alias";
 
         let sql = format!(
-            r#"SELECT id, caller_symbol, callee_symbol, caller_file_path,
-                      reference_file_path, reference_line, reference_column,
-                      reference_kind, language, repository_id,
-                      caller_node_type, enclosing_scope
-               FROM symbol_references
-               WHERE {}
-               ORDER BY reference_file_path, reference_line{}"#,
-            where_clause, limit_clause
+            "SELECT {cols} FROM symbol_references WHERE {cw} \
+             UNION \
+             SELECT {cols} FROM symbol_references WHERE {aw} \
+             ORDER BY reference_file_path, reference_line{limit}",
+            cols = cols,
+            cw = callee_where,
+            aw = alias_where,
+            limit = limit_clause,
         );
 
         let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
-        // Build parameter list dynamically
+        // Build params for both legs (each leg uses the same filter values).
         let mut params_vec: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
-        params_vec.push(Box::new(callee_symbol.to_string()));
-
-        if let Some(ref repo_id) = query.repository_id {
-            params_vec.push(Box::new(repo_id.clone()));
-        }
-        if let Some(ref lang) = query.language {
-            params_vec.push(Box::new(lang.clone()));
-        }
-        if let Some(ref kind) = query.reference_kind {
-            params_vec.push(Box::new(kind.clone()));
+        for _ in 0..2 {
+            params_vec.push(Box::new(callee_symbol.to_string()));
+            if let Some(ref repo_id) = query.repository_id {
+                params_vec.push(Box::new(repo_id.clone()));
+            }
+            if let Some(ref lang) = query.language {
+                params_vec.push(Box::new(lang.clone()));
+            }
+            if let Some(ref kind) = query.reference_kind {
+                params_vec.push(Box::new(kind.clone()));
+            }
         }
 
         let params_refs: Vec<&dyn duckdb::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
@@ -243,13 +269,15 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
         let conn = self.conn.lock().await;
 
         let where_clause = Self::build_where_clause(query, "caller_symbol = ?");
-        let limit_clause = query.limit.map_or(String::new(), |l| format!(" LIMIT {}", l));
+        let limit_clause = query
+            .limit
+            .map_or(String::new(), |l| format!(" LIMIT {}", l));
 
         let sql = format!(
             r#"SELECT id, caller_symbol, callee_symbol, caller_file_path,
                       reference_file_path, reference_line, reference_column,
                       reference_kind, language, repository_id,
-                      caller_node_type, enclosing_scope
+                      caller_node_type, enclosing_scope, import_alias
                FROM symbol_references
                WHERE {}
                ORDER BY reference_file_path, reference_line{}"#,
@@ -296,13 +324,15 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
         let conn = self.conn.lock().await;
 
         let where_clause = Self::build_where_clause(query, "reference_file_path = ?");
-        let limit_clause = query.limit.map_or(String::new(), |l| format!(" LIMIT {}", l));
+        let limit_clause = query
+            .limit
+            .map_or(String::new(), |l| format!(" LIMIT {}", l));
 
         let sql = format!(
             r#"SELECT id, caller_symbol, callee_symbol, caller_file_path,
                       reference_file_path, reference_line, reference_column,
                       reference_kind, language, repository_id,
-                      caller_node_type, enclosing_scope
+                      caller_node_type, enclosing_scope, import_alias
                FROM symbol_references
                WHERE {}
                ORDER BY reference_line{}"#,
@@ -351,7 +381,7 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
                 r#"SELECT id, caller_symbol, callee_symbol, caller_file_path,
                           reference_file_path, reference_line, reference_column,
                           reference_kind, language, repository_id,
-                          caller_node_type, enclosing_scope
+                          caller_node_type, enclosing_scope, import_alias
                    FROM symbol_references
                    WHERE repository_id = ?
                    ORDER BY reference_file_path, reference_line"#,
@@ -499,20 +529,30 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
         symbol_name: &str,
     ) -> Result<Vec<SymbolReference>, DomainError> {
         let conn = self.conn.lock().await;
+
+        // UNION (deduplicating) mirrors find_callers: matches by callee_symbol OR import_alias
+        // while preventing duplicate rows when a single row satisfies both conditions.
+        let cols = "id, caller_symbol, callee_symbol, caller_file_path, \
+                    reference_file_path, reference_line, reference_column, \
+                    reference_kind, language, repository_id, \
+                    caller_node_type, enclosing_scope, import_alias";
+        let sql = format!(
+            "SELECT {cols} FROM symbol_references WHERE callee_symbol = ? \
+             UNION \
+             SELECT {cols} FROM symbol_references WHERE import_alias = ? \
+             ORDER BY repository_id, reference_file_path, reference_line",
+            cols = cols,
+        );
+
         let mut stmt = conn
-            .prepare(
-                r#"SELECT id, caller_symbol, callee_symbol, caller_file_path,
-                          reference_file_path, reference_line, reference_column,
-                          reference_kind, language, repository_id,
-                          caller_node_type, enclosing_scope
-                   FROM symbol_references
-                   WHERE callee_symbol = ?
-                   ORDER BY repository_id, reference_file_path, reference_line"#,
-            )
+            .prepare(&sql)
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
         let rows = stmt
-            .query_map(params![symbol_name], Self::row_to_symbol_reference)
+            .query_map(
+                params![symbol_name, symbol_name],
+                Self::row_to_symbol_reference,
+            )
             .map_err(|e| {
                 DomainError::storage(format!("Failed to query cross-repo references: {}", e))
             })?;

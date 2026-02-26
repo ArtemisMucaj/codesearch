@@ -1,3 +1,6 @@
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
 use async_trait::async_trait;
 use streaming_iterator::StreamingIterator;
 use tracing::debug;
@@ -371,11 +374,34 @@ impl TreeSitterParser {
 
                 ; CommonJS require() — captures the local binding name as the callee.
                 ; @fn_name is used to validate the call is actually require().
+                ; @require_path captures the string argument so the indexer can
+                ; resolve relative paths to actual exported symbol names.
                 (variable_declarator
                     name: (identifier) @callee
                     value: (call_expression
                         function: (identifier) @fn_name
+                        arguments: (arguments (string) @require_path))) @require_import
+
+                ; CommonJS shorthand destructure: const { foo } = require('...')
+                ; The property name is both the original and local name.
+                (variable_declarator
+                    name: (object_pattern
+                        (shorthand_property_identifier_pattern) @callee)
+                    value: (call_expression
+                        function: (identifier) @fn_name
                         arguments: (arguments (string)))) @require_import
+
+                ; CommonJS renamed destructure: const { foo: bar } = require('...')
+                ; @callee captures the original exported name; @import_alias captures
+                ; the local binding so callers of `bar` can be traced back to `foo`.
+                (variable_declarator
+                    name: (object_pattern
+                        (pair_pattern
+                            key: (property_identifier) @callee
+                            value: (identifier) @import_alias))
+                    value: (call_expression
+                        function: (identifier) @fn_name
+                        arguments: (arguments (string)))) @require_import_renamed
 
                 ; JSX elements (React components)
                 (jsx_element
@@ -412,11 +438,31 @@ impl TreeSitterParser {
 
                 ; CommonJS require() — captures the local binding name as the callee.
                 ; @fn_name is used to validate the call is actually require().
+                ; @require_path captures the string argument so the indexer can
+                ; resolve relative paths to actual exported symbol names.
                 (variable_declarator
                     name: (identifier) @callee
                     value: (call_expression
                         function: (identifier) @fn_name
+                        arguments: (arguments (string) @require_path))) @require_import
+
+                ; CommonJS shorthand destructure: const { foo } = require('...')
+                (variable_declarator
+                    name: (object_pattern
+                        (shorthand_property_identifier_pattern) @callee)
+                    value: (call_expression
+                        function: (identifier) @fn_name
                         arguments: (arguments (string)))) @require_import
+
+                ; CommonJS renamed destructure: const { foo: bar } = require('...')
+                (variable_declarator
+                    name: (object_pattern
+                        (pair_pattern
+                            key: (property_identifier) @callee
+                            value: (identifier) @import_alias))
+                    value: (call_expression
+                        function: (identifier) @fn_name
+                        arguments: (arguments (string)))) @require_import_renamed
 
                 ; Type annotations
                 (type_annotation
@@ -595,8 +641,10 @@ impl TreeSitterParser {
             "method_call" => ReferenceKind::MethodCall,
             "type_ref" => ReferenceKind::TypeReference,
             "import" => ReferenceKind::Import,
-            // CommonJS require() binding — validated separately by the fn_name filter
-            "require_import" => ReferenceKind::Import,
+            // CommonJS require() bindings — validated separately by the fn_name filter.
+            // `require_import_renamed` also carries an @import_alias capture for renamed
+            // destructured properties (e.g. `const { foo: bar } = require(...)`).
+            "require_import" | "require_import_renamed" => ReferenceKind::Import,
             "instantiation" => ReferenceKind::Instantiation,
             "macro" => ReferenceKind::MacroInvocation,
             "decorator" => ReferenceKind::MacroInvocation,
@@ -667,6 +715,115 @@ impl TreeSitterParser {
         }
 
         scopes
+    }
+
+    /// Returns `true` if `node` is a `member_expression` that represents `module.exports`.
+    fn is_module_exports(node: tree_sitter::Node<'_>, content: &str) -> bool {
+        node.kind() == "member_expression"
+            && node
+                .child_by_field_name("object")
+                .map(|n| &content[n.byte_range()] == "module")
+                .unwrap_or(false)
+            && node
+                .child_by_field_name("property")
+                .map(|n| &content[n.byte_range()] == "exports")
+                .unwrap_or(false)
+    }
+
+    /// Recursively walks `node` and appends exported symbol names to `exports`.
+    ///
+    /// Handles:
+    /// - `module.exports = identifier`
+    /// - `module.exports.key = expression`
+    /// - `export default identifier`
+    /// - `export function/class/const identifier`
+    /// - `export { identifier, identifier as alias }`
+    fn collect_exports_from_node(
+        node: tree_sitter::Node<'_>,
+        content: &str,
+        exports: &mut HashSet<String>,
+    ) {
+        match node.kind() {
+            "assignment_expression" => {
+                if let Some(left) = node.child_by_field_name("left") {
+                    if Self::is_module_exports(left, content) {
+                        // module.exports = someIdentifier
+                        if let Some(right) = node.child_by_field_name("right") {
+                            if right.kind() == "identifier" {
+                                exports.insert(content[right.byte_range()].to_string());
+                            }
+                        }
+                    } else if left.kind() == "member_expression" {
+                        // module.exports.key = ...
+                        if let Some(obj) = left.child_by_field_name("object") {
+                            if Self::is_module_exports(obj, content) {
+                                if let Some(prop) = left.child_by_field_name("property") {
+                                    exports.insert(content[prop.byte_range()].to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "export_statement" => {
+                // export default someIdentifier
+                if let Some(val) = node.child_by_field_name("value") {
+                    if val.kind() == "identifier" {
+                        exports.insert(content[val.byte_range()].to_string());
+                    }
+                }
+                // export function foo / export class Foo
+                if let Some(decl) = node.child_by_field_name("declaration") {
+                    if let Some(name_node) = decl.child_by_field_name("name") {
+                        exports.insert(content[name_node.byte_range()].to_string());
+                    }
+                    // export const/let/var foo = ...
+                    if matches!(decl.kind(), "lexical_declaration" | "variable_declaration") {
+                        for i in 0..decl.child_count() {
+                            if let Some(declarator) = decl.child(i as u32) {
+                                if declarator.kind() == "variable_declarator" {
+                                    if let Some(n) = declarator.child_by_field_name("name") {
+                                        if n.kind() == "identifier" {
+                                            exports.insert(content[n.byte_range()].to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // export { foo, bar as baz }
+                for i in 0..node.child_count() {
+                    if let Some(child) = node.child(i as u32) {
+                        if child.kind() == "export_clause" {
+                            for j in 0..child.child_count() {
+                                if let Some(spec) = child.child(j as u32) {
+                                    if spec.kind() == "export_specifier" {
+                                        // Use the alias if present (e.g. `bar` in `export { foo as bar }`),
+                                        // falling back to the original name. The alias is the externally
+                                        // visible symbol that callers will reference.
+                                        let exported_name = spec
+                                            .child_by_field_name("alias")
+                                            .or_else(|| spec.child_by_field_name("name"))
+                                            .map(|n| content[n.byte_range()].to_string());
+                                        if let Some(name) = exported_name {
+                                            exports.insert(name);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i as u32) {
+                Self::collect_exports_from_node(child, content, exports);
+            }
+        }
     }
 }
 
@@ -812,12 +969,51 @@ impl ParserService for TreeSitterParser {
         self.supported_languages.clone()
     }
 
+    async fn extract_module_exports(&self, content: &str, language: Language) -> Vec<String> {
+        // Only JS/TS files have module exports.
+        if !matches!(language, Language::JavaScript | Language::TypeScript) {
+            return Vec::new();
+        }
+
+        let ts_language = match self.get_ts_language(language) {
+            Some(l) => l,
+            None => return Vec::new(),
+        };
+
+        // A full tree-sitter parse is CPU-bound; offload it to the blocking thread pool
+        // so we don't stall the async runtime.
+        let content = content.to_string();
+        match tokio::task::spawn_blocking(move || {
+            let mut parser = Parser::new();
+            if parser.set_language(&ts_language).is_err() {
+                return Vec::new();
+            }
+            let tree = match parser.parse(&content, None) {
+                Some(t) => t,
+                None => return Vec::new(),
+            };
+
+            let mut exports: HashSet<String> = HashSet::new();
+            Self::collect_exports_from_node(tree.root_node(), &content, &mut exports);
+            exports.into_iter().collect()
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::warn!("failed to join export extraction task: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
     async fn extract_references(
         &self,
         content: &str,
         file_path: &str,
         language: Language,
         repository_id: &str,
+        exports_by_file: &HashMap<String, Vec<String>>,
     ) -> Result<Vec<SymbolReference>, DomainError> {
         let ts_language = self
             .get_ts_language(language)
@@ -847,6 +1043,9 @@ impl ParserService for TreeSitterParser {
         let scopes = self.collect_scopes(content, &tree, language);
 
         let mut references = Vec::new();
+        // Tracks the raw require() path for each reference at the same index.
+        // Used in the resolution pass below; avoids needing a field on SymbolReference.
+        let mut require_paths: Vec<Option<String>> = Vec::new();
         let capture_names: Vec<&str> = query.capture_names().to_vec();
 
         let mut matches_iter = cursor.matches(&query, tree.root_node(), text_bytes);
@@ -859,6 +1058,11 @@ impl ParserService for TreeSitterParser {
             // called function identifier so we can validate it is actually "require".
             let mut fn_name: Option<String> = None;
             let mut is_require_import = false;
+            // Local alias from a renamed import/require (e.g. `bar` in `{ foo: bar }`).
+            let mut query_import_alias: Option<String> = None;
+            // Raw string argument of a require() call (e.g. `'./module.js'`).
+            // Used in the post-loop resolution pass for cross-file export resolution.
+            let mut require_path_raw: Option<String> = None;
 
             for capture in query_match.captures {
                 let capture_name = capture_names
@@ -870,6 +1074,14 @@ impl ParserService for TreeSitterParser {
                     // "callee" always takes priority - set name and node unconditionally
                     callee_name = Some(content[capture.node.byte_range()].to_string());
                     ref_node = Some(capture.node);
+                } else if capture_name == "require_path" {
+                    // The string literal passed to require() — kept verbatim (including quotes)
+                    // so normalize_import_path can strip them later.
+                    require_path_raw = Some(content[capture.node.byte_range()].to_string());
+                } else if capture_name == "import_alias" {
+                    // Local alias captured directly by the query pattern (CommonJS
+                    // renamed destructure: `const { foo: bar } = require(...)`).
+                    query_import_alias = Some(content[capture.node.byte_range()].to_string());
                 } else if capture_name == "type_ref" {
                     // For type_ref, set the kind but only set name/node if not already set by "callee"
                     reference_kind = ReferenceKind::TypeReference;
@@ -885,7 +1097,8 @@ impl ParserService for TreeSitterParser {
                     if reference_kind == ReferenceKind::Unknown {
                         reference_kind = Self::capture_to_reference_kind(capture_name);
                     }
-                    if capture_name == "require_import" {
+                    if capture_name == "require_import" || capture_name == "require_import_renamed"
+                    {
                         is_require_import = true;
                     }
                 }
@@ -980,6 +1193,24 @@ impl ParserService for TreeSitterParser {
                 let line = node.start_position().row as u32 + 1;
                 let column = node.start_position().column as u32 + 1;
 
+                // Determine the import alias:
+                // 1. For CommonJS renamed destructure (`const { foo: bar } = require(...)`),
+                //    the alias was captured directly in the query as @import_alias.
+                // 2. For ES6 named imports with alias (`import { foo as bar } from '...'`),
+                //    the alias is recorded on the import_specifier node's `alias` field.
+                //    We inspect the node's parent to detect this without needing a separate
+                //    query pattern (which would cause duplicate matches).
+                let import_alias = if reference_kind == ReferenceKind::Import {
+                    query_import_alias.clone().or_else(|| {
+                        node.parent()
+                            .filter(|p| p.kind() == "import_specifier")
+                            .and_then(|p| p.child_by_field_name("alias"))
+                            .map(|alias_node| content[alias_node.byte_range()].to_string())
+                    })
+                } else {
+                    None
+                };
+
                 // Find enclosing scope (function/class that contains this reference)
                 let (caller_symbol, enclosing_scope) = lookup_enclosing_scope(&scopes, line)
                     .map(|(name, parent)| (Some(name), parent))
@@ -1001,6 +1232,18 @@ impl ParserService for TreeSitterParser {
                     reference = reference.with_enclosing_scope(scope);
                 }
 
+                if let Some(alias) = import_alias {
+                    reference = reference.with_import_alias(alias);
+                }
+
+                // Track the raw require() path for simple bindings so the resolution
+                // pass below can map them to the actual exported symbol name.
+                let raw_require = if is_require_import && query_import_alias.is_none() {
+                    require_path_raw.clone()
+                } else {
+                    None
+                };
+                require_paths.push(raw_require);
                 references.push(reference);
             }
         }
@@ -1011,6 +1254,100 @@ impl ParserService for TreeSitterParser {
             file_path,
             language
         );
+
+        // ── Cross-file require() resolution ──────────────────────────────────
+        // For JS/TS files, resolve simple `const X = require('./path')` bindings
+        // against the exports map built during the pre-scan phase.  We only do
+        // this when the caller supplies a non-empty map.
+        if matches!(language, Language::JavaScript | Language::TypeScript)
+            && !exports_by_file.is_empty()
+        {
+            let file_dir = Path::new(file_path).parent().unwrap_or(Path::new(""));
+
+            for (reference, maybe_require_path) in references.iter_mut().zip(require_paths.iter()) {
+                // We only resolve simple `const X = require('./path')` bindings.
+                // Destructured requires already store the exported property name as
+                // callee_symbol, so they don't need cross-file resolution.
+                if reference.reference_kind() != ReferenceKind::Import {
+                    continue;
+                }
+                // Skip if there's already an alias set — that means this is a
+                // destructured or ES6-aliased import that was already resolved.
+                if reference.import_alias().is_some() {
+                    continue;
+                }
+
+                let raw_require_path = match maybe_require_path {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                let normalized = normalize_import_path(raw_require_path);
+
+                // Only resolve relative paths (./  or ../).  External packages such as
+                // `require('express')` are not in the repo and cannot be resolved.
+                if !normalized.starts_with("./") && !normalized.starts_with("../") {
+                    continue;
+                }
+
+                // Resolve the relative path against the requiring file's directory.
+                let resolved = file_dir.join(&normalized);
+                // Clean the path by resolving `.` and `..` components so that a path
+                // like `routes/../middlewares/x.js` becomes `middlewares/x.js` and
+                // matches the normalised keys stored in exports_by_file.
+                let resolved_clean =
+                    resolved
+                        .components()
+                        .fold(PathBuf::new(), |mut acc, component| {
+                            match component {
+                                std::path::Component::CurDir => acc,
+                                std::path::Component::ParentDir => {
+                                    acc.pop();
+                                    acc
+                                }
+                                other => {
+                                    acc.push(other);
+                                    acc
+                                }
+                            }
+                        });
+                // Normalise to a forward-slash string (repo-relative, no leading ./).
+                let resolved_str = resolved_clean.to_string_lossy().replace('\\', "/");
+                // Strip a leading "./" if Path::join left one.
+                let resolved_key = resolved_str
+                    .strip_prefix("./")
+                    .unwrap_or(&resolved_str)
+                    .to_string();
+
+                // Look up in the exports map — try exact match first, then without extension.
+                let exported_symbols = exports_by_file.get(&resolved_key).or_else(|| {
+                    // Try stripping the file extension (e.g. look up "foo/bar" when
+                    // the require was `require('./bar.js')` and the map key is "foo/bar").
+                    let without_ext = Path::new(&resolved_key)
+                        .with_extension("")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    exports_by_file.get(without_ext.as_str())
+                });
+
+                let exported_symbols = match exported_symbols {
+                    Some(s) if !s.is_empty() => s,
+                    _ => continue,
+                };
+
+                // For a single default export, replace the local binding name with the
+                // actual exported symbol and promote the local binding to import_alias.
+                if exported_symbols.len() == 1 {
+                    let local_binding = reference.callee_symbol().to_string();
+                    *reference = reference
+                        .clone()
+                        .with_callee_symbol(exported_symbols[0].clone())
+                        .with_import_alias(local_binding);
+                }
+                // If the file has multiple exports we cannot know which one this
+                // binding refers to — leave callee_symbol as the local name.
+            }
+        }
 
         Ok(references)
     }
@@ -1158,7 +1495,13 @@ fn main() {
 "#;
 
         let references = parser
-            .extract_references(content, "test.rs", Language::Rust, "test-repo")
+            .extract_references(
+                content,
+                "test.rs",
+                Language::Rust,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -1196,7 +1539,13 @@ def main():
 "#;
 
         let references = parser
-            .extract_references(content, "test.py", Language::Python, "test-repo")
+            .extract_references(
+                content,
+                "test.py",
+                Language::Python,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -1229,7 +1578,13 @@ function greet(user: User): string {
 "#;
 
         let references = parser
-            .extract_references(content, "test.ts", Language::TypeScript, "test-repo")
+            .extract_references(
+                content,
+                "test.ts",
+                Language::TypeScript,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -1238,10 +1593,7 @@ function greet(user: User): string {
             .iter()
             .filter(|r| r.callee_symbol() == "User")
             .collect();
-        assert!(
-            !user_refs.is_empty(),
-            "Should find type reference to User"
-        );
+        assert!(!user_refs.is_empty(), "Should find type reference to User");
     }
 
     #[tokio::test]
@@ -1258,7 +1610,13 @@ fn caller() {
 "#;
 
         let references = parser
-            .extract_references(content, "test.rs", Language::Rust, "test-repo")
+            .extract_references(
+                content,
+                "test.rs",
+                Language::Rust,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -1292,7 +1650,13 @@ func main() {
 "#;
 
         let references = parser
-            .extract_references(content, "main.go", Language::Go, "test-repo")
+            .extract_references(
+                content,
+                "main.go",
+                Language::Go,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -1342,7 +1706,13 @@ func main() {
 "#;
 
         let references = parser
-            .extract_references(content, "main.go", Language::Go, "test-repo")
+            .extract_references(
+                content,
+                "main.go",
+                Language::Go,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -1372,7 +1742,13 @@ int main() {
 "#;
 
         let references = parser
-            .extract_references(content, "main.cpp", Language::Cpp, "test-repo")
+            .extract_references(
+                content,
+                "main.cpp",
+                Language::Cpp,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -1390,7 +1766,9 @@ int main() {
 
         let vector_imports: Vec<_> = references
             .iter()
-            .filter(|r| r.callee_symbol() == "vector" && r.reference_kind() == ReferenceKind::Import)
+            .filter(|r| {
+                r.callee_symbol() == "vector" && r.reference_kind() == ReferenceKind::Import
+            })
             .collect();
         assert!(
             !vector_imports.is_empty(),
@@ -1439,19 +1817,13 @@ int main() {
 
         assert!(!chunks.is_empty(), "Should extract chunks from Swift file");
 
-        let has_circle = chunks
-            .iter()
-            .any(|c| c.symbol_name() == Some("Circle"));
+        let has_circle = chunks.iter().any(|c| c.symbol_name() == Some("Circle"));
         assert!(has_circle, "Should find Circle class");
 
-        let has_rect = chunks
-            .iter()
-            .any(|c| c.symbol_name() == Some("Rectangle"));
+        let has_rect = chunks.iter().any(|c| c.symbol_name() == Some("Rectangle"));
         assert!(has_rect, "Should find Rectangle struct");
 
-        let has_shape = chunks
-            .iter()
-            .any(|c| c.symbol_name() == Some("Shape"));
+        let has_shape = chunks.iter().any(|c| c.symbol_name() == Some("Shape"));
         assert!(has_shape, "Should find Shape protocol");
     }
 
@@ -1471,9 +1843,7 @@ int main() {
             .any(|c| c.symbol_name() == Some("printShapeInfo"));
         assert!(has_fn, "Should find printShapeInfo function");
 
-        let has_enum = chunks
-            .iter()
-            .any(|c| c.symbol_name() == Some("Result"));
+        let has_enum = chunks.iter().any(|c| c.symbol_name() == Some("Result"));
         assert!(has_enum, "Should find Result enum");
     }
 
@@ -1517,8 +1887,13 @@ int main() {
         let has_color = chunks.iter().any(|c| c.symbol_name() == Some("Color"));
         assert!(has_color, "Should find Color enum class");
 
-        let has_print_fn = chunks.iter().any(|c| c.symbol_name() == Some("printShapeInfo"));
-        assert!(has_print_fn, "Should find printShapeInfo top-level function");
+        let has_print_fn = chunks
+            .iter()
+            .any(|c| c.symbol_name() == Some("printShapeInfo"));
+        assert!(
+            has_print_fn,
+            "Should find printShapeInfo top-level function"
+        );
     }
 
     #[tokio::test]
@@ -1536,7 +1911,10 @@ int main() {
             .iter()
             .filter(|c| c.node_type() == NodeType::TypeDef)
             .collect();
-        assert!(!typedef_chunks.is_empty(), "Should find at least one type alias");
+        assert!(
+            !typedef_chunks.is_empty(),
+            "Should find at least one type alias"
+        );
 
         let has_shape_list = chunks.iter().any(|c| c.symbol_name() == Some("ShapeList"));
         assert!(has_shape_list, "Should find ShapeList type alias");
@@ -1563,17 +1941,24 @@ fun buildList(): ArrayList<String> {
 "#;
 
         let references = parser
-            .extract_references(content, "test.kt", Language::Kotlin, "test-repo")
+            .extract_references(
+                content,
+                "test.kt",
+                Language::Kotlin,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
-        assert!(!references.is_empty(), "Should extract references from Kotlin");
+        assert!(
+            !references.is_empty(),
+            "Should extract references from Kotlin"
+        );
 
         let sqrt_imports: Vec<_> = references
             .iter()
-            .filter(|r| {
-                r.callee_symbol() == "sqrt" && r.reference_kind() == ReferenceKind::Import
-            })
+            .filter(|r| r.callee_symbol() == "sqrt" && r.reference_kind() == ReferenceKind::Import)
             .collect();
         assert!(!sqrt_imports.is_empty(), "Should find import of sqrt");
 
@@ -1606,15 +1991,20 @@ class Car(speed: Int) : Vehicle(speed) {
 "#;
 
         let references = parser
-            .extract_references(content, "test.kt", Language::Kotlin, "test-repo")
+            .extract_references(
+                content,
+                "test.kt",
+                Language::Kotlin,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
         let animal_refs: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "Animal"
-                    && r.reference_kind() == ReferenceKind::Inheritance
+                r.callee_symbol() == "Animal" && r.reference_kind() == ReferenceKind::Inheritance
             })
             .collect();
         assert!(
@@ -1625,8 +2015,7 @@ class Car(speed: Int) : Vehicle(speed) {
         let vehicle_refs: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "Vehicle"
-                    && r.reference_kind() == ReferenceKind::Inheritance
+                r.callee_symbol() == "Vehicle" && r.reference_kind() == ReferenceKind::Inheritance
             })
             .collect();
         assert!(
@@ -1648,15 +2037,20 @@ fun example() {
 "#;
 
         let references = parser
-            .extract_references(content, "test.kt", Language::Kotlin, "test-repo")
+            .extract_references(
+                content,
+                "test.kt",
+                Language::Kotlin,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
         let add_calls: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "add"
-                    && r.reference_kind() == ReferenceKind::MethodCall
+                r.callee_symbol() == "add" && r.reference_kind() == ReferenceKind::MethodCall
             })
             .collect();
         assert!(!add_calls.is_empty(), "Should find method calls to add");
@@ -1678,17 +2072,25 @@ print(message)
 "#;
 
         let references = parser
-            .extract_references(content, "test.swift", Language::Swift, "test-repo")
+            .extract_references(
+                content,
+                "test.swift",
+                Language::Swift,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
-        assert!(!references.is_empty(), "Should extract references from Swift");
+        assert!(
+            !references.is_empty(),
+            "Should extract references from Swift"
+        );
 
         let foundation_imports: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "Foundation"
-                    && r.reference_kind() == ReferenceKind::Import
+                r.callee_symbol() == "Foundation" && r.reference_kind() == ReferenceKind::Import
             })
             .collect();
         assert!(
@@ -1716,7 +2118,13 @@ module.exports = setupRoutes;
 "#;
 
         let references = parser
-            .extract_references(content, "routes/na-api-router.js", Language::JavaScript, "test-repo")
+            .extract_references(
+                content,
+                "routes/na-api-router.js",
+                Language::JavaScript,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -1724,8 +2132,7 @@ module.exports = setupRoutes;
         let express_imports: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "express"
-                    && r.reference_kind() == ReferenceKind::Import
+                r.callee_symbol() == "express" && r.reference_kind() == ReferenceKind::Import
             })
             .collect();
         assert!(
@@ -1738,8 +2145,7 @@ module.exports = setupRoutes;
         let add_source_imports: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "addSource"
-                    && r.reference_kind() == ReferenceKind::Import
+                r.callee_symbol() == "addSource" && r.reference_kind() == ReferenceKind::Import
             })
             .collect();
         assert!(
@@ -1753,8 +2159,7 @@ module.exports = setupRoutes;
         let use_method_calls: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "use"
-                    && r.reference_kind() == ReferenceKind::MethodCall
+                r.callee_symbol() == "use" && r.reference_kind() == ReferenceKind::MethodCall
             })
             .collect();
         assert!(
@@ -1776,7 +2181,13 @@ function setupRoutes() {
 "#;
 
         let references = parser
-            .extract_references(content, "server.js", Language::JavaScript, "test-repo")
+            .extract_references(
+                content,
+                "server.js",
+                Language::JavaScript,
+                "test-repo",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -1784,13 +2195,497 @@ function setupRoutes() {
         let handler_imports: Vec<_> = references
             .iter()
             .filter(|r| {
-                r.callee_symbol() == "handler"
-                    && r.reference_kind() == ReferenceKind::Import
+                r.callee_symbol() == "handler" && r.reference_kind() == ReferenceKind::Import
             })
             .collect();
         assert!(
             handler_imports.is_empty(),
             "`const handler = createHandler(...)` must NOT be captured as an Import (only require() counts)"
         );
+    }
+
+    // ── Renamed-import tests ────────────────────────────────────────────────
+
+    /// ES6 named import with alias: `import { foo as bar } from './module'`
+    /// The callee should be the original exported name ("foo") and the local
+    /// alias ("bar") must be recorded in import_alias.
+    #[tokio::test]
+    async fn test_extract_es6_named_import_with_alias() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+import { processRequest as handleReq } from './request-handler';
+
+function main() {
+    handleReq({ method: 'GET' });
+}
+"#;
+
+        let references = parser
+            .extract_references(
+                content,
+                "main.ts",
+                Language::TypeScript,
+                "test-repo",
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        // The import statement should record the original exported name as callee.
+        let import_refs: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "processRequest" && r.reference_kind() == ReferenceKind::Import
+            })
+            .collect();
+        assert!(
+            !import_refs.is_empty(),
+            "Expected Import reference with callee 'processRequest' \
+             from `import {{ processRequest as handleReq }}`"
+        );
+
+        // The import_alias must be the local binding name ("handleReq").
+        let alias = import_refs[0].import_alias();
+        assert_eq!(
+            alias,
+            Some("handleReq"),
+            "Expected import_alias = 'handleReq' for the renamed import, got {:?}",
+            alias
+        );
+    }
+
+    /// ES6 named import WITHOUT alias: `import { foo } from './module'`
+    /// The callee is "foo" and import_alias must be None.
+    #[tokio::test]
+    async fn test_extract_es6_named_import_no_alias() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+import { processRequest } from './request-handler';
+
+function main() {
+    processRequest({ method: 'GET' });
+}
+"#;
+
+        let references = parser
+            .extract_references(
+                content,
+                "main.ts",
+                Language::TypeScript,
+                "test-repo",
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let import_refs: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "processRequest" && r.reference_kind() == ReferenceKind::Import
+            })
+            .collect();
+        assert!(
+            !import_refs.is_empty(),
+            "Should find import of 'processRequest'"
+        );
+        assert_eq!(
+            import_refs[0].import_alias(),
+            None,
+            "Non-aliased import must have import_alias = None"
+        );
+    }
+
+    /// CommonJS shorthand destructure: `const { foo } = require('./module')`
+    /// The property name "foo" is both the original and local name; import_alias is None.
+    #[tokio::test]
+    async fn test_extract_js_commonjs_shorthand_destructure() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+const { createServer } = require('http');
+
+createServer((req, res) => { res.end('ok'); }).listen(3000);
+"#;
+
+        let references = parser
+            .extract_references(
+                content,
+                "server.js",
+                Language::JavaScript,
+                "test-repo",
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let import_refs: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "createServer" && r.reference_kind() == ReferenceKind::Import
+            })
+            .collect();
+        assert!(
+            !import_refs.is_empty(),
+            "Expected Import reference with callee 'createServer' \
+             from `const {{ createServer }} = require('http')`"
+        );
+        assert_eq!(
+            import_refs[0].import_alias(),
+            None,
+            "Shorthand destructure (no rename) must have import_alias = None"
+        );
+    }
+
+    /// CommonJS renamed destructure: `const { foo: bar } = require('./module')`
+    /// The callee is the original property name ("foo") and import_alias is the
+    /// local binding ("bar").
+    #[tokio::test]
+    async fn test_extract_js_commonjs_renamed_destructure() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+const { createServer: makeServer } = require('http');
+
+makeServer((req, res) => { res.end('ok'); }).listen(3000);
+"#;
+
+        let references = parser
+            .extract_references(
+                content,
+                "server.js",
+                Language::JavaScript,
+                "test-repo",
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let import_refs: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "createServer" && r.reference_kind() == ReferenceKind::Import
+            })
+            .collect();
+        assert!(
+            !import_refs.is_empty(),
+            "Expected Import reference with callee 'createServer' \
+             from `const {{ createServer: makeServer }} = require('http')`"
+        );
+
+        let alias = import_refs[0].import_alias();
+        assert_eq!(
+            alias,
+            Some("makeServer"),
+            "Expected import_alias = 'makeServer' for renamed destructure, got {:?}",
+            alias
+        );
+    }
+
+    /// TypeScript renamed destructure: `const { foo: bar } = require('./module')`
+    #[tokio::test]
+    async fn test_extract_ts_commonjs_renamed_destructure() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+const { Router: ExpressRouter } = require('express');
+
+const router = new ExpressRouter();
+"#;
+
+        let references = parser
+            .extract_references(
+                content,
+                "router.ts",
+                Language::TypeScript,
+                "test-repo",
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let import_refs: Vec<_> = references
+            .iter()
+            .filter(|r| {
+                r.callee_symbol() == "Router" && r.reference_kind() == ReferenceKind::Import
+            })
+            .collect();
+        assert!(
+            !import_refs.is_empty(),
+            "Expected Import reference with callee 'Router' \
+             from `const {{ Router: ExpressRouter }} = require('express')`"
+        );
+
+        let alias = import_refs[0].import_alias();
+        assert_eq!(
+            alias,
+            Some("ExpressRouter"),
+            "Expected import_alias = 'ExpressRouter', got {:?}",
+            alias
+        );
+    }
+
+    /// CommonJS renamed destructure must still be rejected when the call is not `require()`.
+    #[tokio::test]
+    async fn test_extract_js_destructure_non_require_not_captured() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+const { createServer: makeServer } = someOtherFactory('config');
+"#;
+
+        let references = parser
+            .extract_references(
+                content,
+                "server.js",
+                Language::JavaScript,
+                "test-repo",
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let import_refs: Vec<_> = references
+            .iter()
+            .filter(|r| r.reference_kind() == ReferenceKind::Import)
+            .collect();
+        assert!(
+            import_refs.is_empty(),
+            "Destructured non-require() call must NOT be captured as Import"
+        );
+    }
+
+    // ── Export extraction tests ─────────────────────────────────────────────
+
+    /// `module.exports = identifier` — single default export.
+    #[tokio::test]
+    async fn test_extract_module_exports_default() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+function appApplicationSource(req, res, next) { next(); }
+module.exports = appApplicationSource;
+"#;
+        let exports = parser
+            .extract_module_exports(content, Language::JavaScript)
+            .await;
+        assert_eq!(
+            exports,
+            vec!["appApplicationSource"],
+            "Expected single default export"
+        );
+    }
+
+    /// `module.exports.key = value` — named property export.
+    #[tokio::test]
+    async fn test_extract_module_exports_named_property() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+function helper() {}
+module.exports.helper = helper;
+module.exports.other = function() {};
+"#;
+        let exports = parser
+            .extract_module_exports(content, Language::JavaScript)
+            .await;
+        assert!(
+            exports.contains(&"helper".to_string()),
+            "Expected 'helper' in named property exports"
+        );
+    }
+
+    /// ES6 `export default identifier` and `export function foo`.
+    #[tokio::test]
+    async fn test_extract_module_exports_es6() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+export default myFunc;
+export function helperFn() {}
+export class MyClass {}
+"#;
+        let exports = parser
+            .extract_module_exports(content, Language::TypeScript)
+            .await;
+        assert!(exports.contains(&"myFunc".to_string()), "Expected 'myFunc'");
+        assert!(
+            exports.contains(&"helperFn".to_string()),
+            "Expected 'helperFn'"
+        );
+        assert!(
+            exports.contains(&"MyClass".to_string()),
+            "Expected 'MyClass'"
+        );
+    }
+
+    /// Non-JS language must return empty.
+    #[tokio::test]
+    async fn test_extract_module_exports_unsupported_language() {
+        let parser = TreeSitterParser::new();
+        let content = "fn main() {}";
+        let exports = parser.extract_module_exports(content, Language::Rust).await;
+        assert!(
+            exports.is_empty(),
+            "Rust files should have no module exports"
+        );
+    }
+
+    // ── require() without an exports map ────────────────────────────────────
+
+    /// Without an exports map, `const addSource = require('./sample_middleware.js')`
+    /// must keep `addSource` as the callee symbol (no cross-file resolution).
+    #[tokio::test]
+    async fn test_require_without_exports_map_keeps_local_binding() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+const addSource = require('./sample_middleware.js');
+"#;
+
+        let references = parser
+            .extract_references(
+                content,
+                "router.js",
+                Language::JavaScript,
+                "test-repo",
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let import_ref = references
+            .iter()
+            .find(|r| r.reference_kind() == ReferenceKind::Import)
+            .expect("Expected Import reference");
+
+        assert_eq!(
+            import_ref.callee_symbol(),
+            "addSource",
+            "Without an exports map the local binding name must be preserved"
+        );
+        assert!(
+            import_ref.import_alias().is_none(),
+            "No alias should be set when no exports map is provided"
+        );
+    }
+
+    // ── Cross-file require resolution ───────────────────────────────────────
+
+    /// End-to-end: `const addSource = require('./sample_middleware.js')` where
+    /// `sample_middleware.js` has `module.exports = appApplicationSource`.
+    ///
+    /// After resolution, `callee_symbol` must be `appApplicationSource` and
+    /// `import_alias` must be `addSource`.
+    #[tokio::test]
+    async fn test_resolve_simple_require_to_exported_symbol() {
+        let parser = TreeSitterParser::new();
+
+        let router_content = r#"
+const addSource = require('./sample_middleware.js');
+"#;
+
+        // Build the exports map as the indexer would: pre-scan sample_middleware.js.
+        let middleware_content = r#"
+function appApplicationSource(req, res, next) { next(); }
+module.exports = appApplicationSource;
+"#;
+        let mut exports_by_file: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let middleware_exports = parser
+            .extract_module_exports(middleware_content, Language::JavaScript)
+            .await;
+        exports_by_file.insert("sample_middleware.js".to_string(), middleware_exports);
+
+        let references = parser
+            .extract_references(
+                router_content,
+                "router.js",
+                Language::JavaScript,
+                "test-repo",
+                &exports_by_file,
+            )
+            .await
+            .unwrap();
+
+        let import_ref = references
+            .iter()
+            .find(|r| r.reference_kind() == ReferenceKind::Import)
+            .expect("Expected an Import reference");
+
+        assert_eq!(
+            import_ref.callee_symbol(),
+            "appApplicationSource",
+            "callee_symbol must be the resolved exported name"
+        );
+        assert_eq!(
+            import_ref.import_alias(),
+            Some("addSource"),
+            "import_alias must be the local binding name"
+        );
+    }
+
+    /// When the required file exports multiple symbols, we cannot resolve
+    /// unambiguously — the local binding name must be kept as callee_symbol.
+    #[tokio::test]
+    async fn test_require_multi_export_not_resolved() {
+        let parser = TreeSitterParser::new();
+
+        let content = r#"const utils = require('./utils.js');"#;
+
+        let mut exports_by_file: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        exports_by_file.insert(
+            "utils.js".to_string(),
+            vec!["helperA".to_string(), "helperB".to_string()],
+        );
+
+        let references = parser
+            .extract_references(
+                content,
+                "main.js",
+                Language::JavaScript,
+                "test-repo",
+                &exports_by_file,
+            )
+            .await
+            .unwrap();
+
+        let import_ref = references
+            .iter()
+            .find(|r| r.reference_kind() == ReferenceKind::Import)
+            .expect("Expected an Import reference");
+
+        assert_eq!(
+            import_ref.callee_symbol(),
+            "utils",
+            "With multiple exports the local binding name must be kept"
+        );
+        assert!(
+            import_ref.import_alias().is_none(),
+            "No alias should be set when resolution is ambiguous"
+        );
+    }
+
+    /// External package requires (`require('express')`) must not be modified.
+    #[tokio::test]
+    async fn test_require_external_package_not_resolved() {
+        let parser = TreeSitterParser::new();
+
+        let content = r#"const express = require('express');"#;
+
+        let references = parser
+            .extract_references(
+                content,
+                "app.js",
+                Language::JavaScript,
+                "test-repo",
+                &std::collections::HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let import_ref = references
+            .iter()
+            .find(|r| r.reference_kind() == ReferenceKind::Import)
+            .expect("Expected an Import reference");
+
+        assert_eq!(
+            import_ref.callee_symbol(),
+            "express",
+            "External package bindings must keep the local name"
+        );
+        assert!(import_ref.import_alias().is_none());
     }
 }

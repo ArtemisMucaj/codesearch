@@ -4,14 +4,16 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::debug;
 
-use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, ParserService, QueryExpander};
+use crate::application::{
+    CallGraphExtractor, CallGraphRepository, CallGraphUseCase, FileHashRepository, ParserService,
+    QueryExpander,
+};
 use crate::{
-    DeleteRepositoryUseCase, DuckdbCallGraphRepository,
-    AnthropicClient, DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository,
-    EmbeddingService, ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
-    ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding, MockReranking, OrtEmbedding,
-    OrtReranking, RerankingService, SearchCodeUseCase,
-    SymbolContextUseCase, TreeSitterParser, VectorRepository,
+    AnthropicClient, DeleteRepositoryUseCase, DuckdbCallGraphRepository, DuckdbFileHashRepository,
+    DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService, ImpactAnalysisUseCase,
+    InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander,
+    MockEmbedding, MockReranking, OrtEmbedding, OrtReranking, ParserBasedExtractor,
+    RerankingService, SearchCodeUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -73,12 +75,16 @@ async fn init_duckdb_metadata_repos(
     };
     let shared_conn = repo_adapter.shared_connection();
     let file_hash_repo: Arc<dyn FileHashRepository> = if read_only {
-        Arc::new(DuckdbFileHashRepository::with_connection_no_init(Arc::clone(&shared_conn)))
+        Arc::new(DuckdbFileHashRepository::with_connection_no_init(
+            Arc::clone(&shared_conn),
+        ))
     } else {
         Arc::new(DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn)).await?)
     };
     let call_graph_repo: Arc<dyn CallGraphRepository> = if read_only {
-        Arc::new(DuckdbCallGraphRepository::with_connection_no_init(shared_conn))
+        Arc::new(DuckdbCallGraphRepository::with_connection_no_init(
+            shared_conn,
+        ))
     } else {
         Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?)
     };
@@ -137,7 +143,8 @@ impl Container {
             (vector, repo_adapter, file_hash_repo, call_graph_repo)
         } else if config.read_only {
             // Read-only DuckDB path: no exclusive write lock → concurrent searches work
-            match DuckdbVectorRepository::new_read_only_with_namespace(&db_path, &config.namespace) {
+            match DuckdbVectorRepository::new_read_only_with_namespace(&db_path, &config.namespace)
+            {
                 Ok(duckdb) => {
                     debug!(
                         "Using DuckDB vector storage (read-only) at {:?} namespace {}",
@@ -153,7 +160,12 @@ impl Container {
                     let call_graph_repo = Arc::new(
                         DuckdbCallGraphRepository::with_connection_no_init(shared_conn),
                     );
-                    (Arc::new(duckdb), repo_adapter, file_hash_repo, call_graph_repo)
+                    (
+                        Arc::new(duckdb),
+                        repo_adapter,
+                        file_hash_repo,
+                        call_graph_repo,
+                    )
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -199,7 +211,12 @@ impl Container {
                     );
                     let call_graph_repo =
                         Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?);
-                    (Arc::new(duckdb), repo_adapter, file_hash_repo, call_graph_repo)
+                    (
+                        Arc::new(duckdb),
+                        repo_adapter,
+                        file_hash_repo,
+                        call_graph_repo,
+                    )
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -220,11 +237,13 @@ impl Container {
             }
         };
 
-        // Create the call graph use case with parser-based extractor
-        let call_graph_use_case = Arc::new(CallGraphUseCase::with_parser(
-            parser.clone() as Arc<dyn ParserService>,
-            call_graph_repo,
-        ));
+        // Create the call graph use case with the parser-based extractor.
+        // ParserBasedExtractor lives in the connector layer (it does file I/O);
+        // CallGraphUseCase only knows about the CallGraphExtractor trait.
+        let extractor = Arc::new(ParserBasedExtractor::new(
+            parser.clone() as Arc<dyn ParserService>
+        )) as Arc<dyn CallGraphExtractor>;
+        let call_graph_use_case = Arc::new(CallGraphUseCase::new(extractor, call_graph_repo));
 
         // Initialise the query expander when --expand-query is requested.
         //
@@ -320,5 +339,4 @@ impl Container {
     pub fn memory_storage(&self) -> bool {
         self.config.memory_storage
     }
-
 }

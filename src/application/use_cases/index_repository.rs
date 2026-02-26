@@ -138,6 +138,24 @@ impl IndexRepositoryUseCase {
         let total_files = files_to_process.len() as u64;
         info!("Found {} files to index", total_files);
 
+        // Phase 0 — pre-scan JS/TS files to build a map of file → exported symbol names.
+        // This map is used during reference extraction to resolve `const X = require('./path')`
+        // to the actual exported symbol rather than the local binding name.
+        let pre_scan_paths: Vec<String> = files_to_process
+            .iter()
+            .map(|entry| {
+                entry
+                    .path()
+                    .strip_prefix(absolute_path)
+                    .unwrap_or(entry.path())
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        let exports_by_file = self
+            .run_export_pre_scan(absolute_path, &pre_scan_paths)
+            .await;
+
         let progress_bar = ProgressBar::new(total_files);
         progress_bar.set_style(
             ProgressStyle::default_bar()
@@ -211,11 +229,17 @@ impl IndexRepositoryUseCase {
 
             self.vector_repo.save_batch(&chunks, &embeddings).await?;
 
-            // Extract and save symbol references (call graph)
             let refs_count = self
                 .call_graph_use_case
-                .extract_and_save(&content, &relative_path, language, repository.id())
-                .await?;
+                .extract_and_save(
+                    &content,
+                    &relative_path,
+                    language,
+                    repository.id(),
+                    &exports_by_file,
+                )
+                .await
+                .map_err(|e| DomainError::internal(format!("{:#}", e)))?;
             reference_count += refs_count;
 
             file_count += 1;
@@ -264,6 +288,24 @@ impl IndexRepositoryUseCase {
             .find_by_id(repository.id())
             .await?
             .ok_or_else(|| DomainError::internal("Repository not found after indexing"))
+    }
+
+    /// Run the JS/TS export pre-scan and return the resulting map.
+    /// Shared by the initial and incremental index paths.
+    async fn run_export_pre_scan(
+        &self,
+        absolute_path: &Path,
+        pre_scan_paths: &[String],
+    ) -> HashMap<String, Vec<String>> {
+        let exports = self
+            .call_graph_use_case
+            .build_export_index(absolute_path, pre_scan_paths)
+            .await;
+        debug!(
+            "Export pre-scan complete: {} JS/TS files with detectable exports",
+            exports.len()
+        );
+        exports
     }
 
     async fn incremental_index(
@@ -385,6 +427,14 @@ impl IndexRepositoryUseCase {
                 .await?;
         }
 
+        // Phase 0 — pre-scan ALL JS/TS files in the repo (including unchanged ones) to build
+        // an exports map for require() resolution.  We need the full set because an added or
+        // modified file may import from an unchanged file.
+        let pre_scan_paths: Vec<String> = current_files.keys().cloned().collect();
+        let exports_by_file = self
+            .run_export_pre_scan(absolute_path, &pre_scan_paths)
+            .await;
+
         // Process added and modified files
         let files_to_process: Vec<&String> = added.iter().chain(modified.iter()).copied().collect();
         let total_to_process = files_to_process.len() as u64;
@@ -452,11 +502,17 @@ impl IndexRepositoryUseCase {
 
             self.vector_repo.save_batch(&chunks, &embeddings).await?;
 
-            // Extract and save symbol references (call graph)
             let refs_count = self
                 .call_graph_use_case
-                .extract_and_save(&content, relative_path, language, repository.id())
-                .await?;
+                .extract_and_save(
+                    &content,
+                    relative_path,
+                    language,
+                    repository.id(),
+                    &exports_by_file,
+                )
+                .await
+                .map_err(|e| DomainError::internal(format!("{:#}", e)))?;
             new_reference_count += refs_count;
 
             // Only add file hash after successful indexing

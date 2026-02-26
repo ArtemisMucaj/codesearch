@@ -132,12 +132,23 @@ async fn duckdb_vector_repository_bm25_text_search_finds_matching_chunks() {
     .with_symbol_name("add");
 
     // Give the auth chunk a unit vector at index 5, the unrelated chunk at index 6.
-    let auth_emb = Embedding::new(auth_chunk.id().to_string(), unit_vector(384, 5), "mock".to_string());
-    let math_emb = Embedding::new(unrelated_chunk.id().to_string(), unit_vector(384, 6), "mock".to_string());
+    let auth_emb = Embedding::new(
+        auth_chunk.id().to_string(),
+        unit_vector(384, 5),
+        "mock".to_string(),
+    );
+    let math_emb = Embedding::new(
+        unrelated_chunk.id().to_string(),
+        unit_vector(384, 6),
+        "mock".to_string(),
+    );
 
-    repo.save_batch(&[auth_chunk.clone(), unrelated_chunk], &[auth_emb, math_emb])
-        .await
-        .expect("save_batch");
+    repo.save_batch(
+        &[auth_chunk.clone(), unrelated_chunk],
+        &[auth_emb, math_emb],
+    )
+    .await
+    .expect("save_batch");
 
     // Query with a unit vector that is orthogonal to both stored vectors so
     // semantic scores are ~0; BM25 must carry the result.
@@ -150,7 +161,9 @@ async fn duckdb_vector_repository_bm25_text_search_finds_matching_chunks() {
 
     assert!(!results.is_empty(), "BM25 search should return results");
     assert!(
-        results.iter().any(|r| r.chunk().content().contains("authenticate")),
+        results
+            .iter()
+            .any(|r| r.chunk().content().contains("authenticate")),
         "authenticate_user chunk should appear in BM25 results"
     );
 }
@@ -171,7 +184,11 @@ async fn duckdb_vector_repository_bm25_handles_empty_query() {
         NodeType::Function,
         "repo-empty".to_string(),
     );
-    let emb = Embedding::new(chunk.id().to_string(), unit_vector(384, 0), "mock".to_string());
+    let emb = Embedding::new(
+        chunk.id().to_string(),
+        unit_vector(384, 0),
+        "mock".to_string(),
+    );
     repo.save_batch(&[chunk], &[emb]).await.expect("save_batch");
 
     // An empty query string should not panic or error.
@@ -181,7 +198,10 @@ async fn duckdb_vector_repository_bm25_handles_empty_query() {
         .await
         .expect("search with empty query");
     // Empty query produces no BM25 hits; result comes from semantic leg only.
-    assert!(!results.is_empty(), "expected at least one result from semantic leg");
+    assert!(
+        !results.is_empty(),
+        "expected at least one result from semantic leg"
+    );
     assert!(results[0].score().is_finite());
 }
 

@@ -79,16 +79,17 @@ impl DuckdbVectorRepository {
     pub fn new_read_only_with_namespace(path: &Path, namespace: &str) -> Result<Self, DomainError> {
         let config = Config::default()
             .access_mode(AccessMode::ReadOnly)
-            .map_err(|e| DomainError::storage(format!("Failed to configure read-only access: {}", e)))?;
+            .map_err(|e| {
+                DomainError::storage(format!("Failed to configure read-only access: {}", e))
+            })?;
 
-        let conn = Connection::open_with_flags(path, config)
-            .map_err(|e| DomainError::storage(format!("Failed to open DuckDB (read-only): {}", e)))?;
+        let conn = Connection::open_with_flags(path, config).map_err(|e| {
+            DomainError::storage(format!("Failed to open DuckDB (read-only): {}", e))
+        })?;
 
         // Load VSS and FTS for query support; skip INSTALL (DDL forbidden in read-only mode).
-        conn.execute_batch(
-            "LOAD vss; SET hnsw_enable_experimental_persistence = true; LOAD fts;",
-        )
-        .map_err(|e| DomainError::storage(format!("Failed to load extensions: {}", e)))?;
+        conn.execute_batch("LOAD vss; SET hnsw_enable_experimental_persistence = true; LOAD fts;")
+            .map_err(|e| DomainError::storage(format!("Failed to load extensions: {}", e)))?;
 
         let schema = namespace.trim();
         let schema_name = if schema.is_empty() { "main" } else { schema };
@@ -177,8 +178,9 @@ impl DuckdbVectorRepository {
             schema_name, schema_name, schema_name, schema_name
         );
 
-        conn.execute_batch(&schema_sql)
-            .map_err(|e| DomainError::storage(format!("Failed to initialize DuckDB schema: {}", e)))?;
+        conn.execute_batch(&schema_sql).map_err(|e| {
+            DomainError::storage(format!("Failed to initialize DuckDB schema: {}", e))
+        })?;
 
         debug!("DuckDB schema initialized successfully");
         Ok(())
@@ -315,9 +317,9 @@ impl DuckdbVectorRepository {
         }
         sql.push_str(" ORDER BY score DESC LIMIT ?");
 
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| DomainError::storage(format!("Failed to prepare semantic search: {}", e)))?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            DomainError::storage(format!("Failed to prepare semantic search: {}", e))
+        })?;
         let mut rows = stmt
             .query(params![limit as i64])
             .map_err(|e| DomainError::storage(format!("Failed to run semantic search: {}", e)))?;
@@ -434,8 +436,9 @@ impl DuckdbVectorRepository {
             let score: f32 = row
                 .get(10)
                 .map_err(|e| DomainError::storage(format!("Failed to read BM25 score: {e}")))?;
-            let chunk = Self::row_to_chunk(row)
-                .map_err(|e| DomainError::storage(format!("Failed to parse BM25 chunk row: {e}")))?;
+            let chunk = Self::row_to_chunk(row).map_err(|e| {
+                DomainError::storage(format!("Failed to parse BM25 chunk row: {e}"))
+            })?;
             results.push(SearchResult::new(chunk, score));
         }
         Ok(results)
@@ -639,7 +642,8 @@ impl VectorRepository for DuckdbVectorRepository {
 
         let conn = self.conn.lock().await;
 
-        let semantic = Self::run_semantic(&conn, &self.namespace, &array_lit, query, query.limit())?;
+        let semantic =
+            Self::run_semantic(&conn, &self.namespace, &array_lit, query, query.limit())?;
 
         if !query.is_text_search() {
             return Ok(semantic);

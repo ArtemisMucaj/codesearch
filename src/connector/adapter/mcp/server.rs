@@ -134,9 +134,10 @@ impl CodesearchMcpServer {
         }
 
         let use_case = self.container.search_use_case();
-        let results = use_case.execute(query).await.map_err(|e| {
-            McpError::internal_error(format!("Search failed: {}", e), None)
-        })?;
+        let results = use_case
+            .execute(query)
+            .await
+            .map_err(|e| McpError::internal_error(format!("Search failed: {}", e), None))?;
 
         let outputs: Vec<SearchResultOutput> = results
             .iter()
@@ -176,7 +177,9 @@ impl CodesearchMcpServer {
         let analysis = use_case
             .analyze(&input.symbol, depth, input.repository_id.as_deref())
             .await
-            .map_err(|e| McpError::internal_error(format!("Impact analysis failed: {}", e), None))?;
+            .map_err(|e| {
+                McpError::internal_error(format!("Impact analysis failed: {}", e), None)
+            })?;
 
         let json = serde_json::to_string_pretty(&analysis).map_err(|e| {
             McpError::internal_error(format!("Failed to serialize impact analysis: {}", e), None)

@@ -48,6 +48,10 @@ pub struct SymbolReference {
 
     /// The enclosing scope/context (e.g., class name for methods)
     enclosing_scope: Option<String>,
+
+    /// Local alias used at the import/require site (e.g., `bar` in `import { foo as bar }`).
+    /// `None` when the symbol is imported without renaming.
+    import_alias: Option<String>,
 }
 
 impl SymbolReference {
@@ -76,6 +80,7 @@ impl SymbolReference {
             repository_id,
             caller_node_type: None,
             enclosing_scope: None,
+            import_alias: None,
         }
     }
 
@@ -94,6 +99,7 @@ impl SymbolReference {
         repository_id: String,
         caller_node_type: Option<String>,
         enclosing_scope: Option<String>,
+        import_alias: Option<String>,
     ) -> Self {
         Self {
             id,
@@ -108,6 +114,7 @@ impl SymbolReference {
             repository_id,
             caller_node_type,
             enclosing_scope,
+            import_alias,
         }
     }
 
@@ -118,6 +125,16 @@ impl SymbolReference {
 
     pub fn with_enclosing_scope(mut self, scope: impl Into<String>) -> Self {
         self.enclosing_scope = Some(scope.into());
+        self
+    }
+
+    pub fn with_import_alias(mut self, alias: impl Into<String>) -> Self {
+        self.import_alias = Some(alias.into());
+        self
+    }
+
+    pub fn with_callee_symbol(mut self, callee: impl Into<String>) -> Self {
+        self.callee_symbol = callee.into();
         self
     }
 
@@ -168,6 +185,12 @@ impl SymbolReference {
 
     pub fn enclosing_scope(&self) -> Option<&str> {
         self.enclosing_scope.as_deref()
+    }
+
+    /// Returns the local alias used at this import site, if the symbol was renamed.
+    /// For example, `bar` in `import { foo as bar }` or `const { foo: bar } = require(...)`.
+    pub fn import_alias(&self) -> Option<&str> {
+        self.import_alias.as_deref()
     }
 
     /// Returns a formatted location string for this reference.

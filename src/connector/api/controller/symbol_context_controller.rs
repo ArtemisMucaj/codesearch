@@ -50,9 +50,14 @@ impl<'a> SymbolContextController<'a> {
             out.push_str("  (none found)\n");
         } else {
             for edge in &ctx.callers {
+                let alias_suffix = edge
+                    .import_alias
+                    .as_ref()
+                    .map(|a| format!(", as {}", a))
+                    .unwrap_or_default();
                 out.push_str(&format!(
-                    "  ← {} [{}]  {}:{}\n",
-                    edge.symbol, edge.reference_kind, edge.file_path, edge.line
+                    "  ← {} [{}{}]  {}:{}\n",
+                    edge.symbol, edge.reference_kind, alias_suffix, edge.file_path, edge.line
                 ));
             }
         }
@@ -65,9 +70,14 @@ impl<'a> SymbolContextController<'a> {
             out.push_str("  (none found)\n");
         } else {
             for edge in &ctx.callees {
+                let alias_suffix = edge
+                    .import_alias
+                    .as_ref()
+                    .map(|a| format!(", as {}", a))
+                    .unwrap_or_default();
                 out.push_str(&format!(
-                    "  → {} [{}]  {}:{}\n",
-                    edge.symbol, edge.reference_kind, edge.file_path, edge.line
+                    "  → {} [{}{}]  {}:{}\n",
+                    edge.symbol, edge.reference_kind, alias_suffix, edge.file_path, edge.line
                 ));
             }
         }
