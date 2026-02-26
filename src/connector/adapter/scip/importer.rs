@@ -42,7 +42,7 @@ impl ScipImporter {
             let mut by_file: HashMap<String, Vec<SymbolReference>> = HashMap::new();
 
             for doc in &index.documents {
-                let language = scip_language_to_domain(&doc.language);
+                let language = scip_language_to_domain(&doc.language, &doc.relative_path);
                 if !matches!(
                     language,
                     Language::JavaScript | Language::TypeScript | Language::Php
@@ -337,7 +337,10 @@ fn infer_reference_kind(
 /// SCIP encodes language as a free-form string (e.g. `"JavaScript"`, `"PHP"`)
 /// as defined by the SCIP specification
 /// (<https://github.com/sourcegraph/scip/blob/main/scip.proto>).
-fn scip_language_to_domain(lang: &str) -> Language {
+///
+/// When the indexer leaves `language` empty (scip-typescript does this for JS
+/// files with an inferred tsconfig), we fall back to the file extension.
+fn scip_language_to_domain(lang: &str, path: &str) -> Language {
     match lang.to_lowercase().as_str() {
         "javascript" | "javascriptreact" => Language::JavaScript,
         "typescript" | "typescriptreact" => Language::TypeScript,
@@ -345,6 +348,7 @@ fn scip_language_to_domain(lang: &str) -> Language {
         "rust" => Language::Rust,
         "python" => Language::Python,
         "go" => Language::Go,
+        "" => Language::from_path(Path::new(path)),
         _ => Language::Unknown,
     }
 }
@@ -424,12 +428,27 @@ mod tests {
 
     #[test]
     fn test_scip_language_mapping() {
-        assert_eq!(scip_language_to_domain("TypeScript"), Language::TypeScript);
         assert_eq!(
-            scip_language_to_domain("JavaScriptReact"),
+            scip_language_to_domain("TypeScript", "foo.ts"),
+            Language::TypeScript
+        );
+        assert_eq!(
+            scip_language_to_domain("JavaScriptReact", "foo.jsx"),
             Language::JavaScript
         );
-        assert_eq!(scip_language_to_domain("PHP"), Language::Php);
-        assert_eq!(scip_language_to_domain("Haskell"), Language::Unknown);
+        assert_eq!(scip_language_to_domain("PHP", "foo.php"), Language::Php);
+        assert_eq!(
+            scip_language_to_domain("Haskell", "foo.hs"),
+            Language::Unknown
+        );
+        // Empty language field → infer from extension
+        assert_eq!(
+            scip_language_to_domain("", "api/index.js"),
+            Language::JavaScript
+        );
+        assert_eq!(
+            scip_language_to_domain("", "src/main.ts"),
+            Language::TypeScript
+        );
     }
 }

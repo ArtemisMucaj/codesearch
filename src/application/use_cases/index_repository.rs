@@ -576,6 +576,30 @@ impl IndexRepositoryUseCase {
 
         progress_bar.finish_and_clear();
 
+        // SCIP references for unchanged files.
+        //
+        // The main loop above only saves references for added/modified files.
+        // Unchanged files are skipped for embedding, but their call-graph edges
+        // can still change when cross-file analysis (SCIP) is re-run (e.g. a
+        // callee was renamed in another file).  Persist all SCIP refs that were
+        // not already handled above.
+        let processed_set: std::collections::HashSet<&String> =
+            added.iter().chain(modified.iter()).copied().collect();
+        for (relative_path, file_refs) in &scip_refs {
+            if processed_set.contains(relative_path) {
+                continue;
+            }
+            // Replace stale references with the fresh SCIP output.
+            self.call_graph_use_case
+                .delete_by_file(repository.id(), relative_path)
+                .await?;
+            new_reference_count += self
+                .call_graph_use_case
+                .save_references(file_refs)
+                .await
+                .map_err(|e| DomainError::internal(format!("{:#}", e)))?;
+        }
+
         // Track language statistics for unchanged files
         // We need to count them by language based on their file extensions
         for path in current_paths.intersection(&existing_paths) {
