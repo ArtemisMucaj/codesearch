@@ -1,11 +1,16 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context;
+use futures_util::stream::{self, StreamExt};
 use tracing::{debug, warn};
 
 use crate::application::{CallGraphQuery, CallGraphRepository, CallGraphStats, ParserService};
 use crate::domain::{DomainError, Language, SymbolReference};
+
+/// Maximum number of files read concurrently during the export pre-scan.
+const PRE_SCAN_CONCURRENCY: usize = 16;
 
 /// Trait for call graph extraction strategies.
 /// This allows replacing the extraction method (e.g., tree-sitter, LSP, etc.)
@@ -13,30 +18,32 @@ use crate::domain::{DomainError, Language, SymbolReference};
 #[async_trait::async_trait]
 pub trait CallGraphExtractor: Send + Sync {
     /// Extract symbol references from source code.
+    ///
+    /// `exports_by_file` maps repo-relative file paths to the exported symbol names of
+    /// that file.  Pass an empty map for languages that don't need cross-file resolution.
     async fn extract(
         &self,
         content: &str,
         file_path: &str,
         language: Language,
         repository_id: &str,
+        exports_by_file: &HashMap<String, Vec<String>>,
     ) -> Result<Vec<SymbolReference>, DomainError>;
 
-    /// Like `extract`, but also resolves relative `require()` paths against
-    /// `exports_by_file` to store the actual exported symbol name instead of the
-    /// local binding name.
+    /// Build an export index for JS/TS files so that `extract` can resolve
+    /// relative `require()` paths to actual exported symbol names.
     ///
-    /// The default implementation ignores the map and delegates to `extract`.
-    async fn extract_with_exports(
+    /// Reads each JS/TS file under `absolute_path` / `relative_path` and returns
+    /// a map of repo-relative path → exported symbol names.
+    ///
+    /// The default implementation returns an empty map (no pre-scan needed for
+    /// languages that don't use cross-file import resolution).
+    async fn build_export_index(
         &self,
-        content: &str,
-        file_path: &str,
-        language: Language,
-        repository_id: &str,
-        exports_by_file: &HashMap<String, Vec<String>>,
-    ) -> Result<Vec<SymbolReference>, DomainError> {
-        let _ = exports_by_file;
-        self.extract(content, file_path, language, repository_id)
-            .await
+        _absolute_path: &Path,
+        _relative_paths: &[String],
+    ) -> HashMap<String, Vec<String>> {
+        HashMap::new()
     }
 }
 
@@ -59,28 +66,51 @@ impl CallGraphExtractor for ParserBasedExtractor {
         file_path: &str,
         language: Language,
         repository_id: &str,
-    ) -> Result<Vec<SymbolReference>, DomainError> {
-        self.parser_service
-            .extract_references(content, file_path, language, repository_id)
-            .await
-    }
-
-    async fn extract_with_exports(
-        &self,
-        content: &str,
-        file_path: &str,
-        language: Language,
-        repository_id: &str,
         exports_by_file: &HashMap<String, Vec<String>>,
     ) -> Result<Vec<SymbolReference>, DomainError> {
         self.parser_service
-            .extract_references_with_exports(
-                content,
-                file_path,
-                language,
-                repository_id,
-                exports_by_file,
-            )
+            .extract_references(content, file_path, language, repository_id, exports_by_file)
+            .await
+    }
+
+    async fn build_export_index(
+        &self,
+        absolute_path: &Path,
+        relative_paths: &[String],
+    ) -> HashMap<String, Vec<String>> {
+        let parser = self.parser_service.clone();
+        let absolute_path = absolute_path.to_path_buf();
+
+        stream::iter(relative_paths.iter().cloned())
+            .map(|rel_path| {
+                let parser = parser.clone();
+                let abs_path = absolute_path.clone();
+                async move {
+                    let lang = Language::from_path(Path::new(&rel_path));
+                    if !matches!(lang, Language::JavaScript | Language::TypeScript) {
+                        return None;
+                    }
+                    let content = match tokio::fs::read_to_string(abs_path.join(&rel_path)).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(
+                                "Failed to read file for export pre-scan {}: {}",
+                                rel_path, e
+                            );
+                            return None;
+                        }
+                    };
+                    let exports = parser.extract_module_exports(&content, lang).await;
+                    if exports.is_empty() {
+                        None
+                    } else {
+                        Some((rel_path, exports))
+                    }
+                }
+            })
+            .buffer_unordered(PRE_SCAN_CONCURRENCY)
+            .filter_map(|x| async { x })
+            .collect::<HashMap<String, Vec<String>>>()
             .await
     }
 }
@@ -115,12 +145,28 @@ impl CallGraphUseCase {
         Self::new(extractor, repository)
     }
 
-    /// Like `extract_and_save`, but resolves relative `require()` paths in JS/TS
-    /// files against `exports_by_file` before saving.
+    /// Build an export index for a set of files.
     ///
-    /// Call this instead of `extract_and_save` when a pre-scanned exports map is
-    /// available (populated during the indexing pre-scan phase).
-    pub async fn extract_and_save_resolved(
+    /// Delegates to the extractor's pre-scan implementation; returns an empty
+    /// map for extractors that don't need cross-file export resolution.
+    pub async fn build_export_index(
+        &self,
+        absolute_path: &Path,
+        relative_paths: &[String],
+    ) -> HashMap<String, Vec<String>> {
+        self.extractor
+            .build_export_index(absolute_path, relative_paths)
+            .await
+    }
+
+    /// Extract symbol references from content and save them to the repository.
+    ///
+    /// `exports_by_file` is used to resolve relative `require()` paths in JS/TS
+    /// files to the actual exported symbol names.  Pass an empty map when no
+    /// pre-scan has been performed or for languages that don't need it.
+    ///
+    /// Returns the number of references saved.
+    pub async fn extract_and_save(
         &self,
         content: &str,
         file_path: &str,
@@ -130,32 +176,7 @@ impl CallGraphUseCase {
     ) -> anyhow::Result<u64> {
         match self
             .extractor
-            .extract_with_exports(content, file_path, language, repository_id, exports_by_file)
-            .await
-        {
-            Ok(refs) => self.persist_references(refs, file_path).await,
-            Err(e) => {
-                warn!(
-                    "Failed to extract references from {}: {} (continuing)",
-                    file_path, e
-                );
-                Ok(0)
-            }
-        }
-    }
-
-    /// Extract symbol references from content and save them to the repository.
-    /// Returns the number of references saved.
-    pub async fn extract_and_save(
-        &self,
-        content: &str,
-        file_path: &str,
-        language: Language,
-        repository_id: &str,
-    ) -> anyhow::Result<u64> {
-        match self
-            .extractor
-            .extract(content, file_path, language, repository_id)
+            .extract(content, file_path, language, repository_id, exports_by_file)
             .await
         {
             Ok(refs) => self.persist_references(refs, file_path).await,
@@ -282,6 +303,7 @@ mod tests {
             _file_path: &str,
             _language: Language,
             _repository_id: &str,
+            _exports_by_file: &HashMap<String, Vec<String>>,
         ) -> Result<Vec<SymbolReference>, DomainError> {
             Ok(self.references.clone())
         }
@@ -385,7 +407,13 @@ mod tests {
         let use_case = CallGraphUseCase::new(extractor, repository.clone());
 
         let count = use_case
-            .extract_and_save("fn main() {}", "test.rs", Language::Rust, "repo-1")
+            .extract_and_save(
+                "fn main() {}",
+                "test.rs",
+                Language::Rust,
+                "repo-1",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 
@@ -401,7 +429,13 @@ mod tests {
         let use_case = CallGraphUseCase::new(extractor, repository.clone());
 
         let count = use_case
-            .extract_and_save("fn main() {}", "test.rs", Language::Rust, "repo-1")
+            .extract_and_save(
+                "fn main() {}",
+                "test.rs",
+                Language::Rust,
+                "repo-1",
+                &HashMap::new(),
+            )
             .await
             .unwrap();
 

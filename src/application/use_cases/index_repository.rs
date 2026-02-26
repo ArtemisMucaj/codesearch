@@ -3,7 +3,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures_util::stream::{self, StreamExt};
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 use tracing::{debug, info, warn};
@@ -153,7 +152,10 @@ impl IndexRepositoryUseCase {
                     .to_string()
             })
             .collect();
-        let exports_by_file = self.pre_scan_exports(absolute_path, &pre_scan_paths).await;
+        let exports_by_file = self
+            .call_graph_use_case
+            .build_export_index(absolute_path, &pre_scan_paths)
+            .await;
         debug!(
             "Export pre-scan complete: {} JS/TS files with detectable exports",
             exports_by_file.len()
@@ -232,12 +234,9 @@ impl IndexRepositoryUseCase {
 
             self.vector_repo.save_batch(&chunks, &embeddings).await?;
 
-            // Extract and save symbol references (call graph).
-            // Pass the exports map so that simple `const X = require('./path')` bindings
-            // are resolved to the actual exported symbol name from the target file.
             let refs_count = self
                 .call_graph_use_case
-                .extract_and_save_resolved(
+                .extract_and_save(
                     &content,
                     &relative_path,
                     language,
@@ -294,59 +293,6 @@ impl IndexRepositoryUseCase {
             .find_by_id(repository.id())
             .await?
             .ok_or_else(|| DomainError::internal("Repository not found after indexing"))
-    }
-
-    /// Pre-scan JS/TS files and build a map of relative file path → exported symbol names.
-    /// Used by both the initial and incremental index paths for `require()` resolution.
-    /// Reads are performed in parallel up to `PRE_SCAN_CONCURRENCY` at a time.
-    async fn pre_scan_exports(
-        &self,
-        absolute_path: &Path,
-        relative_paths: &[String],
-    ) -> HashMap<String, Vec<String>> {
-        const PRE_SCAN_CONCURRENCY: usize = 16;
-
-        let parser = self.parser_service.clone();
-        let absolute_path = absolute_path.to_path_buf();
-
-        stream::iter(relative_paths.iter().cloned())
-            .map(|rel_path| {
-                let parser = parser.clone();
-                let abs_path = absolute_path.clone();
-                async move {
-                    let lang = Language::from_path(Path::new(&rel_path));
-                    if !matches!(lang, Language::JavaScript | Language::TypeScript) {
-                        return None;
-                    }
-                    let entry_path = abs_path.join(&rel_path);
-                    let content = match tokio::fs::read_to_string(&entry_path).await {
-                        Ok(c) => c,
-                        Err(e) => {
-                            warn!(
-                                "Failed to read file for export pre-scan {}: {}",
-                                rel_path, e
-                            );
-                            return None;
-                        }
-                    };
-                    // extract_module_exports runs a full tree-sitter parse (CPU-bound);
-                    // offload it to the blocking thread pool so we don't stall the runtime.
-                    let exports = tokio::task::spawn_blocking(
-                        move || parser.extract_module_exports(&content, lang),
-                    )
-                    .await
-                    .unwrap_or_default();
-                    if exports.is_empty() {
-                        None
-                    } else {
-                        Some((rel_path, exports))
-                    }
-                }
-            })
-            .buffer_unordered(PRE_SCAN_CONCURRENCY)
-            .filter_map(|x| async { x })
-            .collect::<HashMap<String, Vec<String>>>()
-            .await
     }
 
     async fn incremental_index(
@@ -472,7 +418,10 @@ impl IndexRepositoryUseCase {
         // an exports map for require() resolution.  We need the full set because an added or
         // modified file may import from an unchanged file.
         let pre_scan_paths: Vec<String> = current_files.keys().cloned().collect();
-        let exports_by_file = self.pre_scan_exports(absolute_path, &pre_scan_paths).await;
+        let exports_by_file = self
+            .call_graph_use_case
+            .build_export_index(absolute_path, &pre_scan_paths)
+            .await;
         debug!(
             "Incremental export pre-scan complete: {} JS/TS files with detectable exports",
             exports_by_file.len()
@@ -545,10 +494,9 @@ impl IndexRepositoryUseCase {
 
             self.vector_repo.save_batch(&chunks, &embeddings).await?;
 
-            // Extract and save symbol references (call graph).
             let refs_count = self
                 .call_graph_use_case
-                .extract_and_save_resolved(
+                .extract_and_save(
                     &content,
                     relative_path,
                     language,
