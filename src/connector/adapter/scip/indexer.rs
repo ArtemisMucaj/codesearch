@@ -38,6 +38,7 @@ impl IndexerKind {
         match self {
             IndexerKind::TypeScript => vec![
                 "index".to_string(),
+                "--infer-tsconfig".to_string(),
                 "--output".to_string(),
                 output_path.to_string_lossy().to_string(),
             ],
