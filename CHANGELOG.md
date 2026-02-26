@@ -22,6 +22,19 @@
 * unit tests for `InMemoryVectorRepository` hybrid paths: cosine vs RRF score ranges, dual-leg ranking, post-fusion `min_score` filtering, no early pruning, empty-term fallback, and limit enforcement
 * integration tests for end-to-end hybrid search: results returned with positive scores, keyword-matched chunk surfaces, special SQL characters (`%`, `_`, `!`) do not cause errors, and semantic-only baseline confirms the flag gates the BM25 leg
 
+## [0.13.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.12.1...v0.13.0) (2026-02-26)
+
+
+### Features
+
+* add SCIP-based call graph extraction for JavaScript/TypeScript and PHP ([#94](https://github.com/ArtemisMucaj/codesearch/issues/94)) ([bccc50f](https://github.com/ArtemisMucaj/codesearch/commit/bccc50fe7ba3662aea2469acb8ff8f5dad805851))
+
+
+### Bug Fixes
+
+* scip indexing with js ([#95](https://github.com/ArtemisMucaj/codesearch/issues/95)) ([b693700](https://github.com/ArtemisMucaj/codesearch/commit/b69370072b725c13f8935adf5261e82997cbec28))
+* ts with no top level function wasn't indexed ([#89](https://github.com/ArtemisMucaj/codesearch/issues/89)) ([c93f0b9](https://github.com/ArtemisMucaj/codesearch/commit/c93f0b9d5852f03fb7d937049e39234b0e57d859))
+
 ## [0.12.1](https://github.com/ArtemisMucaj/codesearch/compare/v0.12.0...v0.12.1) (2026-02-26)
 
 
