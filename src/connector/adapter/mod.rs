@@ -11,7 +11,7 @@ mod mock_embedding;
 mod mock_reranking;
 mod ort_embedding;
 mod ort_reranking;
-mod parser_based_extractor;
+pub mod scip;
 mod treesitter_parser;
 
 pub use anthropic_client::*;
@@ -26,5 +26,4 @@ pub use mock_embedding::*;
 pub use mock_reranking::*;
 pub use ort_embedding::*;
 pub use ort_reranking::*;
-pub use parser_based_extractor::*;
 pub use treesitter_parser::*;

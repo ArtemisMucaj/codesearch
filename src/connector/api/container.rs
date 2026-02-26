@@ -4,16 +4,14 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::debug;
 
-use crate::application::{
-    CallGraphExtractor, CallGraphRepository, CallGraphUseCase, FileHashRepository, ParserService,
-    QueryExpander,
-};
+use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, QueryExpander};
+use crate::connector::adapter::scip::ScipRunner;
 use crate::{
     AnthropicClient, DeleteRepositoryUseCase, DuckdbCallGraphRepository, DuckdbFileHashRepository,
     DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService, ImpactAnalysisUseCase,
     InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander,
-    MockEmbedding, MockReranking, OrtEmbedding, OrtReranking, ParserBasedExtractor,
-    RerankingService, SearchCodeUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
+    MockEmbedding, MockReranking, OrtEmbedding, OrtReranking, RerankingService, Scip,
+    SearchCodeUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -237,13 +235,7 @@ impl Container {
             }
         };
 
-        // Create the call graph use case with the parser-based extractor.
-        // ParserBasedExtractor lives in the connector layer (it does file I/O);
-        // CallGraphUseCase only knows about the CallGraphExtractor trait.
-        let extractor = Arc::new(ParserBasedExtractor::new(
-            parser.clone() as Arc<dyn ParserService>
-        )) as Arc<dyn CallGraphExtractor>;
-        let call_graph_use_case = Arc::new(CallGraphUseCase::new(extractor, call_graph_repo));
+        let call_graph_use_case = Arc::new(CallGraphUseCase::new(call_graph_repo));
 
         // Initialise the query expander when --expand-query is requested.
         //
@@ -277,6 +269,7 @@ impl Container {
     }
 
     pub fn index_use_case(&self) -> IndexRepositoryUseCase {
+        let scip: Arc<dyn Scip> = Arc::new(ScipRunner);
         IndexRepositoryUseCase::new(
             self.repo_adapter.clone(),
             self.vector_repo.clone(),
@@ -285,6 +278,7 @@ impl Container {
             self.parser.clone(),
             self.embedding_service.clone(),
         )
+        .with_scip(scip)
     }
 
     pub fn search_use_case(&self) -> SearchCodeUseCase {

@@ -73,6 +73,10 @@ tokenizers = "0.21"
 hf-hub = "0.4"
 ndarray = "0.16"
 
+# SCIP code intelligence indexing
+scip = "0.3"
+protobuf = "3"
+
 # MCP Server
 rmcp = { version = "0.14", features = ["server", "transport-io", "transport-streamable-http-server", "transport-streamable-http-server-session", "macros"] }
 schemars = "1.0"

@@ -1,119 +1,36 @@
-use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::application::{CallGraphQuery, CallGraphRepository, CallGraphStats};
-use crate::domain::{DomainError, Language, SymbolReference};
-
-/// Trait for call graph extraction strategies.
-/// This allows replacing the extraction method (e.g., tree-sitter, LSP, etc.)
-/// without changing the use case logic.
-#[async_trait::async_trait]
-pub trait CallGraphExtractor: Send + Sync {
-    /// Extract symbol references from source code.
-    ///
-    /// `exports_by_file` maps repo-relative file paths to the exported symbol names of
-    /// that file.  Pass an empty map for languages that don't need cross-file resolution.
-    async fn extract(
-        &self,
-        content: &str,
-        file_path: &str,
-        language: Language,
-        repository_id: &str,
-        exports_by_file: &HashMap<String, Vec<String>>,
-    ) -> Result<Vec<SymbolReference>, DomainError>;
-
-    /// Build an export index for JS/TS files so that `extract` can resolve
-    /// relative `require()` paths to actual exported symbol names.
-    ///
-    /// Reads each JS/TS file under `absolute_path` / `relative_path` and returns
-    /// a map of repo-relative path → exported symbol names.
-    ///
-    /// The default implementation returns an empty map (no pre-scan needed for
-    /// languages that don't use cross-file import resolution).
-    async fn build_export_index(
-        &self,
-        _absolute_path: &Path,
-        _relative_paths: &[String],
-    ) -> HashMap<String, Vec<String>> {
-        HashMap::new()
-    }
-}
+use crate::domain::{DomainError, SymbolReference};
 
 /// Use case for managing call graph (symbol references).
-/// Provides a decoupled interface for extracting, saving, querying, and deleting
-/// symbol references. The extraction strategy can be replaced by providing
-/// a different CallGraphExtractor implementation.
+/// Provides a decoupled interface for saving, querying, and deleting
+/// symbol references populated by the SCIP indexing phase.
 pub struct CallGraphUseCase {
-    extractor: Arc<dyn CallGraphExtractor>,
     repository: Arc<dyn CallGraphRepository>,
 }
 
 impl CallGraphUseCase {
-    /// Create a new CallGraphUseCase with the given extractor and repository.
-    pub fn new(
-        extractor: Arc<dyn CallGraphExtractor>,
-        repository: Arc<dyn CallGraphRepository>,
-    ) -> Self {
-        Self {
-            extractor,
-            repository,
-        }
+    pub fn new(repository: Arc<dyn CallGraphRepository>) -> Self {
+        Self { repository }
     }
 
-    /// Build an export index for a set of files.
-    ///
-    /// Delegates to the extractor's pre-scan implementation; returns an empty
-    /// map for extractors that don't need cross-file export resolution.
-    pub async fn build_export_index(
-        &self,
-        absolute_path: &Path,
-        relative_paths: &[String],
-    ) -> HashMap<String, Vec<String>> {
-        self.extractor
-            .build_export_index(absolute_path, relative_paths)
-            .await
-    }
-
-    /// Extract symbol references from content and save them to the repository.
-    ///
-    /// `exports_by_file` is used to resolve relative `require()` paths in JS/TS
-    /// files to the actual exported symbol names.  Pass an empty map when no
-    /// pre-scan has been performed or for languages that don't need it.
+    /// Persist a slice of pre-extracted [`SymbolReference`]s produced by the
+    /// SCIP importer.
     ///
     /// Returns the number of references saved.
-    pub async fn extract_and_save(
-        &self,
-        content: &str,
-        file_path: &str,
-        language: Language,
-        repository_id: &str,
-        exports_by_file: &HashMap<String, Vec<String>>,
-    ) -> anyhow::Result<u64> {
-        match self
-            .extractor
-            .extract(content, file_path, language, repository_id, exports_by_file)
-            .await
-        {
-            Ok(refs) => self.persist_references(refs, file_path).await,
-            Err(e) => {
-                warn!(
-                    "Failed to extract references from {}: {} (continuing)",
-                    file_path, e
-                );
-                Ok(0)
-            }
-        }
+    pub async fn save_references(&self, references: &[SymbolReference]) -> anyhow::Result<u64> {
+        self.persist_references(references, "<scip>").await
     }
 
-    /// Save a batch of already-extracted references. Handles the empty-vec short-circuit,
+    /// Save a batch of already-extracted references. Handles the empty-slice short-circuit,
     /// the `save_batch` call with anyhow context, and the success debug log.
     async fn persist_references(
         &self,
-        references: Vec<SymbolReference>,
+        references: &[SymbolReference],
         file_path: &str,
     ) -> anyhow::Result<u64> {
         if references.is_empty() {
@@ -122,7 +39,7 @@ impl CallGraphUseCase {
 
         let count = references.len() as u64;
         self.repository
-            .save_batch(&references)
+            .save_batch(references)
             .await
             .with_context(|| format!("failed to save {} references for indexing", count))?;
 
@@ -195,173 +112,5 @@ impl CallGraphUseCase {
         self.repository
             .find_cross_repo_references(symbol_name)
             .await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::ReferenceKind;
-    use std::sync::Mutex;
-
-    struct MockExtractor {
-        references: Vec<SymbolReference>,
-    }
-
-    impl MockExtractor {
-        fn new(references: Vec<SymbolReference>) -> Self {
-            Self { references }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl CallGraphExtractor for MockExtractor {
-        async fn extract(
-            &self,
-            _content: &str,
-            _file_path: &str,
-            _language: Language,
-            _repository_id: &str,
-            _exports_by_file: &HashMap<String, Vec<String>>,
-        ) -> Result<Vec<SymbolReference>, DomainError> {
-            Ok(self.references.clone())
-        }
-    }
-
-    struct MockCallGraphRepository {
-        saved: Mutex<Vec<SymbolReference>>,
-    }
-
-    impl MockCallGraphRepository {
-        fn new() -> Self {
-            Self {
-                saved: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn saved_count(&self) -> usize {
-            self.saved.lock().unwrap().len()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl CallGraphRepository for MockCallGraphRepository {
-        async fn save_batch(&self, references: &[SymbolReference]) -> Result<(), DomainError> {
-            self.saved
-                .lock()
-                .unwrap()
-                .extend(references.iter().cloned());
-            Ok(())
-        }
-
-        async fn find_callers(
-            &self,
-            _callee_symbol: &str,
-            _query: &CallGraphQuery,
-        ) -> Result<Vec<SymbolReference>, DomainError> {
-            Ok(Vec::new())
-        }
-
-        async fn find_callees(
-            &self,
-            _caller_symbol: &str,
-            _query: &CallGraphQuery,
-        ) -> Result<Vec<SymbolReference>, DomainError> {
-            Ok(Vec::new())
-        }
-
-        async fn find_by_file(
-            &self,
-            _file_path: &str,
-            _query: &CallGraphQuery,
-        ) -> Result<Vec<SymbolReference>, DomainError> {
-            Ok(Vec::new())
-        }
-
-        async fn find_by_repository(
-            &self,
-            _repository_id: &str,
-        ) -> Result<Vec<SymbolReference>, DomainError> {
-            Ok(Vec::new())
-        }
-
-        async fn delete_by_file_path(
-            &self,
-            _repository_id: &str,
-            _file_path: &str,
-        ) -> Result<u64, DomainError> {
-            Ok(0)
-        }
-
-        async fn delete_by_repository(&self, _repository_id: &str) -> Result<(), DomainError> {
-            Ok(())
-        }
-
-        async fn get_stats(&self, _repository_id: &str) -> Result<CallGraphStats, DomainError> {
-            Ok(CallGraphStats::default())
-        }
-
-        async fn find_cross_repo_references(
-            &self,
-            _symbol_name: &str,
-        ) -> Result<Vec<SymbolReference>, DomainError> {
-            Ok(Vec::new())
-        }
-    }
-
-    #[tokio::test]
-    async fn test_extract_and_save() {
-        let references = vec![SymbolReference::new(
-            Some("caller".to_string()),
-            "callee".to_string(),
-            "test.rs".to_string(),
-            "test.rs".to_string(),
-            10,
-            5,
-            ReferenceKind::Call,
-            Language::Rust,
-            "repo-1".to_string(),
-        )];
-
-        let extractor = Arc::new(MockExtractor::new(references));
-        let repository = Arc::new(MockCallGraphRepository::new());
-
-        let use_case = CallGraphUseCase::new(extractor, repository.clone());
-
-        let count = use_case
-            .extract_and_save(
-                "fn main() {}",
-                "test.rs",
-                Language::Rust,
-                "repo-1",
-                &HashMap::new(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(count, 1);
-        assert_eq!(repository.saved_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_extract_and_save_empty() {
-        let extractor = Arc::new(MockExtractor::new(Vec::new()));
-        let repository = Arc::new(MockCallGraphRepository::new());
-
-        let use_case = CallGraphUseCase::new(extractor, repository.clone());
-
-        let count = use_case
-            .extract_and_save(
-                "fn main() {}",
-                "test.rs",
-                Language::Rust,
-                "repo-1",
-                &HashMap::new(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(count, 0);
-        assert_eq!(repository.saved_count(), 0);
     }
 }
