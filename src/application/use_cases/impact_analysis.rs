@@ -60,7 +60,7 @@ impl ImpactAnalysisUseCase {
     ///
     /// `symbol`       – symbol name to analyse (e.g. `"authenticate"`)
     /// `max_depth`    – maximum BFS hops (default: 5)
-    /// `repository_id` – optional repository filter
+    /// `repository_id` – optional repository filter for the root symbol lookup
     pub async fn analyze(
         &self,
         symbol: &str,
@@ -129,13 +129,21 @@ impl ImpactAnalysisUseCase {
                     Some(caller_sym) => {
                         let caller_sym = caller_sym.to_string();
 
-                        if visited.contains(&caller_sym) {
+                        // Use the qualified name (ClassName::method) as the BFS key so
+                        // that the next find_callers lookup targets this specific method
+                        // and not every function that shares the same bare name across
+                        // unrelated repositories or classes.
+                        let bfs_key = reference
+                            .qualified_caller()
+                            .unwrap_or_else(|| caller_sym.clone());
+
+                        if visited.contains(&bfs_key) {
                             continue;
                         }
-                        visited.insert(caller_sym.clone());
+                        visited.insert(bfs_key.clone());
 
                         by_depth[next_depth - 1].push(ImpactNode {
-                            symbol: caller_sym.clone(),
+                            symbol: bfs_key.clone(),
                             depth: next_depth,
                             file_path: reference.reference_file_path().to_string(),
                             line: reference.reference_line(),
@@ -145,7 +153,7 @@ impl ImpactAnalysisUseCase {
                             via_symbol: Some(current.clone()),
                         });
 
-                        queue.push_back((caller_sym, next_depth));
+                        queue.push_back((bfs_key, next_depth));
                     }
                 }
             }
@@ -164,5 +172,195 @@ impl ImpactAnalysisUseCase {
             max_depth_reached,
             by_depth,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::use_cases::call_graph::{CallGraphExtractor, CallGraphUseCase};
+    use crate::application::{CallGraphQuery, CallGraphRepository, CallGraphStats};
+    use crate::domain::{DomainError, Language, ReferenceKind, SymbolReference};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    // ── minimal in-memory call-graph repo ────────────────────────────────────
+
+    struct MemCallGraph {
+        refs: Mutex<Vec<SymbolReference>>,
+    }
+
+    impl MemCallGraph {
+        fn new(refs: Vec<SymbolReference>) -> Self {
+            Self {
+                refs: Mutex::new(refs),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CallGraphRepository for MemCallGraph {
+        async fn save_batch(&self, _: &[SymbolReference]) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn find_callers(
+            &self,
+            callee_symbol: &str,
+            _query: &CallGraphQuery,
+        ) -> Result<Vec<SymbolReference>, DomainError> {
+            Ok(self
+                .refs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.callee_symbol() == callee_symbol)
+                .cloned()
+                .collect())
+        }
+        async fn find_callees(
+            &self,
+            _: &str,
+            _: &CallGraphQuery,
+        ) -> Result<Vec<SymbolReference>, DomainError> {
+            Ok(vec![])
+        }
+        async fn find_by_file(
+            &self,
+            _: &str,
+            _: &CallGraphQuery,
+        ) -> Result<Vec<SymbolReference>, DomainError> {
+            Ok(vec![])
+        }
+        async fn find_by_repository(&self, _: &str) -> Result<Vec<SymbolReference>, DomainError> {
+            Ok(vec![])
+        }
+        async fn delete_by_file_path(&self, _: &str, _: &str) -> Result<u64, DomainError> {
+            Ok(0)
+        }
+        async fn delete_by_repository(&self, _: &str) -> Result<(), DomainError> {
+            Ok(())
+        }
+        async fn get_stats(&self, _: &str) -> Result<CallGraphStats, DomainError> {
+            Ok(CallGraphStats::default())
+        }
+        async fn find_cross_repo_references(
+            &self,
+            _: &str,
+        ) -> Result<Vec<SymbolReference>, DomainError> {
+            Ok(vec![])
+        }
+    }
+
+    struct NoopExtractor;
+    #[async_trait::async_trait]
+    impl CallGraphExtractor for NoopExtractor {
+        async fn extract(
+            &self,
+            _: &str,
+            _: &str,
+            _: Language,
+            _: &str,
+            _: &HashMap<String, Vec<String>>,
+        ) -> Result<Vec<SymbolReference>, DomainError> {
+            Ok(vec![])
+        }
+    }
+
+    fn make_ref(
+        caller: &str,
+        callee: &str,
+        enclosing: Option<&str>,
+        repo: &str,
+    ) -> SymbolReference {
+        let mut r = SymbolReference::new(
+            Some(caller.to_string()),
+            callee.to_string(),
+            "file.php".to_string(),
+            "file.php".to_string(),
+            1,
+            1,
+            ReferenceKind::MethodCall,
+            Language::Php,
+            repo.to_string(),
+        );
+        if let Some(scope) = enclosing {
+            r = r.with_enclosing_scope(scope);
+        }
+        r
+    }
+
+    // ── BFS uses qualified_caller as the search key ───────────────────────────
+
+    /// Reproduces the cross-repo false-positive scenario:
+    ///
+    /// DB contains:
+    ///  (php-common)  getNewUser          → advertiseUsersAboutNewUser
+    ///  (apiuser)     post / AssocAdmin   → getNewUser
+    ///  (sync-api)    associateDropbox    → post   ← unrelated "post"
+    ///
+    /// With qualified BFS keys, searching for callers of "getNewUser" finds
+    /// "AssociateAdminDevice::post" (qualified).  The next hop searches for
+    /// callee = "AssociateAdminDevice::post", which the sync-api record does NOT
+    /// match (it only has callee = "post"), so associateDropbox is excluded.
+    #[tokio::test]
+    async fn test_bfs_qualified_key_excludes_unrelated_repo_method() {
+        let refs = vec![
+            // php-common: getNewUser (inside class Home) calls advertiseUsersAboutNewUser
+            make_ref(
+                "getNewUser",
+                "advertiseUsersAboutNewUser",
+                Some("Home"),
+                "php-common",
+            ),
+            // apiuser: AssociateAdminDevice::post calls Home::getNewUser (qualified static /
+            // parent-class call, as the extractor produces after qualification).
+            make_ref(
+                "post",
+                "Home::getNewUser",
+                Some("AssociateAdminDevice"),
+                "apiuser",
+            ),
+            // sync-api: associateDropbox calls a bare "post" (unrelated HTTP helper)
+            make_ref("associateDropbox", "post", None, "sync-api"),
+        ];
+
+        let repo = Arc::new(MemCallGraph::new(refs));
+        let extractor = Arc::new(NoopExtractor);
+        let cg = Arc::new(CallGraphUseCase::new(extractor, repo));
+        let use_case = ImpactAnalysisUseCase::new(cg);
+
+        let analysis = use_case
+            .analyze("advertiseUsersAboutNewUser", 5, None)
+            .await
+            .unwrap();
+
+        let all_symbols: Vec<&str> = analysis
+            .by_depth
+            .iter()
+            .flatten()
+            .map(|n| n.symbol.as_str())
+            .collect();
+
+        // getNewUser (depth 1) and AssociateAdminDevice::post (depth 2) are expected
+        assert!(
+            all_symbols.iter().any(|s| *s == "Home::getNewUser"),
+            "expected Home::getNewUser in results, got: {:?}",
+            all_symbols
+        );
+        assert!(
+            all_symbols
+                .iter()
+                .any(|s| *s == "AssociateAdminDevice::post"),
+            "expected AssociateAdminDevice::post in results, got: {:?}",
+            all_symbols
+        );
+
+        // associateDropbox must NOT appear — its callee is bare "post", not the
+        // qualified "AssociateAdminDevice::post" that the BFS is looking for
+        assert!(
+            !all_symbols.iter().any(|s| *s == "associateDropbox"),
+            "associateDropbox should be excluded (unrelated 'post'), got: {:?}",
+            all_symbols
+        );
     }
 }

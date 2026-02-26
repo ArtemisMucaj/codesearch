@@ -201,10 +201,17 @@ impl SymbolReference {
         )
     }
 
-    /// Returns the qualified caller name (scope::name if scope exists).
+    /// Returns the qualified caller name using the language-idiomatic separator.
+    ///
+    /// - JavaScript / TypeScript: `ClassName.method`  (dot notation)
+    /// - All other languages:     `ClassName::method` (double-colon)
     pub fn qualified_caller(&self) -> Option<String> {
+        let sep = match self.language {
+            Language::JavaScript | Language::TypeScript => ".",
+            _ => "::",
+        };
         match (&self.enclosing_scope, &self.caller_symbol) {
-            (Some(scope), Some(name)) => Some(format!("{}::{}", scope, name)),
+            (Some(scope), Some(name)) => Some(format!("{}{}{}", scope, sep, name)),
             (None, Some(name)) => Some(name.clone()),
             _ => None,
         }

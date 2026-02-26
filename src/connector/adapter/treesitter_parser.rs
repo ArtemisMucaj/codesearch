@@ -9,6 +9,18 @@ use tree_sitter::{Parser, Query, QueryCursor};
 use crate::application::ParserService;
 use crate::domain::{CodeChunk, DomainError, Language, NodeType, ReferenceKind, SymbolReference};
 
+/// Metadata for a definition scope (function, class, trait, …) used to
+/// resolve enclosing-scope names and to identify class definitions.
+#[derive(Debug, Clone)]
+struct ScopeInfo {
+    start_line: u32,
+    end_line: u32,
+    name: String,
+    parent: Option<String>,
+    /// The query capture kind, e.g. `"class"`, `"function"`, `"interface"`.
+    kind: String,
+}
+
 /// Normalize import paths by stripping surrounding delimiters.
 /// - Go imports: "fmt" -> fmt
 /// - C++ string includes: "header.h" -> header.h
@@ -657,14 +669,14 @@ impl TreeSitterParser {
     }
 
     /// Collect all scopes (functions, classes, etc.) from the file in one pass.
-    /// Returns a Vec of (start_line, end_line, name, parent) for each scope.
+    /// Returns a Vec of `ScopeInfo` for each scope.
     /// This avoids repeated Query creation and tree traversal for each reference.
     fn collect_scopes(
         &self,
         content: &str,
         tree: &tree_sitter::Tree,
         language: Language,
-    ) -> Vec<(u32, u32, String, Option<String>)> {
+    ) -> Vec<ScopeInfo> {
         let ts_language = match self.get_ts_language(language) {
             Some(lang) => lang,
             None => return Vec::new(),
@@ -691,6 +703,7 @@ impl TreeSitterParser {
             let mut symbol_name: Option<String> = None;
             let mut parent_symbol: Option<String> = None;
             let mut main_node = None;
+            let mut kind = String::new();
 
             for capture in query_match.captures {
                 let capture_name = capture_names
@@ -704,13 +717,20 @@ impl TreeSitterParser {
                     parent_symbol = Some(content[capture.node.byte_range()].to_string());
                 } else {
                     main_node = Some(capture.node);
+                    kind = capture_name.to_string();
                 }
             }
 
             if let (Some(node), Some(name)) = (main_node, symbol_name) {
                 let start_line = node.start_position().row as u32 + 1;
                 let end_line = node.end_position().row as u32 + 1;
-                scopes.push((start_line, end_line, name, parent_symbol));
+                scopes.push(ScopeInfo {
+                    start_line,
+                    end_line,
+                    name,
+                    parent: parent_symbol,
+                    kind,
+                });
             }
         }
 
@@ -833,25 +853,374 @@ impl TreeSitterParser {
     }
 }
 
+/// Walk up the AST from `node` to find the innermost enclosing class, trait,
+/// or interface and return its name.  Returns `None` when the node is not
+/// nested inside a class body (e.g. a top-level function).
+///
+/// This avoids relying on the `enclosing_scope` value supplied by the scope
+/// collection query, which uses flat (non-nested) patterns and therefore
+/// never captures the parent class name for methods.
+fn find_enclosing_class(
+    node: tree_sitter::Node<'_>,
+    content: &str,
+    language: Language,
+) -> Option<String> {
+    find_enclosing_class_node(node, language)
+        .and_then(|cls| cls.child_by_field_name("name"))
+        .map(|n| content[n.byte_range()].to_string())
+}
+
+/// Walk up the AST from `node` to find the innermost enclosing class / trait /
+/// interface AST node.  Returns the node itself so callers can inspect its
+/// children (e.g. `base_clause` for PHP extends).
+fn find_enclosing_class_node<'tree>(
+    node: tree_sitter::Node<'tree>,
+    language: Language,
+) -> Option<tree_sitter::Node<'tree>> {
+    let class_kinds: &[&str] = match language {
+        Language::Php => &[
+            "class_declaration",
+            "trait_declaration",
+            "interface_declaration",
+        ],
+        Language::Python => &["class_definition"],
+        Language::JavaScript | Language::TypeScript => &["class_declaration"],
+        _ => return None,
+    };
+
+    let mut current = node;
+    loop {
+        let parent = current.parent()?;
+        if class_kinds.contains(&parent.kind()) {
+            return Some(parent);
+        }
+        current = parent;
+    }
+}
+
+/// For a PHP `parent::method()` call, resolve the actual parent class name by
+/// finding the `base_clause` (extends) of the enclosing class declaration.
+///
+/// ```php
+/// class Child extends Base {
+///     public function foo() { parent::bar(); }
+///     //                      ^^^^^^^^^^^^^ → "Base::bar"
+/// }
+/// ```
+///
+/// Returns `None` when there is no enclosing class or when the class has no
+/// `extends` clause (traits / interfaces don't have `base_clause`).
+fn find_php_parent_class(node: tree_sitter::Node<'_>, content: &str) -> Option<String> {
+    let class_node = find_enclosing_class_node(node, Language::Php)?;
+    // PHP tree-sitter grammar: class_declaration has an optional base_clause
+    // child that wraps the parent class name.
+    //   (class_declaration name: (name) (base_clause (name)) …)
+    let mut cursor = class_node.walk();
+    for child in class_node.children(&mut cursor) {
+        if child.kind() == "base_clause" {
+            // The base_clause contains one or more (name) children; the first
+            // is the extended class.
+            let mut inner_cursor = child.walk();
+            for base_child in child.children(&mut inner_cursor) {
+                if base_child.kind() == "name" || base_child.kind() == "qualified_name" {
+                    return Some(content[base_child.byte_range()].to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract a class name from a PHP type node, handling `named_type`,
+/// `optional_type` (`?Foo`), and ignoring primitives / union types.
+fn extract_php_class_from_type(type_node: tree_sitter::Node<'_>, content: &str) -> Option<String> {
+    match type_node.kind() {
+        "named_type" => {
+            // named_type contains a `name` child with the class identifier.
+            let mut cursor = type_node.walk();
+            for child in type_node.children(&mut cursor) {
+                if child.kind() == "name" || child.kind() == "qualified_name" {
+                    return Some(content[child.byte_range()].to_string());
+                }
+            }
+            None
+        }
+        "optional_type" => {
+            // ?Foo — unwrap and recurse into the inner type.
+            let mut cursor = type_node.walk();
+            for child in type_node.children(&mut cursor) {
+                if let Some(name) = extract_php_class_from_type(child, content) {
+                    return Some(name);
+                }
+            }
+            None
+        }
+        // primitive_type, union_type, intersection_type — can't resolve to a
+        // single class, so return None.
+        _ => None,
+    }
+}
+
+/// Collect a mapping of PHP variable names to their class types by scanning
+/// the AST for:
+///
+/// - **Parameter type hints**: `function foo(Home $home)` → `$home → Home`
+/// - **Constructor promotion**: `private Home $home` in parameter lists → `$home → Home`
+/// - **Property declarations**: `private Home $home;` → `$home → Home`
+/// - **`new` assignments**: `$home = new Home()` → `$home → Home`
+///
+/// The returned map uses the bare variable name (without `$`) as keys.
+/// Only PHP files are scanned; returns an empty map for other languages.
+fn collect_php_variable_types(
+    tree: &tree_sitter::Tree,
+    content: &str,
+    language: Language,
+) -> HashMap<String, String> {
+    let mut var_types: HashMap<String, String> = HashMap::new();
+
+    if language != Language::Php {
+        return var_types;
+    }
+
+    fn walk_node(
+        node: tree_sitter::Node<'_>,
+        content: &str,
+        var_types: &mut HashMap<String, String>,
+    ) {
+        match node.kind() {
+            // function foo(Home $home) — simple_parameter with a type field
+            "simple_parameter" => {
+                if let Some(type_node) = node.child_by_field_name("type") {
+                    if let Some(class_name) = extract_php_class_from_type(type_node, content) {
+                        if let Some(name_node) = node.child_by_field_name("name") {
+                            let var_name = content[name_node.byte_range()].to_string();
+                            // Strip leading $ if present
+                            let key = var_name.strip_prefix('$').unwrap_or(&var_name);
+                            var_types.insert(key.to_string(), class_name);
+                        }
+                    }
+                }
+            }
+            // PHP 8.0 constructor promotion: private Home $home
+            "property_promotion_parameter" => {
+                let mut cursor = node.walk();
+                let mut found_type: Option<String> = None;
+                for child in node.children(&mut cursor) {
+                    if found_type.is_none() {
+                        if let Some(class_name) = extract_php_class_from_type(child, content) {
+                            found_type = Some(class_name);
+                        }
+                    }
+                    if child.kind() == "variable_name" {
+                        if let Some(ref class_name) = found_type {
+                            let var_name = content[child.byte_range()].to_string();
+                            let key = var_name.strip_prefix('$').unwrap_or(&var_name);
+                            var_types.insert(key.to_string(), class_name.clone());
+                        }
+                    }
+                }
+            }
+            // private Home $home;
+            "property_declaration" => {
+                if let Some(type_node) = node.child_by_field_name("type") {
+                    if let Some(class_name) = extract_php_class_from_type(type_node, content) {
+                        let mut cursor = node.walk();
+                        for child in node.children(&mut cursor) {
+                            if child.kind() == "property_element" {
+                                let mut inner = child.walk();
+                                for prop_child in child.children(&mut inner) {
+                                    if prop_child.kind() == "variable_name" {
+                                        let var_name = content[prop_child.byte_range()].to_string();
+                                        let key = var_name.strip_prefix('$').unwrap_or(&var_name);
+                                        var_types.insert(key.to_string(), class_name.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // $home = new Home()
+            "assignment_expression" => {
+                if let (Some(left), Some(right)) = (
+                    node.child_by_field_name("left"),
+                    node.child_by_field_name("right"),
+                ) {
+                    if left.kind() == "variable_name"
+                        && right.kind() == "object_creation_expression"
+                    {
+                        // The class name is a `name` child of object_creation_expression.
+                        let mut cursor = right.walk();
+                        for child in right.children(&mut cursor) {
+                            if child.kind() == "name" || child.kind() == "qualified_name" {
+                                let class_name = content[child.byte_range()].to_string();
+                                let var_name = content[left.byte_range()].to_string();
+                                let key = var_name.strip_prefix('$').unwrap_or(&var_name);
+                                var_types.insert(key.to_string(), class_name);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // Recurse into children.
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            walk_node(child, content, var_types);
+        }
+    }
+
+    walk_node(tree.root_node(), content, &mut var_types);
+    var_types
+}
+
+/// Qualify a callee name with its receiver class where that is deterministic
+/// from the AST — without requiring type inference.
+///
+/// Handles:
+/// - PHP/other static calls (`Foo::bar()`, `self::bar()`, `static::bar()`) —
+///   the class name is taken from the `scope` field of `scoped_call_expression`.
+/// - PHP `$this->method()` — receiver is the literal `$this` token; the
+///   enclosing class is found by walking up the AST.
+/// - Python `self.method()` / `cls.method()` — same idea via the `attribute` node.
+/// - JS/TS `this.method()` — via `member_expression`.
+///
+/// Returns the unmodified `name` for any case where the receiver class cannot be
+/// determined statically (e.g. `$obj->method()`, `obj.method()`).
+///
+/// `file_class_names` contains class names defined in the current file,
+/// used by JS/TS to qualify `ClassName.method()` static calls.
+///
+/// `php_var_types` maps PHP variable names (without `$`) to their class types,
+/// used to qualify `$obj->method()` calls when the variable's type is known.
+fn qualify_callee_name(
+    name: String,
+    node: tree_sitter::Node<'_>,
+    content: &str,
+    enclosing_scope: &Option<String>,
+    language: Language,
+    file_class_names: &HashSet<String>,
+    php_var_types: &HashMap<String, String>,
+) -> String {
+    let parent = match node.parent() {
+        Some(p) => p,
+        None => return name,
+    };
+
+    match language {
+        Language::Php => match parent.kind() {
+            "scoped_call_expression" => {
+                // Foo::bar(), self::bar(), parent::bar(), static::bar()
+                if let Some(scope_node) = parent.child_by_field_name("scope") {
+                    let scope_text = &content[scope_node.byte_range()];
+                    return match scope_text {
+                        "self" | "static" => {
+                            // Walk the AST to find the actual enclosing class name;
+                            // fall back to the scope-collection value if AST walk fails.
+                            find_enclosing_class(node, content, language)
+                                .or_else(|| enclosing_scope.clone())
+                                .map(|class| format!("{}::{}", class, name))
+                                .unwrap_or(name)
+                        }
+                        "parent" => {
+                            // Resolve the actual parent class from the extends clause.
+                            // Falls back to bare name if the class doesn't extend anything.
+                            find_php_parent_class(node, content)
+                                .map(|parent_class| format!("{}::{}", parent_class, name))
+                                .unwrap_or(name)
+                        }
+                        class_name => format!("{}::{}", class_name, name),
+                    };
+                }
+                name
+            }
+            "member_call_expression" => {
+                // $this->method() — qualify with the enclosing class.
+                // PHP tree-sitter represents $this as a variable_name node whose
+                // full text is "$this"; guard against both forms for safety.
+                if let Some(obj_node) = parent.child_by_field_name("object") {
+                    let obj_text = &content[obj_node.byte_range()];
+                    if obj_text == "$this" || obj_text == "this" {
+                        let class = find_enclosing_class(node, content, language)
+                            .or_else(|| enclosing_scope.clone());
+                        if let Some(class) = class {
+                            return format!("{}::{}", class, name);
+                        }
+                    } else {
+                        // $obj->method() — look up the variable's type from
+                        // parameter hints, property declarations, or `new` assignments.
+                        let var_name = obj_text.strip_prefix('$').unwrap_or(obj_text);
+                        if let Some(class) = php_var_types.get(var_name) {
+                            return format!("{}::{}", class, name);
+                        }
+                    }
+                }
+                name
+            }
+            _ => name,
+        },
+
+        Language::Python => {
+            // self.method() / cls.method()
+            // The @callee node is the `attribute` field of an `attribute` AST node.
+            if parent.kind() == "attribute" {
+                if let Some(obj_node) = parent.child_by_field_name("object") {
+                    let obj_text = &content[obj_node.byte_range()];
+                    if obj_text == "self" || obj_text == "cls" {
+                        let class = find_enclosing_class(node, content, language)
+                            .or_else(|| enclosing_scope.clone());
+                        if let Some(class) = class {
+                            return format!("{}::{}", class, name);
+                        }
+                    }
+                }
+            }
+            name
+        }
+
+        Language::JavaScript | Language::TypeScript => {
+            // The @callee node is the `property` field of a `member_expression` node.
+            // JS/TS uses dot notation for qualified names: `ClassName.method`.
+            if parent.kind() == "member_expression" {
+                if let Some(obj_node) = parent.child_by_field_name("object") {
+                    let obj_text = &content[obj_node.byte_range()];
+                    if obj_text == "this" {
+                        // this.method() — qualify with the enclosing class.
+                        let class = find_enclosing_class(node, content, language)
+                            .or_else(|| enclosing_scope.clone());
+                        if let Some(class) = class {
+                            return format!("{}.{}", class, name);
+                        }
+                    } else if file_class_names.contains(obj_text) {
+                        // ClassName.staticMethod() — the receiver is a class
+                        // defined in this file.
+                        return format!("{}.{}", obj_text, name);
+                    }
+                }
+            }
+            name
+        }
+
+        _ => name,
+    }
+}
+
 /// Look up the tightest enclosing scope for a given line.
-/// Scopes is a slice of (start_line, end_line, name, parent).
 /// Returns (name, parent) of the tightest scope containing the line.
-fn lookup_enclosing_scope(
-    scopes: &[(u32, u32, String, Option<String>)],
-    line: u32,
-) -> Option<(String, Option<String>)> {
-    let mut best_match: Option<&(u32, u32, String, Option<String>)> = None;
+fn lookup_enclosing_scope(scopes: &[ScopeInfo], line: u32) -> Option<(String, Option<String>)> {
+    let mut best_match: Option<&ScopeInfo> = None;
 
     for scope in scopes {
-        let (start_line, end_line, _, _) = scope;
-
         // Check if this scope contains our target line
-        if *start_line <= line && *end_line >= line {
+        if scope.start_line <= line && scope.end_line >= line {
             let is_better = match best_match {
                 None => true,
-                Some((best_start, best_end, _, _)) => {
+                Some(best) => {
                     // Prefer tighter scope (smaller range that still contains the line)
-                    (end_line - start_line) < (best_end - best_start)
+                    (scope.end_line - scope.start_line) < (best.end_line - best.start_line)
                 }
             };
 
@@ -861,7 +1230,7 @@ fn lookup_enclosing_scope(
         }
     }
 
-    best_match.map(|(_, _, name, parent)| (name.clone(), parent.clone()))
+    best_match.map(|s| (s.name.clone(), s.parent.clone()))
 }
 
 impl Default for TreeSitterParser {
@@ -1048,6 +1417,19 @@ impl ParserService for TreeSitterParser {
         // Collect all scopes once for efficient lookup
         let scopes = self.collect_scopes(content, &tree, language);
 
+        // Build a set of class names defined in this file so that
+        // `qualify_callee_name` can recognise `ClassName.method()` calls in
+        // JS/TS and qualify them as `ClassName.method`.
+        let class_names: HashSet<String> = scopes
+            .iter()
+            .filter(|s| s.kind == "class")
+            .map(|s| s.name.clone())
+            .collect();
+
+        // Collect PHP variable-to-class-type mappings from parameter type hints,
+        // property declarations, and `new` assignments.  Empty for non-PHP files.
+        let php_var_types = collect_php_variable_types(&tree, content, language);
+
         let mut references = Vec::new();
         // Tracks the raw require() path for each reference at the same index.
         // Used in the resolution pass below; avoids needing a field on SymbolReference.
@@ -1222,6 +1604,20 @@ impl ParserService for TreeSitterParser {
                     .map(|(name, parent)| (Some(name), parent))
                     .unwrap_or((None, None));
 
+                // Qualify method callee names with receiver class where the AST
+                // makes it unambiguous: `Foo::bar()` → "Foo::bar",
+                // `$this->method()` / `self.method()` → "EnclosingClass::method".
+                // Unknown-receiver calls (e.g. `$obj->method()`) stay as bare names.
+                name = qualify_callee_name(
+                    name,
+                    node,
+                    content,
+                    &enclosing_scope,
+                    language,
+                    &class_names,
+                    &php_var_types,
+                );
+
                 let mut reference = SymbolReference::new(
                     caller_symbol,
                     name,
@@ -1301,22 +1697,20 @@ impl ParserService for TreeSitterParser {
                 // Clean the path by resolving `.` and `..` components so that a path
                 // like `routes/../middlewares/x.js` becomes `middlewares/x.js` and
                 // matches the normalised keys stored in exports_by_file.
-                let resolved_clean =
-                    resolved
-                        .components()
-                        .fold(PathBuf::new(), |mut acc, component| {
-                            match component {
-                                std::path::Component::CurDir => acc,
-                                std::path::Component::ParentDir => {
-                                    acc.pop();
-                                    acc
-                                }
-                                other => {
-                                    acc.push(other);
-                                    acc
-                                }
-                            }
-                        });
+                let resolved_clean = resolved.components().fold(
+                    PathBuf::new(),
+                    |mut acc, component| match component {
+                        std::path::Component::CurDir => acc,
+                        std::path::Component::ParentDir => {
+                            acc.pop();
+                            acc
+                        }
+                        other => {
+                            acc.push(other);
+                            acc
+                        }
+                    },
+                );
                 // Normalise to a forward-slash string (repo-relative, no leading ./).
                 let resolved_str = resolved_clean.to_string_lossy().replace('\\', "/");
                 // Strip a leading "./" if Path::join left one.
@@ -2713,5 +3107,442 @@ module.exports = appApplicationSource;
             "External package bindings must keep the local name"
         );
         assert!(import_ref.import_alias().is_none());
+    }
+
+    // ── qualify_callee_name tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_php_static_call_qualified_with_class() {
+        let parser = TreeSitterParser::new();
+        let content = r#"<?php
+class Router {
+    public function dispatch() {
+        return AssociateAdminDevice::post($request);
+    }
+}
+"#;
+        let refs = parser
+            .extract_references(
+                content,
+                "router.php",
+                Language::Php,
+                "repo",
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let post_call = refs
+            .iter()
+            .find(|r| r.callee_symbol().ends_with("::post"))
+            .expect("expected a qualified ::post call");
+        assert_eq!(post_call.callee_symbol(), "AssociateAdminDevice::post");
+        assert_eq!(post_call.reference_kind(), ReferenceKind::MethodCall);
+    }
+
+    #[tokio::test]
+    async fn test_php_this_call_qualified_with_enclosing_class() {
+        let parser = TreeSitterParser::new();
+        let content = r#"<?php
+class AssociateAdminDevice {
+    public function post($req) {
+        $user = $this->getNewUser($req);
+        return $user;
+    }
+}
+"#;
+        let refs = parser
+            .extract_references(
+                content,
+                "device.php",
+                Language::Php,
+                "repo",
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let get_user = refs
+            .iter()
+            .find(|r| r.callee_symbol().ends_with("::getNewUser"))
+            .expect("expected a qualified ::getNewUser call");
+        assert_eq!(get_user.callee_symbol(), "AssociateAdminDevice::getNewUser");
+        assert_eq!(get_user.reference_kind(), ReferenceKind::MethodCall);
+    }
+
+    #[tokio::test]
+    async fn test_php_self_call_qualified_with_enclosing_class() {
+        let parser = TreeSitterParser::new();
+        let content = r#"<?php
+class Home {
+    public static function create() {
+        return self::build();
+    }
+}
+"#;
+        let refs = parser
+            .extract_references(content, "home.php", Language::Php, "repo", &HashMap::new())
+            .await
+            .unwrap();
+
+        let build_call = refs
+            .iter()
+            .find(|r| r.callee_symbol().ends_with("::build"))
+            .expect("expected a qualified ::build call");
+        assert_eq!(build_call.callee_symbol(), "Home::build");
+    }
+
+    #[tokio::test]
+    async fn test_php_unknown_receiver_stays_bare() {
+        let parser = TreeSitterParser::new();
+        let content = r#"<?php
+class Controller {
+    public function handle($client) {
+        return $client->post('/api');
+    }
+}
+"#;
+        let refs = parser
+            .extract_references(content, "ctrl.php", Language::Php, "repo", &HashMap::new())
+            .await
+            .unwrap();
+
+        // $client->post() — receiver is unknown; callee must remain bare "post"
+        let post_call = refs
+            .iter()
+            .find(|r| {
+                r.callee_symbol() == "post" && r.reference_kind() == ReferenceKind::MethodCall
+            })
+            .expect("expected a bare post method_call");
+        assert_eq!(post_call.callee_symbol(), "post");
+    }
+
+    #[tokio::test]
+    async fn test_python_self_call_qualified_with_enclosing_class() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+class Home:
+    def get_new_user(self):
+        return self.advertise_users()
+"#;
+        let refs = parser
+            .extract_references(
+                content,
+                "home.py",
+                Language::Python,
+                "repo",
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let advertise = refs
+            .iter()
+            .find(|r| r.callee_symbol().ends_with("::advertise_users"))
+            .expect("expected a qualified ::advertise_users call");
+        assert_eq!(advertise.callee_symbol(), "Home::advertise_users");
+    }
+
+    #[tokio::test]
+    async fn test_js_this_call_qualified_with_enclosing_class() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+class EventBus {
+    publish(event) {
+        this.notify(event);
+    }
+}
+"#;
+        let refs = parser
+            .extract_references(
+                content,
+                "bus.js",
+                Language::JavaScript,
+                "repo",
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let notify = refs
+            .iter()
+            .find(|r| r.callee_symbol().ends_with(".notify"))
+            .expect("expected a qualified .notify call");
+        assert_eq!(notify.callee_symbol(), "EventBus.notify");
+    }
+
+    #[tokio::test]
+    async fn test_php_parent_call_resolved_to_base_class() {
+        let parser = TreeSitterParser::new();
+        let content = r#"<?php
+class Child extends Base {
+    public function foo() {
+        return parent::bar();
+    }
+}
+"#;
+        let refs = parser
+            .extract_references(content, "child.php", Language::Php, "repo", &HashMap::new())
+            .await
+            .unwrap();
+
+        let bar_call = refs
+            .iter()
+            .find(|r| {
+                r.callee_symbol().contains("bar") && r.reference_kind() == ReferenceKind::MethodCall
+            })
+            .expect("expected a bar method call");
+        // parent:: should resolve to the actual parent class "Base"
+        assert_eq!(bar_call.callee_symbol(), "Base::bar");
+    }
+
+    #[tokio::test]
+    async fn test_php_parent_call_without_extends_stays_bare() {
+        let parser = TreeSitterParser::new();
+        // A trait can use parent:: but has no extends clause — the call should
+        // fall back to the bare method name rather than emitting "parent::bar".
+        let content = r#"<?php
+trait MyTrait {
+    public function foo() {
+        return parent::bar();
+    }
+}
+"#;
+        let refs = parser
+            .extract_references(content, "trait.php", Language::Php, "repo", &HashMap::new())
+            .await
+            .unwrap();
+
+        let bar_call = refs
+            .iter()
+            .find(|r| {
+                r.callee_symbol().contains("bar") && r.reference_kind() == ReferenceKind::MethodCall
+            })
+            .expect("expected a bar method call");
+        // No extends clause → bare name
+        assert_eq!(bar_call.callee_symbol(), "bar");
+    }
+
+    #[tokio::test]
+    async fn test_js_class_static_call_qualified_with_class_name() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+class Router {
+    static handle(req) {
+        return req;
+    }
+}
+
+function dispatch() {
+    Router.handle(request);
+}
+"#;
+        let refs = parser
+            .extract_references(
+                content,
+                "app.js",
+                Language::JavaScript,
+                "repo",
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let handle_call = refs
+            .iter()
+            .find(|r| {
+                r.callee_symbol().contains("handle")
+                    && r.reference_kind() == ReferenceKind::MethodCall
+            })
+            .expect("expected a handle method call");
+        assert_eq!(handle_call.callee_symbol(), "Router.handle");
+    }
+
+    #[tokio::test]
+    async fn test_ts_class_static_call_qualified_with_class_name() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+class Logger {
+    static info(msg: string): void {
+        console.log(msg);
+    }
+}
+
+function main() {
+    Logger.info("hello");
+}
+"#;
+        let refs = parser
+            .extract_references(
+                content,
+                "main.ts",
+                Language::TypeScript,
+                "repo",
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let info_call = refs
+            .iter()
+            .find(|r| {
+                r.callee_symbol().contains("info")
+                    && r.reference_kind() == ReferenceKind::MethodCall
+            })
+            .expect("expected an info method call");
+        assert_eq!(info_call.callee_symbol(), "Logger.info");
+    }
+
+    #[tokio::test]
+    async fn test_js_unknown_receiver_stays_bare() {
+        let parser = TreeSitterParser::new();
+        let content = r#"
+class Router {
+    static handle(req) { return req; }
+}
+
+function dispatch(client) {
+    client.send(data);
+}
+"#;
+        let refs = parser
+            .extract_references(
+                content,
+                "app.js",
+                Language::JavaScript,
+                "repo",
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        // client.send() — "client" is not a class defined in this file
+        let send_call = refs
+            .iter()
+            .find(|r| {
+                r.callee_symbol() == "send" && r.reference_kind() == ReferenceKind::MethodCall
+            })
+            .expect("expected a bare send method call");
+        assert_eq!(send_call.callee_symbol(), "send");
+    }
+
+    #[tokio::test]
+    async fn test_php_typed_param_qualifies_method_call() {
+        let parser = TreeSitterParser::new();
+        let content = r#"<?php
+class Service {
+    public function process(Home $home) {
+        return $home->getNewUser();
+    }
+}
+"#;
+        let refs = parser
+            .extract_references(
+                content,
+                "service.php",
+                Language::Php,
+                "repo",
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let call = refs
+            .iter()
+            .find(|r| {
+                r.callee_symbol().contains("getNewUser")
+                    && r.reference_kind() == ReferenceKind::MethodCall
+            })
+            .expect("expected a getNewUser method call");
+        // $home has type Home from parameter hint → "Home::getNewUser"
+        assert_eq!(call.callee_symbol(), "Home::getNewUser");
+    }
+
+    #[tokio::test]
+    async fn test_php_new_assignment_qualifies_method_call() {
+        let parser = TreeSitterParser::new();
+        let content = r#"<?php
+function setup() {
+    $home = new Home();
+    $home->advertiseUsers();
+}
+"#;
+        let refs = parser
+            .extract_references(content, "setup.php", Language::Php, "repo", &HashMap::new())
+            .await
+            .unwrap();
+
+        let call = refs
+            .iter()
+            .find(|r| {
+                r.callee_symbol().contains("advertiseUsers")
+                    && r.reference_kind() == ReferenceKind::MethodCall
+            })
+            .expect("expected an advertiseUsers method call");
+        assert_eq!(call.callee_symbol(), "Home::advertiseUsers");
+    }
+
+    #[tokio::test]
+    async fn test_php_property_type_qualifies_method_call() {
+        let parser = TreeSitterParser::new();
+        let content = r#"<?php
+class Controller {
+    private Home $home;
+
+    public function handle() {
+        return $this->home->getNewUser();
+    }
+}
+"#;
+        let refs = parser
+            .extract_references(content, "ctrl.php", Language::Php, "repo", &HashMap::new())
+            .await
+            .unwrap();
+
+        // $this->home is a property access yielding a Home — but the
+        // $this->home chain is a member_access_expression, not a simple
+        // variable_name. The type inference only resolves simple variables.
+        // This test documents that chained property access is NOT resolved.
+        let call = refs
+            .iter()
+            .find(|r| {
+                r.callee_symbol().contains("getNewUser")
+                    && r.reference_kind() == ReferenceKind::MethodCall
+            })
+            .expect("expected a getNewUser method call");
+        // Chained access through $this->home is not resolved — stays bare
+        assert_eq!(call.callee_symbol(), "getNewUser");
+    }
+
+    #[tokio::test]
+    async fn test_php_nullable_typed_param_qualifies_method_call() {
+        let parser = TreeSitterParser::new();
+        let content = r#"<?php
+class Handler {
+    public function run(?Logger $logger) {
+        $logger->info("running");
+    }
+}
+"#;
+        let refs = parser
+            .extract_references(
+                content,
+                "handler.php",
+                Language::Php,
+                "repo",
+                &HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let call = refs
+            .iter()
+            .find(|r| {
+                r.callee_symbol().contains("info")
+                    && r.reference_kind() == ReferenceKind::MethodCall
+            })
+            .expect("expected an info method call");
+        // ?Logger → Logger
+        assert_eq!(call.callee_symbol(), "Logger::info");
     }
 }
