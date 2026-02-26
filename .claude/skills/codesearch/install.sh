@@ -70,13 +70,28 @@ else
   echo "  Skipping scip-typescript (npm not found). Install Node.js + npm to enable JS/TS support."
 fi
 
-# scip-php (PHP support)
-if command -v go >/dev/null 2>&1; then
-  echo "Installing scip-php via go install..."
-  go install github.com/davidrjenni/scip-php/cmd/scip-php@latest && echo "  scip-php installed." || echo "  Warning: scip-php installation failed (PHP indexing will be unavailable)."
+# scip-php (PHP support) — pre-built Rust binary from ArtemisMucaj/scip-php
+SCIP_PHP_REPO="ArtemisMucaj/scip-php"
+SCIP_PHP_VERSION=$(curl -fsSL "https://api.github.com/repos/$SCIP_PHP_REPO/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+if [ -n "$SCIP_PHP_VERSION" ]; then
+  SCIP_PHP_ASSET="scip-php-${OS}-${ARCH}${EXT}"
+  SCIP_PHP_URL="https://github.com/$SCIP_PHP_REPO/releases/download/$SCIP_PHP_VERSION/$SCIP_PHP_ASSET"
+  echo "Installing scip-php $SCIP_PHP_VERSION..."
+  if curl -fsSL -o "$TMPDIR/scip-php${EXT}" "$SCIP_PHP_URL" 2>/dev/null; then
+    chmod +x "$TMPDIR/scip-php${EXT}"
+    if [ -w "$INSTALL_DIR" ]; then
+      mv "$TMPDIR/scip-php${EXT}" "$INSTALL_DIR/"
+    else
+      sudo mv "$TMPDIR/scip-php${EXT}" "$INSTALL_DIR/"
+    fi
+    echo "  scip-php installed."
+  else
+    echo "  Warning: scip-php download failed (PHP indexing will be unavailable)."
+    echo "  See: https://github.com/$SCIP_PHP_REPO"
+  fi
 else
-  echo "  Skipping scip-php (go not found). Install Go to enable PHP support."
-  echo "  See: https://github.com/davidrjenni/scip-php"
+  echo "  Warning: could not determine latest scip-php version (PHP indexing will be unavailable)."
+  echo "  See: https://github.com/$SCIP_PHP_REPO"
 fi
 
 echo ""
