@@ -57,6 +57,28 @@ else
 fi
 
 echo "codesearch $VERSION installed successfully to $INSTALL_DIR/codesearch${EXT}"
+
+# Install optional SCIP indexers
+echo ""
+echo "Installing optional SCIP indexers..."
+
+# scip-typescript (JavaScript / TypeScript support)
+if command -v npm >/dev/null 2>&1; then
+  echo "Installing scip-typescript via npm..."
+  npm install -g @sourcegraph/scip-typescript && echo "  scip-typescript installed." || echo "  Warning: scip-typescript installation failed (JS/TS indexing will be unavailable)."
+else
+  echo "  Skipping scip-typescript (npm not found). Install Node.js + npm to enable JS/TS support."
+fi
+
+# scip-php (PHP support)
+if command -v go >/dev/null 2>&1; then
+  echo "Installing scip-php via go install..."
+  go install github.com/davidrjenni/scip-php/cmd/scip-php@latest && echo "  scip-php installed." || echo "  Warning: scip-php installation failed (PHP indexing will be unavailable)."
+else
+  echo "  Skipping scip-php (go not found). Install Go to enable PHP support."
+  echo "  See: https://github.com/davidrjenni/scip-php"
+fi
+
 echo ""
 echo "Get started:"
 echo "  codesearch index /path/to/your/project"
