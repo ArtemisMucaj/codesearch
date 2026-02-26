@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use codesearch::{
-    CallGraphExtractor, CallGraphQuery, CallGraphRepository, CallGraphUseCase, CodeChunk,
-    DuckdbCallGraphRepository, DuckdbFileHashRepository, DuckdbMetadataRepository,
-    FileHashRepository, InMemoryVectorRepository, IndexRepositoryUseCase, Language,
-    ListRepositoriesUseCase, MockEmbedding, NodeType, ParserBasedExtractor, ParserService,
-    ReferenceKind, SearchCodeUseCase, SearchQuery, TreeSitterParser, VectorStore,
+    CallGraphQuery, CallGraphRepository, CallGraphUseCase, CodeChunk, DuckdbCallGraphRepository,
+    DuckdbFileHashRepository, DuckdbMetadataRepository, FileHashRepository,
+    InMemoryVectorRepository, IndexRepositoryUseCase, Language, ListRepositoriesUseCase,
+    MockEmbedding, NodeType, ReferenceKind, SearchCodeUseCase, SearchQuery, TreeSitterParser,
+    VectorStore,
 };
 use tempfile::tempdir;
 
@@ -26,11 +26,7 @@ async fn setup_test_env() -> TestEnv {
     let vector_repo = Arc::new(InMemoryVectorRepository::new());
     let parser = Arc::new(TreeSitterParser::new());
 
-    // Create CallGraphUseCase with parser-based extractor
-    let extractor = Arc::new(ParserBasedExtractor::new(
-        parser.clone() as Arc<dyn ParserService>
-    )) as Arc<dyn CallGraphExtractor>;
-    let call_graph_use_case = Arc::new(CallGraphUseCase::new(extractor, call_graph_repo));
+    let call_graph_use_case = Arc::new(CallGraphUseCase::new(call_graph_repo));
 
     TestEnv {
         metadata_repository,
@@ -206,11 +202,7 @@ async fn test_vector_store_returns_chunk_documents() {
     let parser = Arc::new(TreeSitterParser::new());
     let embedding_service = Arc::new(MockEmbedding::new());
 
-    // Create CallGraphUseCase with parser-based extractor
-    let extractor = Arc::new(ParserBasedExtractor::new(
-        parser.clone() as Arc<dyn ParserService>
-    )) as Arc<dyn CallGraphExtractor>;
-    let call_graph_use_case = Arc::new(CallGraphUseCase::new(extractor, call_graph_repo));
+    let call_graph_use_case = Arc::new(CallGraphUseCase::new(call_graph_repo));
 
     let temp_dir = tempdir().expect("Failed to create temp directory");
     let src_dir = temp_dir.path().join("src");

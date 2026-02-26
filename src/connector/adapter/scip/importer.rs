@@ -16,9 +16,6 @@ const ROLE_READ_ACCESS: i32 = 0x8;
 /// Parses a `.scip` index file and converts its occurrences into
 /// [`SymbolReference`] entries compatible with the existing DuckDB call graph
 /// schema.
-///
-/// Only documents whose language matches JavaScript, TypeScript, or PHP are
-/// processed — all others are left to the tree-sitter extractor.
 pub struct ScipImporter;
 
 impl ScipImporter {

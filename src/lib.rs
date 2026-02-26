@@ -4,8 +4,8 @@ pub mod connector;
 pub mod domain;
 
 pub use application::{
-    CallGraphExtractor, CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase,
-    ContextEdge, DeleteRepositoryUseCase, EmbeddingService, FileHashRepository, ImpactAnalysis,
+    CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase, ContextEdge,
+    DeleteRepositoryUseCase, EmbeddingService, FileHashRepository, ImpactAnalysis,
     ImpactAnalysisUseCase, ImpactNode, IndexRepositoryUseCase, ListRepositoriesUseCase,
     MetadataRepository, ParserService, QueryExpander, RerankingService, ScipPhase,
     SearchCodeUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
@@ -16,8 +16,7 @@ pub use cli::{Commands, OutputFormat};
 pub use connector::{
     AnthropicClient, ChatClient, DuckdbCallGraphRepository, DuckdbFileHashRepository,
     DuckdbMetadataRepository, DuckdbVectorRepository, InMemoryVectorRepository, LlmQueryExpander,
-    MockEmbedding, MockReranking, OrtEmbedding, OrtReranking, ParserBasedExtractor,
-    TreeSitterParser,
+    MockEmbedding, MockReranking, OrtEmbedding, OrtReranking, TreeSitterParser,
 };
 
 pub use domain::{
