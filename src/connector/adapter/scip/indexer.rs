@@ -77,9 +77,7 @@ impl ScipIndexer {
     pub async fn run(repo_path: &Path, kind: IndexerKind) -> Result<PathBuf> {
         if !Self::binary_available(kind).await {
             return Err(anyhow!(
-                "'{}' was not found on PATH.\n  {}\n  \
-                 Alternatively, place a pre-generated index.scip in the repository root \
-                 to skip automatic indexing.",
+                "'{}' was not found on PATH.\n  {}",
                 kind.binary(),
                 kind.install_hint(),
             ));
