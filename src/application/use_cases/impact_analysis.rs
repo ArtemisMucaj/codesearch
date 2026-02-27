@@ -8,6 +8,10 @@ use crate::domain::DomainError;
 
 pub const ANONYMOUS_SYMBOL: &str = "<anonymous>";
 
+/// Maximum number of fully-qualified symbols to resolve from a short name during
+/// fallback resolution. Caps the ambiguity fan-out without blocking common cases.
+const RESOLVE_SYMBOLS_LIMIT: u32 = 10;
+
 /// A single node in the impact (blast-radius) graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImpactNode {
@@ -61,6 +65,10 @@ impl ImpactAnalysisUseCase {
     /// `symbol`       – symbol name to analyse (e.g. `"authenticate"`)
     /// `max_depth`    – maximum BFS hops (default: 5)
     /// `repository_id` – optional repository filter
+    ///
+    /// If an exact match for `symbol` returns no results, falls back to a
+    /// suffix-based symbol resolution (e.g. "loadMappedFile" matches
+    /// "Netatmo/Autoloader#loadMappedFile").
     pub async fn analyze(
         &self,
         symbol: &str,
@@ -72,12 +80,31 @@ impl ImpactAnalysisUseCase {
             query = query.with_repository(repo_id);
         }
 
+        // Try exact match first; if nothing found, resolve short name.
+        let root_symbol = {
+            let exact_callers = self.call_graph.find_callers(symbol, &query).await?;
+            if !exact_callers.is_empty() {
+                symbol.to_string()
+            } else {
+                let resolved = self
+                    .call_graph
+                    .resolve_symbols(symbol, &query, Some(RESOLVE_SYMBOLS_LIMIT))
+                    .await?;
+                if resolved.len() == 1 {
+                    resolved.into_iter().next().unwrap()
+                } else {
+                    // No resolution or ambiguous — proceed with original symbol.
+                    symbol.to_string()
+                }
+            }
+        };
+
         let mut visited: HashSet<String> = HashSet::new();
-        visited.insert(symbol.to_string());
+        visited.insert(root_symbol.clone());
 
         // (symbol, depth)
         let mut queue: VecDeque<(String, usize)> = VecDeque::new();
-        queue.push_back((symbol.to_string(), 0));
+        queue.push_back((root_symbol.clone(), 0));
 
         // by_depth[i] holds nodes at depth i+1
         let mut by_depth: Vec<Vec<ImpactNode>> = Vec::new();
@@ -159,7 +186,7 @@ impl ImpactAnalysisUseCase {
             .unwrap_or(0);
 
         Ok(ImpactAnalysis {
-            root_symbol: symbol.to_string(),
+            root_symbol,
             total_affected,
             max_depth_reached,
             by_depth,

@@ -93,6 +93,17 @@ pub trait CallGraphRepository: Send + Sync {
         &self,
         symbol_name: &str,
     ) -> Result<Vec<SymbolReference>, DomainError>;
+
+    /// Resolve a short symbol name to fully-qualified symbol names.
+    /// Returns distinct callee_symbol values whose name ends with the given suffix
+    /// (matching after `#`, `/`, or at the start of the string).
+    /// Used as a fallback when exact match returns zero results.
+    async fn resolve_symbols(
+        &self,
+        short_name: &str,
+        query: &CallGraphQuery,
+        limit: Option<u32>,
+    ) -> Result<Vec<String>, DomainError>;
 }
 
 /// Statistics about the call graph for a repository.

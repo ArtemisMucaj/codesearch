@@ -109,6 +109,8 @@ codesearch/
 │       └── api/
 │           ├── container.rs        # Dependency injection
 │           └── router.rs           # CLI command routing
+├── src/bin/
+│   └── dump_scip.rs                # SCIP index debugging utility (see below)
 ├── src/cli/                        # clap command structs
 ├── tests/
 │   ├── integration_tests.rs        # Full pipeline tests (in-memory storage)
@@ -174,6 +176,45 @@ codesearch index .
 codesearch search "embedding similarity"
 codesearch impact MyStruct --depth 5
 codesearch context some_function
+```
+
+### Debugging SCIP Data
+
+The `dump_scip` binary (`src/bin/dump_scip.rs`) inspects raw `.scip` index files. Use it to verify what an indexer (e.g. `scip-php`, `scip-typescript`) actually produced before codesearch imports it.
+
+```bash
+# Dump the first document (symbols + occurrences)
+cargo run --bin dump_scip -- path/to/index.scip
+
+# Filter to documents whose path contains a substring
+cargo run --bin dump_scip -- path/to/index.scip "Autoloader"
+
+# Aggregate stats: total occurrences broken down by definitions, locals,
+# references, empty-range, and empty-symbol
+cargo run --bin dump_scip -- path/to/index.scip --stats
+```
+
+The `--stats` mode is especially useful for diagnosing import discrepancies — it shows exactly how many occurrences are definitions (skipped by the importer) vs references (imported into DuckDB).
+
+### Exploring the DuckDB Database
+
+Codesearch stores all indexed data (chunks, embeddings, call graph references) in `~/.codesearch/codesearch.duckdb`. You can query this file directly with the [DuckDB CLI](https://duckdb.org/docs/installation/) for ad-hoc debugging and data exploration.
+
+```bash
+# Open the database
+duckdb ~/.codesearch/codesearch.duckdb
+
+# List all tables
+duckdb ~/.codesearch/codesearch.duckdb "SHOW TABLES"
+
+# Inspect the schema of the call graph table
+duckdb ~/.codesearch/codesearch.duckdb "DESCRIBE symbol_references"
+
+# Find the most-referenced symbols in a repository
+duckdb ~/.codesearch/codesearch.duckdb "SELECT callee_symbol, COUNT(*) as cnt FROM symbol_references GROUP BY callee_symbol ORDER BY cnt DESC LIMIT 20"
+
+# Check which caller→callee pairs exist for a symbol
+duckdb ~/.codesearch/codesearch.duckdb "SELECT caller_symbol, callee_symbol, reference_kind FROM symbol_references WHERE callee_symbol LIKE '%Autoloader%'"
 ```
 
 ### Lint & Format
