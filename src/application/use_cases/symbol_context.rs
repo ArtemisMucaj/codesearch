@@ -50,6 +50,10 @@ impl SymbolContextUseCase {
     /// Fetch callers and callees for `symbol` in parallel and combine them.
     ///
     /// `repository_id` – optional filter; `limit` caps each direction independently.
+    ///
+    /// If an exact match for `symbol` returns no results, falls back to a
+    /// suffix-based symbol resolution (e.g. "loadMappedFile" matches
+    /// "Netatmo/Autoloader#loadMappedFile").
     pub async fn get_context(
         &self,
         symbol: &str,
@@ -64,6 +68,7 @@ impl SymbolContextUseCase {
             query = query.with_limit(l);
         }
 
+        // Try exact match first.
         let (callers_result, callees_result) = tokio::join!(
             self.call_graph.find_callers(symbol, &query),
             self.call_graph.find_callees(symbol, &query),
@@ -72,13 +77,70 @@ impl SymbolContextUseCase {
         let callers = callers_result?;
         let callees = callees_result?;
 
-        let caller_count = callers.len();
-        let callee_count = callees.len();
+        // If exact match found results, return them.
+        if !callers.is_empty() || !callees.is_empty() {
+            let caller_count = callers.len();
+            let callee_count = callees.len();
+
+            return Ok(SymbolContext {
+                symbol: symbol.to_string(),
+                callers: callers.iter().map(Self::to_edge_caller).collect(),
+                callees: callees.iter().map(Self::to_edge_callee).collect(),
+                caller_count,
+                callee_count,
+            });
+        }
+
+        // Fallback: resolve short name to fully-qualified symbol(s).
+        let resolved = self
+            .call_graph
+            .resolve_symbols(symbol, &query, Some(10))
+            .await?;
+
+        if resolved.is_empty() {
+            return Ok(SymbolContext {
+                symbol: symbol.to_string(),
+                callers: vec![],
+                callees: vec![],
+                caller_count: 0,
+                callee_count: 0,
+            });
+        }
+
+        // If exactly one symbol matched, use it directly.
+        // If multiple matched, aggregate results from all of them.
+        let resolved_symbol = if resolved.len() == 1 {
+            resolved[0].clone()
+        } else {
+            // Use the first match but collect from all
+            resolved[0].clone()
+        };
+
+        let mut all_callers = Vec::new();
+        let mut all_callees = Vec::new();
+
+        for sym in &resolved {
+            let (cr, ce) = tokio::join!(
+                self.call_graph.find_callers(sym, &query),
+                self.call_graph.find_callees(sym, &query),
+            );
+            all_callers.extend(cr?);
+            all_callees.extend(ce?);
+        }
+
+        let caller_count = all_callers.len();
+        let callee_count = all_callees.len();
+
+        let display_symbol = if resolved.len() == 1 {
+            resolved_symbol
+        } else {
+            format!("{} (resolved {} symbols)", symbol, resolved.len())
+        };
 
         Ok(SymbolContext {
-            symbol: symbol.to_string(),
-            callers: callers.iter().map(Self::to_edge_caller).collect(),
-            callees: callees.iter().map(Self::to_edge_callee).collect(),
+            symbol: display_symbol,
+            callers: all_callers.iter().map(Self::to_edge_caller).collect(),
+            callees: all_callees.iter().map(Self::to_edge_callee).collect(),
             caller_count,
             callee_count,
         })

@@ -565,6 +565,75 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
 
         Ok(results)
     }
+
+    async fn resolve_symbols(
+        &self,
+        short_name: &str,
+        query: &CallGraphQuery,
+        limit: Option<u32>,
+    ) -> Result<Vec<String>, DomainError> {
+        let conn = self.conn.lock().await;
+
+        // Match symbols that end with the short name, preceded by `#`, `/`, or at string start.
+        // This handles patterns like:
+        //   "loadMappedFile" matches "Netatmo/Autoloader#loadMappedFile"
+        //   "Autoloader#loadMappedFile" matches "Netatmo/Autoloader#loadMappedFile"
+        let like_pattern = format!("%{}", short_name);
+        let limit_clause = limit
+            .unwrap_or(20)
+            .to_string();
+
+        let mut conditions = vec!["callee_symbol LIKE ?".to_string()];
+        if query.repository_id.is_some() {
+            conditions.push("repository_id = ?".to_string());
+        }
+        if query.language.is_some() {
+            conditions.push("language = ?".to_string());
+        }
+        let where_clause = conditions.join(" AND ");
+
+        let sql = format!(
+            "SELECT DISTINCT callee_symbol FROM symbol_references \
+             WHERE {} ORDER BY callee_symbol LIMIT {}",
+            where_clause, limit_clause
+        );
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
+
+        let mut params_vec: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
+        params_vec.push(Box::new(like_pattern));
+        if let Some(ref repo_id) = query.repository_id {
+            params_vec.push(Box::new(repo_id.clone()));
+        }
+        if let Some(ref lang) = query.language {
+            params_vec.push(Box::new(lang.clone()));
+        }
+
+        let params_refs: Vec<&dyn duckdb::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+
+        let rows = stmt
+            .query_map(params_refs.as_slice(), |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| DomainError::storage(format!("Failed to resolve symbols: {}", e)))?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            let symbol = row.map_err(|e| DomainError::storage(format!("Failed to read row: {}", e)))?;
+            // Verify the match is at a word boundary (after #, /, or \ for PHP namespaces, or exact match)
+            if symbol == short_name
+                || symbol.ends_with(&format!("#{}", short_name))
+                || symbol.ends_with(&format!("/{}", short_name))
+                || symbol.ends_with(&format!("\\{}", short_name))
+            {
+                results.push(symbol);
+            }
+        }
+
+        Ok(results)
+    }
 }
 
 #[cfg(test)]

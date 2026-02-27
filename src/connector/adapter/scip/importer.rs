@@ -104,7 +104,7 @@ fn process_document(
         })
         .map(|occ| ScopeDef {
             line: occ.range[0] as u32,
-            symbol: normalize_symbol(&occ.symbol),
+            symbol: normalize_symbol(&occ.symbol, language),
             enclosing_scope: extract_enclosing_scope(&occ.symbol),
         })
         .collect();
@@ -123,7 +123,7 @@ fn process_document(
             continue;
         }
 
-        let callee_symbol = normalize_symbol(&occ.symbol);
+        let callee_symbol = normalize_symbol(&occ.symbol, language);
         if callee_symbol.is_empty() {
             continue;
         }
@@ -213,6 +213,10 @@ fn find_enclosing_scope(scope_defs: &[ScopeDef], line: u32) -> Option<ScopeDef> 
 /// descriptors: `middlewares/add-application-source.js/appApplicationSource().`
 /// We strip the file-path prefix to produce just the symbol name.
 ///
+/// For PHP, the `/` characters in SCIP descriptors represent namespace separators
+/// (`\` in PHP source). We convert them back to `\` so that users can search
+/// with familiar PHP-style namespaces (e.g. `Netatmo\Autoloader#loadMappedFile`).
+///
 /// Examples:
 /// ```text
 /// scip-typescript npm . . ButtonComponent#render().
@@ -221,13 +225,13 @@ fn find_enclosing_scope(scope_defs: &[ScopeDef], line: u32) -> Option<ScopeDef> 
 /// scip-typescript npm . . middlewares/add-application-source.js/appApplicationSource().
 ///   → appApplicationSource
 ///
-/// scip-php . . . MyClass#myMethod().
-///   → MyClass#myMethod
+/// scip-php composer pkg dev Netatmo/Autoloader#myMethod().
+///   → Netatmo\Autoloader#myMethod
 ///
 /// local 42
 ///   → (empty — local symbols are filtered out by the caller)
 /// ```
-fn normalize_symbol(symbol: &str) -> String {
+fn normalize_symbol(symbol: &str, language: Language) -> String {
     if symbol.starts_with("local ") {
         return String::new();
     }
@@ -254,12 +258,21 @@ fn normalize_symbol(symbol: &str) -> String {
     // Remove backtick escaping used for identifiers with special characters.
     let unescaped = cleaned.replace('`', "");
 
-    // Strip file-path namespace prefixes produced by scip-typescript.
-    // These look like `middlewares/add-application-source.js/appApplicationSource`
-    // or `api/camera/associate-dropbox.js/Dropbox`.
-    // We find the last segment that looks like a source-file extension followed by `/`
-    // and strip everything up to and including it.
-    strip_file_path_prefix(&unescaped)
+    if language == Language::Php {
+        // PHP SCIP symbols use `/` as the namespace descriptor suffix, but PHP
+        // developers expect `\` as the namespace separator. Convert back so
+        // that stored symbols match PHP conventions.
+        // Note: PHP symbols never use file-path namespace prefixes, so we skip
+        // the strip_file_path_prefix step entirely.
+        unescaped.replace('/', "\\")
+    } else {
+        // Strip file-path namespace prefixes produced by scip-typescript.
+        // These look like `middlewares/add-application-source.js/appApplicationSource`
+        // or `api/camera/associate-dropbox.js/Dropbox`.
+        // We find the last segment that looks like a source-file extension followed by `/`
+        // and strip everything up to and including it.
+        strip_file_path_prefix(&unescaped)
+    }
 }
 
 /// Strip file-path namespace prefix from a normalised SCIP descriptor.
@@ -278,7 +291,6 @@ fn strip_file_path_prefix(descriptor: &str) -> String {
     // Source file extensions that scip-typescript uses as namespace descriptors.
     const FILE_EXT_SLASH: &[&str] = &[
         ".js/", ".ts/", ".jsx/", ".tsx/", ".mjs/", ".cjs/", ".mts/", ".cts/",
-        ".php/",
     ];
 
     // Find the last occurrence of any file extension followed by `/`.
@@ -306,7 +318,7 @@ fn strip_file_path_prefix(descriptor: &str) -> String {
 /// a file-path namespace rather than a meaningful class or module scope.
 fn is_file_path(s: &str) -> bool {
     const FILE_EXTENSIONS: &[&str] = &[
-        ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".php",
+        ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".mts", ".cts",
     ];
     FILE_EXTENSIONS.iter().any(|ext| s.ends_with(ext))
 }
@@ -477,24 +489,47 @@ mod tests {
     #[test]
     fn test_normalize_symbol_method() {
         let sym = "scip-typescript npm . . ButtonComponent#render().";
-        assert_eq!(normalize_symbol(sym), "ButtonComponent#render");
+        assert_eq!(
+            normalize_symbol(sym, Language::JavaScript),
+            "ButtonComponent#render"
+        );
     }
 
     #[test]
     fn test_normalize_symbol_function() {
         let sym = "scip-typescript npm . . parseFile().";
-        assert_eq!(normalize_symbol(sym), "parseFile");
+        assert_eq!(normalize_symbol(sym, Language::JavaScript), "parseFile");
     }
 
     #[test]
     fn test_normalize_symbol_php_method() {
-        let sym = "scip-php . . . MyClass#myMethod().";
-        assert_eq!(normalize_symbol(sym), "MyClass#myMethod");
+        let sym = "scip-php composer pkg dev Netatmo/Autoloader#myMethod().";
+        assert_eq!(
+            normalize_symbol(sym, Language::Php),
+            "Netatmo\\Autoloader#myMethod"
+        );
+    }
+
+    #[test]
+    fn test_normalize_symbol_php_namespaced_class() {
+        let sym = "scip-php composer pkg dev Netatmo/Models/Users/User#";
+        assert_eq!(
+            normalize_symbol(sym, Language::Php),
+            "Netatmo\\Models\\Users\\User"
+        );
+    }
+
+    #[test]
+    fn test_normalize_symbol_php_global_function() {
+        // A global PHP function (no namespace) stays without backslashes.
+        let sym = "scip-php composer pkg dev trim().";
+        assert_eq!(normalize_symbol(sym, Language::Php), "trim");
     }
 
     #[test]
     fn test_normalize_symbol_local() {
-        assert_eq!(normalize_symbol("local 42"), "");
+        assert_eq!(normalize_symbol("local 42", Language::JavaScript), "");
+        assert_eq!(normalize_symbol("local 42", Language::Php), "");
     }
 
     #[test]
@@ -502,20 +537,26 @@ mod tests {
         // scip-typescript encodes JS file paths as namespace descriptors.
         let sym =
             "scip-typescript npm . . middlewares/add-application-source.js/appApplicationSource().";
-        assert_eq!(normalize_symbol(sym), "appApplicationSource");
+        assert_eq!(
+            normalize_symbol(sym, Language::JavaScript),
+            "appApplicationSource"
+        );
     }
 
     #[test]
     fn test_normalize_symbol_js_nested_path() {
         let sym = "scip-typescript npm . . api/camera/associate-dropbox.js/associateDropbox().";
-        assert_eq!(normalize_symbol(sym), "associateDropbox");
+        assert_eq!(
+            normalize_symbol(sym, Language::JavaScript),
+            "associateDropbox"
+        );
     }
 
     #[test]
     fn test_normalize_symbol_js_variable() {
         // Term (variable) — ends with `.` not `().`
         let sym = "scip-typescript npm . . routes/na-api-router.js/addSource.";
-        assert_eq!(normalize_symbol(sym), "addSource");
+        assert_eq!(normalize_symbol(sym, Language::JavaScript), "addSource");
     }
 
     #[test]
@@ -529,7 +570,7 @@ mod tests {
         // strip_file_path_prefix sees no `.js/` in that string (no trailing slash)
         // so returns it unchanged. This is a module reference, which is fine:
         // the importer filters these out because they have no meaningful callee.
-        let result = normalize_symbol(sym);
+        let result = normalize_symbol(sym, Language::JavaScript);
         // The descriptor after stripping trailing `/` is the file path itself.
         // strip_file_path_prefix won't find `.js/` so it returns the whole thing.
         assert_eq!(result, "middlewares/add-application-source.js");
@@ -540,16 +581,7 @@ mod tests {
         // Parameter of a function — the `()` wrapping means `(req)` remains intact
         // because trim_end_matches("().") only strips trailing `().` not `)`
         let sym = "scip-typescript npm . . middlewares/add-application-source.js/appApplicationSource().(req)";
-        // After stripping: descriptor = `...appApplicationSource().(req)`
-        // trim_end_matches("().") removes trailing `)` then `.` then `(`
-        // Actually let's just check what happens:
-        let result = normalize_symbol(sym);
-        // The trimming chain: `...appApplicationSource().(req)` 
-        //   trim_end_matches("().") → strips nothing (doesn't end with `().`)
-        //   trim_end_matches('.') → strips nothing (ends with `)`)
-        //   trim_end_matches('#') → nothing
-        //   trim_end_matches('/') → nothing
-        // Then strip_file_path_prefix strips the file path prefix.
+        let result = normalize_symbol(sym, Language::JavaScript);
         assert_eq!(result, "appApplicationSource().(req)");
     }
 
