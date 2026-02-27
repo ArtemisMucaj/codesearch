@@ -590,6 +590,9 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
         if query.language.is_some() {
             conditions.push("language = ?".to_string());
         }
+        if query.reference_kind.is_some() {
+            conditions.push("reference_kind = ?".to_string());
+        }
         let where_clause = conditions.join(" AND ");
 
         let sql = format!(
@@ -609,6 +612,9 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
         }
         if let Some(ref lang) = query.language {
             params_vec.push(Box::new(lang.clone()));
+        }
+        if let Some(ref kind) = query.reference_kind {
+            params_vec.push(Box::new(kind.clone()));
         }
 
         let params_refs: Vec<&dyn duckdb::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();

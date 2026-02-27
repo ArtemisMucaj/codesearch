@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,10 @@ pub struct SymbolContext {
     /// Total number of outbound references.
     pub callee_count: usize,
 }
+
+/// Default maximum number of fully-qualified symbols to resolve from a short name
+/// when the exact match returns no results. Caps the ambiguity fan-out.
+const FALLBACK_RESOLUTION_LIMIT: u32 = 10;
 
 /// Use case: return a complete in + out dependency view for a named symbol.
 pub struct SymbolContextUseCase {
@@ -94,7 +99,7 @@ impl SymbolContextUseCase {
         // Fallback: resolve short name to fully-qualified symbol(s).
         let resolved = self
             .call_graph
-            .resolve_symbols(symbol, &query, Some(10))
+            .resolve_symbols(symbol, &query, Some(FALLBACK_RESOLUTION_LIMIT))
             .await?;
 
         if resolved.is_empty() {
@@ -127,6 +132,14 @@ impl SymbolContextUseCase {
             all_callers.extend(cr?);
             all_callees.extend(ce?);
         }
+
+        // Deduplicate by reference ID: the same DB row can appear more than once
+        // when multiple resolved symbols share callers/callees, which would inflate
+        // the counts and produce duplicate edges in the output.
+        let mut seen: HashSet<String> = HashSet::new();
+        all_callers.retain(|r| seen.insert(r.id().to_string()));
+        seen.clear();
+        all_callees.retain(|r| seen.insert(r.id().to_string()));
 
         let caller_count = all_callers.len();
         let callee_count = all_callees.len();

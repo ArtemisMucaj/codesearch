@@ -2,6 +2,9 @@ use protobuf::Message;
 use std::env;
 use std::fs;
 
+/// Maximum number of symbols / occurrences printed per document in browse mode.
+const MAX_PRINT_RESULTS: usize = 200;
+
 fn main() {
     let path = env::args()
         .nth(1)
@@ -37,33 +40,21 @@ fn main() {
             }
         }
 
+        let pct = |n: u64| -> f64 {
+            if total_occ == 0 {
+                0.0
+            } else {
+                n as f64 / total_occ as f64 * 100.0
+            }
+        };
+
         println!("Documents:     {}", index.documents.len());
         println!("Total occ:     {}", total_occ);
-        println!(
-            "  Definitions: {} ({:.1}%)",
-            definitions,
-            definitions as f64 / total_occ as f64 * 100.0
-        );
-        println!(
-            "  Locals:      {} ({:.1}%)",
-            locals,
-            locals as f64 / total_occ as f64 * 100.0
-        );
-        println!(
-            "  Empty range: {} ({:.1}%)",
-            empty_range,
-            empty_range as f64 / total_occ as f64 * 100.0
-        );
-        println!(
-            "  Empty symbol:{} ({:.1}%)",
-            empty_symbol,
-            empty_symbol as f64 / total_occ as f64 * 100.0
-        );
-        println!(
-            "  References:  {} ({:.1}%)",
-            references,
-            references as f64 / total_occ as f64 * 100.0
-        );
+        println!("  Definitions: {} ({:.1}%)", definitions, pct(definitions));
+        println!("  Locals:      {} ({:.1}%)", locals, pct(locals));
+        println!("  Empty range: {} ({:.1}%)", empty_range, pct(empty_range));
+        println!("  Empty symbol:{} ({:.1}%)", empty_symbol, pct(empty_symbol));
+        println!("  References:  {} ({:.1}%)", references, pct(references));
         return;
     }
 
@@ -79,17 +70,18 @@ fn main() {
                 "\n  --- Symbol Information ({} total) ---",
                 doc.symbols.len()
             );
-            for si in doc.symbols.iter().take(200) {
+            for si in doc.symbols.iter().take(MAX_PRINT_RESULTS) {
                 println!("    symbol: {}", si.symbol);
                 println!("      kind: {:?}", si.kind);
             }
         }
 
         println!(
-            "\n  --- Occurrences ({} total, showing first 200) ---",
-            doc.occurrences.len()
+            "\n  --- Occurrences ({} total, showing first {}) ---",
+            doc.occurrences.len(),
+            MAX_PRINT_RESULTS
         );
-        for (i, occ) in doc.occurrences.iter().enumerate().take(200) {
+        for (i, occ) in doc.occurrences.iter().enumerate().take(MAX_PRINT_RESULTS) {
             let role_str = if occ.symbol_roles & 1 != 0 {
                 "Definition"
             } else if occ.symbol_roles & 2 != 0 {

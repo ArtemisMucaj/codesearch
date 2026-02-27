@@ -347,7 +347,13 @@ fn extract_enclosing_scope(symbol: &str) -> Option<String> {
             if is_file_path(&scope) {
                 return None;
             }
-            return Some(scope);
+            // Strip any leading file-path prefix embedded in the scope.
+            // scip-typescript emits descriptors like `src/foo.ts/MyClass#method().`
+            // where the scope resolves to `src/foo.ts/MyClass`.  The `src/foo.ts`
+            // part is a file-path namespace, not a class — take only the last
+            // `/`-separated component so we get `MyClass`.
+            let normalized = scope.rsplit('/').next().unwrap_or(&scope).to_string();
+            return Some(normalized);
         }
     }
 

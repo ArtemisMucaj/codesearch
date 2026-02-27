@@ -8,6 +8,10 @@ use crate::domain::DomainError;
 
 pub const ANONYMOUS_SYMBOL: &str = "<anonymous>";
 
+/// Maximum number of fully-qualified symbols to resolve from a short name during
+/// fallback resolution. Caps the ambiguity fan-out without blocking common cases.
+const RESOLVE_SYMBOLS_LIMIT: u32 = 10;
+
 /// A single node in the impact (blast-radius) graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImpactNode {
@@ -84,7 +88,7 @@ impl ImpactAnalysisUseCase {
             } else {
                 let resolved = self
                     .call_graph
-                    .resolve_symbols(symbol, &query, Some(10))
+                    .resolve_symbols(symbol, &query, Some(RESOLVE_SYMBOLS_LIMIT))
                     .await?;
                 if resolved.len() == 1 {
                     resolved.into_iter().next().unwrap()
