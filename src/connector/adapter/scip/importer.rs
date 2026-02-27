@@ -96,7 +96,10 @@ fn process_document(
         .iter()
         .filter(|occ| {
             (occ.symbol_roles & ROLE_DEFINITION) != 0
-                && is_callable_kind(kind_map.get(occ.symbol.as_str()).copied())
+                && is_callable_kind(
+                    kind_map.get(occ.symbol.as_str()).copied(),
+                    Some(occ.symbol.as_str()),
+                )
                 && !occ.range.is_empty()
         })
         .map(|occ| ScopeDef {
@@ -133,7 +136,7 @@ fn process_document(
         };
 
         let callee_kind = kind_map.get(occ.symbol.as_str()).copied();
-        let reference_kind = infer_reference_kind(occ.symbol_roles, callee_kind);
+        let reference_kind = infer_reference_kind(occ.symbol_roles, callee_kind, &occ.symbol);
 
         // Find the enclosing function/method via backwards scan.
         let enclosing = find_enclosing_scope(&scope_defs, occ_line);
@@ -206,10 +209,17 @@ fn find_enclosing_scope(scope_defs: &[ScopeDef], line: u32) -> Option<ScopeDef> 
 ///
 /// SCIP symbol format: `<scheme> <manager> <pkg-name> <version> <descriptor>+`
 ///
+/// For JavaScript/TypeScript, scip-typescript encodes the file path as namespace
+/// descriptors: `middlewares/add-application-source.js/appApplicationSource().`
+/// We strip the file-path prefix to produce just the symbol name.
+///
 /// Examples:
 /// ```text
 /// scip-typescript npm . . ButtonComponent#render().
 ///   → ButtonComponent#render
+///
+/// scip-typescript npm . . middlewares/add-application-source.js/appApplicationSource().
+///   → appApplicationSource
 ///
 /// scip-php . . . MyClass#myMethod().
 ///   → MyClass#myMethod
@@ -244,13 +254,69 @@ fn normalize_symbol(symbol: &str) -> String {
     // Remove backtick escaping used for identifiers with special characters.
     let unescaped = cleaned.replace('`', "");
 
-    unescaped
+    // Strip file-path namespace prefixes produced by scip-typescript.
+    // These look like `middlewares/add-application-source.js/appApplicationSource`
+    // or `api/camera/associate-dropbox.js/Dropbox`.
+    // We find the last segment that looks like a source-file extension followed by `/`
+    // and strip everything up to and including it.
+    strip_file_path_prefix(&unescaped)
+}
+
+/// Strip file-path namespace prefix from a normalised SCIP descriptor.
+///
+/// scip-typescript encodes the source file as a chain of namespace descriptors,
+/// e.g. `middlewares/add-application-source.js/appApplicationSource`.
+/// We want to strip the file-path portion and keep only the actual symbol name
+/// (which may include class#method separators).
+///
+/// Strategy: find the last `/` that is preceded by a source-file extension
+/// (`.js`, `.ts`, `.jsx`, `.tsx`, `.mjs`, `.cjs`, `.mts`, `.cts`).
+/// Everything after that `/` is the symbol name.
+///
+/// If no file-path prefix is found, returns the input unchanged.
+fn strip_file_path_prefix(descriptor: &str) -> String {
+    // Source file extensions that scip-typescript uses as namespace descriptors.
+    const FILE_EXT_SLASH: &[&str] = &[
+        ".js/", ".ts/", ".jsx/", ".tsx/", ".mjs/", ".cjs/", ".mts/", ".cts/",
+        ".php/",
+    ];
+
+    // Find the last occurrence of any file extension followed by `/`.
+    let mut best_pos = None;
+    for ext in FILE_EXT_SLASH {
+        if let Some(pos) = descriptor.rfind(ext) {
+            let end = pos + ext.len(); // position right after the `/`
+            match best_pos {
+                Some(prev) if end > prev => best_pos = Some(end),
+                None => best_pos = Some(end),
+                _ => {}
+            }
+        }
+    }
+
+    match best_pos {
+        Some(pos) => descriptor[pos..].to_string(),
+        _ => descriptor.to_string(),
+    }
+}
+
+/// Returns `true` if the string looks like (or ends with) a source file path.
+///
+/// Used to detect when a normalised SCIP scope/descriptor is actually just
+/// a file-path namespace rather than a meaningful class or module scope.
+fn is_file_path(s: &str) -> bool {
+    const FILE_EXTENSIONS: &[&str] = &[
+        ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".php",
+    ];
+    FILE_EXTENSIONS.iter().any(|ext| s.ends_with(ext))
 }
 
 /// Extract the enclosing scope (e.g. class name) from a SCIP symbol descriptor.
 ///
 /// For `ButtonComponent#render().` → returns `Some("ButtonComponent")`
 /// For `parseFile().`              → returns `None`
+/// For `middlewares/add-application-source.js/appApplicationSource().` → returns `None`
+///   (the `middlewares/...` prefix is a file path, not a class scope)
 fn extract_enclosing_scope(symbol: &str) -> Option<String> {
     let parts: Vec<&str> = symbol.splitn(5, ' ').collect();
     let descriptor = parts.get(4)?;
@@ -263,6 +329,12 @@ fn extract_enclosing_scope(symbol: &str) -> Option<String> {
             .trim_end_matches('/')
             .replace('`', "");
         if !scope.is_empty() {
+            // If the scope IS a file path (e.g. `middlewares/add-application-source.js`),
+            // it's not a meaningful enclosing scope — it's just the file namespace
+            // from scip-typescript.
+            if is_file_path(&scope) {
+                return None;
+            }
             return Some(scope);
         }
     }
@@ -276,8 +348,13 @@ fn extract_enclosing_scope(symbol: &str) -> Option<String> {
 
 /// `true` when the SCIP SymbolKind represents something callable (function,
 /// method, constructor, etc.).
-fn is_callable_kind(kind: Option<SymbolKind>) -> bool {
-    matches!(
+///
+/// When `symbol_str` is provided, also returns `true` for `UnspecifiedKind`
+/// symbols whose SCIP descriptor ends with `().` — the conventional suffix
+/// scip-typescript uses for functions/methods even when it doesn't emit an
+/// explicit SymbolKind.
+fn is_callable_kind(kind: Option<SymbolKind>, symbol_str: Option<&str>) -> bool {
+    if matches!(
         kind,
         Some(
             SymbolKind::Function
@@ -288,13 +365,31 @@ fn is_callable_kind(kind: Option<SymbolKind>) -> bool {
                 | SymbolKind::Getter
                 | SymbolKind::Setter
         )
-    )
+    ) {
+        return true;
+    }
+
+    // scip-typescript often omits SymbolKind (= UnspecifiedKind) for JS.
+    // However, function/method descriptors use the `().` suffix in the SCIP
+    // symbol string, so we can infer callability from that.
+    if matches!(kind, Some(SymbolKind::UnspecifiedKind) | None) {
+        if let Some(sym) = symbol_str {
+            return sym.ends_with("().");
+        }
+    }
+
+    false
 }
 
 /// Map SCIP occurrence roles + callee kind to a [`ReferenceKind`].
+///
+/// When `callee_kind` is `None` or `UnspecifiedKind` (common with scip-typescript
+/// for JS), falls back to inspecting the raw SCIP symbol descriptor suffix to
+/// infer whether the symbol is callable.
 fn infer_reference_kind(
     roles: i32,
     callee_kind: Option<SymbolKind>,
+    symbol_str: &str,
 ) -> ReferenceKind {
     if (roles & ROLE_IMPORT) != 0 {
         return ReferenceKind::Import;
@@ -319,9 +414,27 @@ fn infer_reference_kind(
         ) => ReferenceKind::MethodCall,
         Some(SymbolKind::Function) => ReferenceKind::Call,
         _ => {
-            if (roles & ROLE_READ_ACCESS) != 0 {
+            // scip-typescript omits SymbolKind for JS files.  Use the SCIP
+            // descriptor suffix as a heuristic:
+            //   `().`  → function/method
+            //   `#`    → class/type member
+            //   `.`    → term/variable
+            //   `/`    → namespace/module
+            if symbol_str.ends_with("().") {
+                // Looks like a function — check if it has a `#` separator
+                // (method) or not (plain function).
+                let parts: Vec<&str> = symbol_str.splitn(5, ' ').collect();
+                let descriptor = parts.get(4).unwrap_or(&"");
+                if descriptor.contains('#') {
+                    ReferenceKind::MethodCall
+                } else {
+                    ReferenceKind::Call
+                }
+            } else if (roles & ROLE_READ_ACCESS) != 0 {
                 ReferenceKind::VariableReference
             } else {
+                // Term accessor (`.` suffix) → variable reference;
+                // anything else → unknown.
                 ReferenceKind::Unknown
             }
         }
@@ -385,6 +498,105 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_symbol_js_file_path_prefix() {
+        // scip-typescript encodes JS file paths as namespace descriptors.
+        let sym =
+            "scip-typescript npm . . middlewares/add-application-source.js/appApplicationSource().";
+        assert_eq!(normalize_symbol(sym), "appApplicationSource");
+    }
+
+    #[test]
+    fn test_normalize_symbol_js_nested_path() {
+        let sym = "scip-typescript npm . . api/camera/associate-dropbox.js/associateDropbox().";
+        assert_eq!(normalize_symbol(sym), "associateDropbox");
+    }
+
+    #[test]
+    fn test_normalize_symbol_js_variable() {
+        // Term (variable) — ends with `.` not `().`
+        let sym = "scip-typescript npm . . routes/na-api-router.js/addSource.";
+        assert_eq!(normalize_symbol(sym), "addSource");
+    }
+
+    #[test]
+    fn test_normalize_symbol_js_module_ref() {
+        // Module reference — the descriptor IS the file path ending with `/`
+        // After trim_end_matches('/'), it becomes the bare file path, which
+        // is_file_path detects. normalize_symbol still returns the file name
+        // (without path) since it's a namespace, not a function.
+        let sym = "scip-typescript npm . . middlewares/add-application-source.js/";
+        // trim_end_matches('/') → `middlewares/add-application-source.js`
+        // strip_file_path_prefix sees no `.js/` in that string (no trailing slash)
+        // so returns it unchanged. This is a module reference, which is fine:
+        // the importer filters these out because they have no meaningful callee.
+        let result = normalize_symbol(sym);
+        // The descriptor after stripping trailing `/` is the file path itself.
+        // strip_file_path_prefix won't find `.js/` so it returns the whole thing.
+        assert_eq!(result, "middlewares/add-application-source.js");
+    }
+
+    #[test]
+    fn test_normalize_symbol_js_parameter() {
+        // Parameter of a function — the `()` wrapping means `(req)` remains intact
+        // because trim_end_matches("().") only strips trailing `().` not `)`
+        let sym = "scip-typescript npm . . middlewares/add-application-source.js/appApplicationSource().(req)";
+        // After stripping: descriptor = `...appApplicationSource().(req)`
+        // trim_end_matches("().") removes trailing `)` then `.` then `(`
+        // Actually let's just check what happens:
+        let result = normalize_symbol(sym);
+        // The trimming chain: `...appApplicationSource().(req)` 
+        //   trim_end_matches("().") → strips nothing (doesn't end with `().`)
+        //   trim_end_matches('.') → strips nothing (ends with `)`)
+        //   trim_end_matches('#') → nothing
+        //   trim_end_matches('/') → nothing
+        // Then strip_file_path_prefix strips the file path prefix.
+        assert_eq!(result, "appApplicationSource().(req)");
+    }
+
+    #[test]
+    fn test_strip_file_path_prefix_basic() {
+        assert_eq!(
+            strip_file_path_prefix("middlewares/add-application-source.js/appApplicationSource"),
+            "appApplicationSource"
+        );
+    }
+
+    #[test]
+    fn test_strip_file_path_prefix_no_prefix() {
+        assert_eq!(
+            strip_file_path_prefix("ButtonComponent#render"),
+            "ButtonComponent#render"
+        );
+    }
+
+    #[test]
+    fn test_strip_file_path_prefix_ts_file() {
+        assert_eq!(
+            strip_file_path_prefix("src/components/Button.tsx/ButtonComponent#render"),
+            "ButtonComponent#render"
+        );
+    }
+
+    #[test]
+    fn test_strip_file_path_prefix_only_file_with_slash() {
+        // When the descriptor ends with `.js/`, stripping produces an empty string.
+        assert_eq!(
+            strip_file_path_prefix("middlewares/add-application-source.js/"),
+            ""
+        );
+    }
+
+    #[test]
+    fn test_strip_file_path_prefix_only_file_without_slash() {
+        // When the descriptor is just a file path without trailing `/`,
+        // no `.js/` pattern is found, so it's returned as-is.
+        assert_eq!(
+            strip_file_path_prefix("middlewares/add-application-source.js"),
+            "middlewares/add-application-source.js"
+        );
+    }
+
+    #[test]
     fn test_extract_enclosing_scope_method() {
         let sym = "scip-typescript npm . . ButtonComponent#render().";
         assert_eq!(
@@ -397,6 +609,52 @@ mod tests {
     fn test_extract_enclosing_scope_top_level() {
         let sym = "scip-typescript npm . . parseFile().";
         assert_eq!(extract_enclosing_scope(sym), None);
+    }
+
+    #[test]
+    fn test_extract_enclosing_scope_js_file_path() {
+        // File path prefix should NOT be treated as an enclosing scope.
+        let sym =
+            "scip-typescript npm . . middlewares/add-application-source.js/appApplicationSource().";
+        assert_eq!(extract_enclosing_scope(sym), None);
+    }
+
+    #[test]
+    fn test_is_callable_kind_unspecified_with_function_descriptor() {
+        // scip-typescript omits kind for JS; we infer from `().` suffix.
+        assert!(is_callable_kind(
+            Some(SymbolKind::UnspecifiedKind),
+            Some("scip-typescript npm . . routes/na-api-router.js/handler().")
+        ));
+    }
+
+    #[test]
+    fn test_is_callable_kind_unspecified_without_function_descriptor() {
+        // Variable (`.` suffix, not `().`) should NOT be callable.
+        assert!(!is_callable_kind(
+            Some(SymbolKind::UnspecifiedKind),
+            Some("scip-typescript npm . . routes/na-api-router.js/addSource.")
+        ));
+    }
+
+    #[test]
+    fn test_infer_reference_kind_unspecified_function() {
+        let kind = infer_reference_kind(
+            0,
+            Some(SymbolKind::UnspecifiedKind),
+            "scip-typescript npm . . middlewares/add-application-source.js/appApplicationSource().",
+        );
+        assert_eq!(kind, ReferenceKind::Call);
+    }
+
+    #[test]
+    fn test_infer_reference_kind_unspecified_method() {
+        let kind = infer_reference_kind(
+            0,
+            Some(SymbolKind::UnspecifiedKind),
+            "scip-typescript npm . . ButtonComponent#render().",
+        );
+        assert_eq!(kind, ReferenceKind::MethodCall);
     }
 
     #[test]
