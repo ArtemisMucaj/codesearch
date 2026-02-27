@@ -28,11 +28,25 @@ impl<'a> SymbolContextController<'a> {
 
         Ok(match format {
             OutputFormat::Json => serde_json::to_string_pretty(&ctx)?,
-            OutputFormat::Vimgrep => {
-                anyhow::bail!("--format vimgrep is not supported for context; use text or json")
-            }
+            OutputFormat::Vimgrep => Self::format_context_vimgrep(&ctx),
             OutputFormat::Text => self.format_context(&ctx),
         })
+    }
+
+    fn format_context_vimgrep(ctx: &SymbolContext) -> String {
+        let callers = ctx.callers.iter().map(|e| {
+            format!(
+                "{}:{}:1:← {} [{}]",
+                e.file_path, e.line, e.symbol, e.reference_kind
+            )
+        });
+        let callees = ctx.callees.iter().map(|e| {
+            format!(
+                "{}:{}:1:→ {} [{}]",
+                e.file_path, e.line, e.symbol, e.reference_kind
+            )
+        });
+        callers.chain(callees).collect::<Vec<_>>().join("\n")
     }
 
     fn format_context(&self, ctx: &SymbolContext) -> String {

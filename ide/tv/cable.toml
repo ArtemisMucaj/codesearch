@@ -1,0 +1,33 @@
+# CodeSearch cable channels for Television (https://github.com/alexpasmantier/television)
+#
+# Installation:
+#   Merge these channels into ~/.config/television/cable.toml
+#   (or run  ide/zed/setup.sh  which does this automatically).
+#
+# Usage inside Zed tasks (or any terminal):
+#   tv codesearch           — live semantic search; type query in TV's bar
+#   tv codesearch-context   — symbol context; type a symbol name in TV's bar
+#   tv codesearch-impact    — blast-radius analysis; type a symbol name in TV's bar
+#
+# Prerequisites:  codesearch binary on $PATH,  bat (optional, for previews)
+
+# ── Semantic search ──────────────────────────────────────────────────────────
+# Calls codesearch as you type; results are in vimgrep format (file:line:col:text).
+[[cable_channel]]
+name = "codesearch"
+source_command = "codesearch search '{query}' --format vimgrep 2>/dev/null"
+preview_command = "bat --color=always --highlight-line {2} -- {1} 2>/dev/null || sed -n '{2}p' {1}"
+
+# ── Symbol context (callers + callees) ───────────────────────────────────────
+# Type a symbol name; Television re-runs the context lookup live.
+[[cable_channel]]
+name = "codesearch-context"
+source_command = "codesearch context '{query}' --format vimgrep 2>/dev/null"
+preview_command = "bat --color=always --highlight-line {2} -- {1} 2>/dev/null || sed -n '{2}p' {1}"
+
+# ── Impact / blast-radius analysis ───────────────────────────────────────────
+# Type a symbol name; Television re-runs the impact analysis live.
+[[cable_channel]]
+name = "codesearch-impact"
+source_command = "codesearch impact '{query}' --format vimgrep 2>/dev/null"
+preview_command = "bat --color=always --highlight-line {2} -- {1} 2>/dev/null || sed -n '{2}p' {1}"

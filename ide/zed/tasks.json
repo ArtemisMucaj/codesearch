@@ -1,26 +1,26 @@
 [
   {
-    "label": "codesearch: search (prompt)",
-    "command": "bash -c 'read -rp \"Search query: \" q && codesearch search \"$q\" --format text'",
-    "tags": ["codesearch"],
-    "reveal": "always",
+    "label": "codesearch: search",
+    "command": "bash -c 'r=$(tv codesearch) && [[ -n \"$r\" ]] && file=$(echo \"$r\" | cut -d: -f1) && line=$(echo \"$r\" | cut -d: -f2) && zed \"$file:$line\"'",
+    "tags": ["codesearch", "television"],
+    "hide": "always",
     "use_new_terminal": true,
     "allow_concurrent_runs": true
   },
   {
     "label": "codesearch: symbol context",
-    "command": "codesearch context \"$ZED_SYMBOL\"",
-    "tags": ["codesearch"],
-    "reveal": "always",
-    "use_new_terminal": false,
+    "command": "bash -c 'r=$(codesearch context \"$ZED_SYMBOL\" --format vimgrep | tv) && [[ -n \"$r\" ]] && file=$(echo \"$r\" | cut -d: -f1) && line=$(echo \"$r\" | cut -d: -f2) && zed \"$file:$line\"'",
+    "tags": ["codesearch", "television"],
+    "hide": "always",
+    "use_new_terminal": true,
     "allow_concurrent_runs": true
   },
   {
     "label": "codesearch: impact analysis",
-    "command": "codesearch impact \"$ZED_SYMBOL\"",
-    "tags": ["codesearch"],
-    "reveal": "always",
-    "use_new_terminal": false,
+    "command": "bash -c 'r=$(codesearch impact \"$ZED_SYMBOL\" --format vimgrep | tv) && [[ -n \"$r\" ]] && file=$(echo \"$r\" | cut -d: -f1) && line=$(echo \"$r\" | cut -d: -f2) && zed \"$file:$line\"'",
+    "tags": ["codesearch", "television"],
+    "hide": "always",
+    "use_new_terminal": true,
     "allow_concurrent_runs": true
   },
   {
@@ -35,14 +35,6 @@
     "label": "television: find file",
     "command": "zed \"$(tv files)\"",
     "tags": ["television"],
-    "hide": "always",
-    "use_new_terminal": true,
-    "allow_concurrent_runs": true
-  },
-  {
-    "label": "codesearch: search via television",
-    "command": "bash -c 'read -rp \"Search query: \" q && r=$(codesearch search \"$q\" --format vimgrep | tv) && [[ -n \"$r\" ]] && file=$(echo \"$r\" | cut -d: -f1) && line=$(echo \"$r\" | cut -d: -f2) && zed \"$file:$line\"'",
-    "tags": ["codesearch", "television"],
     "hide": "always",
     "use_new_terminal": true,
     "allow_concurrent_runs": true
