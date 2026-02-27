@@ -1,7 +1,7 @@
 [
   {
     "label": "codesearch: search",
-    "command": "bash -c 'r=$(tv codesearch) && [[ -n \"$r\" ]] && file=$(echo \"$r\" | cut -d: -f1) && line=$(echo \"$r\" | cut -d: -f2) && zed \"$file:$line\"'",
+    "command": "bash -c 'r=$(tv codesearch 2>/dev/null); [[ -n \"$r\" ]] || exit 0; file=$(echo \"$r\" | cut -d: -f1); line=$(echo \"$r\" | cut -d: -f2); zed \"$file:$line\"'",
     "tags": ["codesearch", "television"],
     "hide": "always",
     "use_new_terminal": true,
@@ -9,7 +9,7 @@
   },
   {
     "label": "codesearch: symbol context",
-    "command": "bash -c 'r=$(codesearch context \"$ZED_SYMBOL\" --format vimgrep | tv) && [[ -n \"$r\" ]] && file=$(echo \"$r\" | cut -d: -f1) && line=$(echo \"$r\" | cut -d: -f2) && zed \"$file:$line\"'",
+    "command": "bash -c 'r=$(codesearch context \"$ZED_SYMBOL\" --format vimgrep 2>/dev/null | tv 2>/dev/null); [[ -n \"$r\" ]] || exit 0; file=$(echo \"$r\" | cut -d: -f1); line=$(echo \"$r\" | cut -d: -f2); zed \"$file:$line\"'",
     "tags": ["codesearch", "television"],
     "hide": "always",
     "use_new_terminal": true,
@@ -17,7 +17,7 @@
   },
   {
     "label": "codesearch: impact analysis",
-    "command": "bash -c 'r=$(codesearch impact \"$ZED_SYMBOL\" --format vimgrep | tv) && [[ -n \"$r\" ]] && file=$(echo \"$r\" | cut -d: -f1) && line=$(echo \"$r\" | cut -d: -f2) && zed \"$file:$line\"'",
+    "command": "bash -c 'r=$(codesearch impact \"$ZED_SYMBOL\" --format vimgrep 2>/dev/null | tv 2>/dev/null); [[ -n \"$r\" ]] || exit 0; file=$(echo \"$r\" | cut -d: -f1); line=$(echo \"$r\" | cut -d: -f2); zed \"$file:$line\"'",
     "tags": ["codesearch", "television"],
     "hide": "always",
     "use_new_terminal": true,

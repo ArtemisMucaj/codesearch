@@ -13,21 +13,23 @@
 
 # ── Semantic search ──────────────────────────────────────────────────────────
 # Calls codesearch as you type; results are in vimgrep format (file:line:col:text).
+# The empty-query guard prevents codesearch from being called before the user
+# has typed anything (TV starts the channel with an empty query).
 [[cable_channel]]
 name = "codesearch"
-source_command = "codesearch search '{query}' --format vimgrep 2>/dev/null"
-preview_command = "bat --color=always --highlight-line {2} -- {1} 2>/dev/null || sed -n '{2}p' {1}"
+source_command = "[ -z '{query}' ] || codesearch search '{query}' --format vimgrep 2>/dev/null"
+preview_command = "bat --color=always --highlight-line $(echo {} | cut -d: -f2) -- $(echo {} | cut -d: -f1) 2>/dev/null"
 
 # ── Symbol context (callers + callees) ───────────────────────────────────────
 # Type a symbol name; Television re-runs the context lookup live.
 [[cable_channel]]
 name = "codesearch-context"
-source_command = "codesearch context '{query}' --format vimgrep 2>/dev/null"
-preview_command = "bat --color=always --highlight-line {2} -- {1} 2>/dev/null || sed -n '{2}p' {1}"
+source_command = "[ -z '{query}' ] || codesearch context '{query}' --format vimgrep 2>/dev/null"
+preview_command = "bat --color=always --highlight-line $(echo {} | cut -d: -f2) -- $(echo {} | cut -d: -f1) 2>/dev/null"
 
 # ── Impact / blast-radius analysis ───────────────────────────────────────────
 # Type a symbol name; Television re-runs the impact analysis live.
 [[cable_channel]]
 name = "codesearch-impact"
-source_command = "codesearch impact '{query}' --format vimgrep 2>/dev/null"
-preview_command = "bat --color=always --highlight-line {2} -- {1} 2>/dev/null || sed -n '{2}p' {1}"
+source_command = "[ -z '{query}' ] || codesearch impact '{query}' --format vimgrep 2>/dev/null"
+preview_command = "bat --color=always --highlight-line $(echo {} | cut -d: -f2) -- $(echo {} | cut -d: -f1) 2>/dev/null"
