@@ -1,7 +1,9 @@
 [
   {
     "bindings": {
-      "ctrl-shift-f": ["task::Spawn", { "task_name": "codesearch: search (prompt)" }]
+      "ctrl-shift-f": ["task::Spawn", { "task_name": "codesearch: search (prompt)" }],
+      "ctrl-shift-t": ["task::Spawn", { "task_name": "television: find file", "reveal_target": "center" }],
+      "ctrl-shift-s": ["task::Spawn", { "task_name": "codesearch: search via television", "reveal_target": "center" }]
     }
   },
   {

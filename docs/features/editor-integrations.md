@@ -48,7 +48,67 @@ Run [`ide/zed/setup.sh`](../../ide/zed/setup.sh) for an automated install, or ma
 
 #### Keybindings
 
-Copy [`ide/zed/keybindings.json`](../../ide/zed/keybindings.json) into `~/.config/zed/keymap.json` to add keyboard shortcuts (`ctrl-shift-f` search, `ctrl-shift-i` impact, `ctrl-shift-x` context), or let `setup.sh` handle it interactively.
+Copy [`ide/zed/keybindings.json`](../../ide/zed/keybindings.json) into `~/.config/zed/keymap.json` to add keyboard shortcuts, or let `setup.sh` handle it interactively.
+
+| Keybinding | Action | Context |
+|---|---|---|
+| `ctrl-shift-f` | codesearch: search (prompt) | Global |
+| `ctrl-shift-i` | codesearch: impact analysis | Editor |
+| `ctrl-shift-x` | codesearch: symbol context | Editor |
+| `ctrl-shift-t` | television: find file | Global |
+| `ctrl-shift-s` | codesearch: search via television | Global |
+
+### Television (fuzzy-picker integration)
+
+[Television](https://github.com/alexpasmantier/television) (`tv`) is a fast terminal fuzzy finder. The Zed integration adds two tasks that use Television as an interactive result picker, inspired by [Zed's hidden-gems guide](https://zed.dev/blog/hidden-gems-part-2#emulate-vims-telescope-via-television).
+
+#### Prerequisites
+
+Install `tv` from the [Television releases page](https://github.com/alexpasmantier/television/releases) or via your package manager, then make sure it is on your `$PATH`.
+
+#### `television: find file`
+
+Opens Television's built-in file channel and then opens the selected file in Zed — a Telescope-style file picker for Zed:
+
+```json
+{
+  "label": "television: find file",
+  "command": "zed \"$(tv files)\"",
+  "hide": "always",
+  "use_new_terminal": true,
+  "allow_concurrent_runs": true
+}
+```
+
+Bind it to `ctrl-shift-t` (or override `ctrl-p` / `cmd-p` for a drop-in Telescope replacement):
+
+```json
+{
+  "bindings": {
+    "ctrl-shift-t": ["task::Spawn", { "task_name": "television: find file", "reveal_target": "center" }]
+  }
+}
+```
+
+#### `codesearch: search via television`
+
+Combines CodeSearch's semantic search with Television's fuzzy picker. The task:
+
+1. Prompts for a search query.
+2. Runs `codesearch search` with `--format vimgrep` and pipes the results into `tv`.
+3. Parses the selected `file:line:col:…` entry and opens Zed at the exact line.
+
+```json
+{
+  "label": "codesearch: search via television",
+  "command": "bash -c 'read -rp \"Search query: \" q && r=$(codesearch search \"$q\" --format vimgrep | tv) && [[ -n \"$r\" ]] && file=$(echo \"$r\" | cut -d: -f1) && line=$(echo \"$r\" | cut -d: -f2) && zed \"$file:$line\"'",
+  "hide": "always",
+  "use_new_terminal": true,
+  "allow_concurrent_runs": true
+}
+```
+
+Both tasks are included in [`ide/zed/tasks.json`](../../ide/zed/tasks.json) and installed by `setup.sh`.
 
 ## Neovim
 

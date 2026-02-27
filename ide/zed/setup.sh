@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# setup.sh — Install CodeSearch integration into Zed
+# setup.sh — Install CodeSearch (+ Television) integration into Zed
 #
 # What it does:
-#   1. Merges the four codesearch tasks into ~/.config/zed/tasks.json
+#   1. Merges codesearch and television tasks into ~/.config/zed/tasks.json
 #   2. Optionally adds keybindings to ~/.config/zed/keymap.json
 #
 # Requirements: jq (brew install jq | apt install jq)
+# Optional:     tv  (https://github.com/alexpasmantier/television)
 
 set -euo pipefail
 
@@ -24,6 +25,9 @@ mkdir -p "$ZED_DIR"
 
 command -v codesearch &>/dev/null \
     || warn "'codesearch' not found on PATH — install it before starting Zed."
+
+command -v tv &>/dev/null \
+    || warn "'tv' (television) not found on PATH — install it from https://github.com/alexpasmantier/television for the 'television: find file' and 'codesearch: search via television' tasks."
 
 # Atomically write JSON: stage to a temp file, then rename into place.
 write_json() {
@@ -53,7 +57,9 @@ info "Tasks merged → $TASKS_FILE"
 printf "\n${BOLD}Suggested keybindings:${NC}\n"
 printf "  ctrl-shift-f  →  codesearch: search (prompt)\n"
 printf "  ctrl-shift-i  →  codesearch: impact analysis\n"
-printf "  ctrl-shift-x  →  codesearch: symbol context\n\n"
+printf "  ctrl-shift-x  →  codesearch: symbol context\n"
+printf "  ctrl-shift-t  →  television: find file           (requires tv)\n"
+printf "  ctrl-shift-s  →  codesearch: search via television (requires tv)\n\n"
 read -r -p "Add these keybindings to keymap.json? [y/N] " yn
 
 if [[ "$yn" == [yY]* ]]; then

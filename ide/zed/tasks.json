@@ -30,5 +30,21 @@
     "reveal": "always",
     "use_new_terminal": false,
     "allow_concurrent_runs": false
+  },
+  {
+    "label": "television: find file",
+    "command": "zed \"$(tv files)\"",
+    "tags": ["television"],
+    "hide": "always",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": true
+  },
+  {
+    "label": "codesearch: search via television",
+    "command": "bash -c 'read -rp \"Search query: \" q && r=$(codesearch search \"$q\" --format vimgrep | tv) && [[ -n \"$r\" ]] && file=$(echo \"$r\" | cut -d: -f1) && line=$(echo \"$r\" | cut -d: -f2) && zed \"$file:$line\"'",
+    "tags": ["codesearch", "television"],
+    "hide": "always",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": true
   }
 ]
