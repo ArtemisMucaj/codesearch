@@ -28,9 +28,6 @@ command -v codesearch &>/dev/null \
 command -v fzf &>/dev/null \
     || warn "'fzf' not found on PATH — install it (brew install fzf / apt install fzf)."
 
-command -v ag &>/dev/null \
-    || warn "'ag' not found on PATH — install it (brew install the_silver_searcher / apt install silversearcher-ag); required for 'fzf: live ag search'."
-
 # Atomically write a file: stage to a temp file, then rename into place.
 write_file() {
     local dest="$1" content="$2"
@@ -59,9 +56,7 @@ info "Tasks merged → $TASKS_FILE"
 printf "\n${BOLD}Suggested keybindings:${NC}\n"
 printf "  ctrl-shift-f  →  codesearch: search         (prompt + fzf picker)\n"
 printf "  ctrl-shift-i  →  codesearch: impact analysis (fzf picker)\n"
-printf "  ctrl-shift-x  →  codesearch: symbol context  (fzf picker)\n"
-printf "  ctrl-shift-t  →  fzf: find file\n"
-printf "  ctrl-shift-g  →  fzf: live ag search         (live grep, à la Telescope)\n\n"
+printf "  ctrl-shift-x  →  codesearch: symbol context  (fzf picker)\n\n"
 read -r -p "Add these keybindings to keymap.json? [y/N] " yn
 
 if [[ "$yn" == [yY]* ]]; then
