@@ -30,7 +30,13 @@ command -v codesearch &>/dev/null \
     || warn "'codesearch' not found on PATH — install it before starting Zed."
 
 command -v tv &>/dev/null \
-    || warn "'tv' (television) not found on PATH — install it from https://github.com/alexpasmantier/television; all codesearch tasks require it."
+    || warn "'tv' (television) not found on PATH — install it from https://github.com/alexpasmantier/television; the TV-based codesearch tasks require it."
+
+command -v fzf &>/dev/null \
+    || warn "'fzf' not found on PATH — install it (brew install fzf / apt install fzf); required for the fzf tasks."
+
+command -v ag &>/dev/null \
+    || warn "'ag' not found on PATH — install it (brew install the_silver_searcher / apt install silversearcher-ag); required for 'fzf: live ag search'."
 
 # Atomically write a file: stage to a temp file, then rename into place.
 write_file() {
@@ -77,7 +83,8 @@ printf "\n${BOLD}Suggested keybindings:${NC}\n"
 printf "  ctrl-shift-f  →  codesearch: search         (prompt + tv picker)\n"
 printf "  ctrl-shift-i  →  codesearch: impact analysis (pipes through tv)\n"
 printf "  ctrl-shift-x  →  codesearch: symbol context  (pipes through tv)\n"
-printf "  ctrl-shift-t  →  television: find file\n\n"
+printf "  ctrl-shift-t  →  television: find file\n"
+printf "  ctrl-shift-g  →  fzf: live ag search         (live grep, à la Telescope)\n\n"
 read -r -p "Add these keybindings to keymap.json? [y/N] " yn
 
 if [[ "$yn" == [yY]* ]]; then

@@ -38,5 +38,21 @@
     "hide": "always",
     "use_new_terminal": true,
     "allow_concurrent_runs": true
+  },
+  {
+    "label": "fzf: live ag search",
+    "command": "bash -c 'if command -v bat &>/dev/null; then p=\"bat --color=always --style=numbers --highlight-line {2} -- {1} 2>/dev/null\"; else p=\"cat -n -- {1} 2>/dev/null\"; fi; r=$(fzf --disabled --ansi --prompt \"ag> \" --header \"Type to search  ·  Enter to open  ·  Ctrl-C to quit\" --layout reverse --info inline --bind \"start:reload:[ -n {q} ] && ag --nobreak --noheading --color -- {q} 2>/dev/null || true\" --bind \"change:reload:[ -n {q} ] && ag --nobreak --noheading --color -- {q} 2>/dev/null || true\" --delimiter : --preview \"$p\" --preview-window \"right,60%,border-left,+{2}+3/3,~3\"); [[ -n \"$r\" ]] || exit 0; file=$(echo \"$r\" | cut -d: -f1); line=$(echo \"$r\" | cut -d: -f2); zed \"$file:$line\"'",
+    "tags": ["fzf", "ag"],
+    "hide": "always",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": true
+  },
+  {
+    "label": "fzf: codesearch search",
+    "command": "bash -c 'printf \"Semantic search: \"; read -r q; [[ -z \"$q\" ]] && exit 0; if command -v bat &>/dev/null; then p=\"bat --color=always --style=numbers --highlight-line {2} -- {1} 2>/dev/null\"; else p=\"cat -n -- {1} 2>/dev/null\"; fi; r=$(codesearch search \"$q\" --format vimgrep 2>/dev/null | fzf --ansi --delimiter : --prompt \"codesearch> \" --header \"Query: $q  ·  Enter to open  ·  Ctrl-C to quit\" --layout reverse --preview \"$p\" --preview-window \"right,60%,border-left,+{2}+3/3,~3\"); [[ -n \"$r\" ]] || exit 0; file=$(echo \"$r\" | cut -d: -f1); line=$(echo \"$r\" | cut -d: -f2); zed \"$file:$line\"'",
+    "tags": ["fzf", "codesearch"],
+    "hide": "always",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": true
   }
 ]

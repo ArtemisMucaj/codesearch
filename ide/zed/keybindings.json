@@ -2,7 +2,8 @@
   {
     "bindings": {
       "ctrl-shift-f": ["task::Spawn", { "task_name": "codesearch: search", "reveal_target": "center" }],
-      "ctrl-shift-t": ["task::Spawn", { "task_name": "television: find file", "reveal_target": "center" }]
+      "ctrl-shift-t": ["task::Spawn", { "task_name": "television: find file", "reveal_target": "center" }],
+      "ctrl-shift-g": ["task::Spawn", { "task_name": "fzf: live ag search", "reveal_target": "center" }]
     }
   },
   {
