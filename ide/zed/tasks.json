@@ -1,7 +1,7 @@
 [
   {
     "label": "codesearch: search",
-    "command": "bash -c 'r=$(tv codesearch); [[ -n \"$r\" ]] || exit 0; file=$(echo \"$r\" | cut -d: -f1); line=$(echo \"$r\" | cut -d: -f2); zed \"$file:$line\"'",
+    "command": "bash -c 'printf \"CodeSearch: \"; read -r q; [[ -z \"$q\" ]] && exit 0; r=$(codesearch search \"$q\" --format vimgrep 2>/dev/null | tv); [[ -n \"$r\" ]] || exit 0; file=$(echo \"$r\" | cut -d: -f1); line=$(echo \"$r\" | cut -d: -f2); zed \"$file:$line\"'",
     "tags": ["codesearch", "television"],
     "hide": "always",
     "use_new_terminal": true,

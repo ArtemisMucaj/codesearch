@@ -56,34 +56,61 @@ merged_tasks=$(jq -n \
 write_file "$TASKS_FILE" "$merged_tasks"
 info "Tasks merged → $TASKS_FILE"
 
-# ── 2. Television cable channels ── cable.toml ───────────────────────────────
+# ── 2. Television cable channels ─────────────────────────────────────────────
+# Television 0.15 changed the cable channel format:
+#   < 0.15 : single  ~/.config/television/cable.toml  with [[cable_channel]] sections
+#   ≥ 0.15 : individual *.toml files in  ~/.config/television/cable/
+# We detect the installed version and install to the right location.
 if command -v tv &>/dev/null; then
     mkdir -p "$TV_DIR"
-    CABLE_FILE="$TV_DIR/cable.toml"
-    CABLE_SRC="$REPO_ROOT/ide/tv/cable.toml"
 
-    if [[ -f "$CABLE_FILE" ]]; then
-        # Append channels that are not already present (match by name = "..." line).
-        while IFS= read -r line; do
-            channel_name=$(echo "$line" | grep -oP '(?<=name = ")[^"]+' || true)
-            if [[ -n "$channel_name" ]] && ! grep -q "name = \"$channel_name\"" "$CABLE_FILE"; then
-                printf '\n' >> "$CABLE_FILE"
-                # Append the full channel block (from this name line to next [[)
-                awk "/name = \"$channel_name\"/{found=1; print; next} found && /^\[\[/{exit} found{print}" "$CABLE_SRC" >> "$CABLE_FILE"
-                info "Cable channel '$channel_name' added → $CABLE_FILE"
-            elif [[ -n "$channel_name" ]]; then
-                info "Cable channel '$channel_name' already present — skipped."
+    # Detect major.minor version (e.g. "0.15" from "television 0.15.2")
+    tv_ver=$(tv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)
+    TV_MAJOR=$(echo "${tv_ver:-0.0}" | cut -d. -f1)
+    TV_MINOR=$(echo "${tv_ver:-0.0}" | cut -d. -f2)
+
+    if [[ "$TV_MAJOR" -gt 0 ]] || [[ "$TV_MAJOR" -eq 0 && "$TV_MINOR" -ge 15 ]]; then
+        # ── Television ≥ 0.15: one file per channel in cable/ ────────────────
+        CABLE_DIR="$TV_DIR/cable"
+        CABLE_SRC_DIR="$REPO_ROOT/ide/tv/cable"
+        mkdir -p "$CABLE_DIR"
+        for src in "$CABLE_SRC_DIR"/*.toml; do
+            name=$(basename "$src")
+            dest="$CABLE_DIR/$name"
+            if [[ ! -f "$dest" ]]; then
+                cp "$src" "$dest"
+                info "Cable channel installed → $dest"
+            else
+                info "Cable channel '$name' already present — skipped."
             fi
-        done < <(grep 'name = "' "$CABLE_SRC")
+        done
     else
-        cp "$CABLE_SRC" "$CABLE_FILE"
-        info "Cable channels installed → $CABLE_FILE"
+        # ── Television < 0.15: single cable.toml ────────────────────────────
+        CABLE_FILE="$TV_DIR/cable.toml"
+        CABLE_SRC="$REPO_ROOT/ide/tv/cable.toml"
+        if [[ -f "$CABLE_FILE" ]]; then
+            # Append channels that are not already present (match by name = "..." line).
+            while IFS= read -r line; do
+                channel_name=$(echo "$line" | grep -oP '(?<=name = ")[^"]+' || true)
+                if [[ -n "$channel_name" ]] && ! grep -q "name = \"$channel_name\"" "$CABLE_FILE"; then
+                    printf '\n' >> "$CABLE_FILE"
+                    # Append the full channel block (from this name line to next [[)
+                    awk "/name = \"$channel_name\"/{found=1; print; next} found && /^\[\[/{exit} found{print}" "$CABLE_SRC" >> "$CABLE_FILE"
+                    info "Cable channel '$channel_name' added → $CABLE_FILE"
+                elif [[ -n "$channel_name" ]]; then
+                    info "Cable channel '$channel_name' already present — skipped."
+                fi
+            done < <(grep 'name = "' "$CABLE_SRC")
+        else
+            cp "$CABLE_SRC" "$CABLE_FILE"
+            info "Cable channels installed → $CABLE_FILE"
+        fi
     fi
 fi
 
 # ── 3. Keybindings ── keymap.json (optional) ──────────────────────────────────
 printf "\n${BOLD}Suggested keybindings:${NC}\n"
-printf "  ctrl-shift-f  →  codesearch: search         (tv cable channel)\n"
+printf "  ctrl-shift-f  →  codesearch: search         (prompt + tv picker)\n"
 printf "  ctrl-shift-i  →  codesearch: impact analysis (pipes through tv)\n"
 printf "  ctrl-shift-x  →  codesearch: symbol context  (pipes through tv)\n"
 printf "  ctrl-shift-t  →  television: find file\n\n"

@@ -1,4 +1,8 @@
-# CodeSearch cable channels for Television (https://github.com/alexpasmantier/television)
+# CodeSearch cable channels for Television < 0.15 (https://github.com/alexpasmantier/television)
+#
+# ⚠️  Television 0.15 changed the cable channel format.  If you are running
+#     tv 0.15 or later, use ide/tv/cable/*.toml (individual per-channel files)
+#     instead of this file.  ide/zed/setup.sh handles this automatically.
 #
 # Installation:
 #   Merge these channels into ~/.config/television/cable.toml
