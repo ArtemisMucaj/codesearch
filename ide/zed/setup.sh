@@ -4,10 +4,10 @@
 # What it does:
 #   1. Merges codesearch and television tasks into ~/.config/zed/tasks.json
 #   2. Optionally adds keybindings to ~/.config/zed/keymap.json
-#   3. Merges codesearch cable channels into ~/.config/television/cable.toml
+#   3. Installs codesearch cable channels into ~/.config/television/cable/
 #
 # Requirements: jq (brew install jq | apt install jq)
-# Optional:     tv  (https://github.com/alexpasmantier/television)
+# Optional:     tv ≥ 0.15  (https://github.com/alexpasmantier/television)
 
 set -euo pipefail
 
@@ -56,56 +56,20 @@ merged_tasks=$(jq -n \
 write_file "$TASKS_FILE" "$merged_tasks"
 info "Tasks merged → $TASKS_FILE"
 
-# ── 2. Television cable channels ─────────────────────────────────────────────
-# Television 0.15 changed the cable channel format:
-#   < 0.15 : single  ~/.config/television/cable.toml  with [[cable_channel]] sections
-#   ≥ 0.15 : individual *.toml files in  ~/.config/television/cable/
-# We detect the installed version and install to the right location.
+# ── 2. Television cable channels ── ~/.config/television/cable/ ───────────────
 if command -v tv &>/dev/null; then
-    mkdir -p "$TV_DIR"
-
-    # Detect major.minor version (e.g. "0.15" from "television 0.15.2")
-    tv_ver=$(tv --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)
-    TV_MAJOR=$(echo "${tv_ver:-0.0}" | cut -d. -f1)
-    TV_MINOR=$(echo "${tv_ver:-0.0}" | cut -d. -f2)
-
-    if [[ "$TV_MAJOR" -gt 0 ]] || [[ "$TV_MAJOR" -eq 0 && "$TV_MINOR" -ge 15 ]]; then
-        # ── Television ≥ 0.15: one file per channel in cable/ ────────────────
-        CABLE_DIR="$TV_DIR/cable"
-        CABLE_SRC_DIR="$REPO_ROOT/ide/tv/cable"
-        mkdir -p "$CABLE_DIR"
-        for src in "$CABLE_SRC_DIR"/*.toml; do
-            name=$(basename "$src")
-            dest="$CABLE_DIR/$name"
-            if [[ ! -f "$dest" ]]; then
-                cp "$src" "$dest"
-                info "Cable channel installed → $dest"
-            else
-                info "Cable channel '$name' already present — skipped."
-            fi
-        done
-    else
-        # ── Television < 0.15: single cable.toml ────────────────────────────
-        CABLE_FILE="$TV_DIR/cable.toml"
-        CABLE_SRC="$REPO_ROOT/ide/tv/cable.toml"
-        if [[ -f "$CABLE_FILE" ]]; then
-            # Append channels that are not already present (match by name = "..." line).
-            while IFS= read -r line; do
-                channel_name=$(echo "$line" | grep -oP '(?<=name = ")[^"]+' || true)
-                if [[ -n "$channel_name" ]] && ! grep -q "name = \"$channel_name\"" "$CABLE_FILE"; then
-                    printf '\n' >> "$CABLE_FILE"
-                    # Append the full channel block (from this name line to next [[)
-                    awk "/name = \"$channel_name\"/{found=1; print; next} found && /^\[\[/{exit} found{print}" "$CABLE_SRC" >> "$CABLE_FILE"
-                    info "Cable channel '$channel_name' added → $CABLE_FILE"
-                elif [[ -n "$channel_name" ]]; then
-                    info "Cable channel '$channel_name' already present — skipped."
-                fi
-            done < <(grep 'name = "' "$CABLE_SRC")
+    CABLE_DIR="$TV_DIR/cable"
+    mkdir -p "$CABLE_DIR"
+    for src in "$REPO_ROOT/ide/tv/cable"/*.toml; do
+        name=$(basename "$src")
+        dest="$CABLE_DIR/$name"
+        if [[ ! -f "$dest" ]]; then
+            cp "$src" "$dest"
+            info "Cable channel installed → $dest"
         else
-            cp "$CABLE_SRC" "$CABLE_FILE"
-            info "Cable channels installed → $CABLE_FILE"
+            info "Cable channel '$name' already present — skipped."
         fi
-    fi
+    done
 fi
 
 # ── 3. Keybindings ── keymap.json (optional) ──────────────────────────────────
