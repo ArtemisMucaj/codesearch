@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# setup.sh — Install CodeSearch (+ Television) integration into Zed
+# setup.sh — Install CodeSearch + fzf integration into Zed
 #
 # What it does:
-#   1. Merges codesearch and television tasks into ~/.config/zed/tasks.json
+#   1. Merges codesearch and fzf tasks into ~/.config/zed/tasks.json
 #   2. Optionally adds keybindings to ~/.config/zed/keymap.json
-#   3. Installs codesearch cable channels into ~/.config/television/cable/
 #
 # Requirements: jq (brew install jq | apt install jq)
-# Optional:     tv ≥ 0.15  (https://github.com/alexpasmantier/television)
 
 set -euo pipefail
 
@@ -20,20 +18,15 @@ command -v jq &>/dev/null \
     || die "'jq' is required — install it with:  brew install jq   OR   apt install jq"
 
 ZED_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/zed"
-TV_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/television"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 
 mkdir -p "$ZED_DIR"
 
 command -v codesearch &>/dev/null \
     || warn "'codesearch' not found on PATH — install it before starting Zed."
 
-command -v tv &>/dev/null \
-    || warn "'tv' (television) not found on PATH — install it from https://github.com/alexpasmantier/television; the TV-based codesearch tasks require it."
-
 command -v fzf &>/dev/null \
-    || warn "'fzf' not found on PATH — install it (brew install fzf / apt install fzf); required for the fzf tasks."
+    || warn "'fzf' not found on PATH — install it (brew install fzf / apt install fzf)."
 
 command -v ag &>/dev/null \
     || warn "'ag' not found on PATH — install it (brew install the_silver_searcher / apt install silversearcher-ag); required for 'fzf: live ag search'."
@@ -62,28 +55,12 @@ merged_tasks=$(jq -n \
 write_file "$TASKS_FILE" "$merged_tasks"
 info "Tasks merged → $TASKS_FILE"
 
-# ── 2. Television cable channels ── ~/.config/television/cable/ ───────────────
-if command -v tv &>/dev/null; then
-    CABLE_DIR="$TV_DIR/cable"
-    mkdir -p "$CABLE_DIR"
-    for src in "$REPO_ROOT/ide/tv/cable"/*.toml; do
-        name=$(basename "$src")
-        dest="$CABLE_DIR/$name"
-        if [[ ! -f "$dest" ]]; then
-            cp "$src" "$dest"
-            info "Cable channel installed → $dest"
-        else
-            info "Cable channel '$name' already present — skipped."
-        fi
-    done
-fi
-
-# ── 3. Keybindings ── keymap.json (optional) ──────────────────────────────────
+# ── 2. Keybindings ── keymap.json (optional) ──────────────────────────────────
 printf "\n${BOLD}Suggested keybindings:${NC}\n"
-printf "  ctrl-shift-f  →  codesearch: search         (prompt + tv picker)\n"
-printf "  ctrl-shift-i  →  codesearch: impact analysis (pipes through tv)\n"
-printf "  ctrl-shift-x  →  codesearch: symbol context  (pipes through tv)\n"
-printf "  ctrl-shift-t  →  television: find file\n"
+printf "  ctrl-shift-f  →  codesearch: search         (prompt + fzf picker)\n"
+printf "  ctrl-shift-i  →  codesearch: impact analysis (fzf picker)\n"
+printf "  ctrl-shift-x  →  codesearch: symbol context  (fzf picker)\n"
+printf "  ctrl-shift-t  →  fzf: find file\n"
 printf "  ctrl-shift-g  →  fzf: live ag search         (live grep, à la Telescope)\n\n"
 read -r -p "Add these keybindings to keymap.json? [y/N] " yn
 
@@ -100,4 +77,4 @@ else
 fi
 
 printf "\n"
-info "Done — restart Zed (and tv) to pick up the changes."
+info "Done — restart Zed to pick up the changes."
