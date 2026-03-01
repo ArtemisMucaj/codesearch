@@ -30,11 +30,24 @@ impl<'a> ImpactController<'a> {
 
         Ok(match format {
             OutputFormat::Json => serde_json::to_string_pretty(&analysis)?,
-            OutputFormat::Vimgrep => {
-                anyhow::bail!("--format vimgrep is not supported for impact; use text or json")
-            }
+            OutputFormat::Vimgrep => Self::format_impact_vimgrep(&analysis),
             OutputFormat::Text => self.format_impact(&analysis),
         })
+    }
+
+    fn format_impact_vimgrep(analysis: &ImpactAnalysis) -> String {
+        analysis
+            .by_depth
+            .iter()
+            .flatten()
+            .map(|node| {
+                format!(
+                    "{}:{}:1:{} [{}]",
+                    node.file_path, node.line, node.symbol, node.reference_kind
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn format_impact(&self, analysis: &ImpactAnalysis) -> String {

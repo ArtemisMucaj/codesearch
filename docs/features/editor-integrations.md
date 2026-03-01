@@ -4,13 +4,13 @@ CodeSearch provides output formats and plugins for integrating semantic search i
 
 ## Output Formats
 
-The `--format` (`-F`) flag on the `search` command controls output:
+The `--format` (`-F`) flag controls output for `search`, `context`, and `impact`:
 
-| Format | Description |
-|--------|-------------|
-| `text` | Human-readable output with code previews (default) |
-| `json` | Structured JSON array for programmatic consumption |
-| `vimgrep` | `file:line:col:text` for Neovim quickfix list and Telescope |
+| Format | Description | Commands |
+|--------|-------------|----------|
+| `text` | Human-readable output with code previews (default) | all |
+| `json` | Structured JSON array for programmatic consumption | all |
+| `vimgrep` | `file:line:col:text` for Neovim quickfix list and Telescope | all |
 
 ## Zed
 
@@ -48,7 +48,32 @@ Run [`ide/zed/setup.sh`](../../ide/zed/setup.sh) for an automated install, or ma
 
 #### Keybindings
 
-Copy [`ide/zed/keybindings.json`](../../ide/zed/keybindings.json) into `~/.config/zed/keymap.json` to add keyboard shortcuts (`ctrl-shift-f` search, `ctrl-shift-i` impact, `ctrl-shift-x` context), or let `setup.sh` handle it interactively.
+Copy [`ide/zed/keybindings.json`](../../ide/zed/keybindings.json) into `~/.config/zed/keymap.json` to add keyboard shortcuts, or let `setup.sh` handle it interactively.
+
+| Keybinding | Action | Context |
+|---|---|---|
+| `ctrl-shift-f` | codesearch: search | Global |
+| `ctrl-shift-i` | codesearch: impact analysis | Editor |
+| `ctrl-shift-x` | codesearch: symbol context | Editor |
+
+### fzf (fuzzy-picker integration)
+
+All codesearch tasks use [fzf](https://github.com/junegunn/fzf) as their interactive result picker. Each task pipes `--format vimgrep` output through fzf and opens the selected `file:line` in Zed.
+
+#### Prerequisites
+
+- `fzf` on your `$PATH` (`brew install fzf` / `apt install fzf`)
+- `bat` on your `$PATH` for syntax-highlighted previews (`brew install bat` / `apt install bat`) — optional, falls back to `cat`
+
+#### How each task works
+
+| Task | How it works |
+|---|---|
+| `codesearch: search` | Prompts for a query, pipes results through fzf |
+| `codesearch: symbol context` | Runs `codesearch context "$ZED_SYMBOL"`, fzf picks from results |
+| `codesearch: impact analysis` | Runs `codesearch impact "$ZED_SYMBOL"`, fzf picks from results |
+
+All tasks are defined in [`ide/zed/tasks.json`](../../ide/zed/tasks.json) and installed by `setup.sh`.
 
 ## Neovim
 
