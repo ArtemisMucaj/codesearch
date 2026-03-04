@@ -1,4 +1,5 @@
 mod app;
+mod cache;
 mod event;
 mod state;
 mod views;
