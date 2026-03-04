@@ -23,6 +23,18 @@ pub enum EmbeddingTarget {
     Api,
 }
 
+/// Provider to use for LLM-based query expansion.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum QueryExpansionTarget {
+    /// Anthropic-compatible `/v1/messages` endpoint (default). Controlled by
+    /// `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and `ANTHROPIC_API_KEY`.
+    #[default]
+    Anthropic,
+    /// OpenAI-compatible `/v1/chat/completions` endpoint. Controlled by
+    /// `OPENAI_BASE_URL`, `OPENAI_MODEL`, and `OPENAI_API_KEY`.
+    OpenAi,
+}
+
 /// Reranking backend to use after retrieval.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum RerankingTarget {

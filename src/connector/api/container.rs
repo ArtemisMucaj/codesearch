@@ -6,15 +6,15 @@ use tracing::debug;
 
 use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, QueryExpander};
 use crate::connector::adapter::scip::ScipRunner;
-use crate::cli::{EmbeddingTarget, RerankingTarget};
+use crate::cli::{EmbeddingTarget, QueryExpansionTarget, RerankingTarget};
 use crate::connector::adapter::NamespaceEmbeddingConfig;
 use crate::{
     AnthropicClient, AnthropicReranking, DeleteRepositoryUseCase, DuckdbCallGraphRepository,
     DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
     ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
-    ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding, MockReranking, OpenAiEmbedding,
-    OpenAiReranking, OrtEmbedding, OrtReranking, RerankingService, Scip, SearchCodeUseCase,
-    SymbolContextUseCase, TreeSitterParser, VectorRepository,
+    ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding, MockReranking, OpenAiChatClient,
+    OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, RerankingService, Scip,
+    SearchCodeUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -58,6 +58,13 @@ pub struct ContainerConfig {
     /// `ApiOpenAi`: LLM via OpenAI-compatible `/v1/chat/completions` — uses
     ///   `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`.
     pub reranking_target: RerankingTarget,
+    /// Which provider to use for LLM-based query expansion (when enabled).
+    ///
+    /// `Anthropic` (default): Anthropic-compatible `/v1/messages` — uses
+    ///   `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `ANTHROPIC_API_KEY`.
+    /// `OpenAi`: OpenAI-compatible `/v1/chat/completions` — uses
+    ///   `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`.
+    pub query_expansion_target: QueryExpansionTarget,
     /// Embedding model identifier.
     ///
     /// For `Onnx`: HuggingFace model ID (default: `sentence-transformers/all-MiniLM-L6-v2`).
@@ -206,7 +213,8 @@ impl Container {
                     }
                     RerankingTarget::ApiOpenAi => {
                         debug!("Using OpenAI reranking service (/v1/chat/completions)");
-                        Some(Arc::new(OpenAiReranking::new()))
+                        let client = Arc::new(OpenAiChatClient::from_env());
+                        Some(Arc::new(OpenAiReranking::new(client)))
                     }
                 }
             }
@@ -338,19 +346,28 @@ impl Container {
         let call_graph_use_case = Arc::new(CallGraphUseCase::new(call_graph_repo));
 
         // Initialise the query expander when --expand-query is requested.
-        //
-        // Local-first: targets LM Studio at http://localhost:1234 by default.
-        // Override with ANTHROPIC_BASE_URL / ANTHROPIC_MODEL / ANTHROPIC_API_KEY
-        // to point at any other Anthropic-compatible server (including the cloud).
-        // If the server is unreachable the expander falls back to the original
-        // query gracefully, so search always returns results.
+        // Falls back gracefully to the original query when the server is unreachable.
         let query_expander: Option<Arc<dyn QueryExpander>> = if config.expand_query {
-            let anthropic = AnthropicClient::from_env();
-            debug!(
-                "Using LLM-based query expander (url={})",
-                anthropic.configured_base_url()
-            );
-            Some(Arc::new(LlmQueryExpander::new(Arc::new(anthropic))))
+            let client: Arc<dyn crate::connector::adapter::ChatClient> =
+                match config.query_expansion_target {
+                    QueryExpansionTarget::Anthropic => {
+                        let c = AnthropicClient::from_env();
+                        debug!(
+                            "Using Anthropic query expander (url={})",
+                            c.configured_base_url()
+                        );
+                        Arc::new(c)
+                    }
+                    QueryExpansionTarget::OpenAi => {
+                        let c = OpenAiChatClient::from_env();
+                        debug!(
+                            "Using OpenAI query expander (url={})",
+                            c.configured_base_url()
+                        );
+                        Arc::new(c)
+                    }
+                };
+            Some(Arc::new(LlmQueryExpander::new(client)))
         } else {
             None
         };

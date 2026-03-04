@@ -1,14 +1,11 @@
-use std::time::Duration;
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::application::RerankingService;
+use crate::connector::adapter::ChatClient;
 use crate::domain::{DomainError, SearchResult};
-
-const DEFAULT_BASE_URL: &str = "http://localhost:1234";
-const CHAT_PATH: &str = "/v1/chat/completions";
 
 /// Maximum characters of a code snippet included in the ranking prompt.
 const MAX_SNIPPET_CHARS: usize = 300;
@@ -27,83 +24,31 @@ Snippets:
 
 Example output: [0.97, 0.02]";
 
-#[derive(Serialize)]
-struct ChatRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
-    temperature: f32,
-}
-
-#[derive(Serialize)]
-struct ChatMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(Deserialize)]
-struct ChatResponse {
-    choices: Vec<ChatChoice>,
-}
-
-#[derive(Deserialize)]
-struct ChatChoice {
-    message: ChatResponseMessage,
-}
-
-#[derive(Deserialize)]
-struct ChatResponseMessage {
-    content: String,
-}
-
-/// LLM-based reranker using the OpenAI-compatible `/v1/chat/completions`
-/// endpoint (e.g. LM Studio running locally).
+/// LLM-based reranker that delegates to a [`ChatClient`] using the
+/// OpenAI-compatible `/v1/chat/completions` endpoint (e.g. LM Studio).
 ///
 /// For each rerank call the full candidate list is sent in a single prompt; the
 /// model returns a JSON array of relevance scores in input order. On any error
 /// (unreachable server, parse failure, wrong array length) the adapter falls back
 /// to the original retrieval scores so search always returns results.
 ///
-/// **Configuration** (via environment variables):
+/// The chat client and model are controlled by the following environment variables:
 ///
 /// | Variable          | Default                    |
 /// |-------------------|----------------------------|
 /// | `OPENAI_BASE_URL` | `http://localhost:1234`    |
-/// | `OPENAI_MODEL`    | `openai-reranker`          |
+/// | `OPENAI_MODEL`    | `openai-chat`              |
 /// | `OPENAI_API_KEY`  | `""` (not required locally)|
 pub struct OpenAiReranking {
-    client: reqwest::Client,
-    url: String,
+    client: Arc<dyn ChatClient>,
     model_name: String,
 }
 
 impl OpenAiReranking {
-    pub fn new() -> Self {
-        let base = std::env::var("OPENAI_BASE_URL")
-            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        let url = format!("{}{}", base.trim_end_matches('/'), CHAT_PATH);
+    pub fn new(client: Arc<dyn ChatClient>) -> Self {
         let model_name = std::env::var("OPENAI_MODEL")
             .unwrap_or_else(|_| "openai-reranker".to_string());
-
-        debug!("OpenAiReranking: endpoint={}, model={}", url, model_name);
-
-        let mut headers = reqwest::header::HeaderMap::new();
-        if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-            if !key.is_empty() {
-                if let Ok(val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")) {
-                    headers.insert(reqwest::header::AUTHORIZATION, val);
-                }
-            }
-        }
-
-        Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .default_headers(headers)
-                .build()
-                .expect("reqwest::Client build failed"),
-            url,
-            model_name,
-        }
+        Self { client, model_name }
     }
 
     fn build_prompt(query: &str, documents: &[String]) -> String {
@@ -119,8 +64,6 @@ impl OpenAiReranking {
         prompt
     }
 
-    /// Parse a JSON float array from the raw model response.
-    /// Returns `None` when parsing fails or the length doesn't match `expected`.
     fn parse_scores(text: &str, expected: usize) -> Option<Vec<f32>> {
         let start = text.find('[')?;
         let end = text.rfind(']')?;
@@ -173,52 +116,16 @@ impl RerankingService for OpenAiReranking {
         let user_prompt = Self::build_prompt(query, &documents);
         let n = results.len();
 
-        let body = ChatRequest {
-            model: self.model_name.clone(),
-            messages: vec![
-                ChatMessage {
-                    role: "system".to_string(),
-                    content: SYSTEM_PROMPT.to_string(),
-                },
-                ChatMessage {
-                    role: "user".to_string(),
-                    content: user_prompt,
-                },
-            ],
-            temperature: 0.0,
-        };
-
-        let scores = match self.client.post(&self.url).json(&body).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                match resp.json::<ChatResponse>().await {
-                    Ok(chat) => {
-                        let text = chat
-                            .choices
-                            .into_iter()
-                            .next()
-                            .map(|c| c.message.content)
-                            .unwrap_or_default();
-                        debug!("OpenAiReranking raw response: {text}");
-                        Self::parse_scores(&text, n).unwrap_or_else(|| {
-                            warn!("OpenAiReranking: falling back to original retrieval scores");
-                            results.iter().map(|r| r.score()).collect()
-                        })
-                    }
-                    Err(e) => {
-                        warn!("OpenAiReranking: failed to parse response: {e}. Falling back.");
-                        results.iter().map(|r| r.score()).collect()
-                    }
-                }
-            }
-            Ok(resp) => {
-                warn!(
-                    "OpenAiReranking: server returned {}. Falling back to original scores.",
-                    resp.status()
-                );
-                results.iter().map(|r| r.score()).collect()
+        let scores = match self.client.complete(SYSTEM_PROMPT, &user_prompt).await {
+            Ok(text) => {
+                debug!("OpenAiReranking raw response: {text}");
+                Self::parse_scores(&text, n).unwrap_or_else(|| {
+                    warn!("OpenAiReranking: falling back to original retrieval scores");
+                    results.iter().map(|r| r.score()).collect()
+                })
             }
             Err(e) => {
-                warn!("OpenAiReranking: request error: {e}. Falling back to original scores.");
+                warn!("OpenAiReranking: client error: {e}. Falling back to original scores.");
                 results.iter().map(|r| r.score()).collect()
             }
         };
