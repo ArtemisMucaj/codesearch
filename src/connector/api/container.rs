@@ -10,8 +10,9 @@ use crate::{
     AnthropicClient, DeleteRepositoryUseCase, DuckdbCallGraphRepository, DuckdbFileHashRepository,
     DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService, ImpactAnalysisUseCase,
     InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander,
-    MockEmbedding, MockReranking, OrtEmbedding, OrtReranking, RerankingService, Scip,
-    SearchCodeUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
+    LmStudioEmbedding, LmStudioReranking, MockEmbedding, MockReranking, OrtEmbedding, OrtReranking,
+    RerankingService, Scip, SearchCodeUseCase, SymbolContextUseCase, TreeSitterParser,
+    VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -38,6 +39,19 @@ pub struct ContainerConfig {
     /// at any Anthropic-compatible server including the cloud. Falls back to the
     /// original query gracefully when the server is unreachable.
     pub expand_query: bool,
+    /// Use LM Studio (or any OpenAI-compatible server) for embeddings and reranking
+    /// instead of the bundled ONNX models.
+    ///
+    /// Embedding calls go to `{LM_STUDIO_BASE_URL}/v1/embeddings` using the model
+    /// named by `LM_STUDIO_EMBEDDING_MODEL`.  `LM_STUDIO_BASE_URL` falls back to
+    /// `ANTHROPIC_BASE_URL` when unset (both default to `http://localhost:1234`).
+    ///
+    /// Reranking calls go to `{ANTHROPIC_BASE_URL}/v1/messages` using the model
+    /// named by `ANTHROPIC_MODEL` — the same endpoint used for query expansion.
+    ///
+    /// Both fall back gracefully: embedding errors propagate (indexing requires
+    /// embeddings), but reranking errors fall back to original retrieval scores.
+    pub lm_studio_embeddings: bool,
 }
 
 pub struct Container {
@@ -100,6 +114,9 @@ impl Container {
         let embedding_service: Arc<dyn EmbeddingService> = if config.mock_embeddings {
             debug!("Using mock embedding service");
             Arc::new(MockEmbedding::new())
+        } else if config.lm_studio_embeddings {
+            debug!("Using LM Studio embedding service (OpenAI-compatible /v1/embeddings)");
+            Arc::new(LmStudioEmbedding::from_env())
         } else {
             debug!("Initializing ONNX embedding service...");
             Arc::new(OrtEmbedding::new(None)?)
@@ -110,6 +127,10 @@ impl Container {
             if config.mock_embeddings {
                 debug!("Using mock reranking service");
                 Some(Arc::new(MockReranking::new()))
+            } else if config.lm_studio_embeddings {
+                debug!("Using LM Studio reranking service (chat-based, /v1/messages)");
+                let client = Arc::new(AnthropicClient::from_env());
+                Some(Arc::new(LmStudioReranking::new(client)))
             } else {
                 debug!("Initializing ONNX reranking service...");
                 match OrtReranking::new(None) {

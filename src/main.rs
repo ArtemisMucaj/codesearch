@@ -39,6 +39,15 @@ struct Cli {
     #[arg(long, global = true)]
     expand_query: bool,
 
+    /// Use LM Studio (or any OpenAI-compatible server) for embeddings and reranking
+    /// instead of the bundled ONNX models. Requires a running embedding model
+    /// reachable at LM_STUDIO_BASE_URL/v1/embeddings (defaults to
+    /// http://localhost:1234). Set LM_STUDIO_EMBEDDING_MODEL to the model name
+    /// loaded in LM Studio. Reranking uses the same chat endpoint (ANTHROPIC_BASE_URL)
+    /// as query expansion.
+    #[arg(long, global = true)]
+    lm_studio_embeddings: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -95,6 +104,7 @@ async fn main() -> Result<()> {
         memory_storage: cli.memory_storage,
         no_rerank: cli.no_rerank,
         expand_query: cli.expand_query,
+        lm_studio_embeddings: cli.lm_studio_embeddings,
         read_only,
     };
 
