@@ -138,7 +138,13 @@ impl ChatClient for OpenAiChatClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = match resp.text().await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!("OpenAiChatClient: failed to read error response body: {e}");
+                    format!("<failed to read body: {e}>")
+                }
+            };
             return Err(DomainError::internal(format!(
                 "OpenAI chat API returned {status}: {body}"
             )));

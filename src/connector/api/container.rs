@@ -154,13 +154,17 @@ impl Container {
 
         // Resolve the effective model name for the selected embedding target.
         const ONNX_DEFAULT_MODEL: &str = "sentence-transformers/all-MiniLM-L6-v2";
-        let effective_model = config
-            .embedding_model
-            .clone()
-            .unwrap_or_else(|| match config.embedding_target {
+        let effective_model = match config.embedding_model.clone() {
+            Some(m) => m,
+            None => match config.embedding_target {
                 EmbeddingTarget::Onnx => ONNX_DEFAULT_MODEL.to_string(),
-                EmbeddingTarget::Api => ONNX_DEFAULT_MODEL.to_string(),
-            });
+                EmbeddingTarget::Api => {
+                    return Err(anyhow::anyhow!(
+                        "--embedding-model is required when using --embedding-target=api"
+                    ));
+                }
+            },
+        };
 
         // Initialize embedding service
         let embedding_service: Arc<dyn EmbeddingService> = if config.mock_embeddings {

@@ -47,7 +47,7 @@ pub struct OpenAiReranking {
 impl OpenAiReranking {
     pub fn new(client: Arc<dyn ChatClient>) -> Self {
         let model_name = std::env::var("OPENAI_MODEL")
-            .unwrap_or_else(|_| "openai-reranker".to_string());
+            .unwrap_or_else(|_| "openai-chat".to_string());
         Self { client, model_name }
     }
 
@@ -132,7 +132,13 @@ impl RerankingService for OpenAiReranking {
         let mut reranked: Vec<SearchResult> = results
             .into_iter()
             .zip(scores)
-            .map(|(result, score)| SearchResult::new(result.chunk().clone(), score))
+            .map(|(result, score)| {
+                let sr = SearchResult::new(result.chunk().clone(), score);
+                match result.highlights() {
+                    Some(h) => sr.with_highlights(h.to_vec()),
+                    None => sr,
+                }
+            })
             .collect();
 
         reranked.sort_by(|a, b| {
