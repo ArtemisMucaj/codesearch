@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, QueryExpander};
 use crate::connector::adapter::scip::ScipRunner;
@@ -145,6 +146,53 @@ async fn init_duckdb_metadata_repos(
     Ok((repo_adapter, file_hash_repo, call_graph_repo))
 }
 
+/// Maximum number of retry attempts when a read-only DuckDB open fails due to a
+/// lock held by a concurrent writer (e.g. an ongoing `codesearch index` run).
+const READ_ONLY_LOCK_RETRIES: u32 = 5;
+
+/// Initial backoff delay for lock-conflict retries.  Doubles on each attempt:
+/// 500 ms → 1 s → 2 s → 4 s → 8 s  (≈ 15.5 s total wait before giving up).
+const READ_ONLY_LOCK_RETRY_INITIAL_MS: u64 = 500;
+
+/// Returns `true` when the error string looks like a DuckDB file-lock conflict
+/// produced by a concurrent writer process.
+fn is_lock_conflict(err: &str) -> bool {
+    err.contains("Could not set lock on file") || err.contains("Conflicting lock is held")
+}
+
+/// Attempt to open the DuckDB vector repository in read-only mode, retrying
+/// with exponential backoff when the failure is a cross-process lock conflict.
+///
+/// On each attempt a warning is emitted so the user can see that the tool is
+/// waiting for an ongoing indexing operation to release the lock.  After
+/// [`READ_ONLY_LOCK_RETRIES`] failed attempts the last error is returned as-is
+/// so the caller can surface a clear message.
+async fn open_read_only_with_retry(
+    db_path: &std::path::Path,
+    namespace: &str,
+    ns_cfg: &NamespaceEmbeddingConfig,
+) -> Result<DuckdbVectorRepository, crate::domain::DomainError> {
+    let mut delay_ms = READ_ONLY_LOCK_RETRY_INITIAL_MS;
+    for attempt in 0..=READ_ONLY_LOCK_RETRIES {
+        match DuckdbVectorRepository::new_read_only_with_namespace(db_path, namespace, ns_cfg) {
+            Ok(repo) => return Ok(repo),
+            Err(e) if attempt < READ_ONLY_LOCK_RETRIES && is_lock_conflict(&e.to_string()) => {
+                warn!(
+                    "DuckDB is locked by another process (attempt {}/{}). \
+                     Waiting {}ms before retrying…",
+                    attempt + 1,
+                    READ_ONLY_LOCK_RETRIES,
+                    delay_ms,
+                );
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms *= 2;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
+
 impl Container {
     pub async fn new(config: ContainerConfig) -> Result<Self> {
         let db_path = PathBuf::from(&config.data_dir).join("codesearch.duckdb");
@@ -257,12 +305,10 @@ impl Container {
                 init_duckdb_metadata_repos(&db_path, config.read_only).await?;
             (vector, repo_adapter, file_hash_repo, call_graph_repo)
         } else if config.read_only {
-            // Read-only DuckDB path: no exclusive write lock → concurrent searches work
-            match DuckdbVectorRepository::new_read_only_with_namespace(
-                &db_path,
-                &config.namespace,
-                &ns_cfg,
-            ) {
+            // Read-only DuckDB path: no exclusive write lock → concurrent searches work.
+            // Retry with exponential backoff when the database is temporarily locked by a
+            // concurrent indexing process so the user doesn't silently get empty results.
+            match open_read_only_with_retry(&db_path, &config.namespace, &ns_cfg).await {
                 Ok(duckdb) => {
                     debug!(
                         "Using DuckDB vector storage (read-only) at {:?} namespace {}",
@@ -286,28 +332,31 @@ impl Container {
                     )
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Failed to open DuckDB in read-only mode ({}): {}. Falling back to in-memory storage.",
+                    let msg = e.to_string();
+                    if is_lock_conflict(&msg) {
+                        // A concurrent indexing process is still holding the write lock after
+                        // all retries.  Return a clear error rather than silently serving
+                        // empty in-memory results.
+                        return Err(anyhow::anyhow!(
+                            "Cannot open the database for searching: another process is currently \
+                             indexing ({db}). Please wait for indexing to finish and try again.\n\
+                             Details: {msg}",
+                            db = db_path.display(),
+                            msg = msg,
+                        ));
+                    }
+                    // Any other failure (e.g. database does not exist yet, corrupt file).
+                    // Degrade to in-memory storage so `codesearch search` doesn't hard-crash
+                    // on a fresh install.
+                    warn!(
+                        "Failed to open DuckDB in read-only mode ({}): {}. \
+                         Falling back to in-memory storage.",
                         db_path.display(),
-                        e
-                    );
-                    // The read-only open already failed (database may not exist yet or is
-                    // corrupt). We intentionally open DuckDB metadata in write mode here as
-                    // a last-resort degraded fallback. This may fail if another process holds
-                    // the write lock, but the vector store is in-memory so no vector writes
-                    // will occur.
-                    debug!(
-                        "Degraded fallback: opening DuckDB metadata in write mode despite \
-                        read_only=true (read-only open failed above)"
+                        msg
                     );
                     let vector = Arc::new(InMemoryVectorRepository::new());
-                    let repo_adapter = Arc::new(DuckdbMetadataRepository::new(&db_path)?);
-                    let shared_conn = repo_adapter.shared_connection();
-                    let file_hash_repo = Arc::new(
-                        DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn)).await?,
-                    );
-                    let call_graph_repo =
-                        Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?);
+                    let (repo_adapter, file_hash_repo, call_graph_repo) =
+                        init_duckdb_metadata_repos(&db_path, false).await?;
                     (vector, repo_adapter, file_hash_repo, call_graph_repo)
                 }
             }
