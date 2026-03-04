@@ -54,11 +54,10 @@ impl OpenAiReranking {
     fn build_prompt(query: &str, documents: &[String]) -> String {
         let mut prompt = format!("Query: \"{query}\"\n\nSnippets:\n");
         for (i, doc) in documents.iter().enumerate() {
-            let snippet = if doc.len() > MAX_SNIPPET_CHARS {
-                &doc[..MAX_SNIPPET_CHARS]
-            } else {
-                doc.as_str()
-            };
+            let snippet = doc
+                .char_indices()
+                .nth(MAX_SNIPPET_CHARS)
+                .map_or(doc.as_str(), |(i, _)| &doc[..i]);
             prompt.push_str(&format!("{}. {}\n", i + 1, snippet));
         }
         prompt

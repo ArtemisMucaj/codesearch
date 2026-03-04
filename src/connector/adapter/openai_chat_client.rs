@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::connector::adapter::ChatClient;
 use crate::domain::DomainError;
@@ -55,7 +55,7 @@ pub struct OpenAiChatClient {
 }
 
 impl OpenAiChatClient {
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, reqwest::Error> {
         let base = std::env::var("OPENAI_BASE_URL")
             .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         let url = format!("{}{}", base.trim_end_matches('/'), CHAT_PATH);
@@ -67,23 +67,27 @@ impl OpenAiChatClient {
         let mut headers = reqwest::header::HeaderMap::new();
         if let Ok(key) = std::env::var("OPENAI_API_KEY") {
             if !key.is_empty() {
-                if let Ok(val) =
-                    reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
-                {
-                    headers.insert(reqwest::header::AUTHORIZATION, val);
+                match reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")) {
+                    Ok(val) => {
+                        headers.insert(reqwest::header::AUTHORIZATION, val);
+                    }
+                    Err(e) => {
+                        let masked = mask_key(&key);
+                        warn!(
+                            "OpenAiChatClient: failed to build Authorization header \
+                             (key={masked}): {e}; skipping"
+                        );
+                    }
                 }
             }
         }
 
-        Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .default_headers(headers)
-                .build()
-                .expect("reqwest::Client build failed"),
-            url,
-            model,
-        }
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .default_headers(headers)
+            .build()?;
+
+        Ok(Self { client, url, model })
     }
 
     /// The base URL this client is configured to use — useful for log messages.
@@ -92,6 +96,18 @@ impl OpenAiChatClient {
             .trim_end_matches(CHAT_PATH)
             .to_string()
     }
+}
+
+/// Returns a masked version of `key` for logging: first 4 and last 4 chars
+/// visible, rest replaced with `*`.
+fn mask_key(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() <= 8 {
+        return "*".repeat(chars.len());
+    }
+    let prefix: String = chars[..4].iter().collect();
+    let suffix: String = chars[chars.len() - 4..].iter().collect();
+    format!("{}{}{}",  prefix, "*".repeat(chars.len() - 8), suffix)
 }
 
 #[async_trait]

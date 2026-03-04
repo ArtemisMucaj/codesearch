@@ -123,6 +123,15 @@ async fn main() -> Result<()> {
             .init();
     }
 
+    if cli.embedding_dimensions == 0 {
+        eprintln!("error: --embedding-dimensions must be greater than 0");
+        std::process::exit(1);
+    }
+    if cli.embedding_requests == 0 {
+        eprintln!("error: --embedding-requests must be greater than 0");
+        std::process::exit(1);
+    }
+
     let data_dir = expand_tilde(&cli.data_dir);
     std::fs::create_dir_all(&data_dir)?;
 

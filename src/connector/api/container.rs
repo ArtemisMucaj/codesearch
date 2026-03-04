@@ -221,7 +221,7 @@ impl Container {
                     }
                     RerankingTarget::ApiOpenAi => {
                         debug!("Using OpenAI reranking service (/v1/chat/completions)");
-                        let client = Arc::new(OpenAiChatClient::from_env());
+                        let client = Arc::new(OpenAiChatClient::from_env()?);
                         Some(Arc::new(OpenAiReranking::new(client)))
                     }
                 }
@@ -367,7 +367,7 @@ impl Container {
                         Arc::new(c)
                     }
                     QueryExpansionTarget::OpenAi => {
-                        let c = OpenAiChatClient::from_env();
+                        let c = OpenAiChatClient::from_env()?;
                         debug!(
                             "Using OpenAI query expander (url={})",
                             c.configured_base_url()
