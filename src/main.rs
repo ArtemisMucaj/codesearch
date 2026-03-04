@@ -6,6 +6,7 @@ use rmcp::ServiceExt;
 use tracing_subscriber::EnvFilter;
 
 use codesearch::connector::adapter::mcp::CodesearchMcpServer;
+use codesearch::cli::EmbeddingTarget;
 use codesearch::{Commands, Container, ContainerConfig, Router};
 
 #[derive(Parser)]
@@ -39,14 +40,27 @@ struct Cli {
     #[arg(long, global = true)]
     expand_query: bool,
 
-    /// Use LM Studio (or any OpenAI-compatible server) for embeddings and reranking
-    /// instead of the bundled ONNX models. Requires a running embedding model
-    /// reachable at LM_STUDIO_BASE_URL/v1/embeddings (defaults to
-    /// http://localhost:1234). Set LM_STUDIO_EMBEDDING_MODEL to the model name
-    /// loaded in LM Studio. Reranking uses the same chat endpoint (ANTHROPIC_BASE_URL)
-    /// as query expansion.
+    /// Embedding backend: 'onnx' for bundled ONNX models (default, offline-capable)
+    /// or 'api' for an OpenAI-compatible /v1/embeddings endpoint (e.g. LM Studio).
+    /// The chosen target and model are stored per namespace on first index and
+    /// validated on every subsequent operation — mismatches are hard errors.
+    #[arg(long, global = true, value_enum, default_value = "onnx")]
+    embedding_target: EmbeddingTarget,
+
+    /// Embedding model identifier.
+    /// For 'onnx': HuggingFace model ID (default: sentence-transformers/all-MiniLM-L6-v2).
+    /// For 'api': model name sent in the /v1/embeddings request body; must match
+    /// the model loaded in LM Studio (or target server). Use ANTHROPIC_BASE_URL
+    /// to point at a non-default server address.
     #[arg(long, global = true)]
-    lm_studio_embeddings: bool,
+    embedding_model: Option<String>,
+
+    /// Number of dimensions produced by the embedding model (default: 384).
+    /// Override when using a model with a different output size (e.g. 768 or 1024).
+    /// This value is stored in namespace_config on first index and cannot be
+    /// changed without re-indexing.
+    #[arg(long, global = true, default_value = "384")]
+    embedding_dimensions: usize,
 
     #[command(subcommand)]
     command: Commands,
@@ -104,7 +118,9 @@ async fn main() -> Result<()> {
         memory_storage: cli.memory_storage,
         no_rerank: cli.no_rerank,
         expand_query: cli.expand_query,
-        lm_studio_embeddings: cli.lm_studio_embeddings,
+        embedding_target: cli.embedding_target,
+        embedding_model: cli.embedding_model,
+        embedding_dimensions: cli.embedding_dimensions,
         read_only,
     };
 

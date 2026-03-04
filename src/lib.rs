@@ -11,7 +11,7 @@ pub use application::{
     SearchCodeUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
 };
 
-pub use cli::{Commands, OutputFormat};
+pub use cli::{Commands, EmbeddingTarget, OutputFormat};
 
 pub use connector::{
     AnthropicClient, ChatClient, DuckdbCallGraphRepository, DuckdbFileHashRepository,

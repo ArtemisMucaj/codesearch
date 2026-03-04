@@ -12,6 +12,19 @@ pub enum OutputFormat {
     Vimgrep,
 }
 
+/// Embedding backend to use for indexing and search.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum EmbeddingTarget {
+    /// Bundled ONNX models downloaded from HuggingFace (default, offline-capable).
+    #[default]
+    Onnx,
+    /// OpenAI-compatible `/v1/embeddings` API (e.g. LM Studio running locally).
+    /// Requires a running embedding model at ANTHROPIC_BASE_URL (default
+    /// http://localhost:1234). Reranking uses the same server's /v1/messages
+    /// endpoint (ANTHROPIC_MODEL, ANTHROPIC_API_KEY).
+    Api,
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     Index {

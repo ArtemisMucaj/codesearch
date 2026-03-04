@@ -8,7 +8,6 @@ use crate::application::EmbeddingService;
 use crate::domain::{CodeChunk, DomainError, Embedding, EmbeddingConfig};
 
 const DEFAULT_BASE_URL: &str = "http://localhost:1234";
-const DEFAULT_MODEL: &str = "text-embedding-model";
 const EMBEDDINGS_PATH: &str = "/v1/embeddings";
 const BATCH_SIZE: usize = 32;
 
@@ -29,25 +28,16 @@ struct EmbeddingData {
     index: usize,
 }
 
-/// HTTP embedding adapter targeting the OpenAI-compatible `/v1/embeddings` endpoint.
+/// HTTP embedding adapter targeting the OpenAI-compatible `/v1/embeddings`
+/// endpoint — e.g. LM Studio running locally.
 ///
-/// Designed for **LM Studio** running locally, but works with any server that
-/// exposes a compatible embeddings endpoint (OpenAI, Ollama, etc.).
-///
-/// **Configuration** (environment variables, all optional):
-///
-/// | Variable                    | Default                   | Purpose                     |
-/// |-----------------------------|---------------------------|-----------------------------|
-/// | `LM_STUDIO_BASE_URL`        | `http://localhost:1234`   | Base URL of the API server  |
-/// | `LM_STUDIO_EMBEDDING_MODEL` | `text-embedding-model`    | Model identifier to send    |
-///
-/// `LM_STUDIO_BASE_URL` falls back to `ANTHROPIC_BASE_URL` when unset, so a
-/// single env-var covers both chat and embedding when they share the same server.
-///
-/// **Dimension validation**: the expected dimension count is read from the first
-/// API response.  If the loaded model outputs a different number of dimensions
-/// than the configured store (384 by default) a warning is logged — the mismatch
-/// will surface as an error at the vector-storage layer.
+/// **Configuration**:
+/// - Base URL: `ANTHROPIC_BASE_URL` env var (default `http://localhost:1234`),
+///   the same variable used by the query-expansion and reranking chat clients so
+///   a single env-var covers the whole local stack.
+/// - Model name and dimensions: supplied at construction time from `--embedding-model`
+///   and `--embedding-dimensions` CLI flags; they are stored in `namespace_config`
+///   and validated on every subsequent open.
 pub struct LmStudioEmbedding {
     client: reqwest::Client,
     url: String,
@@ -55,19 +45,21 @@ pub struct LmStudioEmbedding {
 }
 
 impl LmStudioEmbedding {
-    /// Construct from environment variables with local-first defaults.
-    pub fn from_env() -> Self {
-        // Prefer LM_STUDIO_BASE_URL; fall back to ANTHROPIC_BASE_URL; then hardcoded default.
-        let base = std::env::var("LM_STUDIO_BASE_URL")
-            .or_else(|_| std::env::var("ANTHROPIC_BASE_URL"))
+    /// `model` — the model name sent in every `/v1/embeddings` request (must
+    /// match the model loaded in LM Studio).
+    ///
+    /// `dimensions` — the number of dimensions the model outputs; must match the
+    /// value stored in `namespace_config` for the target namespace (enforced by
+    /// the vector repository on open).
+    pub fn new(model: impl Into<String>, dimensions: usize) -> Self {
+        let base = std::env::var("ANTHROPIC_BASE_URL")
             .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        let model = std::env::var("LM_STUDIO_EMBEDDING_MODEL")
-            .unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         let url = format!("{}{}", base.trim_end_matches('/'), EMBEDDINGS_PATH);
+        let model = model.into();
 
         debug!(
-            "LmStudioEmbedding: endpoint={}, model={}",
-            url, model
+            "LmStudioEmbedding: endpoint={}, model={}, dims={}",
+            url, model, dimensions
         );
 
         Self {
@@ -76,9 +68,7 @@ impl LmStudioEmbedding {
                 .build()
                 .expect("reqwest::Client build failed"),
             url,
-            // Dimensions are set to the store default (384); mismatches are caught at
-            // the storage layer with an informative error.
-            config: EmbeddingConfig::new(model, 384, 512),
+            config: EmbeddingConfig::new(model, dimensions, 512),
         }
     }
 
@@ -121,22 +111,23 @@ impl LmStudioEmbedding {
         let mut data = api_response.data;
         data.sort_by_key(|d| d.index);
 
-        let expected_dims = self.config.dimensions();
+        let expected = self.config.dimensions();
 
         let embeddings = data
             .into_iter()
             .map(|d| {
                 let mut vec = d.embedding;
-                if vec.len() != expected_dims {
+                if vec.len() != expected {
                     warn!(
-                        "LmStudioEmbedding: model returned {} dimensions, expected {}. \
-                        Set LM_STUDIO_EMBEDDING_MODEL to a 384-dim model or re-index \
-                        with a matching schema.",
+                        "LmStudioEmbedding: model '{}' returned {} dimensions, expected {}. \
+                         Check that the model loaded in LM Studio matches \
+                         --embedding-model and --embedding-dimensions.",
+                        self.config.model_name(),
                         vec.len(),
-                        expected_dims
+                        expected
                     );
                 }
-                // L2-normalise so cosine similarity equals dot product (same as OrtEmbedding).
+                // L2-normalise so cosine similarity equals dot product.
                 let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
                 if norm > 0.0 {
                     for v in &mut vec {
@@ -148,7 +139,7 @@ impl LmStudioEmbedding {
             .collect::<Vec<_>>();
 
         debug!(
-            "LmStudioEmbedding: generated {} embedding(s) ({}-dim)",
+            "LmStudioEmbedding: {} embedding(s) ({}-dim)",
             n,
             embeddings.first().map(|v| v.len()).unwrap_or(0)
         );

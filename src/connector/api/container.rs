@@ -6,6 +6,8 @@ use tracing::debug;
 
 use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, QueryExpander};
 use crate::connector::adapter::scip::ScipRunner;
+use crate::cli::EmbeddingTarget;
+use crate::connector::adapter::NamespaceEmbeddingConfig;
 use crate::{
     AnthropicClient, DeleteRepositoryUseCase, DuckdbCallGraphRepository, DuckdbFileHashRepository,
     DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService, ImpactAnalysisUseCase,
@@ -39,19 +41,31 @@ pub struct ContainerConfig {
     /// at any Anthropic-compatible server including the cloud. Falls back to the
     /// original query gracefully when the server is unreachable.
     pub expand_query: bool,
-    /// Use LM Studio (or any OpenAI-compatible server) for embeddings and reranking
-    /// instead of the bundled ONNX models.
+    /// Which embedding backend to use.
     ///
-    /// Embedding calls go to `{LM_STUDIO_BASE_URL}/v1/embeddings` using the model
-    /// named by `LM_STUDIO_EMBEDDING_MODEL`.  `LM_STUDIO_BASE_URL` falls back to
-    /// `ANTHROPIC_BASE_URL` when unset (both default to `http://localhost:1234`).
+    /// `Onnx` (default): bundled ONNX models downloaded from HuggingFace.
+    /// `Api`: OpenAI-compatible `/v1/embeddings` endpoint (e.g. LM Studio at
+    /// `ANTHROPIC_BASE_URL`).
     ///
-    /// Reranking calls go to `{ANTHROPIC_BASE_URL}/v1/messages` using the model
-    /// named by `ANTHROPIC_MODEL` — the same endpoint used for query expansion.
+    /// The chosen target and model are stored in `namespace_config` on first use
+    /// and validated on every subsequent open — mismatches are hard errors.
+    pub embedding_target: EmbeddingTarget,
+    /// Embedding model identifier.
     ///
-    /// Both fall back gracefully: embedding errors propagate (indexing requires
-    /// embeddings), but reranking errors fall back to original retrieval scores.
-    pub lm_studio_embeddings: bool,
+    /// For `Onnx`: HuggingFace model ID (default: `sentence-transformers/all-MiniLM-L6-v2`).
+    /// For `Api`: model name sent in the `/v1/embeddings` request body (must match
+    /// the model currently loaded in LM Studio or the target server).
+    ///
+    /// `None` means "use the default for the selected target".
+    pub embedding_model: Option<String>,
+    /// Number of dimensions produced by the embedding model.
+    ///
+    /// Defaults to 384 (the dimension of `all-MiniLM-L6-v2`).  Override with
+    /// `--embedding-dimensions` when using a model with a different output size.
+    /// The value is persisted in `namespace_config` and cannot change after the
+    /// namespace has been indexed — use a different namespace or re-index with
+    /// `--force` to change it.
+    pub embedding_dimensions: usize,
 }
 
 pub struct Container {
@@ -110,16 +124,50 @@ impl Container {
         // Initialize parser
         let parser = Arc::new(TreeSitterParser::new());
 
+        // Resolve the effective model name for the selected embedding target.
+        const ONNX_DEFAULT_MODEL: &str = "sentence-transformers/all-MiniLM-L6-v2";
+        let effective_model = config
+            .embedding_model
+            .clone()
+            .unwrap_or_else(|| match config.embedding_target {
+                EmbeddingTarget::Onnx => ONNX_DEFAULT_MODEL.to_string(),
+                EmbeddingTarget::Api => {
+                    // No sensible default for the API target — the user must specify.
+                    // We use a placeholder; the namespace_config validator will catch
+                    // mismatches on re-use.
+                    "api-embedding-model".to_string()
+                }
+            });
+
         // Initialize embedding service
         let embedding_service: Arc<dyn EmbeddingService> = if config.mock_embeddings {
             debug!("Using mock embedding service");
             Arc::new(MockEmbedding::new())
-        } else if config.lm_studio_embeddings {
-            debug!("Using LM Studio embedding service (OpenAI-compatible /v1/embeddings)");
-            Arc::new(LmStudioEmbedding::from_env())
         } else {
-            debug!("Initializing ONNX embedding service...");
-            Arc::new(OrtEmbedding::new(None)?)
+            match config.embedding_target {
+                EmbeddingTarget::Onnx => {
+                    debug!(
+                        "Initializing ONNX embedding service (model='{}')...",
+                        effective_model
+                    );
+                    let model_arg = if effective_model == ONNX_DEFAULT_MODEL {
+                        None
+                    } else {
+                        Some(effective_model.as_str())
+                    };
+                    Arc::new(OrtEmbedding::new(model_arg)?)
+                }
+                EmbeddingTarget::Api => {
+                    debug!(
+                        "Using API embedding service (model='{}', dims={})",
+                        effective_model, config.embedding_dimensions
+                    );
+                    Arc::new(LmStudioEmbedding::new(
+                        effective_model.clone(),
+                        config.embedding_dimensions,
+                    ))
+                }
+            }
         };
 
         // Initialize reranking service
@@ -127,25 +175,41 @@ impl Container {
             if config.mock_embeddings {
                 debug!("Using mock reranking service");
                 Some(Arc::new(MockReranking::new()))
-            } else if config.lm_studio_embeddings {
-                debug!("Using LM Studio reranking service (chat-based, /v1/messages)");
-                let client = Arc::new(AnthropicClient::from_env());
-                Some(Arc::new(LmStudioReranking::new(client)))
             } else {
-                debug!("Initializing ONNX reranking service...");
-                match OrtReranking::new(None) {
-                    Ok(reranker) => Some(Arc::new(reranker)),
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to initialize reranking service: {}. Continuing without reranking.",
-                            e
-                        );
-                        None
+                match config.embedding_target {
+                    EmbeddingTarget::Onnx => {
+                        debug!("Initializing ONNX reranking service...");
+                        match OrtReranking::new(None) {
+                            Ok(reranker) => Some(Arc::new(reranker)),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to initialize reranking service: {}. \
+                                     Continuing without reranking.",
+                                    e
+                                );
+                                None
+                            }
+                        }
+                    }
+                    EmbeddingTarget::Api => {
+                        debug!("Using API reranking service (chat-based, /v1/messages)");
+                        let client = Arc::new(AnthropicClient::from_env());
+                        Some(Arc::new(LmStudioReranking::new(client)))
                     }
                 }
             }
         } else {
             None
+        };
+
+        // Build the NamespaceEmbeddingConfig that is stored/validated per namespace.
+        let ns_cfg = NamespaceEmbeddingConfig {
+            embedding_target: match config.embedding_target {
+                EmbeddingTarget::Onnx => "onnx".to_string(),
+                EmbeddingTarget::Api => "api".to_string(),
+            },
+            embedding_model: effective_model,
+            dimensions: config.embedding_dimensions,
         };
 
         // Create vector repository, metadata adapter, file hash repository, and call graph repository
@@ -162,8 +226,11 @@ impl Container {
             (vector, repo_adapter, file_hash_repo, call_graph_repo)
         } else if config.read_only {
             // Read-only DuckDB path: no exclusive write lock → concurrent searches work
-            match DuckdbVectorRepository::new_read_only_with_namespace(&db_path, &config.namespace)
-            {
+            match DuckdbVectorRepository::new_read_only_with_namespace(
+                &db_path,
+                &config.namespace,
+                &ns_cfg,
+            ) {
                 Ok(duckdb) => {
                     debug!(
                         "Using DuckDB vector storage (read-only) at {:?} namespace {}",
@@ -214,7 +281,7 @@ impl Container {
             }
         } else {
             // DuckDB vector storage - share connection with repository adapter
-            match DuckdbVectorRepository::new_with_namespace(&db_path, &config.namespace) {
+            match DuckdbVectorRepository::new_with_namespace(&db_path, &config.namespace, &ns_cfg) {
                 Ok(duckdb) => {
                     debug!(
                         "Using DuckDB vector storage at {:?} namespace {}",
