@@ -35,6 +35,21 @@ pub trait VectorRepository: Send + Sync {
 
     async fn count(&self) -> Result<u64, DomainError>;
 
+    /// Return all chunks stored for a given file path within a repository.
+    ///
+    /// Used by the TUI snippet-lookup use case to retrieve indexed source code
+    /// for a given reference location without performing a similarity search.
+    /// The default no-op preserves backwards compatibility for adapters that do
+    /// not need to support snippet lookup (e.g. mock / in-memory test adapters).
+    async fn find_chunks_by_file(
+        &self,
+        repository_id: &str,
+        file_path: &str,
+    ) -> Result<Vec<CodeChunk>, DomainError> {
+        let _ = (repository_id, file_path);
+        Ok(vec![])
+    }
+
     /// Called once after a batch of writes to finalise any deferred work
     /// (e.g. rebuilding a full-text search index). The default implementation
     /// is a no-op; backends that maintain auxiliary indexes should override it.

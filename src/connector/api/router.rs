@@ -81,6 +81,7 @@ impl<'a> Router<'a> {
                     .await
             }
             Commands::Mcp { .. } => unreachable!("MCP command is handled separately in main"),
+            Commands::Tui { .. } => unreachable!("TUI command is handled separately in main"),
         }
     }
 }

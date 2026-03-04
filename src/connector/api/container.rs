@@ -15,7 +15,7 @@ use crate::{
     ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
     ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding, MockReranking, OpenAiChatClient,
     OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, RerankingService, Scip,
-    SearchCodeUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
+    SearchCodeUseCase, SnippetLookupUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -496,6 +496,10 @@ impl Container {
 
     pub fn context_use_case(&self) -> SymbolContextUseCase {
         SymbolContextUseCase::new(self.call_graph_use_case.clone())
+    }
+
+    pub fn snippet_lookup_use_case(&self) -> SnippetLookupUseCase {
+        SnippetLookupUseCase::new(self.vector_repo.clone())
     }
 
     pub fn data_dir(&self) -> &str {

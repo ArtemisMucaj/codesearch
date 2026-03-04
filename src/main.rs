@@ -141,7 +141,7 @@ async fn main() -> Result<()> {
     let read_only = !is_mcp
         && matches!(
             &cli.command,
-            Commands::Search { .. } | Commands::List | Commands::Stats
+            Commands::Search { .. } | Commands::List | Commands::Stats | Commands::Tui { .. }
         );
 
     let config = ContainerConfig {
@@ -178,6 +178,21 @@ async fn main() -> Result<()> {
     }
 
     let container = Container::new(config).await?;
+
+    // Handle TUI command specially — it takes over the terminal for its lifetime.
+    if let Commands::Tui { repository } = cli.command {
+        use std::sync::Arc;
+        use codesearch::tui::TuiApp;
+        let app = TuiApp::new(
+            Arc::new(container.search_use_case()),
+            Arc::new(container.impact_use_case()),
+            Arc::new(container.context_use_case()),
+            Arc::new(container.snippet_lookup_use_case()),
+            repository,
+        );
+        return app.run().await;
+    }
+
     let router = Router::new(&container);
     let output = router.route(cli.command).await?;
 
