@@ -6,11 +6,14 @@ use tracing::debug;
 
 use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, QueryExpander};
 use crate::connector::adapter::scip::ScipRunner;
+use crate::cli::{EmbeddingTarget, QueryExpansionTarget, RerankingTarget};
+use crate::connector::adapter::NamespaceEmbeddingConfig;
 use crate::{
-    AnthropicClient, DeleteRepositoryUseCase, DuckdbCallGraphRepository, DuckdbFileHashRepository,
-    DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService, ImpactAnalysisUseCase,
-    InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander,
-    MockEmbedding, MockReranking, OrtEmbedding, OrtReranking, RerankingService, Scip,
+    AnthropicClient, AnthropicReranking, DeleteRepositoryUseCase, DuckdbCallGraphRepository,
+    DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
+    ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
+    ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding, MockReranking, OpenAiChatClient,
+    OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, RerankingService, Scip,
     SearchCodeUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
 };
 
@@ -38,6 +41,59 @@ pub struct ContainerConfig {
     /// at any Anthropic-compatible server including the cloud. Falls back to the
     /// original query gracefully when the server is unreachable.
     pub expand_query: bool,
+    /// Which embedding backend to use.
+    ///
+    /// `Onnx` (default): bundled ONNX models downloaded from HuggingFace.
+    /// `Api`: OpenAI-compatible `/v1/embeddings` endpoint (e.g. LM Studio).
+    /// Set `OPENAI_BASE_URL` to override the default `http://localhost:1234`.
+    ///
+    /// The chosen target and model are stored in `namespace_config` on first use
+    /// and validated on every subsequent open — mismatches are hard errors.
+    pub embedding_target: EmbeddingTarget,
+    /// Which reranking backend to use (when reranking is enabled).
+    ///
+    /// `Onnx` (default): bundled ONNX cross-encoder model.
+    /// `ApiAnthropic`: LLM via Anthropic-compatible `/v1/messages` — uses
+    ///   `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `ANTHROPIC_API_KEY`.
+    /// `ApiOpenAi`: LLM via OpenAI-compatible `/v1/chat/completions` — uses
+    ///   `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`.
+    pub reranking_target: RerankingTarget,
+    /// Which provider to use for LLM-based query expansion (when enabled).
+    ///
+    /// `Anthropic` (default): Anthropic-compatible `/v1/messages` — uses
+    ///   `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `ANTHROPIC_API_KEY`.
+    /// `OpenAi`: OpenAI-compatible `/v1/chat/completions` — uses
+    ///   `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`.
+    pub query_expansion_target: QueryExpansionTarget,
+    /// Embedding model identifier.
+    ///
+    /// For `Onnx`: HuggingFace model ID (default: `sentence-transformers/all-MiniLM-L6-v2`).
+    /// For `Api`: model name sent in the `/v1/embeddings` request body (must match
+    /// the model currently loaded in LM Studio or the target server).
+    ///
+    /// `None` means "use the default for the selected target".
+    pub embedding_model: Option<String>,
+    /// Number of dimensions produced by the embedding model.
+    ///
+    /// Defaults to 384 (the dimension of `all-MiniLM-L6-v2`).  Override with
+    /// `--embedding-dimensions` when using a model with a different output size.
+    /// The value is persisted in `namespace_config` and cannot change after the
+    /// namespace has been indexed — use a different namespace or re-index with
+    /// `--force` to change it.
+    pub embedding_dimensions: usize,
+    /// Maximum number of `embed_chunks` calls issued concurrently during indexing.
+    ///
+    /// For the API embedding target each call is a network round-trip, so higher
+    /// values (4–8) dramatically reduce wall-clock indexing time at the cost of
+    /// more simultaneous HTTP connections to the embedding server.
+    ///
+    /// For the ONNX target each call becomes a `spawn_blocking` task.  The
+    /// effective throughput gain is bounded by the number of physical CPU cores;
+    /// setting this above `num_cpus` just adds scheduling overhead without
+    /// improving speed.
+    ///
+    /// Default: 4.
+    pub embed_concurrency: usize,
 }
 
 pub struct Container {
@@ -96,13 +152,49 @@ impl Container {
         // Initialize parser
         let parser = Arc::new(TreeSitterParser::new());
 
+        // Resolve the effective model name for the selected embedding target.
+        const ONNX_DEFAULT_MODEL: &str = "sentence-transformers/all-MiniLM-L6-v2";
+        let effective_model = match config.embedding_model.clone() {
+            Some(m) => m,
+            None => match config.embedding_target {
+                EmbeddingTarget::Onnx => ONNX_DEFAULT_MODEL.to_string(),
+                EmbeddingTarget::Api => {
+                    return Err(anyhow::anyhow!(
+                        "--embedding-model is required when using --embedding-target=api"
+                    ));
+                }
+            },
+        };
+
         // Initialize embedding service
         let embedding_service: Arc<dyn EmbeddingService> = if config.mock_embeddings {
             debug!("Using mock embedding service");
             Arc::new(MockEmbedding::new())
         } else {
-            debug!("Initializing ONNX embedding service...");
-            Arc::new(OrtEmbedding::new(None)?)
+            match config.embedding_target {
+                EmbeddingTarget::Onnx => {
+                    debug!(
+                        "Initializing ONNX embedding service (model='{}')...",
+                        effective_model
+                    );
+                    let model_arg = if effective_model == ONNX_DEFAULT_MODEL {
+                        None
+                    } else {
+                        Some(effective_model.as_str())
+                    };
+                    Arc::new(OrtEmbedding::new(model_arg)?)
+                }
+                EmbeddingTarget::Api => {
+                    debug!(
+                        "Using OpenAI embedding service (model='{}', dims={})",
+                        effective_model, config.embedding_dimensions
+                    );
+                    Arc::new(OpenAiEmbedding::new(
+                        effective_model.clone(),
+                        config.embedding_dimensions,
+                    ))
+                }
+            }
         };
 
         // Initialize reranking service
@@ -111,20 +203,45 @@ impl Container {
                 debug!("Using mock reranking service");
                 Some(Arc::new(MockReranking::new()))
             } else {
-                debug!("Initializing ONNX reranking service...");
-                match OrtReranking::new(None) {
-                    Ok(reranker) => Some(Arc::new(reranker)),
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to initialize reranking service: {}. Continuing without reranking.",
-                            e
-                        );
-                        None
+                match config.reranking_target {
+                    RerankingTarget::Onnx => {
+                        debug!("Initializing ONNX reranking service...");
+                        match OrtReranking::new(None) {
+                            Ok(reranker) => Some(Arc::new(reranker)),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to initialize ONNX reranking service: {}. \
+                                     Continuing without reranking.",
+                                    e
+                                );
+                                None
+                            }
+                        }
+                    }
+                    RerankingTarget::ApiAnthropic => {
+                        debug!("Using Anthropic reranking service (/v1/messages)");
+                        let client = Arc::new(AnthropicClient::from_env());
+                        Some(Arc::new(AnthropicReranking::new(client)))
+                    }
+                    RerankingTarget::ApiOpenAi => {
+                        debug!("Using OpenAI reranking service (/v1/chat/completions)");
+                        let client = Arc::new(OpenAiChatClient::from_env()?);
+                        Some(Arc::new(OpenAiReranking::new(client)))
                     }
                 }
             }
         } else {
             None
+        };
+
+        // Build the NamespaceEmbeddingConfig that is stored/validated per namespace.
+        let ns_cfg = NamespaceEmbeddingConfig {
+            embedding_target: match config.embedding_target {
+                EmbeddingTarget::Onnx => "onnx".to_string(),
+                EmbeddingTarget::Api => "api".to_string(),
+            },
+            embedding_model: effective_model,
+            dimensions: config.embedding_dimensions,
         };
 
         // Create vector repository, metadata adapter, file hash repository, and call graph repository
@@ -141,8 +258,11 @@ impl Container {
             (vector, repo_adapter, file_hash_repo, call_graph_repo)
         } else if config.read_only {
             // Read-only DuckDB path: no exclusive write lock → concurrent searches work
-            match DuckdbVectorRepository::new_read_only_with_namespace(&db_path, &config.namespace)
-            {
+            match DuckdbVectorRepository::new_read_only_with_namespace(
+                &db_path,
+                &config.namespace,
+                &ns_cfg,
+            ) {
                 Ok(duckdb) => {
                     debug!(
                         "Using DuckDB vector storage (read-only) at {:?} namespace {}",
@@ -193,7 +313,7 @@ impl Container {
             }
         } else {
             // DuckDB vector storage - share connection with repository adapter
-            match DuckdbVectorRepository::new_with_namespace(&db_path, &config.namespace) {
+            match DuckdbVectorRepository::new_with_namespace(&db_path, &config.namespace, &ns_cfg) {
                 Ok(duckdb) => {
                     debug!(
                         "Using DuckDB vector storage at {:?} namespace {}",
@@ -238,19 +358,28 @@ impl Container {
         let call_graph_use_case = Arc::new(CallGraphUseCase::new(call_graph_repo));
 
         // Initialise the query expander when --expand-query is requested.
-        //
-        // Local-first: targets LM Studio at http://localhost:1234 by default.
-        // Override with ANTHROPIC_BASE_URL / ANTHROPIC_MODEL / ANTHROPIC_API_KEY
-        // to point at any other Anthropic-compatible server (including the cloud).
-        // If the server is unreachable the expander falls back to the original
-        // query gracefully, so search always returns results.
+        // Falls back gracefully to the original query when the server is unreachable.
         let query_expander: Option<Arc<dyn QueryExpander>> = if config.expand_query {
-            let anthropic = AnthropicClient::from_env();
-            debug!(
-                "Using LLM-based query expander (url={})",
-                anthropic.configured_base_url()
-            );
-            Some(Arc::new(LlmQueryExpander::new(Arc::new(anthropic))))
+            let client: Arc<dyn crate::connector::adapter::ChatClient> =
+                match config.query_expansion_target {
+                    QueryExpansionTarget::Anthropic => {
+                        let c = AnthropicClient::from_env();
+                        debug!(
+                            "Using Anthropic query expander (url={})",
+                            c.configured_base_url()
+                        );
+                        Arc::new(c)
+                    }
+                    QueryExpansionTarget::OpenAi => {
+                        let c = OpenAiChatClient::from_env()?;
+                        debug!(
+                            "Using OpenAI query expander (url={})",
+                            c.configured_base_url()
+                        );
+                        Arc::new(c)
+                    }
+                };
+            Some(Arc::new(LlmQueryExpander::new(client)))
         } else {
             None
         };
@@ -279,6 +408,7 @@ impl Container {
             self.embedding_service.clone(),
         )
         .with_scip(scip)
+        .with_embed_concurrency(self.config.embed_concurrency)
     }
 
     pub fn search_use_case(&self) -> SearchCodeUseCase {

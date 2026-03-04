@@ -12,6 +12,47 @@ pub enum OutputFormat {
     Vimgrep,
 }
 
+/// Embedding backend to use for indexing and search.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum EmbeddingTarget {
+    /// Bundled ONNX models downloaded from HuggingFace (default, offline-capable).
+    #[default]
+    Onnx,
+    /// OpenAI-compatible `/v1/embeddings` API (e.g. LM Studio running locally).
+    /// Set `OPENAI_BASE_URL` to override the default `http://localhost:1234`.
+    Api,
+}
+
+/// Provider to use for LLM-based query expansion.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum QueryExpansionTarget {
+    /// Anthropic-compatible `/v1/messages` endpoint (default). Controlled by
+    /// `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and `ANTHROPIC_API_KEY`.
+    #[default]
+    Anthropic,
+    /// OpenAI-compatible `/v1/chat/completions` endpoint. Controlled by
+    /// `OPENAI_BASE_URL`, `OPENAI_MODEL`, and `OPENAI_API_KEY`.
+    OpenAi,
+}
+
+/// Reranking backend to use after retrieval.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum RerankingTarget {
+    /// Bundled ONNX cross-encoder model (default, offline-capable).
+    #[default]
+    Onnx,
+    /// LLM reranker via Anthropic-compatible `/v1/messages` (e.g. LM Studio or
+    /// Anthropic cloud). Controlled by `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`,
+    /// and `ANTHROPIC_API_KEY`.
+    #[value(name = "api/anthropic")]
+    ApiAnthropic,
+    /// LLM reranker via OpenAI-compatible `/v1/chat/completions` (e.g. LM
+    /// Studio). Controlled by `OPENAI_BASE_URL`, `OPENAI_MODEL`, and
+    /// `OPENAI_API_KEY`.
+    #[value(name = "api/openai")]
+    ApiOpenAi,
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     Index {

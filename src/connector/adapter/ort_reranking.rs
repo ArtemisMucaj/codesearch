@@ -13,7 +13,7 @@ use tracing::{debug, info};
 use crate::application::RerankingService;
 use crate::domain::{DomainError, SearchResult};
 
-const DEFAULT_MODEL_ID: &str = "mixedbread-ai/mxbai-rerank-xsmall-v1";
+const DEFAULT_MODEL_ID: &str = "BAAI/bge-reranker-base";
 const DEFAULT_MAX_SEQ_LENGTH: usize = 512;
 const BATCH_SIZE: usize = 32;
 

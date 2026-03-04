@@ -330,7 +330,7 @@ CodeSearch supports optional reranking to improve search result relevance using 
 
 1. Initial hybrid/vector search retrieves candidates using inverse-log scaling: `num + ⌈num / ln(num)⌉` (defaults to 20 base candidates when `num ≤ 10`)
 2. For semantic-only results, candidates with vector similarity score below 0.1 are excluded (too irrelevant to benefit from reranking); hybrid RRF results bypass this filter because RRF scores are intentionally small (~0.016–0.033)
-3. A cross-encoder model (mxbai-rerank-xsmall-v1) reranks remaining candidates based on query-document relevance
+3. A cross-encoder model (bge-reranker-base) reranks remaining candidates based on query-document relevance
 4. Top `num` reranked results are returned
 
 ### Usage
@@ -347,7 +347,7 @@ codesearch search "validation" --language rust --min-score 0.7
 
 ### Models
 
-- **Default**: `mixedbread-ai/mxbai-rerank-xsmall-v1` (70M parameters, ONNX)
+- **Default**: `BAAI/bge-reranker-base` (110M parameters, ONNX)
 - Downloaded automatically from HuggingFace Hub on first use
 - No API key or external service required
 

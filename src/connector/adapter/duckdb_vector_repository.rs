@@ -10,15 +10,32 @@ use tracing::{debug, info, warn};
 use crate::application::{rrf_fuse, VectorRepository};
 use crate::domain::{CodeChunk, DomainError, Embedding, SearchQuery, SearchResult};
 
-const VECTOR_DIMENSIONS: usize = 384;
 /// Maximum number of BM25 candidates fetched per search leg.
 /// BM25 is exact keyword matching so a small pool is sufficient;
 /// the semantic leg handles broader recall.
 const BM25_FETCH_LIMIT: usize = 10;
 
+/// Embedding configuration that must remain consistent across all operations on
+/// a given namespace. Stored in the `namespace_config` table and validated on
+/// every open; mismatches are hard errors with actionable messages.
+#[derive(Debug, Clone)]
+pub struct NamespaceEmbeddingConfig {
+    /// `"onnx"` or `"api"`.
+    pub embedding_target: String,
+    /// Model identifier that produced the embeddings (HuggingFace ID or API
+    /// model name).  Must stay the same for the lifetime of the namespace to
+    /// preserve a consistent embedding space.
+    pub embedding_model: String,
+    /// Dimensionality of the embedding vectors.  Fixed by the schema of the
+    /// `embeddings` table and cannot change after the namespace is first created.
+    pub dimensions: usize,
+}
+
 pub struct DuckdbVectorRepository {
     conn: Arc<Mutex<Connection>>,
     namespace: String,
+    /// Dimensionality of the embedding vectors for this namespace.
+    dimensions: usize,
     /// Set to `true` whenever chunk data changes (inserts or deletes).
     /// The FTS index is rebuilt lazily before the next BM25 search.
     fts_dirty: AtomicBool,
@@ -29,25 +46,35 @@ pub struct DuckdbVectorRepository {
 }
 
 impl DuckdbVectorRepository {
-    pub fn new(path: &Path) -> Result<Self, DomainError> {
-        Self::new_with_namespace(path, "main")
-    }
-
-    pub fn new_with_namespace(path: &Path, namespace: &str) -> Result<Self, DomainError> {
+    /// Open (or create) a writable vector repository for `namespace` with the
+    /// given embedding configuration.
+    ///
+    /// **First open** (new namespace): creates the DuckDB schema with
+    /// `FLOAT[dimensions]` columns and persists the config in `namespace_config`.
+    ///
+    /// **Subsequent opens**: loads the stored config and validates it against
+    /// the provided one.  A dimension mismatch is a hard error (schema
+    /// incompatibility); a model mismatch is also a hard error (different
+    /// embedding space — re-index with `codesearch index --force` to fix).
+    pub fn new_with_namespace(
+        path: &Path,
+        namespace: &str,
+        cfg: &NamespaceEmbeddingConfig,
+    ) -> Result<Self, DomainError> {
         let conn = Connection::open(path)
             .map_err(|e| DomainError::storage(format!("Failed to open DuckDB database: {}", e)))?;
-        Self::initialize(&conn, namespace)?;
 
         let schema = namespace.trim();
         let schema_name = if schema.is_empty() { "main" } else { schema };
 
-        // Only rebuild the FTS index on startup if it has never been created.
-        // If it already exists (from a previous session), assume it is valid.
+        let dimensions = Self::initialize(&conn, schema_name, cfg, false)?;
+
         let fts_already_exists = Self::fts_index_exists(&conn, schema_name);
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             namespace: schema_name.to_string(),
+            dimensions,
             fts_dirty: AtomicBool::new(!fts_already_exists),
             read_only: false,
         })
@@ -59,12 +86,17 @@ impl DuckdbVectorRepository {
             DomainError::storage(format!("Failed to open DuckDB in-memory DB: {}", e))
         })?;
         let namespace = "main";
-        Self::initialize(&conn, namespace)?;
+        let cfg = NamespaceEmbeddingConfig {
+            embedding_target: "onnx".to_string(),
+            embedding_model: "mock".to_string(),
+            dimensions: 384,
+        };
+        let dimensions = Self::initialize(&conn, namespace, &cfg, false)?;
 
-        // In-memory databases are always fresh; no prior FTS index can exist.
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             namespace: namespace.to_string(),
+            dimensions,
             fts_dirty: AtomicBool::new(true),
             read_only: false,
         })
@@ -74,9 +106,15 @@ impl DuckdbVectorRepository {
     ///
     /// Read-only connections do not acquire the exclusive write lock, so multiple
     /// processes can search the same database file concurrently without conflicts.
-    /// Schema initialization is skipped (tables must already exist from a prior
-    /// write-mode session); only the VSS and FTS extensions are loaded for query support.
-    pub fn new_read_only_with_namespace(path: &Path, namespace: &str) -> Result<Self, DomainError> {
+    ///
+    /// The stored `namespace_config` is read to determine the correct vector
+    /// dimensions; the provided `cfg` is validated against it (hard error on
+    /// mismatch). Schema initialisation is skipped.
+    pub fn new_read_only_with_namespace(
+        path: &Path,
+        namespace: &str,
+        cfg: &NamespaceEmbeddingConfig,
+    ) -> Result<Self, DomainError> {
         let config = Config::default()
             .access_mode(AccessMode::ReadOnly)
             .map_err(|e| {
@@ -87,18 +125,16 @@ impl DuckdbVectorRepository {
             DomainError::storage(format!("Failed to open DuckDB (read-only): {}", e))
         })?;
 
-        // Load VSS and FTS for query support; skip INSTALL (DDL forbidden in read-only mode).
+        // Load VSS and FTS for query support; INSTALL is DDL and forbidden.
         conn.execute_batch("LOAD vss; SET hnsw_enable_experimental_persistence = true; LOAD fts;")
             .map_err(|e| DomainError::storage(format!("Failed to load extensions: {}", e)))?;
 
         let schema = namespace.trim();
         let schema_name = if schema.is_empty() { "main" } else { schema };
 
-        // In read-only mode we cannot rebuild the FTS index.
-        // Check whether the index was already built by a prior write session.
-        // If it exists, fts_dirty=false lets run_text() use it directly.
-        // If it is missing, fts_dirty=true — but the read_only flag prevents
-        // any rebuild attempt; search() will degrade to semantic-only.
+        // Read stored dimensions (read-only: don't save anything)
+        let dimensions = Self::initialize(&conn, schema_name, cfg, true)?;
+
         let fts_already_exists = Self::fts_index_exists(&conn, schema_name);
         if !fts_already_exists {
             warn!(
@@ -110,6 +146,7 @@ impl DuckdbVectorRepository {
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             namespace: schema_name.to_string(),
+            dimensions,
             fts_dirty: AtomicBool::new(!fts_already_exists),
             read_only: true,
         })
@@ -122,44 +159,49 @@ impl DuckdbVectorRepository {
         Arc::clone(&self.conn)
     }
 
-    /// Initializes tables, VSS, and FTS extensions.
-    fn initialize(conn: &Connection, schema: &str) -> Result<(), DomainError> {
-        let schema = schema.trim();
-        let schema_name = if schema.is_empty() { "main" } else { schema };
+    /// Returns the vector dimensionality configured for this namespace.
+    pub fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+
+    /// Initialise extensions, global tables, namespace schema, and the
+    /// `namespace_config` entry.
+    ///
+    /// Returns the **effective** dimensions for this namespace:
+    /// - If a `namespace_config` row already exists, the stored dimensions are
+    ///   used and the provided `cfg` is validated against them (hard errors on
+    ///   mismatch).
+    /// - If no row exists (new namespace) and `read_only` is `false`, the
+    ///   namespace schema is created with `cfg.dimensions` and the config is
+    ///   persisted.
+    /// - In `read_only` mode the stored dimensions are returned; if the
+    ///   namespace has no stored config (DB may not have been indexed yet),
+    ///   `cfg.dimensions` is returned as a best-effort fallback.
+    fn initialize(
+        conn: &Connection,
+        schema_name: &str,
+        cfg: &NamespaceEmbeddingConfig,
+        read_only: bool,
+    ) -> Result<usize, DomainError> {
         debug!("Initializing DuckDB with schema: {}", schema_name);
 
-        // Install and load VSS (vector similarity search) and FTS (full-text search).
-        // `INSTALL` downloads the extension on first use; subsequent runs load from cache.
+        if read_only {
+            // Only load extensions; DDL forbidden.
+            // (extensions were already loaded by the caller for read-only path)
+            // Read and validate stored namespace config.
+            return Self::read_and_validate_namespace_config(conn, schema_name, cfg, read_only);
+        }
+
+        // Install and load VSS + FTS.
         conn.execute_batch(
             "INSTALL vss; LOAD vss; SET hnsw_enable_experimental_persistence = true; \
              INSTALL fts; LOAD fts;",
         )
         .map_err(|e| DomainError::storage(format!("Failed to initialize extensions: {}", e)))?;
 
-        // Create all tables in a single batch
-        let schema_sql = format!(
+        // Global tables (not namespace-scoped).
+        conn.execute_batch(
             r#"
-            CREATE SCHEMA IF NOT EXISTS "{}";
-
-            CREATE TABLE IF NOT EXISTS "{}".chunks (
-                id TEXT PRIMARY KEY,
-                file_path TEXT NOT NULL,
-                content TEXT NOT NULL,
-                start_line INTEGER NOT NULL,
-                end_line INTEGER NOT NULL,
-                language TEXT NOT NULL,
-                node_type TEXT NOT NULL,
-                symbol_name TEXT,
-                parent_symbol TEXT,
-                repository_id TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS "{}".embeddings (
-                chunk_id TEXT PRIMARY KEY,
-                vector FLOAT[384] NOT NULL,
-                model TEXT NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS repositories (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -172,18 +214,153 @@ impl DuckdbVectorRepository {
                 namespace TEXT,
                 languages TEXT
             );
-
-            CREATE INDEX IF NOT EXISTS embedding_hnsw_idx ON "{}".embeddings USING HNSW (vector) WITH (metric = 'cosine');
+            CREATE TABLE IF NOT EXISTS namespace_config (
+                namespace TEXT PRIMARY KEY,
+                embedding_target TEXT NOT NULL,
+                embedding_model TEXT NOT NULL,
+                dimensions INTEGER NOT NULL
+            );
             "#,
-            schema_name, schema_name, schema_name, schema_name
+        )
+        .map_err(|e| DomainError::storage(format!("Failed to create global tables: {}", e)))?;
+
+        // Read or save namespace_config, obtain effective dimensions.
+        let dims = Self::read_and_validate_namespace_config(conn, schema_name, cfg, read_only)?;
+
+        // Namespace schema tables — use effective dims so the FLOAT column is
+        // always correct for both new and existing namespaces.
+        let schema_sql = format!(
+            r#"
+            CREATE SCHEMA IF NOT EXISTS "{}";
+            CREATE TABLE IF NOT EXISTS "{}".chunks (
+                id TEXT PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                content TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                language TEXT NOT NULL,
+                node_type TEXT NOT NULL,
+                symbol_name TEXT,
+                parent_symbol TEXT,
+                repository_id TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS "{}".embeddings (
+                chunk_id TEXT PRIMARY KEY,
+                vector FLOAT[{dims}] NOT NULL,
+                model TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS embedding_hnsw_idx
+                ON "{}".embeddings USING HNSW (vector) WITH (metric = 'cosine');
+            "#,
+            schema_name, schema_name, schema_name, schema_name, dims = dims
         );
 
         conn.execute_batch(&schema_sql).map_err(|e| {
-            DomainError::storage(format!("Failed to initialize DuckDB schema: {}", e))
+            DomainError::storage(format!("Failed to initialize namespace schema: {}", e))
         })?;
 
-        debug!("DuckDB schema initialized successfully");
-        Ok(())
+        debug!("DuckDB schema initialised (namespace={schema_name}, dims={dims})");
+        Ok(dims)
+    }
+
+    /// Read the stored `namespace_config` row, validate it against `cfg`, and
+    /// return the effective dimensions.
+    ///
+    /// - Existing row: validates `dimensions` and `embedding_model`.  Hard error
+    ///   on mismatch so corrupt searches never silently happen.
+    /// - No row + write mode: saves `cfg` and returns `cfg.dimensions`.
+    /// - No row + read-only mode: returns `cfg.dimensions` as a best-effort
+    ///   fallback (the namespace may simply not have been indexed yet).
+    fn read_and_validate_namespace_config(
+        conn: &Connection,
+        namespace: &str,
+        cfg: &NamespaceEmbeddingConfig,
+        read_only: bool,
+    ) -> Result<usize, DomainError> {
+        // Attempt to read the stored config; the table may not exist yet in
+        // read-only mode (first ever open before any indexing).
+        let stored = conn
+            .query_row(
+                "SELECT embedding_target, embedding_model, dimensions \
+                 FROM namespace_config WHERE namespace = ?",
+                params![namespace],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)? as usize,
+                    ))
+                },
+            )
+            .ok()
+            .map(|(target, model, dims)| (target, model, dims));
+
+        match stored {
+            Some((stored_target, stored_model, stored_dims)) => {
+                // Hard error: dimension mismatch means the schema cannot be used.
+                if stored_dims != cfg.dimensions {
+                    return Err(DomainError::invalid_input(format!(
+                        "Namespace '{}' was indexed with {}-dimensional embeddings \
+                         (model '{}', target '{}') but you are now using {}-dimensional \
+                         embeddings (model '{}', target '{}'). \
+                         Re-index with `codesearch index --force` using the original \
+                         model, or create a new namespace with `--namespace <name>`.",
+                        namespace,
+                        stored_dims,
+                        stored_model,
+                        stored_target,
+                        cfg.dimensions,
+                        cfg.embedding_model,
+                        cfg.embedding_target,
+                    )));
+                }
+                // Hard error: model mismatch means vectors live in different spaces.
+                if stored_model != cfg.embedding_model {
+                    return Err(DomainError::invalid_input(format!(
+                        "Namespace '{}' was indexed with embedding model '{}' (target '{}') \
+                         but you are now using model '{}' (target '{}'). \
+                         Mixed embedding spaces produce meaningless search results. \
+                         Re-index with `codesearch index --force` using model '{}', \
+                         or create a new namespace with `--namespace <name>`.",
+                        namespace,
+                        stored_model,
+                        stored_target,
+                        cfg.embedding_model,
+                        cfg.embedding_target,
+                        cfg.embedding_model,
+                    )));
+                }
+                debug!(
+                    "Namespace '{}' config validated (model='{}', dims={})",
+                    namespace, stored_model, stored_dims
+                );
+                Ok(stored_dims)
+            }
+            None => {
+                if !read_only {
+                    // New namespace: persist the config.
+                    conn.execute(
+                        "INSERT INTO namespace_config \
+                         (namespace, embedding_target, embedding_model, dimensions) \
+                         VALUES (?, ?, ?, ?)",
+                        params![
+                            namespace,
+                            cfg.embedding_target,
+                            cfg.embedding_model,
+                            cfg.dimensions as i64
+                        ],
+                    )
+                    .map_err(|e| {
+                        DomainError::storage(format!("Failed to save namespace config: {e}"))
+                    })?;
+                    debug!(
+                        "Namespace '{}' config saved (model='{}', dims={})",
+                        namespace, cfg.embedding_model, cfg.dimensions
+                    );
+                }
+                Ok(cfg.dimensions)
+            }
+        }
     }
 
     // ── FTS helpers ──────────────────────────────────────────────────────────
@@ -231,11 +408,11 @@ impl DuckdbVectorRepository {
 
     // ── Private query helpers (synchronous, take &Connection) ────────────────
 
-    fn vector_to_array_literal(vector: &[f32]) -> Result<String, DomainError> {
-        if vector.len() != VECTOR_DIMENSIONS {
+    fn vector_to_array_literal(&self, vector: &[f32]) -> Result<String, DomainError> {
+        if vector.len() != self.dimensions {
             return Err(DomainError::invalid_input(format!(
                 "Expected embedding dimension {}, got {}",
-                VECTOR_DIMENSIONS,
+                self.dimensions,
                 vector.len()
             )));
         }
@@ -245,11 +422,10 @@ impl DuckdbVectorRepository {
             if i > 0 {
                 s.push_str(", ");
             }
-            // DuckDB accepts standard float literals.
             s.push_str(&format!("{}", v));
         }
         s.push(']');
-        s.push_str("::FLOAT[384]");
+        s.push_str(&format!("::FLOAT[{}]", self.dimensions));
         Ok(s)
     }
 
@@ -498,7 +674,7 @@ impl VectorRepository for DuckdbVectorRepository {
         }
 
         for embedding in embeddings {
-            let array_lit = Self::vector_to_array_literal(embedding.vector())?;
+            let array_lit = self.vector_to_array_literal(embedding.vector())?;
             // Note: The array literal must be part of the SQL statement (not parameterized)
             // because DuckDB FLOAT[384] type doesn't support parameterization.
             // This is safe since the array is constructed from our embedding data, not user input.
@@ -630,15 +806,15 @@ impl VectorRepository for DuckdbVectorRepository {
         query_embedding: &[f32],
         query: &SearchQuery,
     ) -> Result<Vec<SearchResult>, DomainError> {
-        if query_embedding.len() != VECTOR_DIMENSIONS {
+        if query_embedding.len() != self.dimensions {
             return Err(DomainError::invalid_input(format!(
                 "Expected query embedding dimension {}, got {}",
-                VECTOR_DIMENSIONS,
+                self.dimensions,
                 query_embedding.len()
             )));
         }
 
-        let array_lit = Self::vector_to_array_literal(query_embedding)?;
+        let array_lit = self.vector_to_array_literal(query_embedding)?;
 
         let conn = self.conn.lock().await;
 

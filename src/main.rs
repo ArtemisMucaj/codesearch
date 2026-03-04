@@ -6,6 +6,7 @@ use rmcp::ServiceExt;
 use tracing_subscriber::EnvFilter;
 
 use codesearch::connector::adapter::mcp::CodesearchMcpServer;
+use codesearch::cli::{EmbeddingTarget, QueryExpansionTarget, RerankingTarget};
 use codesearch::{Commands, Container, ContainerConfig, Router};
 
 #[derive(Parser)]
@@ -38,6 +39,52 @@ struct Cli {
     /// If expansion fails for any reason the original query is used as-is.
     #[arg(long, global = true)]
     expand_query: bool,
+
+    /// Embedding backend: 'onnx' for bundled ONNX models (default, offline-capable)
+    /// or 'api' for an OpenAI-compatible /v1/embeddings endpoint (e.g. LM Studio).
+    /// The chosen target and model are stored per namespace on first index and
+    /// validated on every subsequent operation — mismatches are hard errors.
+    /// Set OPENAI_BASE_URL to override the default http://localhost:1234.
+    #[arg(long, global = true, value_enum, default_value = "onnx")]
+    embedding_target: EmbeddingTarget,
+
+    /// Embedding model identifier.
+    /// For 'onnx': HuggingFace model ID (default: sentence-transformers/all-MiniLM-L6-v2).
+    /// For 'api': model name sent in the /v1/embeddings request body; must match
+    /// the model loaded in the target server (set OPENAI_BASE_URL for non-default address).
+    #[arg(long, global = true)]
+    embedding_model: Option<String>,
+
+    /// Number of dimensions produced by the embedding model (default: 384).
+    /// Override when using a model with a different output size (e.g. 768 or 1024).
+    /// This value is stored in namespace_config on first index and cannot be
+    /// changed without re-indexing.
+    #[arg(long, global = true, default_value = "384")]
+    embedding_dimensions: usize,
+
+    /// Reranking backend (used when --no-rerank is not set):
+    ///   'onnx'           — bundled ONNX cross-encoder model (default).
+    ///   'api/anthropic'  — LLM via /v1/messages (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL).
+    ///   'api/openai'     — LLM via /v1/chat/completions (OPENAI_BASE_URL, OPENAI_MODEL).
+    #[arg(long, global = true, value_enum, default_value = "onnx")]
+    reranking_target: RerankingTarget,
+
+    /// Maximum number of concurrent embedding API calls during indexing.
+    ///
+    /// For the API embedding target ('--embedding-target=api'), each slot is a
+    /// parallel HTTP request to the embedding server, so higher values reduce
+    /// indexing time proportionally. For the ONNX target, each slot is a
+    /// spawn_blocking task — gains are bounded by available CPU cores.
+    ///
+    /// Default: 4.
+    #[arg(long, global = true, default_value = "4")]
+    embedding_requests: usize,
+
+    /// Provider for LLM-based query expansion (used with --expand-query):
+    ///   'anthropic' — /v1/messages (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, default).
+    ///   'open-ai'   — /v1/chat/completions (OPENAI_BASE_URL, OPENAI_MODEL).
+    #[arg(long, global = true, value_enum, default_value = "anthropic")]
+    expand_query_target: QueryExpansionTarget,
 
     #[command(subcommand)]
     command: Commands,
@@ -76,6 +123,15 @@ async fn main() -> Result<()> {
             .init();
     }
 
+    if cli.embedding_dimensions == 0 {
+        eprintln!("error: --embedding-dimensions must be greater than 0");
+        std::process::exit(1);
+    }
+    if cli.embedding_requests == 0 {
+        eprintln!("error: --embedding-requests must be greater than 0");
+        std::process::exit(1);
+    }
+
     let data_dir = expand_tilde(&cli.data_dir);
     std::fs::create_dir_all(&data_dir)?;
 
@@ -95,6 +151,12 @@ async fn main() -> Result<()> {
         memory_storage: cli.memory_storage,
         no_rerank: cli.no_rerank,
         expand_query: cli.expand_query,
+        embedding_target: cli.embedding_target,
+        embedding_model: cli.embedding_model,
+        embedding_dimensions: cli.embedding_dimensions,
+        reranking_target: cli.reranking_target,
+        query_expansion_target: cli.expand_query_target,
+        embed_concurrency: cli.embedding_requests,
         read_only,
     };
 
