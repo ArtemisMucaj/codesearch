@@ -81,6 +81,19 @@ pub struct ContainerConfig {
     /// namespace has been indexed — use a different namespace or re-index with
     /// `--force` to change it.
     pub embedding_dimensions: usize,
+    /// Maximum number of `embed_chunks` calls issued concurrently during indexing.
+    ///
+    /// For the API embedding target each call is a network round-trip, so higher
+    /// values (4–8) dramatically reduce wall-clock indexing time at the cost of
+    /// more simultaneous HTTP connections to the embedding server.
+    ///
+    /// For the ONNX target each call becomes a `spawn_blocking` task.  The
+    /// effective throughput gain is bounded by the number of physical CPU cores;
+    /// setting this above `num_cpus` just adds scheduling overhead without
+    /// improving speed.
+    ///
+    /// Default: 4.
+    pub embed_concurrency: usize,
 }
 
 pub struct Container {
@@ -146,12 +159,7 @@ impl Container {
             .clone()
             .unwrap_or_else(|| match config.embedding_target {
                 EmbeddingTarget::Onnx => ONNX_DEFAULT_MODEL.to_string(),
-                EmbeddingTarget::Api => {
-                    // No sensible default for the API target — the user must specify.
-                    // We use a placeholder; the namespace_config validator will catch
-                    // mismatches on re-use.
-                    "api-embedding-model".to_string()
-                }
+                EmbeddingTarget::Api => ONNX_DEFAULT_MODEL.to_string(),
             });
 
         // Initialize embedding service
@@ -396,6 +404,7 @@ impl Container {
             self.embedding_service.clone(),
         )
         .with_scip(scip)
+        .with_embed_concurrency(self.config.embed_concurrency)
     }
 
     pub fn search_use_case(&self) -> SearchCodeUseCase {

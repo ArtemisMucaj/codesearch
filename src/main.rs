@@ -69,6 +69,17 @@ struct Cli {
     #[arg(long, global = true, value_enum, default_value = "onnx")]
     reranking_target: RerankingTarget,
 
+    /// Maximum number of concurrent embedding API calls during indexing.
+    ///
+    /// For the API embedding target ('--embedding-target=api'), each slot is a
+    /// parallel HTTP request to the embedding server, so higher values reduce
+    /// indexing time proportionally. For the ONNX target, each slot is a
+    /// spawn_blocking task — gains are bounded by available CPU cores.
+    ///
+    /// Default: 4.
+    #[arg(long, global = true, default_value = "4")]
+    embedding_requests: usize,
+
     /// Provider for LLM-based query expansion (used with --expand-query):
     ///   'anthropic' — /v1/messages (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, default).
     ///   'open-ai'   — /v1/chat/completions (OPENAI_BASE_URL, OPENAI_MODEL).
@@ -136,6 +147,7 @@ async fn main() -> Result<()> {
         embedding_dimensions: cli.embedding_dimensions,
         reranking_target: cli.reranking_target,
         query_expansion_target: cli.expand_query_target,
+        embed_concurrency: cli.embedding_requests,
         read_only,
     };
 

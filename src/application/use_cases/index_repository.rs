@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures_util::StreamExt;
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 use tracing::{debug, info, warn};
@@ -12,9 +13,12 @@ use crate::application::{
     VectorRepository,
 };
 use crate::domain::{
-    compute_file_hash, DomainError, FileHash, Language, LanguageStats, Repository, SymbolReference,
-    VectorStore,
+    compute_file_hash, DomainError, Embedding, FileHash, Language, LanguageStats, Repository,
+    SymbolReference, VectorStore,
 };
+
+/// Default number of concurrent `embed_chunks` calls during indexing.
+const DEFAULT_EMBED_CONCURRENCY: usize = 4;
 
 /// Port trait for the SCIP indexing phase.
 ///
@@ -52,6 +56,8 @@ pub struct IndexRepositoryUseCase {
     /// Optional SCIP indexer.  When present, JS/TS/PHP files use SCIP-derived
     /// symbol references instead of (or as a fallback from) tree-sitter.
     scip: Option<Arc<dyn Scip>>,
+    /// Maximum number of concurrent `embed_chunks` calls.
+    embed_concurrency: usize,
 }
 
 impl IndexRepositoryUseCase {
@@ -71,12 +77,19 @@ impl IndexRepositoryUseCase {
             parser_service,
             embedding_service,
             scip: None,
+            embed_concurrency: DEFAULT_EMBED_CONCURRENCY,
         }
     }
 
     /// Attach an optional SCIP indexer.
     pub fn with_scip(mut self, scip: Arc<dyn Scip>) -> Self {
         self.scip = Some(scip);
+        self
+    }
+
+    /// Set the maximum number of concurrent `embed_chunks` calls.
+    pub fn with_embed_concurrency(mut self, n: usize) -> Self {
+        self.embed_concurrency = n.max(1);
         self
     }
 
@@ -175,7 +188,7 @@ impl IndexRepositoryUseCase {
         let start_time = Instant::now();
 
         // First pass: collect all files to process
-        let files_to_process: Vec<_> = WalkBuilder::new(absolute_path)
+        let files_to_process: Vec<PathBuf> = WalkBuilder::new(absolute_path)
             .hidden(true)
             .git_ignore(true)
             .git_global(true)
@@ -187,23 +200,21 @@ impl IndexRepositoryUseCase {
                 let language = Language::from_path(entry.path());
                 language != Language::Unknown && self.parser_service.supports_language(language)
             })
+            .map(|entry| entry.path().to_path_buf())
             .collect();
 
         let total_files = files_to_process.len() as u64;
         info!("Found {} files to index", total_files);
 
-        // SCIP: run any available SCIP indexers (scip-typescript / scip-php) and
-        // pre-load their symbol references.  Only SCIP-derived references are stored;
-        // tree-sitter is used solely for code chunking / vector-store indexing.
-        let has_js_ts = files_to_process.iter().any(|e| {
+        let has_js_ts = files_to_process.iter().any(|p| {
             matches!(
-                Language::from_path(e.path()),
+                Language::from_path(p),
                 Language::JavaScript | Language::TypeScript
             )
         });
         let has_php = files_to_process
             .iter()
-            .any(|e| Language::from_path(e.path()) == Language::Php);
+            .any(|p| Language::from_path(p) == Language::Php);
         let scip_refs = self
             .run_scip(absolute_path, repository.id(), has_js_ts, has_php)
             .await?;
@@ -222,66 +233,53 @@ impl IndexRepositoryUseCase {
         let mut file_hashes = Vec::new();
         let mut language_stats: HashMap<String, LanguageStats> = HashMap::new();
 
-        for entry in files_to_process {
-            let entry_path = entry.path();
-            let language = Language::from_path(entry_path);
+        // Phase 1 (concurrent): read → parse → embed
+        // Phase 2 (sequential): write to DuckDB + update stats
+        let repo_id = repository.id().to_string();
+        let abs_path = absolute_path.to_path_buf();
+        let embedding_service = self.embedding_service.clone();
+        let parser_service = self.parser_service.clone();
+        let concurrency = self.embed_concurrency;
 
-            let relative_path = entry_path
-                .strip_prefix(absolute_path)
-                .unwrap_or(entry_path)
-                .to_string_lossy()
-                .to_string();
-
-            progress_bar.set_message(relative_path.clone());
-            debug!("Processing file: {}", relative_path);
-
-            let content = match tokio::fs::read_to_string(entry_path).await {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!("Failed to read file {}: {}", relative_path, e);
-                    progress_bar.inc(1);
-                    continue;
+        let mut stream = futures_util::stream::iter(files_to_process)
+            .map(move |entry_path| {
+                let embedding_service = embedding_service.clone();
+                let parser_service = parser_service.clone();
+                let abs_path = abs_path.clone();
+                let repo_id = repo_id.clone();
+                async move {
+                    parse_and_embed(
+                        entry_path,
+                        &abs_path,
+                        &repo_id,
+                        &*parser_service,
+                        &*embedding_service,
+                    )
+                    .await
                 }
+            })
+            .buffer_unordered(concurrency);
+
+        while let Some(maybe_result) = stream.next().await {
+            progress_bar.inc(1);
+            let result = match maybe_result {
+                Some(r) => r,
+                None => continue,
             };
 
-            // Compute and store file hash
-            let content_hash = compute_file_hash(&content);
-            file_hashes.push(FileHash::new(
-                relative_path.clone(),
-                content_hash,
-                repository.id().to_string(),
-            ));
+            progress_bar.set_message(result.relative_path.clone());
 
-            let chunks = match self
-                .parser_service
-                .parse_file(&content, &relative_path, language, repository.id())
-                .await
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!("Failed to parse file {}: {}", relative_path, e);
-                    progress_bar.inc(1);
-                    continue;
-                }
-            };
-
-            if !chunks.is_empty() {
-                let embeddings = match self.embedding_service.embed_chunks(&chunks).await {
-                    Ok(e) => e,
-                    Err(e) => {
-                        warn!("Failed to generate embeddings for {}: {}", relative_path, e);
-                        progress_bar.inc(1);
-                        continue;
-                    }
-                };
-                self.vector_repo.save_batch(&chunks, &embeddings).await?;
+            if !result.chunks.is_empty() {
+                self.vector_repo
+                    .save_batch(&result.chunks, &result.embeddings)
+                    .await?;
             }
 
-            let refs_count = if let Some(scip_file_refs) = scip_refs.get(&relative_path) {
+            let refs_count = if let Some(scip_file_refs) = scip_refs.get(&result.relative_path) {
                 debug!(
                     "Using {} SCIP references for {}",
                     scip_file_refs.len(),
-                    relative_path
+                    result.relative_path
                 );
                 self.call_graph_use_case
                     .save_references(scip_file_refs)
@@ -292,27 +290,30 @@ impl IndexRepositoryUseCase {
             };
             reference_count += refs_count;
 
-            file_count += 1;
-            chunk_count += chunks.len() as u64;
+            file_hashes.push(FileHash::new(
+                result.relative_path.clone(),
+                result.content_hash,
+                repository.id().to_string(),
+            ));
 
-            // Track language statistics
-            let lang_key = language.as_str().to_string();
+            file_count += 1;
+            chunk_count += result.chunks.len() as u64;
+
+            let lang_key = result.language.as_str().to_string();
             let stats = language_stats.entry(lang_key).or_default();
             stats.file_count += 1;
-            stats.chunk_count += chunks.len() as u64;
+            stats.chunk_count += result.chunks.len() as u64;
 
             debug!(
                 "Indexed {} chunks, {} references from {}",
-                chunks.len(),
+                result.chunks.len(),
                 refs_count,
-                relative_path
+                result.relative_path
             );
-            progress_bar.inc(1);
         }
 
         progress_bar.finish_and_clear();
 
-        // Save all file hashes
         self.file_hash_repo.save_batch(&file_hashes).await?;
 
         self.repository_repo
@@ -434,7 +435,6 @@ impl IndexRepositoryUseCase {
                 .vector_repo
                 .delete_by_file_path(repository.id(), path)
                 .await?;
-            // Also delete symbol references for this file
             self.call_graph_use_case
                 .delete_by_file(repository.id(), path)
                 .await?;
@@ -453,14 +453,12 @@ impl IndexRepositoryUseCase {
                 .vector_repo
                 .delete_by_file_path(repository.id(), path)
                 .await?;
-            // Also delete symbol references for this file
             self.call_graph_use_case
                 .delete_by_file(repository.id(), path)
                 .await?;
         }
 
-        // SCIP: same as the full-index path.  Re-run the indexer even for incremental
-        // updates because cross-file references may have changed.
+        // SCIP: same as the full-index path.
         let has_js_ts = current_files
             .keys()
             .any(|p| matches!(Language::from_path(Path::new(p)), Language::JavaScript | Language::TypeScript));
@@ -471,8 +469,12 @@ impl IndexRepositoryUseCase {
             .run_scip(absolute_path, repository.id(), has_js_ts, has_php)
             .await?;
 
-        // Process added and modified files
-        let files_to_process: Vec<&String> = added.iter().chain(modified.iter()).copied().collect();
+        // Convert relative path strings to PathBufs for the stream
+        let files_to_process: Vec<PathBuf> = added
+            .iter()
+            .chain(modified.iter())
+            .map(|p| absolute_path.join(p))
+            .collect();
         let total_to_process = files_to_process.len() as u64;
 
         let progress_bar = ProgressBar::new(total_to_process);
@@ -489,56 +491,55 @@ impl IndexRepositoryUseCase {
         let mut new_reference_count = 0u64;
         let mut language_stats: HashMap<String, LanguageStats> = HashMap::new();
 
-        for relative_path in files_to_process {
-            progress_bar.set_message(relative_path.clone());
+        // Precompute hashes from the walk above so we don't re-read the files
+        // just for the hash in the sequential phase.
+        let current_files_snapshot = current_files.clone();
 
-            let entry_path = absolute_path.join(relative_path);
-            let language = Language::from_path(&entry_path);
+        let repo_id = repository.id().to_string();
+        let abs_path = absolute_path.to_path_buf();
+        let embedding_service = self.embedding_service.clone();
+        let parser_service = self.parser_service.clone();
+        let concurrency = self.embed_concurrency;
 
-            let content = match tokio::fs::read_to_string(&entry_path).await {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!("Failed to read file {}: {}", relative_path, e);
-                    progress_bar.inc(1);
-                    continue;
+        let mut stream = futures_util::stream::iter(files_to_process)
+            .map(move |entry_path| {
+                let embedding_service = embedding_service.clone();
+                let parser_service = parser_service.clone();
+                let abs_path = abs_path.clone();
+                let repo_id = repo_id.clone();
+                async move {
+                    parse_and_embed(
+                        entry_path,
+                        &abs_path,
+                        &repo_id,
+                        &*parser_service,
+                        &*embedding_service,
+                    )
+                    .await
                 }
+            })
+            .buffer_unordered(concurrency);
+
+        while let Some(maybe_result) = stream.next().await {
+            progress_bar.inc(1);
+            let result = match maybe_result {
+                Some(r) => r,
+                None => continue,
             };
 
-            let content_hash = current_files
-                .get(relative_path)
-                .cloned()
-                .unwrap_or_else(|| compute_file_hash(&content));
+            progress_bar.set_message(result.relative_path.clone());
 
-            let chunks = match self
-                .parser_service
-                .parse_file(&content, relative_path, language, repository.id())
-                .await
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!("Failed to parse file {}: {}", relative_path, e);
-                    progress_bar.inc(1);
-                    continue;
-                }
-            };
-
-            if !chunks.is_empty() {
-                let embeddings = match self.embedding_service.embed_chunks(&chunks).await {
-                    Ok(e) => e,
-                    Err(e) => {
-                        warn!("Failed to generate embeddings for {}: {}", relative_path, e);
-                        progress_bar.inc(1);
-                        continue;
-                    }
-                };
-                self.vector_repo.save_batch(&chunks, &embeddings).await?;
+            if !result.chunks.is_empty() {
+                self.vector_repo
+                    .save_batch(&result.chunks, &result.embeddings)
+                    .await?;
             }
 
-            let refs_count = if let Some(scip_file_refs) = scip_refs.get(relative_path) {
+            let refs_count = if let Some(scip_file_refs) = scip_refs.get(&result.relative_path) {
                 debug!(
                     "Using {} SCIP references for {}",
                     scip_file_refs.len(),
-                    relative_path
+                    result.relative_path
                 );
                 self.call_graph_use_case
                     .save_references(scip_file_refs)
@@ -549,47 +550,44 @@ impl IndexRepositoryUseCase {
             };
             new_reference_count += refs_count;
 
-            // Only add file hash after successful indexing
+            let content_hash = current_files_snapshot
+                .get(&result.relative_path)
+                .cloned()
+                .unwrap_or(result.content_hash);
+
             new_file_hashes.push(FileHash::new(
-                relative_path.clone(),
+                result.relative_path.clone(),
                 content_hash,
                 repository.id().to_string(),
             ));
 
             processed_count += 1;
-            new_chunk_count += chunks.len() as u64;
+            new_chunk_count += result.chunks.len() as u64;
 
-            // Track language statistics for new/modified files
-            let lang_key = language.as_str().to_string();
+            let lang_key = result.language.as_str().to_string();
             let stats = language_stats.entry(lang_key).or_default();
             stats.file_count += 1;
-            stats.chunk_count += chunks.len() as u64;
+            stats.chunk_count += result.chunks.len() as u64;
 
             debug!(
                 "Indexed {} chunks, {} references from {}",
-                chunks.len(),
+                result.chunks.len(),
                 refs_count,
-                relative_path
+                result.relative_path
             );
-            progress_bar.inc(1);
         }
 
         progress_bar.finish_and_clear();
 
         // SCIP references for unchanged files.
-        //
-        // The main loop above only saves references for added/modified files.
-        // Unchanged files are skipped for embedding, but their call-graph edges
-        // can still change when cross-file analysis (SCIP) is re-run (e.g. a
-        // callee was renamed in another file).  Persist all SCIP refs that were
-        // not already handled above.
-        let processed_set: std::collections::HashSet<&String> =
-            added.iter().chain(modified.iter()).copied().collect();
+        let processed_set: HashSet<String> = new_file_hashes
+            .iter()
+            .map(|h| h.file_path().to_string())
+            .collect();
         for (relative_path, file_refs) in &scip_refs {
             if processed_set.contains(relative_path) {
                 continue;
             }
-            // Replace stale references with the fresh SCIP output.
             self.call_graph_use_case
                 .delete_by_file(repository.id(), relative_path)
                 .await?;
@@ -601,7 +599,6 @@ impl IndexRepositoryUseCase {
         }
 
         // Track language statistics for unchanged files
-        // We need to count them by language based on their file extensions
         for path in current_paths.intersection(&existing_paths) {
             if !modified.contains(path) {
                 let entry_path = absolute_path.join(*path);
@@ -610,19 +607,14 @@ impl IndexRepositoryUseCase {
                     let lang_key = language.as_str().to_string();
                     let stats = language_stats.entry(lang_key).or_default();
                     stats.file_count += 1;
-                    // Note: We don't have chunk counts for unchanged files without querying DB
-                    // For simplicity, we'll just track file counts; chunk counts for unchanged
-                    // files would require an additional query
                 }
             }
         }
 
-        // Save new file hashes
         if !new_file_hashes.is_empty() {
             self.file_hash_repo.save_batch(&new_file_hashes).await?;
         }
 
-        // Calculate total stats
         let total_file_count = unchanged_count as u64 + processed_count;
         let previous_chunk_count = repository.chunk_count();
         let total_chunk_count = previous_chunk_count - deleted_chunk_count + new_chunk_count;
@@ -651,4 +643,74 @@ impl IndexRepositoryUseCase {
             .await?
             .ok_or_else(|| DomainError::internal("Repository not found after indexing"))
     }
+}
+
+/// Intermediate result of the concurrent parse+embed phase.
+struct FileParseResult {
+    relative_path: String,
+    content_hash: String,
+    language: Language,
+    chunks: Vec<crate::domain::CodeChunk>,
+    embeddings: Vec<Embedding>,
+}
+
+/// Read, parse and embed a single file.  Returns `None` when the file should
+/// be skipped (read/parse/embed failure); warnings are emitted in that case.
+async fn parse_and_embed(
+    entry_path: PathBuf,
+    absolute_path: &Path,
+    repo_id: &str,
+    parser_service: &dyn ParserService,
+    embedding_service: &dyn EmbeddingService,
+) -> Option<FileParseResult> {
+    let language = Language::from_path(&entry_path);
+    let relative_path = entry_path
+        .strip_prefix(absolute_path)
+        .unwrap_or(&entry_path)
+        .to_string_lossy()
+        .to_string();
+
+    let content = match tokio::fs::read_to_string(&entry_path).await {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Failed to read file {}: {}", relative_path, e);
+            return None;
+        }
+    };
+
+    let content_hash = compute_file_hash(&content);
+
+    let chunks = match parser_service
+        .parse_file(&content, &relative_path, language, repo_id)
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Failed to parse file {}: {}", relative_path, e);
+            return None;
+        }
+    };
+
+    let embeddings = if chunks.is_empty() {
+        vec![]
+    } else {
+        match embedding_service.embed_chunks(&chunks).await {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(
+                    "Failed to generate embeddings for {}: {}",
+                    relative_path, e
+                );
+                return None;
+            }
+        }
+    };
+
+    Some(FileParseResult {
+        relative_path,
+        content_hash,
+        language,
+        chunks,
+        embeddings,
+    })
 }
