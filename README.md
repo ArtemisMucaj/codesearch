@@ -213,7 +213,7 @@ Callees (3 total) — what this symbol uses:
 | Flag | Command | Default | Description |
 |------|---------|---------|-------------|
 | `--depth` | `impact` | `5` | Maximum BFS hop depth |
-| `--limit` | `context` | (none) | Max callers/callees per direction |
+| `-l, --limit` | `context` | (none) | Max callers/callees per direction |
 | `-r, --repository` | both | (none) | Restrict to a specific repository |
 | `-F, --format` | both | `text` | Output format: `text` or `json` |
 

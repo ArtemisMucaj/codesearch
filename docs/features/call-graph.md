@@ -107,7 +107,7 @@ codesearch context authenticate --format json
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--limit` | (none) | Max callers/callees to return per direction |
+| `-l, --limit` | (none) | Max callers/callees to return per direction |
 | `-r, --repository` | (none) | Restrict lookup to one repository |
 | `-F, --format` | `text` | Output format: `text` or `json` |
 
