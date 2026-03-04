@@ -16,8 +16,8 @@ pub use cli::{Commands, EmbeddingTarget, OutputFormat, QueryExpansionTarget, Rer
 pub use connector::{
     AnthropicClient, AnthropicReranking, ChatClient, DuckdbCallGraphRepository,
     DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository,
-    InMemoryVectorRepository, LlmQueryExpander, MockEmbedding, MockReranking, OpenAiChatClient,
-    OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterParser,
+    InMemoryVectorRepository, LlmQueryExpander, MockEmbedding, MockReranking, NamespaceEmbeddingConfig,
+    OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterParser,
 };
 
 pub use domain::{
