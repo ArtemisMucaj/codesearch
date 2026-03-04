@@ -29,6 +29,8 @@ pub struct SearchState {
     pub snippet_scroll: u16,
     /// Optional repository filter forwarded to the use case.
     pub repository: Option<String>,
+    /// Cache key of the most recently dispatched search request.
+    pub pending_key: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -42,6 +44,8 @@ pub struct ImpactState {
     /// Vertical scroll offset for the flame graph.
     pub flame_scroll: u16,
     pub repository: Option<String>,
+    /// Cache key of the most recently dispatched impact request.
+    pub pending_key: Option<String>,
 }
 
 #[derive(Debug)]
@@ -59,6 +63,8 @@ pub struct ContextState {
     /// Vertical scroll offset for the code panel.
     pub snippet_scroll: u16,
     pub repository: Option<String>,
+    /// Cache key of the most recently dispatched context request.
+    pub pending_key: Option<String>,
 }
 
 impl Default for ContextState {
@@ -75,12 +81,14 @@ impl Default for ContextState {
             error: None,
             snippet_scroll: 0,
             repository: None,
+            pending_key: None,
         }
     }
 }
 
 // ── Top-level app state ───────────────────────────────────────────────────────
 
+#[derive(Debug)]
 pub struct AppState {
     pub mode: ActiveMode,
     pub search: SearchState,

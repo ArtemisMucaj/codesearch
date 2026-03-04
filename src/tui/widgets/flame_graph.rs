@@ -30,8 +30,11 @@ pub fn render(frame: &mut Frame, area: Rect, analysis: &ImpactAnalysis, scroll: 
     // Row 0 — root symbol
     all_lines.push(build_row(&[analysis.root_symbol.as_str()], width, 0, max_depth));
 
-    // Rows 1..=max_depth — callers at each depth
+    // Rows 1..=max_depth — callers at each depth (skip empty buckets)
     for (i, nodes) in analysis.by_depth.iter().enumerate() {
+        if nodes.is_empty() {
+            continue;
+        }
         let depth = i + 1;
         let symbols: Vec<&str> = nodes.iter().map(|n| n.symbol.as_str()).collect();
         all_lines.push(build_row(&symbols, width, depth, max_depth));

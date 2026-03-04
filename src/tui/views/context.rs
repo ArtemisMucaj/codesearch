@@ -161,7 +161,10 @@ fn render_pane_list(
 fn render_snippet(frame: &mut Frame, area: Rect, state: &AppState) {
     let s = &state.context;
 
-    let (content, title, start_line) = match &s.snippet {
+    // When an error is active treat it the same as no snippet to avoid showing stale code.
+    let snippet = if s.error.is_some() { &None } else { &s.snippet };
+
+    let (content, title, start_line) = match snippet {
         Some(chunk) => (
             chunk.content().to_string(),
             shorten_path(chunk.file_path()),

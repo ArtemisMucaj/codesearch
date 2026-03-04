@@ -181,7 +181,6 @@ async fn main() -> Result<()> {
 
     // Handle TUI command specially — it takes over the terminal for its lifetime.
     if let Commands::Tui { repository } = cli.command {
-        use std::sync::Arc;
         use codesearch::tui::TuiApp;
         let app = TuiApp::new(
             Arc::new(container.search_use_case()),

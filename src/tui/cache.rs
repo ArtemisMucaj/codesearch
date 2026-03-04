@@ -24,17 +24,20 @@ pub struct TuiCache {
 impl TuiCache {
     /// Build the cache key for a search query.
     pub fn search_key(query: &str, repository: Option<&str>) -> String {
-        format!("{}|{}", query, repository.unwrap_or(""))
+        serde_json::to_string(&[query, repository.unwrap_or("")])
+            .unwrap_or_else(|_| format!("{:?}", (query, repository)))
     }
 
     /// Build the cache key for an impact analysis.
     pub fn impact_key(symbol: &str, depth: usize, repository: Option<&str>) -> String {
-        format!("{}|{}|{}", symbol, depth, repository.unwrap_or(""))
+        serde_json::to_string(&(symbol, depth, repository.unwrap_or("")))
+            .unwrap_or_else(|_| format!("{:?}", (symbol, depth, repository)))
     }
 
     /// Build the cache key for a symbol context lookup.
     pub fn context_key(symbol: &str, repository: Option<&str>) -> String {
-        format!("{}|{}", symbol, repository.unwrap_or(""))
+        serde_json::to_string(&[symbol, repository.unwrap_or("")])
+            .unwrap_or_else(|_| format!("{:?}", (symbol, repository)))
     }
 
     /// Build the cache key for a snippet lookup.

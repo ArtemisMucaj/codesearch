@@ -57,7 +57,13 @@ fn render_results(frame: &mut Frame, area: Rect, state: &AppState) {
 
 fn render_snippet(frame: &mut Frame, area: Rect, state: &AppState) {
     let s = &state.search;
-    let selected = s.results.get(s.selected);
+
+    // Do not render a (potentially stale) snippet when an error is active.
+    let selected = if s.error.is_some() {
+        None
+    } else {
+        s.results.get(s.selected)
+    };
 
     let (content, title, start_line) = match selected {
         Some(r) => (

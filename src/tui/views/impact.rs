@@ -60,6 +60,18 @@ fn render_affected(frame: &mut Frame, area: Rect, state: &AppState) {
 fn render_flame(frame: &mut Frame, area: Rect, state: &AppState) {
     let s = &state.impact;
 
+    if let Some(err) = &s.error {
+        let block = Block::default()
+            .title(" Blast Radius ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red));
+        frame.render_widget(
+            Paragraph::new(format!("Error: {}", err)).block(block),
+            area,
+        );
+        return;
+    }
+
     match &s.analysis {
         None => {
             let block = Block::default()

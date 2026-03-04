@@ -919,7 +919,7 @@ impl VectorRepository for DuckdbVectorRepository {
                 format!(
                     "SELECT id, file_path, content, start_line, end_line, language, node_type, \
                      symbol_name, parent_symbol, repository_id \
-                     FROM \"{}\".chunks WHERE file_path = ? ORDER BY start_line LIMIT 100",
+                     FROM \"{}\".chunks WHERE file_path = ? ORDER BY start_line",
                     self.namespace
                 ),
                 false,
@@ -930,7 +930,7 @@ impl VectorRepository for DuckdbVectorRepository {
                     "SELECT id, file_path, content, start_line, end_line, language, node_type, \
                      symbol_name, parent_symbol, repository_id \
                      FROM \"{}\".chunks WHERE file_path = ? AND repository_id = ? \
-                     ORDER BY start_line LIMIT 100",
+                     ORDER BY start_line",
                     self.namespace
                 ),
                 true,

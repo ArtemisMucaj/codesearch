@@ -4,6 +4,7 @@ use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
+use tracing::warn;
 
 use crate::application::{
     ImpactAnalysisUseCase, SearchCodeUseCase, SnippetLookupUseCase, SymbolContextUseCase,
@@ -72,7 +73,12 @@ impl TuiApp {
                     match maybe_ev {
                         Some(Ok(Event::Key(key))) => self.handle_key(key),
                         Some(Ok(Event::Resize(..))) => {}
-                        _ => {}
+                        Some(Ok(_)) => {}
+                        Some(Err(e)) => {
+                            warn!("terminal event error: {}", e);
+                            break;
+                        }
+                        None => break,
                     }
                 }
             }
@@ -254,6 +260,7 @@ impl TuiApp {
         self.state.search.error = None;
         self.state.search.selected = 0;
         self.state.search.snippet_scroll = 0;
+        self.state.search.pending_key = Some(key.clone());
 
         let uc = Arc::clone(&self.search_uc);
         let tx = self.event_tx.clone();
@@ -267,7 +274,9 @@ impl TuiApp {
                 q = q.with_repositories(vec![r]);
             }
             let result = uc.execute(q).await.map_err(|e| e.to_string());
-            tx.send(TuiEvent::SearchDone { key, result }).ok();
+            if let Err(e) = tx.send(TuiEvent::SearchDone { key, result }) {
+                warn!("SearchDone send failed: {}", e);
+            }
         });
     }
 
@@ -295,6 +304,7 @@ impl TuiApp {
         self.state.impact.error = None;
         self.state.impact.selected = 0;
         self.state.impact.flame_scroll = 0;
+        self.state.impact.pending_key = Some(key.clone());
 
         let uc = Arc::clone(&self.impact_uc);
         let tx = self.event_tx.clone();
@@ -305,7 +315,9 @@ impl TuiApp {
                 .analyze(&symbol, IMPACT_DEPTH, repository.as_deref())
                 .await
                 .map_err(|e| e.to_string());
-            tx.send(TuiEvent::ImpactDone { key, result }).ok();
+            if let Err(e) = tx.send(TuiEvent::ImpactDone { key, result }) {
+                warn!("ImpactDone send failed: {}", e);
+            }
         });
     }
 
@@ -333,6 +345,7 @@ impl TuiApp {
         self.state.context.selected_caller = 0;
         self.state.context.selected_callee = 0;
         self.state.context.snippet_scroll = 0;
+        self.state.context.pending_key = Some(key.clone());
 
         let uc = Arc::clone(&self.context_uc);
         let tx = self.event_tx.clone();
@@ -343,7 +356,9 @@ impl TuiApp {
                 .get_context(&symbol, repository.as_deref(), Some(50))
                 .await
                 .map_err(|e| e.to_string());
-            tx.send(TuiEvent::ContextDone { key, result }).ok();
+            if let Err(e) = tx.send(TuiEvent::ContextDone { key, result }) {
+                warn!("ContextDone send failed: {}", e);
+            }
         });
     }
 
@@ -393,11 +408,12 @@ impl TuiApp {
                 .get_snippet(&repository_id, &edge.file_path, edge.line)
                 .await
                 .map_err(|e| e.to_string());
-            tx.send(TuiEvent::SnippetDone {
+            if let Err(e) = tx.send(TuiEvent::SnippetDone {
                 key: cache_key,
                 result,
-            })
-            .ok();
+            }) {
+                warn!("SnippetDone send failed: {}", e);
+            }
         });
     }
 
@@ -406,6 +422,10 @@ impl TuiApp {
     fn handle_app_event(&mut self, event: TuiEvent) {
         match event {
             TuiEvent::SearchDone { key, result } => {
+                // Ignore results that are no longer for the active dispatch.
+                if self.state.search.pending_key.as_deref() != Some(&key) {
+                    return;
+                }
                 self.state.search.loading = false;
                 match result {
                     Ok(results) => {
@@ -420,6 +440,10 @@ impl TuiApp {
                 }
             }
             TuiEvent::ImpactDone { key, result } => {
+                // Ignore results that are no longer for the active dispatch.
+                if self.state.impact.pending_key.as_deref() != Some(&key) {
+                    return;
+                }
                 self.state.impact.loading = false;
                 match result {
                     Ok(analysis) => {
@@ -434,6 +458,10 @@ impl TuiApp {
                 }
             }
             TuiEvent::ContextDone { key, result } => {
+                // Ignore results that are no longer for the active dispatch.
+                if self.state.context.pending_key.as_deref() != Some(&key) {
+                    return;
+                }
                 self.state.context.loading = false;
                 match result {
                     Ok(context) => {
@@ -453,14 +481,15 @@ impl TuiApp {
                 self.state.context.snippet_loading = false;
                 match result {
                     Ok(chunk) => {
+                        // Cache both Some (found) and None (explicitly not found).
                         self.cache.snippets.insert(key, chunk.clone());
                         self.state.context.snippet = chunk;
                         self.state.context.snippet_scroll = 0;
                     }
-                    Err(_) => {
-                        // Cache the miss so we don't retry the same failed lookup.
-                        self.cache.snippets.insert(key, None);
-                        self.state.context.snippet = None;
+                    Err(e) => {
+                        // Transient backend error: log but do not cache so the
+                        // lookup can be retried on the next navigation.
+                        warn!("snippet lookup failed: {}", e);
                     }
                 }
             }
