@@ -19,10 +19,26 @@ pub enum EmbeddingTarget {
     #[default]
     Onnx,
     /// OpenAI-compatible `/v1/embeddings` API (e.g. LM Studio running locally).
-    /// Requires a running embedding model at ANTHROPIC_BASE_URL (default
-    /// http://localhost:1234). Reranking uses the same server's /v1/messages
-    /// endpoint (ANTHROPIC_MODEL, ANTHROPIC_API_KEY).
+    /// Set `OPENAI_BASE_URL` to override the default `http://localhost:1234`.
     Api,
+}
+
+/// Reranking backend to use after retrieval.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum RerankingTarget {
+    /// Bundled ONNX cross-encoder model (default, offline-capable).
+    #[default]
+    Onnx,
+    /// LLM reranker via Anthropic-compatible `/v1/messages` (e.g. LM Studio or
+    /// Anthropic cloud). Controlled by `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`,
+    /// and `ANTHROPIC_API_KEY`.
+    #[value(name = "api/anthropic")]
+    ApiAnthropic,
+    /// LLM reranker via OpenAI-compatible `/v1/chat/completions` (e.g. LM
+    /// Studio). Controlled by `OPENAI_BASE_URL`, `OPENAI_MODEL`, and
+    /// `OPENAI_API_KEY`.
+    #[value(name = "api/openai")]
+    ApiOpenAi,
 }
 
 #[derive(Subcommand)]

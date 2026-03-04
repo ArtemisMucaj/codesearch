@@ -11,13 +11,13 @@ pub use application::{
     SearchCodeUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
 };
 
-pub use cli::{Commands, EmbeddingTarget, OutputFormat};
+pub use cli::{Commands, EmbeddingTarget, OutputFormat, RerankingTarget};
 
 pub use connector::{
-    AnthropicClient, ChatClient, DuckdbCallGraphRepository, DuckdbFileHashRepository,
-    DuckdbMetadataRepository, DuckdbVectorRepository, InMemoryVectorRepository, LlmQueryExpander,
-    LmStudioEmbedding, LmStudioReranking, MockEmbedding, MockReranking, OrtEmbedding, OrtReranking,
-    TreeSitterParser,
+    AnthropicClient, AnthropicReranking, ChatClient, DuckdbCallGraphRepository,
+    DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository,
+    InMemoryVectorRepository, LlmQueryExpander, MockEmbedding, MockReranking, OpenAiEmbedding,
+    OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterParser,
 };
 
 pub use domain::{

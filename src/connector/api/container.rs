@@ -6,15 +6,15 @@ use tracing::debug;
 
 use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, QueryExpander};
 use crate::connector::adapter::scip::ScipRunner;
-use crate::cli::EmbeddingTarget;
+use crate::cli::{EmbeddingTarget, RerankingTarget};
 use crate::connector::adapter::NamespaceEmbeddingConfig;
 use crate::{
-    AnthropicClient, DeleteRepositoryUseCase, DuckdbCallGraphRepository, DuckdbFileHashRepository,
-    DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService, ImpactAnalysisUseCase,
-    InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander,
-    LmStudioEmbedding, LmStudioReranking, MockEmbedding, MockReranking, OrtEmbedding, OrtReranking,
-    RerankingService, Scip, SearchCodeUseCase, SymbolContextUseCase, TreeSitterParser,
-    VectorRepository,
+    AnthropicClient, AnthropicReranking, DeleteRepositoryUseCase, DuckdbCallGraphRepository,
+    DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
+    ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
+    ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding, MockReranking, OpenAiEmbedding,
+    OpenAiReranking, OrtEmbedding, OrtReranking, RerankingService, Scip, SearchCodeUseCase,
+    SymbolContextUseCase, TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -44,12 +44,20 @@ pub struct ContainerConfig {
     /// Which embedding backend to use.
     ///
     /// `Onnx` (default): bundled ONNX models downloaded from HuggingFace.
-    /// `Api`: OpenAI-compatible `/v1/embeddings` endpoint (e.g. LM Studio at
-    /// `ANTHROPIC_BASE_URL`).
+    /// `Api`: OpenAI-compatible `/v1/embeddings` endpoint (e.g. LM Studio).
+    /// Set `OPENAI_BASE_URL` to override the default `http://localhost:1234`.
     ///
     /// The chosen target and model are stored in `namespace_config` on first use
     /// and validated on every subsequent open — mismatches are hard errors.
     pub embedding_target: EmbeddingTarget,
+    /// Which reranking backend to use (when reranking is enabled).
+    ///
+    /// `Onnx` (default): bundled ONNX cross-encoder model.
+    /// `ApiAnthropic`: LLM via Anthropic-compatible `/v1/messages` — uses
+    ///   `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `ANTHROPIC_API_KEY`.
+    /// `ApiOpenAi`: LLM via OpenAI-compatible `/v1/chat/completions` — uses
+    ///   `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`.
+    pub reranking_target: RerankingTarget,
     /// Embedding model identifier.
     ///
     /// For `Onnx`: HuggingFace model ID (default: `sentence-transformers/all-MiniLM-L6-v2`).
@@ -159,10 +167,10 @@ impl Container {
                 }
                 EmbeddingTarget::Api => {
                     debug!(
-                        "Using API embedding service (model='{}', dims={})",
+                        "Using OpenAI embedding service (model='{}', dims={})",
                         effective_model, config.embedding_dimensions
                     );
-                    Arc::new(LmStudioEmbedding::new(
+                    Arc::new(OpenAiEmbedding::new(
                         effective_model.clone(),
                         config.embedding_dimensions,
                     ))
@@ -176,14 +184,14 @@ impl Container {
                 debug!("Using mock reranking service");
                 Some(Arc::new(MockReranking::new()))
             } else {
-                match config.embedding_target {
-                    EmbeddingTarget::Onnx => {
+                match config.reranking_target {
+                    RerankingTarget::Onnx => {
                         debug!("Initializing ONNX reranking service...");
                         match OrtReranking::new(None) {
                             Ok(reranker) => Some(Arc::new(reranker)),
                             Err(e) => {
                                 tracing::warn!(
-                                    "Failed to initialize reranking service: {}. \
+                                    "Failed to initialize ONNX reranking service: {}. \
                                      Continuing without reranking.",
                                     e
                                 );
@@ -191,10 +199,14 @@ impl Container {
                             }
                         }
                     }
-                    EmbeddingTarget::Api => {
-                        debug!("Using API reranking service (chat-based, /v1/messages)");
+                    RerankingTarget::ApiAnthropic => {
+                        debug!("Using Anthropic reranking service (/v1/messages)");
                         let client = Arc::new(AnthropicClient::from_env());
-                        Some(Arc::new(LmStudioReranking::new(client)))
+                        Some(Arc::new(AnthropicReranking::new(client)))
+                    }
+                    RerankingTarget::ApiOpenAi => {
+                        debug!("Using OpenAI reranking service (/v1/chat/completions)");
+                        Some(Arc::new(OpenAiReranking::new()))
                     }
                 }
             }

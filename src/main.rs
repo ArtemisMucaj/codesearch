@@ -6,7 +6,7 @@ use rmcp::ServiceExt;
 use tracing_subscriber::EnvFilter;
 
 use codesearch::connector::adapter::mcp::CodesearchMcpServer;
-use codesearch::cli::EmbeddingTarget;
+use codesearch::cli::{EmbeddingTarget, RerankingTarget};
 use codesearch::{Commands, Container, ContainerConfig, Router};
 
 #[derive(Parser)]
@@ -44,14 +44,14 @@ struct Cli {
     /// or 'api' for an OpenAI-compatible /v1/embeddings endpoint (e.g. LM Studio).
     /// The chosen target and model are stored per namespace on first index and
     /// validated on every subsequent operation — mismatches are hard errors.
+    /// Set OPENAI_BASE_URL to override the default http://localhost:1234.
     #[arg(long, global = true, value_enum, default_value = "onnx")]
     embedding_target: EmbeddingTarget,
 
     /// Embedding model identifier.
     /// For 'onnx': HuggingFace model ID (default: sentence-transformers/all-MiniLM-L6-v2).
     /// For 'api': model name sent in the /v1/embeddings request body; must match
-    /// the model loaded in LM Studio (or target server). Use ANTHROPIC_BASE_URL
-    /// to point at a non-default server address.
+    /// the model loaded in the target server (set OPENAI_BASE_URL for non-default address).
     #[arg(long, global = true)]
     embedding_model: Option<String>,
 
@@ -61,6 +61,13 @@ struct Cli {
     /// changed without re-indexing.
     #[arg(long, global = true, default_value = "384")]
     embedding_dimensions: usize,
+
+    /// Reranking backend (used when --no-rerank is not set):
+    ///   'onnx'           — bundled ONNX cross-encoder model (default).
+    ///   'api/anthropic'  — LLM via /v1/messages (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL).
+    ///   'api/openai'     — LLM via /v1/chat/completions (OPENAI_BASE_URL, OPENAI_MODEL).
+    #[arg(long, global = true, value_enum, default_value = "onnx")]
+    reranking_target: RerankingTarget,
 
     #[command(subcommand)]
     command: Commands,
@@ -121,6 +128,7 @@ async fn main() -> Result<()> {
         embedding_target: cli.embedding_target,
         embedding_model: cli.embedding_model,
         embedding_dimensions: cli.embedding_dimensions,
+        reranking_target: cli.reranking_target,
         read_only,
     };
 
