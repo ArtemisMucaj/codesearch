@@ -7,6 +7,8 @@ use crate::tui::state::AppState;
 use crate::tui::widgets::{code_panel, result_list};
 use crate::tui::widgets::result_list::ListEntry;
 
+use super::format::shorten_path;
+
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let panes = Layout::horizontal([
         Constraint::Percentage(35),
@@ -77,11 +79,3 @@ fn render_snippet(frame: &mut Frame, area: Rect, state: &AppState) {
     code_panel::render(frame, area, &title, &content, start_line, s.snippet_scroll);
 }
 
-fn shorten_path(path: &str) -> String {
-    // Show at most the last two path components for readability.
-    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if parts.len() <= 2 {
-        return path.to_string();
-    }
-    format!("…/{}/{}", parts[parts.len() - 2], parts[parts.len() - 1])
-}

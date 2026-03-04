@@ -32,7 +32,12 @@ impl SnippetLookupUseCase {
         let chunks = self
             .vector_repo
             .find_chunks_by_file(repository_id, file_path)
-            .await?;
+            .await
+            .map_err(|e| {
+                DomainError::storage(format!(
+                    "snippet lookup for '{file_path}' in repository '{repository_id}': {e}"
+                ))
+            })?;
 
         // Prefer the smallest chunk whose range fully contains the reference line
         // so we show the tightest relevant context (e.g. a function rather than a module).

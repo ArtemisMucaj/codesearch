@@ -7,6 +7,8 @@ use crate::tui::state::{AppState, ContextPane};
 use crate::tui::widgets::code_panel;
 use crate::tui::widgets::result_list::ListEntry;
 
+use super::format::{short_symbol, shorten_path};
+
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let panes = Layout::horizontal([
         Constraint::Percentage(35),
@@ -56,15 +58,7 @@ fn render_edges(frame: &mut Frame, area: Rect, state: &AppState) {
             .collect(),
     };
 
-    let callers_border = if callers_focused {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-
-    // render_stateful_widget wants ownership of state, so we inline the block title.
     let caller_count = caller_entries.len();
-    let _ = callers_border; // used below via result_list which sets its own border
 
     render_pane_list(
         frame,
@@ -195,14 +189,3 @@ fn render_snippet(frame: &mut Frame, area: Rect, state: &AppState) {
     code_panel::render(frame, area, &title, &content, start_line, s.snippet_scroll);
 }
 
-fn shorten_path(path: &str) -> String {
-    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if parts.len() <= 2 {
-        return path.to_string();
-    }
-    format!("…/{}/{}", parts[parts.len() - 2], parts[parts.len() - 1])
-}
-
-fn short_symbol(fq: &str) -> &str {
-    fq.rsplit(&['/', ':', '.']).next().unwrap_or(fq)
-}

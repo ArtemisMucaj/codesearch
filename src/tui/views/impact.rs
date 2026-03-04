@@ -8,6 +8,8 @@ use crate::tui::state::AppState;
 use crate::tui::widgets::{flame_graph, result_list};
 use crate::tui::widgets::result_list::ListEntry;
 
+use super::format::{short_symbol, shorten_path};
+
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     let panes = Layout::horizontal([
         Constraint::Percentage(35),
@@ -101,14 +103,3 @@ fn flat_nodes(by_depth: &[Vec<ImpactNode>]) -> Vec<&ImpactNode> {
     by_depth.iter().flatten().collect()
 }
 
-fn shorten_path(path: &str) -> String {
-    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if parts.len() <= 2 {
-        return path.to_string();
-    }
-    format!("…/{}/{}", parts[parts.len() - 2], parts[parts.len() - 1])
-}
-
-fn short_symbol(fq: &str) -> &str {
-    fq.rsplit(&['/', ':', '.']).next().unwrap_or(fq)
-}

@@ -19,6 +19,7 @@ use super::views;
 const SEARCH_LIMIT: usize = 20;
 const IMPACT_DEPTH: usize = 5;
 const SCROLL_STEP: u16 = 5;
+const DEFAULT_CONTEXT_LIMIT: u32 = 50;
 
 pub struct TuiApp {
     state: AppState,
@@ -367,7 +368,7 @@ impl TuiApp {
 
         tokio::spawn(async move {
             let result = uc
-                .get_context(&symbol, repository.as_deref(), Some(50))
+                .get_context(&symbol, repository.as_deref(), Some(DEFAULT_CONTEXT_LIMIT))
                 .await
                 .map_err(|e| e.to_string());
             if let Err(e) = tx.send(TuiEvent::ContextDone { key, result }) {
