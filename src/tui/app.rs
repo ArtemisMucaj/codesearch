@@ -341,6 +341,11 @@ impl TuiApp {
             self.state.context.error = None;
             self.state.context.loading = false;
             self.state.context.pending_key = Some(key);
+            // Clear stale snippet state before load_context_snippet so that if
+            // the new context has no edges the old snippet is not left visible.
+            self.state.context.snippet = None;
+            self.state.context.snippet_loading = false;
+            self.state.context.pending_snippet_key = None;
             self.load_context_snippet();
             return;
         }
@@ -348,10 +353,13 @@ impl TuiApp {
         self.state.context.loading = true;
         self.state.context.error = None;
         self.state.context.snippet = None;
+        self.state.context.snippet_loading = false;
         self.state.context.selected_caller = 0;
         self.state.context.selected_callee = 0;
         self.state.context.snippet_scroll = 0;
         self.state.context.pending_key = Some(key.clone());
+        // Invalidate any in-flight snippet task so its SnippetDone is discarded.
+        self.state.context.pending_snippet_key = None;
 
         let uc = Arc::clone(&self.context_uc);
         let tx = self.event_tx.clone();
@@ -395,17 +403,19 @@ impl TuiApp {
         let repository_id = s.repository.clone().unwrap_or_default();
         let cache_key = TuiCache::snippet_key(&repository_id, &edge.file_path, edge.line);
 
-        // Cache hit (including negative hits stored as None).
+        // Cache hit (including not-found results stored as None).
         if let Some(cached) = self.cache.snippets.get(&cache_key).cloned() {
             s.snippet = cached;
             s.snippet_scroll = 0;
             s.snippet_loading = false;
+            s.pending_snippet_key = Some(cache_key);
             return;
         }
 
         s.snippet = None;
         s.snippet_scroll = 0;
         s.snippet_loading = true;
+        s.pending_snippet_key = Some(cache_key.clone());
 
         let uc = Arc::clone(&self.snippet_uc);
         let tx = self.event_tx.clone();
@@ -485,6 +495,10 @@ impl TuiApp {
                 }
             }
             TuiEvent::SnippetDone { key, result } => {
+                // Ignore results from superseded snippet requests (e.g. rapid navigation).
+                if self.state.context.pending_snippet_key.as_ref() != Some(&key) {
+                    return;
+                }
                 self.state.context.snippet_loading = false;
                 match result {
                     Ok(chunk) => {

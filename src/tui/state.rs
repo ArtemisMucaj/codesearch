@@ -1,5 +1,6 @@
 use crate::application::{ImpactAnalysis, SymbolContext};
 use crate::domain::{CodeChunk, SearchResult};
+use crate::tui::cache::SnippetKey;
 
 /// Which input mode / view is active.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +66,9 @@ pub struct ContextState {
     pub repository: Option<String>,
     /// Cache key of the most recently dispatched context request.
     pub pending_key: Option<String>,
+    /// Cache key of the most recently dispatched snippet request.
+    /// Used to discard SnippetDone events that arrived out of order.
+    pub pending_snippet_key: Option<SnippetKey>,
 }
 
 impl Default for ContextState {
@@ -82,6 +86,7 @@ impl Default for ContextState {
             snippet_scroll: 0,
             repository: None,
             pending_key: None,
+            pending_snippet_key: None,
         }
     }
 }
