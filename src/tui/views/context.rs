@@ -161,10 +161,10 @@ fn render_pane_list(
 fn render_snippet(frame: &mut Frame, area: Rect, state: &AppState) {
     let s = &state.context;
 
-    // When an error is active treat it the same as no snippet to avoid showing stale code.
-    let snippet = if s.error.is_some() { &None } else { &s.snippet };
+    // When an error is active, suppress any stale snippet so the hint pane shows instead.
+    let chunk = if s.error.is_none() { s.snippet.as_ref() } else { None };
 
-    let (content, title, start_line) = match snippet {
+    let (content, title, start_line) = match chunk {
         Some(chunk) => (
             chunk.content().to_string(),
             shorten_path(chunk.file_path()),

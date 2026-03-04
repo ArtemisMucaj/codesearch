@@ -4,7 +4,7 @@ use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::application::{
     ImpactAnalysisUseCase, SearchCodeUseCase, SnippetLookupUseCase, SymbolContextUseCase,
@@ -253,6 +253,8 @@ impl TuiApp {
             self.state.search.selected = 0;
             self.state.search.snippet_scroll = 0;
             self.state.search.error = None;
+            self.state.search.loading = false;
+            self.state.search.pending_key = Some(key);
             return;
         }
 
@@ -275,7 +277,7 @@ impl TuiApp {
             }
             let result = uc.execute(q).await.map_err(|e| e.to_string());
             if let Err(e) = tx.send(TuiEvent::SearchDone { key, result }) {
-                warn!("SearchDone send failed: {}", e);
+                debug!("SearchDone send failed (app already exited): {}", e);
             }
         });
     }
@@ -297,6 +299,8 @@ impl TuiApp {
             self.state.impact.selected = 0;
             self.state.impact.flame_scroll = 0;
             self.state.impact.error = None;
+            self.state.impact.loading = false;
+            self.state.impact.pending_key = Some(key);
             return;
         }
 
@@ -316,7 +320,7 @@ impl TuiApp {
                 .await
                 .map_err(|e| e.to_string());
             if let Err(e) = tx.send(TuiEvent::ImpactDone { key, result }) {
-                warn!("ImpactDone send failed: {}", e);
+                debug!("ImpactDone send failed (app already exited): {}", e);
             }
         });
     }
@@ -335,6 +339,8 @@ impl TuiApp {
             self.state.context.selected_callee = 0;
             self.state.context.snippet_scroll = 0;
             self.state.context.error = None;
+            self.state.context.loading = false;
+            self.state.context.pending_key = Some(key);
             self.load_context_snippet();
             return;
         }
@@ -357,13 +363,14 @@ impl TuiApp {
                 .await
                 .map_err(|e| e.to_string());
             if let Err(e) = tx.send(TuiEvent::ContextDone { key, result }) {
-                warn!("ContextDone send failed: {}", e);
+                debug!("ContextDone send failed (app already exited): {}", e);
             }
         });
     }
 
     /// Serve the snippet for the currently focused context edge, cache-first.
-    /// Failed lookups are also cached as `None` to avoid repeated DB round-trips.
+    /// Not-found results (Ok(None)) are cached to avoid redundant round-trips;
+    /// transient errors are not cached so the lookup can be retried on next navigation.
     fn load_context_snippet(&mut self) {
         let s = &mut self.state.context;
 
@@ -412,7 +419,7 @@ impl TuiApp {
                 key: cache_key,
                 result,
             }) {
-                warn!("SnippetDone send failed: {}", e);
+                debug!("SnippetDone send failed (app already exited): {}", e);
             }
         });
     }
