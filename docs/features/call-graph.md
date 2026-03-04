@@ -56,16 +56,13 @@ codesearch impact authenticate --format json
 ```
 Impact analysis for 'authenticate'
 ─────────────────────────────────────────
-Total affected symbols : 4
-Max depth reached      : 2
+process_request [call]  src/router.rs:10
+└── handle_login [call]  src/api/auth.rs:42
+    └── authenticate
 
-Depth 1 (2 symbol(s)):
-  • handle_login [call]  src/api/auth.rs
-  • verify_token [call]  src/middleware/auth.rs
-
-Depth 2 (2 symbol(s)):
-  • process_request [call]  src/router.rs
-  • run_tests [call]  tests/integration.rs
+run_tests [call]  tests/integration.rs:5
+└── verify_token [call]  src/middleware/auth.rs:18
+    └── authenticate
 ```
 
 ### JSON Schema
@@ -107,7 +104,7 @@ codesearch context authenticate --format json
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--limit` | (none) | Max callers/callees to return per direction |
+| `-l, --limit` | (none) | Max callers/callees to return per direction |
 | `-r, --repository` | (none) | Restrict lookup to one repository |
 | `-F, --format` | `text` | Output format: `text` or `json` |
 
@@ -118,7 +115,6 @@ codesearch context authenticate --format json
 ```
 Context for 'authenticate'
 ─────────────────────────────────────────
-
 Callers (2 total) — who uses this symbol:
   ← handle_login [call]  src/api/auth.rs:42
   ← verify_session [call]  src/middleware/session.rs:18
