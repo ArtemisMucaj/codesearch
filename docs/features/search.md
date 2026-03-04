@@ -82,7 +82,7 @@ codesearch search "validation" --no-rerank
 - Fetches candidates from hybrid or vector search using an inverse-log formula: `num + ⌈num / ln(num)⌉` (defaults to 20 base candidates when `num ≤ 10`)
 - For **semantic-only** results, filters out candidates with vector similarity score below 0.1 (too irrelevant to benefit from reranking)
 - For **hybrid** results, the 0.1 threshold is bypassed — RRF scores are intentionally small (~0.016–0.033) and all fused results are passed to the reranker
-- Rescores remaining candidates using a cross-encoder model (mxbai-rerank-xsmall-v1)
+- Rescores remaining candidates using a cross-encoder model (bge-reranker-base)
 - Returns top `num` results by relevance score
 
 **Trade-offs:**

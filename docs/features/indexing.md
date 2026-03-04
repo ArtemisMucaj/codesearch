@@ -70,10 +70,10 @@ let embedding = model.embed(text);  // 384 dimensions
 
 #### Embedding Models
 
-| Model                          | Dimensions | Sequence Length |
-|--------------------------------|------------|-----------------|
-| mxbai-embed-xsmall-v1 (default) | 384        | 512             |
-| bge-small-en-v1.5              | 384        | 512             |
+| Model                                  | Dimensions | Sequence Length |
+|----------------------------------------|------------|-----------------|
+| all-MiniLM-L6-v2 (default)             | 384        | 512             |
+| bge-small-en-v1.5                      | 384        | 512             |
 
 ### 5. Persistence
 
@@ -198,7 +198,7 @@ Vector Search (retrieve candidates)
     ↓
 Filter (exclude candidates with vector score < 0.1)
     ↓
-Reranking (mxbai-rerank-xsmall-v1)
+Reranking (bge-reranker-base)
     ├─ Score each candidate against query
     ├─ Sort by relevance score
     └─ Keep top num results
@@ -208,10 +208,10 @@ Return Results
 
 ### Reranking Model
 
-- **Model**: `mixedbread-ai/mxbai-rerank-xsmall-v1`
+- **Model**: `BAAI/bge-reranker-base`
 - **Type**: Cross-encoder (scores query-document pairs)
-- **Size**: ~70M parameters (ONNX format)
-- **Download**: Automatic from HuggingFace Hub (~150MB)
+- **Size**: ~110M parameters (ONNX format)
+- **Download**: Automatic from HuggingFace Hub (~220MB)
 
 ### Usage
 
