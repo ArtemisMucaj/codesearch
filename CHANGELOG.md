@@ -22,6 +22,19 @@
 * unit tests for `InMemoryVectorRepository` hybrid paths: cosine vs RRF score ranges, dual-leg ranking, post-fusion `min_score` filtering, no early pruning, empty-term fallback, and limit enforcement
 * integration tests for end-to-end hybrid search: results returned with positive scores, keyword-matched chunk surfaces, special SQL characters (`%`, `_`, `!`) do not cause errors, and semantic-only baseline confirms the flag gates the BM25 leg
 
+## [0.14.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.13.1...v0.14.0) (2026-03-04)
+
+
+### Features
+
+* embedding, reranking api ([#99](https://github.com/ArtemisMucaj/codesearch/issues/99)) ([54ddd4c](https://github.com/ArtemisMucaj/codesearch/commit/54ddd4c39bd5c7c884fcf1462c5c989e9eddc6f1))
+
+
+### Bug Fixes
+
+* context and impact command output documentation ([#101](https://github.com/ArtemisMucaj/codesearch/issues/101)) ([c54e018](https://github.com/ArtemisMucaj/codesearch/commit/c54e0183f73fb99f73bd54784099f5b95699d15a))
+* duckdb retry if locked ([#102](https://github.com/ArtemisMucaj/codesearch/issues/102)) ([fd2d834](https://github.com/ArtemisMucaj/codesearch/commit/fd2d8346d767736eb2777932388fa3e6b9e85c5a))
+
 ## [0.13.1](https://github.com/ArtemisMucaj/codesearch/compare/v0.13.0...v0.13.1) (2026-02-27)
 
 
