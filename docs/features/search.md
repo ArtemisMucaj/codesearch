@@ -17,7 +17,7 @@ flowchart TB
     F --> G[Reranking\noptional]
     G --> H[Search Results]
 
-    B -.- B1[ONNX Runtime<br/>384-dim embeddings]
+    B -.- B1[Embedding backend<br/>ONNX or API — see --embedding-target]
     C -.- C1[DuckDB VSS<br/>HNSW cosine distance]
     D -.- D1[LIKE on content<br/>+ symbol_name]
     E -.- E1[score = 1/(60+rank)<br/>summed across legs]
@@ -25,7 +25,7 @@ flowchart TB
 ```
 
 **Default (Hybrid) Search Pipeline**:
-1. **Query Embedding**: Input text is embedded with the same ONNX model used at indexing time (384 dimensions)
+1. **Query Embedding**: Input text is embedded with the same model and backend used at indexing time (dimensions are stored in `namespace_config` and validated on open — see [Embedding Backends](./embedding-backends.md))
 2. **Semantic leg**: DuckDB VSS HNSW index finds nearest vectors by cosine distance
 3. **Keyword leg**: BM25-style `LIKE` matching on chunk content (1 pt) and symbol names (2 pts), normalised to [0, 1]
 4. **RRF Fusion**: Both ranked lists are merged — each result scores `1 / (60 + rank)` from each leg it appears in; items found by both legs accumulate the highest fused scores (range ~0.016–0.033)

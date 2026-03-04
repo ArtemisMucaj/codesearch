@@ -58,22 +58,25 @@ Each chunk is converted to a vector embedding:
 
 ```rust
 // Chunk preparation
-let text = format!("{} [{}] {}",
+let text = format!("{} {}",
     symbol_name,  // e.g., "calculate_sum"
-    node_type,    // e.g., "function"
     content       // The actual code
 );
 
-// Generate embedding
-let embedding = model.embed(text);  // 384 dimensions
+// Generate embedding (dimensions depend on the configured backend and model)
+let embedding = embedding_service.embed(text).await?;
 ```
 
-#### Embedding Models
+Two backends are available — see [Embedding Backends](./embedding-backends.md) for full details.
 
-| Model                                  | Dimensions | Sequence Length |
-|----------------------------------------|------------|-----------------|
-| all-MiniLM-L6-v2 (default)             | 384        | 512             |
-| bge-small-en-v1.5                      | 384        | 512             |
+#### Embedding Backends
+
+| Backend | Flag | Default model | Dimensions |
+|---------|------|---------------|------------|
+| ONNX (local, default) | `--embedding-target=onnx` | `sentence-transformers/all-MiniLM-L6-v2` | 384 |
+| API (OpenAI-compatible) | `--embedding-target=api` | Configured via `--embedding-model` | Configured via `--embedding-dimensions` |
+
+The model and dimension count are stored in the `namespace_config` DuckDB table on first index and validated on every subsequent open — mismatches are hard errors.
 
 ### 5. Persistence
 
@@ -90,7 +93,7 @@ Data is stored using configurable backends:
 - Code chunks: full content, file paths, line numbers, language, node type, symbol names
 
 **Vectors** (via `DuckdbVectorRepository` with VSS):
-- Stores FLOAT[384] embedding vectors directly in DuckDB
+- Stores `FLOAT[{dimensions}]` embedding vectors directly in DuckDB — the column width is fixed at namespace creation time based on `--embedding-dimensions` (default 384)
 - **VSS (Vector Similarity Search) acceleration**:
   - Uses HNSW (Hierarchical Navigable Small World) index
   - Cosine distance metric for similarity calculations
@@ -184,21 +187,21 @@ This ensures partial indexing succeeds even when some files fail.
 
 ## Reranking During Search
 
-Optionally, search results can be reranked using a cross-encoder model for improved relevance:
+Optionally, search results can be reranked for improved relevance.
 
 ### How Reranking Works
 
 ```
 User Query
     ↓
-Embed Query (384 dimensions)
+Embed Query
     ↓
 Vector Search (retrieve candidates)
     └─ Fetch num + ⌈num / ln(num)⌉ candidates (defaults to 20 base when num ≤ 10)
     ↓
 Filter (exclude candidates with vector score < 0.1)
     ↓
-Reranking (bge-reranker-base)
+Reranking
     ├─ Score each candidate against query
     ├─ Sort by relevance score
     └─ Keep top num results
@@ -206,12 +209,12 @@ Reranking (bge-reranker-base)
 Return Results
 ```
 
-### Reranking Model
+### Reranking by Backend
 
-- **Model**: `BAAI/bge-reranker-base`
-- **Type**: Cross-encoder (scores query-document pairs)
-- **Size**: ~110M parameters (ONNX format)
-- **Download**: Automatic from HuggingFace Hub (~220MB)
+| Backend | Reranking method | Model |
+|---------|-----------------|-------|
+| ONNX | Cross-encoder (ONNX) | `BAAI/bge-reranker-base` (~220 MB, downloaded automatically) |
+| API | LLM-based (single prompt, JSON scores) | Chat model at `ANTHROPIC_BASE_URL` (`ANTHROPIC_MODEL`) |
 
 ### Usage
 
