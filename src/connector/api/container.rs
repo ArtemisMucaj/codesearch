@@ -163,10 +163,9 @@ fn is_lock_conflict(err: &str) -> bool {
 /// Attempt to open the DuckDB vector repository in read-only mode, retrying
 /// with exponential backoff when the failure is a cross-process lock conflict.
 ///
-/// On each attempt a warning is emitted so the user can see that the tool is
-/// waiting for an ongoing indexing operation to release the lock.  After
-/// [`READ_ONLY_LOCK_RETRIES`] failed attempts the last error is returned as-is
-/// so the caller can surface a clear message.
+/// A single warning is emitted on the first lock conflict so the user knows the
+/// tool is waiting.  After [`READ_ONLY_LOCK_RETRIES`] failed attempts the last
+/// error is returned as-is so the caller can surface a clear message.
 async fn open_read_only_with_retry(
     db_path: &std::path::Path,
     namespace: &str,
@@ -177,13 +176,11 @@ async fn open_read_only_with_retry(
         match DuckdbVectorRepository::new_read_only_with_namespace(db_path, namespace, ns_cfg) {
             Ok(repo) => return Ok(repo),
             Err(e) if attempt < READ_ONLY_LOCK_RETRIES && is_lock_conflict(&e.to_string()) => {
-                warn!(
-                    "DuckDB is locked by another process (attempt {}/{}). \
-                     Waiting {}ms before retrying…",
-                    attempt + 1,
-                    READ_ONLY_LOCK_RETRIES,
-                    delay_ms,
-                );
+                if attempt == 0 {
+                    warn!(
+                        "DuckDB is locked by another process; waiting for it to finish…",
+                    );
+                }
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 delay_ms *= 2;
             }
