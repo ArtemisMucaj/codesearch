@@ -398,7 +398,12 @@ impl TuiApp {
 
         let edge = match edge {
             Some(e) => e,
-            None => return,
+            None => {
+                s.snippet = None;
+                s.snippet_loading = false;
+                s.pending_snippet_key = None;
+                return;
+            }
         };
 
         let repository_id = s.repository.clone().unwrap_or_default();

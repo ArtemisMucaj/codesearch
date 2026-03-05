@@ -13,5 +13,5 @@ pub(super) fn shorten_path(path: &str) -> String {
 ///
 /// Splits on `/`, `:`, and `.` and returns the rightmost non-empty component.
 pub(super) fn short_symbol(fq: &str) -> &str {
-    fq.rsplit(&['/', ':', '.']).next().unwrap_or(fq)
+    fq.rsplit(&['/', ':', '.']).find(|s| !s.is_empty()).unwrap_or(fq)
 }
