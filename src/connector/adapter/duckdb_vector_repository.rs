@@ -884,6 +884,29 @@ impl VectorRepository for DuckdbVectorRepository {
         Ok(fused)
     }
 
+    async fn flush(&self) -> Result<(), DomainError> {
+        if self.read_only || !self.fts_dirty.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let conn = self.conn.lock().await;
+        Self::rebuild_fts_index(&conn, &self.namespace)?;
+        self.fts_dirty.store(false, Ordering::Release);
+        info!("BM25 index built for namespace '{}'", self.namespace);
+        Ok(())
+    }
+
+    async fn count(&self) -> Result<u64, DomainError> {
+        let conn = self.conn.lock().await;
+        let count: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM \"{}\".chunks", self.namespace),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| DomainError::storage(format!("Failed to count chunks: {}", e)))?;
+        Ok(count as u64)
+    }
+
     async fn find_chunks_by_file(
         &self,
         repository_id: &str,
@@ -936,28 +959,5 @@ impl VectorRepository for DuckdbVectorRepository {
             chunks.push(chunk);
         }
         Ok(chunks)
-    }
-
-    async fn flush(&self) -> Result<(), DomainError> {
-        if self.read_only || !self.fts_dirty.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let conn = self.conn.lock().await;
-        Self::rebuild_fts_index(&conn, &self.namespace)?;
-        self.fts_dirty.store(false, Ordering::Release);
-        info!("BM25 index built for namespace '{}'", self.namespace);
-        Ok(())
-    }
-
-    async fn count(&self) -> Result<u64, DomainError> {
-        let conn = self.conn.lock().await;
-        let count: i64 = conn
-            .query_row(
-                &format!("SELECT COUNT(*) FROM \"{}\".chunks", self.namespace),
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|e| DomainError::storage(format!("Failed to count chunks: {}", e)))?;
-        Ok(count as u64)
     }
 }
