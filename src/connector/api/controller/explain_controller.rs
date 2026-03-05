@@ -14,10 +14,6 @@ use super::super::Container;
 /// Maximum lines to include per source window around a reference.
 const SOURCE_WINDOW_LINES: usize = 40;
 
-/// Maximum unique symbols to read source for across all paths combined.
-/// Caps prompt size when the call graph is very wide.
-const MAX_UNIQUE_SYMBOLS_WITH_SOURCE: usize = 20;
-
 const SYSTEM_PROMPT: &str = "\
 You are a senior software engineer performing call-flow analysis. \
 Given a symbol's source code and its call graph, write a clear and precise explanation covering:
@@ -199,15 +195,11 @@ async fn build_prompt(
     let paths = reconstruct_paths(by_depth);
     let total_paths = paths.len();
 
-    // Collect unique nodes to read source for (dedup by symbol, capped to avoid
-    // sending a huge prompt when the graph is very wide).
+    // Collect unique nodes to read source for (dedup by symbol).
     let mut seen: HashSet<&str> = HashSet::new();
     let mut nodes_to_read: Vec<&ImpactNode> = Vec::new();
-    'outer: for path in &paths {
+    for path in &paths {
         for node in path {
-            if seen.len() >= MAX_UNIQUE_SYMBOLS_WITH_SOURCE {
-                break 'outer;
-            }
             if seen.insert(node.symbol.as_str()) {
                 nodes_to_read.push(node);
             }
