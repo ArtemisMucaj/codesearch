@@ -141,7 +141,12 @@ async fn main() -> Result<()> {
     let read_only = !is_mcp
         && matches!(
             &cli.command,
-            Commands::Search { .. } | Commands::List | Commands::Stats
+            Commands::Search { .. }
+                | Commands::List
+                | Commands::Stats
+                | Commands::Impact { .. }
+                | Commands::Context { .. }
+                | Commands::Explain { .. }
         );
 
     let config = ContainerConfig {

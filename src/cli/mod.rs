@@ -134,6 +134,28 @@ pub enum Commands {
         format: OutputFormat,
     },
 
+    /// LLM-driven explanation of a symbol's complete call flow, data flow, and
+    /// business purpose. Runs impact analysis then passes each affected symbol's
+    /// source code to the configured LLM and returns a structured description.
+    Explain {
+        /// Symbol name to explain (e.g. "authenticate" or "MyStruct::new")
+        symbol: String,
+
+        /// Maximum hop depth to traverse when building the call graph (default: 3)
+        #[arg(long, default_value = "3")]
+        depth: usize,
+
+        /// Restrict analysis to a specific repository ID
+        #[arg(short, long)]
+        repository: Option<String>,
+
+        /// LLM backend to use for the explanation:
+        ///   'anthropic' — /v1/messages (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, default).
+        ///   'open-ai'   — /v1/chat/completions (OPENAI_BASE_URL, OPENAI_MODEL).
+        #[arg(long, value_enum, default_value = "anthropic")]
+        llm: QueryExpansionTarget,
+    },
+
     /// Start MCP (Model Context Protocol) server for integration with AI tools
     Mcp {
         /// Run as HTTP server on specified port (e.g., --http 8080)

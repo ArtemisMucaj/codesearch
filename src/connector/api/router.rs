@@ -4,13 +4,14 @@ use crate::Commands;
 
 use super::container::Container;
 use super::controller::{
-    DeleteController, ImpactController, IndexController, ListRepositoriesController,
-    SearchController, StatsController, SymbolContextController,
+    DeleteController, ExplainController, ImpactController, IndexController,
+    ListRepositoriesController, SearchController, StatsController, SymbolContextController,
 };
 
 pub struct Router<'a> {
     search_controller: SearchController<'a>,
     impact_controller: ImpactController<'a>,
+    explain_controller: ExplainController<'a>,
     symbol_context_controller: SymbolContextController<'a>,
     stats_controller: StatsController<'a>,
     index_controller: IndexController<'a>,
@@ -23,6 +24,7 @@ impl<'a> Router<'a> {
         Self {
             search_controller: SearchController::new(container),
             impact_controller: ImpactController::new(container),
+            explain_controller: ExplainController::new(container),
             symbol_context_controller: SymbolContextController::new(container),
             stats_controller: StatsController::new(container),
             index_controller: IndexController::new(container),
@@ -78,6 +80,16 @@ impl<'a> Router<'a> {
             } => {
                 self.symbol_context_controller
                     .context(symbol, repository, limit, format)
+                    .await
+            }
+            Commands::Explain {
+                symbol,
+                depth,
+                repository,
+                llm,
+            } => {
+                self.explain_controller
+                    .explain(symbol, depth, repository, llm)
                     .await
             }
             Commands::Mcp { .. } => unreachable!("MCP command is handled separately in main"),
