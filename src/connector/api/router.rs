@@ -64,12 +64,11 @@ impl<'a> Router<'a> {
             Commands::Stats => self.stats_controller.stats().await,
             Commands::Impact {
                 symbol,
-                depth,
                 repository,
                 format,
             } => {
                 self.impact_controller
-                    .impact(symbol, depth, repository, format)
+                    .impact(symbol, repository, format)
                     .await
             }
             Commands::Context {
@@ -84,12 +83,11 @@ impl<'a> Router<'a> {
             }
             Commands::Explain {
                 symbol,
-                depth,
                 repository,
                 llm,
             } => {
                 self.explain_controller
-                    .explain(symbol, depth, repository, llm)
+                    .explain(symbol, repository, llm)
                     .await
             }
             Commands::Mcp { .. } => unreachable!("MCP command is handled separately in main"),

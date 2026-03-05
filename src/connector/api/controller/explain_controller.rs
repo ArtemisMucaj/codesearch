@@ -42,7 +42,6 @@ impl<'a> ExplainController<'a> {
     pub async fn explain(
         &self,
         symbol: String,
-        depth: usize,
         repository: Option<String>,
         llm: LlmTarget,
     ) -> Result<String> {
@@ -58,7 +57,7 @@ impl<'a> ExplainController<'a> {
         // Run impact analysis to obtain the full call graph for this symbol.
         let impact_uc = self.container.impact_use_case();
         let analysis = impact_uc
-            .analyze(&symbol, depth, repository.as_deref())
+            .analyze(&symbol, repository.as_deref())
             .await?;
 
         if analysis.total_affected == 0 {

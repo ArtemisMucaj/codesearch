@@ -103,10 +103,6 @@ pub enum Commands {
         /// Symbol name to analyse (e.g. "authenticate" or "MyStruct::new")
         symbol: String,
 
-        /// Maximum hop depth to traverse (default: 5)
-        #[arg(long, default_value = "5")]
-        depth: usize,
-
         /// Restrict analysis to a specific repository ID
         #[arg(short, long)]
         repository: Option<String>,
@@ -140,10 +136,6 @@ pub enum Commands {
     Explain {
         /// Symbol name to explain (e.g. "authenticate" or "MyStruct::new")
         symbol: String,
-
-        /// Maximum hop depth to traverse when building the call graph (default: 3)
-        #[arg(long, default_value = "3")]
-        depth: usize,
 
         /// Restrict analysis to a specific repository ID
         #[arg(short, long)]
