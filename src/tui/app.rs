@@ -449,6 +449,7 @@ impl TuiApp {
                 if self.state.search.pending_key.as_deref() != Some(&key) {
                     return;
                 }
+                self.state.search.pending_key = None;
                 self.state.search.loading = false;
                 match result {
                     Ok(results) => {
@@ -467,6 +468,7 @@ impl TuiApp {
                 if self.state.impact.pending_key.as_deref() != Some(&key) {
                     return;
                 }
+                self.state.impact.pending_key = None;
                 self.state.impact.loading = false;
                 match result {
                     Ok(analysis) => {
@@ -485,6 +487,7 @@ impl TuiApp {
                 if self.state.context.pending_key.as_deref() != Some(&key) {
                     return;
                 }
+                self.state.context.pending_key = None;
                 self.state.context.loading = false;
                 match result {
                     Ok(context) => {
@@ -505,6 +508,7 @@ impl TuiApp {
                 if self.state.context.pending_snippet_key.as_ref() != Some(&key) {
                     return;
                 }
+                self.state.context.pending_snippet_key = None;
                 self.state.context.snippet_loading = false;
                 match result {
                     Ok(chunk) => {
