@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::application::CallGraphQuery;
 use crate::cli::LlmTarget;
@@ -72,10 +72,20 @@ impl<'a> ExplainController<'a> {
         };
 
         let root_source = {
-            let callees = call_graph
+            let callees = match call_graph
                 .find_callees(&analysis.root_symbol, &cg_query)
                 .await
-                .unwrap_or_default();
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        symbol = %analysis.root_symbol,
+                        "Failed to find callees for root symbol; root source will be unavailable"
+                    );
+                    Vec::new()
+                }
+            };
             match callees.first() {
                 Some(ref_) => {
                     read_source_window(ref_.caller_file_path(), ref_.reference_line(), SOURCE_WINDOW_LINES)
@@ -135,11 +145,13 @@ fn reconstruct_paths<'a>(by_depth: &'a [Vec<ImpactNode>]) -> Vec<Vec<&'a ImpactN
         .filter(|n| !children_map.contains_key(n.symbol.as_str()))
         .collect();
 
-    // Lookup for unambiguous path tracing: (depth, symbol) → node.
-    let mut node_by_depth_symbol: HashMap<(usize, &str), &ImpactNode> = HashMap::new();
+    // Lookup for unambiguous path tracing: (depth, symbol, repository_id) → node.
+    // Including repository_id prevents collisions when the same symbol name exists
+    // at the same depth in multiple repositories.
+    let mut node_by_depth_symbol: HashMap<(usize, &str, &str), &ImpactNode> = HashMap::new();
     for node in &all_nodes {
         node_by_depth_symbol
-            .entry((node.depth, node.symbol.as_str()))
+            .entry((node.depth, node.symbol.as_str(), node.repository_id.as_str()))
             .or_insert(node);
     }
 
@@ -150,7 +162,7 @@ fn reconstruct_paths<'a>(by_depth: &'a [Vec<ImpactNode>]) -> Vec<Vec<&'a ImpactN
         let mut current = leaf;
         while let Some(via) = current.via_symbol.as_deref() {
             let parent_depth = current.depth.saturating_sub(1);
-            if let Some(&parent) = node_by_depth_symbol.get(&(parent_depth, via)) {
+            if let Some(&parent) = node_by_depth_symbol.get(&(parent_depth, via, current.repository_id.as_str())) {
                 path.push(parent);
                 current = parent;
             } else {
@@ -195,22 +207,23 @@ async fn build_prompt(
     let paths = reconstruct_paths(by_depth);
     let total_paths = paths.len();
 
-    // Collect unique nodes to read source for (dedup by symbol).
-    let mut seen: HashSet<&str> = HashSet::new();
+    // Collect unique nodes to read source for (dedup by (symbol, file_path) so that
+    // the same symbol defined in different files each gets its own source read).
+    let mut seen: HashSet<(&str, &str)> = HashSet::new();
     let mut nodes_to_read: Vec<&ImpactNode> = Vec::new();
     for path in &paths {
         for node in path {
-            if seen.insert(node.symbol.as_str()) {
+            if seen.insert((node.symbol.as_str(), node.file_path.as_str())) {
                 nodes_to_read.push(node);
             }
         }
     }
 
     // Read sources sequentially (cannot await inside a closure).
-    let mut source_cache: HashMap<&str, Option<String>> = HashMap::new();
+    let mut source_cache: HashMap<(&str, &str), Option<String>> = HashMap::new();
     for node in nodes_to_read {
         let src = read_source_window(&node.file_path, node.line, SOURCE_WINDOW_LINES).await;
-        source_cache.insert(node.symbol.as_str(), src);
+        source_cache.insert((node.symbol.as_str(), node.file_path.as_str()), src);
     }
 
     prompt.push_str(&format!("## Call paths ({total_paths} total)\n\n"));
@@ -227,7 +240,7 @@ async fn build_prompt(
 
         // Render each node in the path (outermost first).
         for node in path {
-            let src_block = match source_cache.get(node.symbol.as_str()) {
+            let src_block = match source_cache.get(&(node.symbol.as_str(), node.file_path.as_str())) {
                 Some(Some(src)) => format!("```\n{src}\n```"),
                 _ => "_(source not available)_".to_string(),
             };
@@ -249,9 +262,13 @@ async fn read_source_window(file_path: &str, center_line: u32, window: usize) ->
     if lines.is_empty() {
         return None;
     }
-    let center = center_line.saturating_sub(1) as usize; // convert to 0-indexed
+    // Convert to 0-indexed and clamp so center is always a valid index.
+    let center = (center_line.saturating_sub(1) as usize).min(lines.len().saturating_sub(1));
     let half = window / 2;
     let start = center.saturating_sub(half);
     let end = (start + window).min(lines.len());
+    if start >= end {
+        return None;
+    }
     Some(lines[start..end].join("\n"))
 }
