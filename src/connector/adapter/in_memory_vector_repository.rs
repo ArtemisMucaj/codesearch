@@ -137,6 +137,24 @@ impl VectorRepository for InMemoryVectorRepository {
         let chunks = self.chunks.lock().await;
         Ok(chunks.len() as u64)
     }
+
+    async fn find_chunks_by_file(
+        &self,
+        repository_id: &str,
+        file_path: &str,
+    ) -> Result<Vec<CodeChunk>, DomainError> {
+        let chunks = self.chunks.lock().await;
+        let mut result: Vec<CodeChunk> = chunks
+            .values()
+            .filter(|c| {
+                c.file_path() == file_path
+                    && (repository_id.is_empty() || c.repository_id() == repository_id)
+            })
+            .cloned()
+            .collect();
+        result.sort_by_key(|c| c.start_line());
+        Ok(result)
+    }
 }
 
 impl InMemoryVectorRepository {

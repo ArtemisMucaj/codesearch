@@ -19,13 +19,12 @@ impl<'a> ImpactController<'a> {
     pub async fn impact(
         &self,
         symbol: String,
-        depth: usize,
         repository: Option<String>,
         format: OutputFormat,
     ) -> Result<String> {
         let use_case = self.container.impact_use_case();
         let analysis = use_case
-            .analyze(&symbol, depth, repository.as_deref())
+            .analyze(&symbol, repository.as_deref())
             .await?;
 
         Ok(match format {
