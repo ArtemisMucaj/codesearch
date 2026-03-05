@@ -255,7 +255,7 @@ impl TuiApp {
             self.state.search.snippet_scroll = 0;
             self.state.search.error = None;
             self.state.search.loading = false;
-            self.state.search.pending_key = Some(key);
+            self.state.search.pending_key = None;
             return;
         }
 
@@ -301,7 +301,7 @@ impl TuiApp {
             self.state.impact.flame_scroll = 0;
             self.state.impact.error = None;
             self.state.impact.loading = false;
-            self.state.impact.pending_key = Some(key);
+            self.state.impact.pending_key = None;
             return;
         }
 
@@ -341,7 +341,7 @@ impl TuiApp {
             self.state.context.snippet_scroll = 0;
             self.state.context.error = None;
             self.state.context.loading = false;
-            self.state.context.pending_key = Some(key);
+            self.state.context.pending_key = None;
             // Clear stale snippet state before load_context_snippet so that if
             // the new context has no edges the old snippet is not left visible.
             self.state.context.snippet = None;
@@ -414,7 +414,7 @@ impl TuiApp {
             s.snippet = cached;
             s.snippet_scroll = 0;
             s.snippet_loading = false;
-            s.pending_snippet_key = Some(cache_key);
+            s.pending_snippet_key = None;
             return;
         }
 
