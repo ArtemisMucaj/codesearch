@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -13,10 +14,9 @@ use super::super::Container;
 /// Maximum lines to include per source window around a reference.
 const SOURCE_WINDOW_LINES: usize = 40;
 
-/// Maximum number of depth-1 callers for which full source is included in the prompt.
-/// Beyond this limit only the symbol name and location are listed to stay within
-/// the model's context budget.
-const MAX_CALLERS_WITH_SOURCE: usize = 5;
+/// Maximum unique symbols to read source for across all paths combined.
+/// Caps prompt size when the call graph is very wide.
+const MAX_UNIQUE_SYMBOLS_WITH_SOURCE: usize = 20;
 
 const SYSTEM_PROMPT: &str = "\
 You are a senior software engineer performing call-flow analysis. \
@@ -115,6 +115,58 @@ impl<'a> ExplainController<'a> {
     }
 }
 
+/// Reconstruct all call paths from the BFS result.
+///
+/// Each path is ordered outermost-caller-first: `path[0]` is the most
+/// distant symbol from the root (the entry point), `path[last]` is the
+/// direct caller of the root symbol. The root itself is not included —
+/// it is appended by the caller when rendering the chain header.
+fn reconstruct_paths<'a>(by_depth: &'a [Vec<ImpactNode>]) -> Vec<Vec<&'a ImpactNode>> {
+    let all_nodes: Vec<&ImpactNode> = by_depth.iter().flatten().collect();
+
+    // children_map[sym] = nodes that list sym as their via_symbol (callers of sym).
+    let mut children_map: HashMap<&str, Vec<&ImpactNode>> = HashMap::new();
+    for node in &all_nodes {
+        if let Some(via) = node.via_symbol.as_deref() {
+            children_map.entry(via).or_default().push(node);
+        }
+    }
+
+    // Leaf nodes: no other node calls through them (outermost callers).
+    let leaf_nodes: Vec<&ImpactNode> = all_nodes
+        .iter()
+        .copied()
+        .filter(|n| !children_map.contains_key(n.symbol.as_str()))
+        .collect();
+
+    // Lookup for unambiguous path tracing: (depth, symbol) → node.
+    let mut node_by_depth_symbol: HashMap<(usize, &str), &ImpactNode> = HashMap::new();
+    for node in &all_nodes {
+        node_by_depth_symbol
+            .entry((node.depth, node.symbol.as_str()))
+            .or_insert(node);
+    }
+
+    let mut paths = Vec::new();
+    for leaf in leaf_nodes {
+        // Trace from leaf back toward the root symbol.
+        let mut path = vec![leaf];
+        let mut current = leaf;
+        while let Some(via) = current.via_symbol.as_deref() {
+            let parent_depth = current.depth.saturating_sub(1);
+            if let Some(&parent) = node_by_depth_symbol.get(&(parent_depth, via)) {
+                path.push(parent);
+                current = parent;
+            } else {
+                break;
+            }
+        }
+        // path[0] = outermost caller (leaf), path[last] = direct caller of root.
+        paths.push(path);
+    }
+    paths
+}
+
 /// Construct the structured user prompt from the impact graph.
 async fn build_prompt(
     root_symbol: &str,
@@ -140,54 +192,61 @@ async fn build_prompt(
         }
     }
 
-    // Depth-1 callers: include full source for the first MAX_CALLERS_WITH_SOURCE.
-    if let Some(depth1) = by_depth.first() {
-        if !depth1.is_empty() {
-            prompt.push_str("## Direct callers (depth 1)\n\n");
-            for (i, node) in depth1.iter().enumerate() {
-                if i < MAX_CALLERS_WITH_SOURCE {
-                    prompt.push_str(&format_node_with_source(i + 1, node).await);
-                } else {
-                    // Remaining callers without source to save context budget.
-                    prompt.push_str(&format!(
-                        "- `{}` — `{}:{}`\n",
-                        node.symbol, node.file_path, node.line
-                    ));
-                }
+    if by_depth.is_empty() {
+        return prompt;
+    }
+
+    let paths = reconstruct_paths(by_depth);
+    let total_paths = paths.len();
+
+    // Collect unique nodes to read source for (dedup by symbol, capped to avoid
+    // sending a huge prompt when the graph is very wide).
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut nodes_to_read: Vec<&ImpactNode> = Vec::new();
+    'outer: for path in &paths {
+        for node in path {
+            if seen.len() >= MAX_UNIQUE_SYMBOLS_WITH_SOURCE {
+                break 'outer;
             }
-            prompt.push('\n');
+            if seen.insert(node.symbol.as_str()) {
+                nodes_to_read.push(node);
+            }
         }
     }
 
-    // Deeper depths: summary only (no source).
-    for (depth_idx, nodes) in by_depth.iter().enumerate().skip(1) {
-        if nodes.is_empty() {
-            continue;
-        }
-        prompt.push_str(&format!("## Depth {} callers\n\n", depth_idx + 1));
-        for node in nodes {
-            let via = node.via_symbol.as_deref().unwrap_or("(unknown)");
+    // Read sources sequentially (cannot await inside a closure).
+    let mut source_cache: HashMap<&str, Option<String>> = HashMap::new();
+    for node in nodes_to_read {
+        let src = read_source_window(&node.file_path, node.line, SOURCE_WINDOW_LINES).await;
+        source_cache.insert(node.symbol.as_str(), src);
+    }
+
+    prompt.push_str(&format!("## Call paths ({total_paths} total)\n\n"));
+
+    for (i, path) in paths.iter().enumerate() {
+        // Chain header reads outermost → ... → direct_caller → root_symbol.
+        let chain: String = path
+            .iter()
+            .map(|n| n.symbol.as_str())
+            .chain(std::iter::once(root_symbol))
+            .collect::<Vec<_>>()
+            .join(" → ");
+        prompt.push_str(&format!("### Path {} — `{}`\n\n", i + 1, chain));
+
+        // Render each node in the path (outermost first).
+        for node in path {
+            let src_block = match source_cache.get(node.symbol.as_str()) {
+                Some(Some(src)) => format!("```\n{src}\n```"),
+                _ => "_(source not available)_".to_string(),
+            };
             prompt.push_str(&format!(
-                "- `{}` via `{}` — `{}:{}`\n",
-                node.symbol, via, node.file_path, node.line
+                "#### `{}` — `{}:{}`\n{}\n\n",
+                node.symbol, node.file_path, node.line, src_block
             ));
         }
-        prompt.push('\n');
     }
 
     prompt
-}
-
-/// Format a single impact node with its source window (if readable).
-async fn format_node_with_source(index: usize, node: &ImpactNode) -> String {
-    let header = format!(
-        "### {}. `{}` — `{}:{}`\n",
-        index, node.symbol, node.file_path, node.line
-    );
-    match read_source_window(&node.file_path, node.line, SOURCE_WINDOW_LINES).await {
-        Some(src) => format!("{header}```\n{src}\n```\n\n"),
-        None => format!("{header}_(source not available)_\n\n"),
-    }
 }
 
 /// Read `window` lines of source from `file_path` centred on `center_line` (1-indexed).
