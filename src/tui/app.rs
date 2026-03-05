@@ -259,6 +259,11 @@ impl TuiApp {
             return;
         }
 
+        // Already waiting for a result with this exact key — do not spawn a duplicate.
+        if self.state.search.pending_key.as_deref() == Some(&key) {
+            return;
+        }
+
         self.state.search.loading = true;
         self.state.search.error = None;
         self.state.search.selected = 0;
@@ -305,6 +310,11 @@ impl TuiApp {
             return;
         }
 
+        // Already waiting for a result with this exact key — do not spawn a duplicate.
+        if self.state.impact.pending_key.as_deref() == Some(&key) {
+            return;
+        }
+
         self.state.impact.loading = true;
         self.state.impact.error = None;
         self.state.impact.selected = 0;
@@ -348,6 +358,11 @@ impl TuiApp {
             self.state.context.snippet_loading = false;
             self.state.context.pending_snippet_key = None;
             self.load_context_snippet();
+            return;
+        }
+
+        // Already waiting for a result with this exact key — do not spawn a duplicate.
+        if self.state.context.pending_key.as_deref() == Some(&key) {
             return;
         }
 
@@ -536,5 +551,5 @@ fn bounded_add(current: usize, delta: i32, len: usize) -> usize {
 }
 
 fn bounded_scroll(current: u16, delta: i32) -> u16 {
-    (current as i32 + delta).max(0) as u16
+    (current as i32 + delta).clamp(0, u16::MAX as i32) as u16
 }
