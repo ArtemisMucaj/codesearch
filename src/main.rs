@@ -6,7 +6,7 @@ use rmcp::ServiceExt;
 use tracing_subscriber::EnvFilter;
 
 use codesearch::connector::adapter::mcp::CodesearchMcpServer;
-use codesearch::cli::{EmbeddingTarget, QueryExpansionTarget, RerankingTarget};
+use codesearch::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use codesearch::{Commands, Container, ContainerConfig, Router};
 
 #[derive(Parser)]
@@ -84,7 +84,7 @@ struct Cli {
     ///   'anthropic' — /v1/messages (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, default).
     ///   'open-ai'   — /v1/chat/completions (OPENAI_BASE_URL, OPENAI_MODEL).
     #[arg(long, global = true, value_enum, default_value = "anthropic")]
-    expand_query_target: QueryExpansionTarget,
+    llm_target: LlmTarget,
 
     #[command(subcommand)]
     command: Commands,
@@ -160,7 +160,7 @@ async fn main() -> Result<()> {
         embedding_model: cli.embedding_model,
         embedding_dimensions: cli.embedding_dimensions,
         reranking_target: cli.reranking_target,
-        query_expansion_target: cli.expand_query_target,
+        llm_target: cli.llm_target,
         embed_concurrency: cli.embedding_requests,
         read_only,
     };

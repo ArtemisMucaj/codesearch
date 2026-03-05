@@ -11,7 +11,7 @@ pub use application::{
     SearchCodeUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
 };
 
-pub use cli::{Commands, EmbeddingTarget, OutputFormat, QueryExpansionTarget, RerankingTarget};
+pub use cli::{Commands, EmbeddingTarget, LlmTarget, OutputFormat, RerankingTarget};
 
 pub use connector::{
     AnthropicClient, AnthropicReranking, ChatClient, DuckdbCallGraphRepository,

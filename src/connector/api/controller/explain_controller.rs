@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use tracing::debug;
 
 use crate::application::CallGraphQuery;
-use crate::cli::QueryExpansionTarget;
+use crate::cli::LlmTarget;
 use crate::connector::adapter::{AnthropicClient, ChatClient, OpenAiChatClient};
 use crate::ImpactNode;
 
@@ -44,12 +44,12 @@ impl<'a> ExplainController<'a> {
         symbol: String,
         depth: usize,
         repository: Option<String>,
-        llm: QueryExpansionTarget,
+        llm: LlmTarget,
     ) -> Result<String> {
         // Build the chat client requested by the caller.
         let chat_client: Arc<dyn ChatClient> = match llm {
-            QueryExpansionTarget::Anthropic => Arc::new(AnthropicClient::from_env()),
-            QueryExpansionTarget::OpenAi => Arc::new(
+            LlmTarget::Anthropic => Arc::new(AnthropicClient::from_env()),
+            LlmTarget::OpenAi => Arc::new(
                 OpenAiChatClient::from_env()
                     .context("Failed to initialise OpenAI chat client for explain command")?,
             ),

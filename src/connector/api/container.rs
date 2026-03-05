@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 
 use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, QueryExpander};
 use crate::connector::adapter::scip::ScipRunner;
-use crate::cli::{EmbeddingTarget, QueryExpansionTarget, RerankingTarget};
+use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::NamespaceEmbeddingConfig;
 use crate::{
     AnthropicClient, AnthropicReranking, DeleteRepositoryUseCase, DuckdbCallGraphRepository,
@@ -65,7 +65,7 @@ pub struct ContainerConfig {
     ///   `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `ANTHROPIC_API_KEY`.
     /// `OpenAi`: OpenAI-compatible `/v1/chat/completions` — uses
     ///   `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`.
-    pub query_expansion_target: QueryExpansionTarget,
+    pub llm_target: LlmTarget,
     /// Embedding model identifier.
     ///
     /// For `Onnx`: HuggingFace model ID (default: `sentence-transformers/all-MiniLM-L6-v2`).
@@ -407,8 +407,8 @@ impl Container {
         // Falls back gracefully to the original query when the server is unreachable.
         let query_expander: Option<Arc<dyn QueryExpander>> = if config.expand_query {
             let client: Arc<dyn crate::connector::adapter::ChatClient> =
-                match config.query_expansion_target {
-                    QueryExpansionTarget::Anthropic => {
+                match config.llm_target {
+                    LlmTarget::Anthropic => {
                         let c = AnthropicClient::from_env();
                         debug!(
                             "Using Anthropic query expander (url={})",
@@ -416,7 +416,7 @@ impl Container {
                         );
                         Arc::new(c)
                     }
-                    QueryExpansionTarget::OpenAi => {
+                    LlmTarget::OpenAi => {
                         let c = OpenAiChatClient::from_env()?;
                         debug!(
                             "Using OpenAI query expander (url={})",

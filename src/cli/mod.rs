@@ -23,9 +23,9 @@ pub enum EmbeddingTarget {
     Api,
 }
 
-/// Provider to use for LLM-based query expansion.
+/// Provider to use for LLM calls (query expansion, explain, etc.).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum QueryExpansionTarget {
+pub enum LlmTarget {
     /// Anthropic-compatible `/v1/messages` endpoint (default). Controlled by
     /// `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and `ANTHROPIC_API_KEY`.
     #[default]
@@ -153,7 +153,7 @@ pub enum Commands {
         ///   'anthropic' — /v1/messages (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, default).
         ///   'open-ai'   — /v1/chat/completions (OPENAI_BASE_URL, OPENAI_MODEL).
         #[arg(long, value_enum, default_value = "anthropic")]
-        llm: QueryExpansionTarget,
+        llm: LlmTarget,
     },
 
     /// Start MCP (Model Context Protocol) server for integration with AI tools
