@@ -6,27 +6,23 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::application::{
-    ImpactAnalysisUseCase, SearchCodeUseCase, SnippetLookupUseCase, SymbolContextUseCase,
-};
+use crate::application::{ImpactAnalysisUseCase, SearchCodeUseCase, SnippetLookupUseCase};
 use crate::domain::SearchQuery;
 
 use super::cache::TuiCache;
 use super::event::TuiEvent;
-use super::state::{ActiveMode, AppState, ContextPane};
+use super::state::{ActiveMode, AppState, ImpactPane, SearchPane};
 use super::views;
 
 const SEARCH_LIMIT: usize = 20;
 const IMPACT_DEPTH: usize = 5;
 const SCROLL_STEP: u16 = 5;
-const DEFAULT_CONTEXT_LIMIT: u32 = 50;
 
 pub struct TuiApp {
     state: AppState,
     cache: TuiCache,
     search_uc: Arc<SearchCodeUseCase>,
     impact_uc: Arc<ImpactAnalysisUseCase>,
-    context_uc: Arc<SymbolContextUseCase>,
     snippet_uc: Arc<SnippetLookupUseCase>,
     event_tx: mpsc::UnboundedSender<TuiEvent>,
     event_rx: mpsc::UnboundedReceiver<TuiEvent>,
@@ -36,7 +32,6 @@ impl TuiApp {
     pub fn new(
         search_uc: Arc<SearchCodeUseCase>,
         impact_uc: Arc<ImpactAnalysisUseCase>,
-        context_uc: Arc<SymbolContextUseCase>,
         snippet_uc: Arc<SnippetLookupUseCase>,
         repository: Option<String>,
     ) -> Self {
@@ -46,7 +41,6 @@ impl TuiApp {
             cache: TuiCache::default(),
             search_uc,
             impact_uc,
-            context_uc,
             snippet_uc,
             event_tx: tx,
             event_rx: rx,
@@ -102,11 +96,11 @@ impl TuiApp {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.state.should_quit = true;
             }
+            KeyCode::Esc => self.handle_esc(),
             KeyCode::Tab => {
                 self.state.mode = match self.state.mode {
                     ActiveMode::Search => ActiveMode::Impact,
-                    ActiveMode::Impact => ActiveMode::Context,
-                    ActiveMode::Context => ActiveMode::Search,
+                    ActiveMode::Impact => ActiveMode::Search,
                 };
             }
             KeyCode::Enter => self.dispatch_current(),
@@ -115,26 +109,120 @@ impl TuiApp {
             }
             KeyCode::Up if key.modifiers == KeyModifiers::NONE => self.navigate(-1),
             KeyCode::Down if key.modifiers == KeyModifiers::NONE => self.navigate(1),
-            KeyCode::Left if self.state.mode == ActiveMode::Context => {
-                self.state.context.focused_pane = ContextPane::Callers;
-                self.load_context_snippet();
+            // Ctrl+←/→ switch panes; plain ←/→ move the text cursor.
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.focus_left();
             }
-            KeyCode::Right if self.state.mode == ActiveMode::Context => {
-                self.state.context.focused_pane = ContextPane::Callees;
-                self.load_context_snippet();
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.focus_right();
+            }
+            KeyCode::Left if key.modifiers == KeyModifiers::NONE => {
+                let c = self.state.active_cursor_mut();
+                *c = c.saturating_sub(1);
+            }
+            KeyCode::Right if key.modifiers == KeyModifiers::NONE => {
+                let len = self.state.active_input().chars().count();
+                let c = self.state.active_cursor_mut();
+                if *c < len {
+                    *c += 1;
+                }
+            }
+            KeyCode::Home => {
+                *self.state.active_cursor_mut() = 0;
+            }
+            KeyCode::End => {
+                let len = self.state.active_input().chars().count();
+                *self.state.active_cursor_mut() = len;
             }
             KeyCode::PageUp => self.scroll_code(-(SCROLL_STEP as i32)),
             KeyCode::PageDown => self.scroll_code(SCROLL_STEP as i32),
             KeyCode::Backspace => {
-                self.state.active_input_mut().pop();
+                let cursor = self.state.active_cursor();
+                if cursor > 0 {
+                    let byte_idx = {
+                        let input = self.state.active_input_mut();
+                        let idx = input
+                            .char_indices()
+                            .nth(cursor - 1)
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
+                        input.remove(idx);
+                        idx
+                    };
+                    let _ = byte_idx;
+                    *self.state.active_cursor_mut() -= 1;
+                }
             }
             KeyCode::Char(c)
                 if key.modifiers == KeyModifiers::NONE
                     || key.modifiers == KeyModifiers::SHIFT =>
             {
-                self.state.active_input_mut().push(c);
+                let cursor = self.state.active_cursor();
+                {
+                    let input = self.state.active_input_mut();
+                    let byte_idx = input
+                        .char_indices()
+                        .nth(cursor)
+                        .map(|(i, _)| i)
+                        .unwrap_or_else(|| input.len());
+                    input.insert(byte_idx, c);
+                }
+                *self.state.active_cursor_mut() += 1;
+                // Typing new text in Impact mode while the Chain pane is
+                // focused would cause Enter to dispatch a chain-snippet load
+                // rather than a new impact analysis.  Reset to the entry-point
+                // pane so the next Enter searches correctly.
+                if self.state.mode == ActiveMode::Impact
+                    && self.state.impact.focused_pane == ImpactPane::Chain
+                {
+                    self.state.impact.focused_pane = ImpactPane::EntryPoints;
+                    self.state.impact.chain_snippet = None;
+                    self.state.impact.chain_snippet_loading = false;
+                    self.state.impact.chain_snippet_pending_key = None;
+                    self.state.impact.chain_snippet_scroll = 0;
+                }
             }
             _ => {}
+        }
+    }
+
+    // ── Pane focus switching ──────────────────────────────────────────────────
+
+    fn focus_left(&mut self) {
+        match self.state.mode {
+            ActiveMode::Search => {
+                self.state.search.focused_pane = SearchPane::List;
+            }
+            ActiveMode::Impact => {
+                self.state.impact.focused_pane = ImpactPane::EntryPoints;
+            }
+        }
+    }
+
+    fn focus_right(&mut self) {
+        match self.state.mode {
+            ActiveMode::Search => {
+                self.state.search.focused_pane = SearchPane::Code;
+            }
+            ActiveMode::Impact => {
+                self.state.impact.focused_pane = ImpactPane::Chain;
+                // Reset chain selection whenever we enter the pane.
+                self.state.impact.chain_selected = 0;
+            }
+        }
+    }
+
+    // ── Esc ───────────────────────────────────────────────────────────────────
+
+    fn handle_esc(&mut self) {
+        if self.state.mode == ActiveMode::Impact
+            && self.state.impact.chain_snippet.is_some()
+        {
+            // Return from chain code view to chain navigation.
+            self.state.impact.chain_snippet = None;
+            self.state.impact.chain_snippet_loading = false;
+            self.state.impact.chain_snippet_pending_key = None;
+            self.state.impact.chain_snippet_scroll = 0;
         }
     }
 
@@ -143,6 +231,12 @@ impl TuiApp {
     fn navigate(&mut self, delta: i32) {
         match self.state.mode {
             ActiveMode::Search => {
+                // Right pane focused → scroll the code panel.
+                if self.state.search.focused_pane == SearchPane::Code {
+                    self.state.search.snippet_scroll =
+                        bounded_scroll(self.state.search.snippet_scroll, delta * SCROLL_STEP as i32);
+                    return;
+                }
                 let len = self.state.search.results.len();
                 if len == 0 {
                     return;
@@ -152,39 +246,61 @@ impl TuiApp {
                 self.state.search.snippet_scroll = 0;
             }
             ActiveMode::Impact => {
+                if self.state.impact.focused_pane == ImpactPane::Chain {
+                    if self.state.impact.chain_snippet.is_some() {
+                        // Scroll the chain code view.
+                        self.state.impact.chain_snippet_scroll = bounded_scroll(
+                            self.state.impact.chain_snippet_scroll,
+                            delta * SCROLL_STEP as i32,
+                        );
+                    } else {
+                        // Navigate within the call chain.
+                        self.navigate_chain(delta);
+                    }
+                    return;
+                }
+                // Left pane (entry points).
                 let len = self
                     .state
                     .impact
                     .analysis
                     .as_ref()
-                    .map(|a| a.by_depth.iter().map(|d| d.len()).sum::<usize>())
+                    .map(|a| a.leaf_nodes().len())
                     .unwrap_or(0);
                 if len == 0 {
                     return;
                 }
-                self.state.impact.selected = bounded_add(self.state.impact.selected, delta, len);
-            }
-            ActiveMode::Context => {
-                let s = &mut self.state.context;
-                match s.focused_pane {
-                    ContextPane::Callers => {
-                        let len = s.context.as_ref().map(|c| c.callers.len()).unwrap_or(0);
-                        if len == 0 {
-                            return;
-                        }
-                        s.selected_caller = bounded_add(s.selected_caller, delta, len);
-                    }
-                    ContextPane::Callees => {
-                        let len = s.context.as_ref().map(|c| c.callees.len()).unwrap_or(0);
-                        if len == 0 {
-                            return;
-                        }
-                        s.selected_callee = bounded_add(s.selected_callee, delta, len);
-                    }
+                let old = self.state.impact.selected;
+                self.state.impact.selected = bounded_add(old, delta, len);
+                if self.state.impact.selected != old {
+                    // Entry point changed — reset chain state.
+                    self.state.impact.chain_selected = 0;
+                    self.state.impact.chain_snippet = None;
+                    self.state.impact.chain_snippet_loading = false;
+                    self.state.impact.chain_snippet_pending_key = None;
+                    self.state.impact.chain_snippet_scroll = 0;
                 }
-                self.load_context_snippet();
             }
         }
+    }
+
+    fn navigate_chain(&mut self, delta: i32) {
+        let len = self
+            .state
+            .impact
+            .analysis
+            .as_ref()
+            .and_then(|a| {
+                let leaves = a.leaf_nodes();
+                let leaf = leaves.get(self.state.impact.selected).copied()?;
+                Some(a.path_for_leaf(leaf).len())
+            })
+            .unwrap_or(0);
+        if len == 0 {
+            return;
+        }
+        self.state.impact.chain_selected =
+            bounded_add(self.state.impact.chain_selected, delta, len);
     }
 
     fn scroll_code(&mut self, delta: i32) {
@@ -194,12 +310,13 @@ impl TuiApp {
                     bounded_scroll(self.state.search.snippet_scroll, delta);
             }
             ActiveMode::Impact => {
-                self.state.impact.flame_scroll =
-                    bounded_scroll(self.state.impact.flame_scroll, delta);
-            }
-            ActiveMode::Context => {
-                self.state.context.snippet_scroll =
-                    bounded_scroll(self.state.context.snippet_scroll, delta);
+                if self.state.impact.chain_snippet.is_some() {
+                    self.state.impact.chain_snippet_scroll =
+                        bounded_scroll(self.state.impact.chain_snippet_scroll, delta);
+                } else {
+                    self.state.impact.flame_scroll =
+                        bounded_scroll(self.state.impact.flame_scroll, delta);
+                }
             }
         }
     }
@@ -222,10 +339,17 @@ impl TuiApp {
             });
 
         if let Some(sym) = symbol {
+            self.state.impact.cursor = sym.chars().count();
             self.state.impact.input = sym;
             self.state.impact.analysis = None;
             self.state.impact.selected = 0;
             self.state.impact.flame_scroll = 0;
+            self.state.impact.chain_selected = 0;
+            self.state.impact.chain_snippet = None;
+            self.state.impact.chain_snippet_loading = false;
+            self.state.impact.chain_snippet_pending_key = None;
+            self.state.impact.chain_snippet_scroll = 0;
+            self.state.impact.focused_pane = ImpactPane::EntryPoints;
             self.state.mode = ActiveMode::Impact;
             self.dispatch_impact();
         }
@@ -236,8 +360,19 @@ impl TuiApp {
     fn dispatch_current(&mut self) {
         match self.state.mode {
             ActiveMode::Search => self.dispatch_search(),
-            ActiveMode::Impact => self.dispatch_impact(),
-            ActiveMode::Context => self.dispatch_context(),
+            ActiveMode::Impact => {
+                match self.state.impact.focused_pane {
+                    ImpactPane::EntryPoints => self.dispatch_impact(),
+                    ImpactPane::Chain => {
+                        // Enter in the chain pane loads the selected node's code.
+                        if self.state.impact.chain_snippet.is_none()
+                            && !self.state.impact.chain_snippet_loading
+                        {
+                            self.dispatch_chain_snippet();
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -259,8 +394,11 @@ impl TuiApp {
             return;
         }
 
-        // Already waiting for a result with this exact key — do not spawn a duplicate.
         if self.state.search.pending_key.as_deref() == Some(&key) {
+            return;
+        }
+
+        if self.state.search.errored_key.as_deref() == Some(&key) {
             return;
         }
 
@@ -269,6 +407,7 @@ impl TuiApp {
         self.state.search.selected = 0;
         self.state.search.snippet_scroll = 0;
         self.state.search.pending_key = Some(key.clone());
+        self.state.search.errored_key = None;
 
         let uc = Arc::clone(&self.search_uc);
         let tx = self.event_tx.clone();
@@ -310,16 +449,26 @@ impl TuiApp {
             return;
         }
 
-        // Already waiting for a result with this exact key — do not spawn a duplicate.
         if self.state.impact.pending_key.as_deref() == Some(&key) {
+            return;
+        }
+
+        if self.state.impact.errored_key.as_deref() == Some(&key) {
             return;
         }
 
         self.state.impact.loading = true;
         self.state.impact.error = None;
+        self.state.impact.analysis = None;
         self.state.impact.selected = 0;
         self.state.impact.flame_scroll = 0;
+        self.state.impact.chain_selected = 0;
+        self.state.impact.chain_snippet = None;
+        self.state.impact.chain_snippet_loading = false;
+        self.state.impact.chain_snippet_pending_key = None;
+        self.state.impact.chain_snippet_scroll = 0;
         self.state.impact.pending_key = Some(key.clone());
+        self.state.impact.errored_key = None;
 
         let uc = Arc::clone(&self.impact_uc);
         let tx = self.event_tx.clone();
@@ -336,121 +485,51 @@ impl TuiApp {
         });
     }
 
-    fn dispatch_context(&mut self) {
-        let symbol = self.state.context.input.trim().to_string();
-        if symbol.is_empty() {
-            return;
-        }
-
-        let key = TuiCache::context_key(&symbol, self.state.context.repository.as_deref());
-
-        if let Some(cached) = self.cache.contexts.get(&key).cloned() {
-            self.state.context.context = Some(cached);
-            self.state.context.selected_caller = 0;
-            self.state.context.selected_callee = 0;
-            self.state.context.snippet_scroll = 0;
-            self.state.context.error = None;
-            self.state.context.loading = false;
-            self.state.context.pending_key = None;
-            // Clear stale snippet state before load_context_snippet so that if
-            // the new context has no edges the old snippet is not left visible.
-            self.state.context.snippet = None;
-            self.state.context.snippet_loading = false;
-            self.state.context.pending_snippet_key = None;
-            self.load_context_snippet();
-            return;
-        }
-
-        // Already waiting for a result with this exact key — do not spawn a duplicate.
-        if self.state.context.pending_key.as_deref() == Some(&key) {
-            return;
-        }
-
-        self.state.context.loading = true;
-        self.state.context.error = None;
-        self.state.context.snippet = None;
-        self.state.context.snippet_loading = false;
-        self.state.context.selected_caller = 0;
-        self.state.context.selected_callee = 0;
-        self.state.context.snippet_scroll = 0;
-        self.state.context.pending_key = Some(key.clone());
-        // Invalidate any in-flight snippet task so its SnippetDone is discarded.
-        self.state.context.pending_snippet_key = None;
-
-        let uc = Arc::clone(&self.context_uc);
-        let tx = self.event_tx.clone();
-        let repository = self.state.context.repository.clone();
-
-        tokio::spawn(async move {
-            let result = uc
-                .get_context(&symbol, repository.as_deref(), Some(DEFAULT_CONTEXT_LIMIT))
-                .await
-                .map_err(|e| e.to_string());
-            if let Err(e) = tx.send(TuiEvent::ContextDone { key, result }) {
-                debug!("ContextDone send failed (app already exited): {}", e);
-            }
-        });
-    }
-
-    /// Serve the snippet for the currently focused context edge, cache-first.
-    /// Not-found results (Ok(None)) are cached to avoid redundant round-trips;
-    /// transient errors are not cached so the lookup can be retried on next navigation.
-    fn load_context_snippet(&mut self) {
-        let s = &mut self.state.context;
-
-        let edge = match s.focused_pane {
-            ContextPane::Callers => s
-                .context
-                .as_ref()
-                .and_then(|c| c.callers.get(s.selected_caller))
-                .cloned(),
-            ContextPane::Callees => s
-                .context
-                .as_ref()
-                .and_then(|c| c.callees.get(s.selected_callee))
-                .cloned(),
+    fn dispatch_chain_snippet(&mut self) {
+        // Extract the (repo_id, file_path, line) for the selected chain node.
+        let node_coords = {
+            let analysis = match &self.state.impact.analysis {
+                Some(a) => a,
+                None => return,
+            };
+            let leaves = analysis.leaf_nodes();
+            let leaf = match leaves.get(self.state.impact.selected) {
+                Some(l) => *l,
+                None => return,
+            };
+            let path = analysis.path_for_leaf(leaf);
+            let node = match path.get(self.state.impact.chain_selected) {
+                Some(n) => *n,
+                None => return,
+            };
+            (node.repository_id.clone(), node.file_path.clone(), node.line)
         };
 
-        let edge = match edge {
-            Some(e) => e,
-            None => {
-                s.snippet = None;
-                s.snippet_loading = false;
-                s.pending_snippet_key = None;
-                return;
-            }
-        };
+        let key = TuiCache::snippet_key(&node_coords.0, &node_coords.1, node_coords.2);
 
-        let repository_id = s.repository.clone().unwrap_or_default();
-        let cache_key = TuiCache::snippet_key(&repository_id, &edge.file_path, edge.line);
-
-        // Cache hit (including not-found results stored as None).
-        if let Some(cached) = self.cache.snippets.get(&cache_key).cloned() {
-            s.snippet = cached;
-            s.snippet_scroll = 0;
-            s.snippet_loading = false;
-            s.pending_snippet_key = None;
+        if let Some(cached) = self.cache.snippets.get(&key).cloned() {
+            self.state.impact.chain_snippet = cached;
+            self.state.impact.chain_snippet_loading = false;
+            self.state.impact.chain_snippet_pending_key = None;
+            self.state.impact.chain_snippet_scroll = 0;
             return;
         }
 
-        s.snippet = None;
-        s.snippet_scroll = 0;
-        s.snippet_loading = true;
-        s.pending_snippet_key = Some(cache_key.clone());
+        self.state.impact.chain_snippet_loading = true;
+        self.state.impact.chain_snippet_pending_key = Some(key.clone());
+        self.state.impact.chain_snippet_scroll = 0;
 
         let uc = Arc::clone(&self.snippet_uc);
         let tx = self.event_tx.clone();
+        let (repo_id, file_path, line) = node_coords;
 
         tokio::spawn(async move {
             let result = uc
-                .get_snippet(&repository_id, &edge.file_path, edge.line)
+                .get_snippet(&repo_id, &file_path, line)
                 .await
                 .map_err(|e| e.to_string());
-            if let Err(e) = tx.send(TuiEvent::SnippetDone {
-                key: cache_key,
-                result,
-            }) {
-                debug!("SnippetDone send failed (app already exited): {}", e);
+            if let Err(e) = tx.send(TuiEvent::ChainSnippetDone { key, result }) {
+                debug!("ChainSnippetDone send failed (app already exited): {}", e);
             }
         });
     }
@@ -460,7 +539,6 @@ impl TuiApp {
     fn handle_app_event(&mut self, event: TuiEvent) {
         match event {
             TuiEvent::SearchDone { key, result } => {
-                // Ignore results that are no longer for the active dispatch.
                 if self.state.search.pending_key.as_deref() != Some(&key) {
                     return;
                 }
@@ -474,12 +552,12 @@ impl TuiApp {
                         self.state.search.snippet_scroll = 0;
                     }
                     Err(e) => {
+                        self.state.search.errored_key = Some(key);
                         self.state.search.error = Some(e);
                     }
                 }
             }
             TuiEvent::ImpactDone { key, result } => {
-                // Ignore results that are no longer for the active dispatch.
                 if self.state.impact.pending_key.as_deref() != Some(&key) {
                     return;
                 }
@@ -493,49 +571,25 @@ impl TuiApp {
                         self.state.impact.flame_scroll = 0;
                     }
                     Err(e) => {
+                        self.state.impact.errored_key = Some(key);
                         self.state.impact.error = Some(e);
                     }
                 }
             }
-            TuiEvent::ContextDone { key, result } => {
-                // Ignore results that are no longer for the active dispatch.
-                if self.state.context.pending_key.as_deref() != Some(&key) {
+            TuiEvent::ChainSnippetDone { key, result } => {
+                if self.state.impact.chain_snippet_pending_key.as_ref() != Some(&key) {
                     return;
                 }
-                self.state.context.pending_key = None;
-                self.state.context.loading = false;
-                match result {
-                    Ok(context) => {
-                        self.cache.contexts.insert(key, context.clone());
-                        self.state.context.context = Some(context);
-                        self.state.context.selected_caller = 0;
-                        self.state.context.selected_callee = 0;
-                        self.state.context.snippet_scroll = 0;
-                        self.load_context_snippet();
-                    }
-                    Err(e) => {
-                        self.state.context.error = Some(e);
-                    }
-                }
-            }
-            TuiEvent::SnippetDone { key, result } => {
-                // Ignore results from superseded snippet requests (e.g. rapid navigation).
-                if self.state.context.pending_snippet_key.as_ref() != Some(&key) {
-                    return;
-                }
-                self.state.context.pending_snippet_key = None;
-                self.state.context.snippet_loading = false;
+                self.state.impact.chain_snippet_pending_key = None;
+                self.state.impact.chain_snippet_loading = false;
                 match result {
                     Ok(chunk) => {
-                        // Cache both Some (found) and None (explicitly not found).
                         self.cache.snippets.insert(key, chunk.clone());
-                        self.state.context.snippet = chunk;
-                        self.state.context.snippet_scroll = 0;
+                        self.state.impact.chain_snippet = chunk;
+                        self.state.impact.chain_snippet_scroll = 0;
                     }
                     Err(e) => {
-                        // Transient backend error: log but do not cache so the
-                        // lookup can be retried on the next navigation.
-                        warn!("snippet lookup failed: {}", e);
+                        warn!("chain snippet lookup failed: {}", e);
                     }
                 }
             }

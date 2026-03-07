@@ -99,16 +99,34 @@ async fn main() -> Result<()> {
         Commands::Mcp { http, public } => (true, *http, *public),
         _ => (false, None, false),
     };
+    let is_tui = matches!(&cli.command, Commands::Tui { .. });
 
     // For MCP stdio mode, log to stderr (stdout is for MCP protocol)
     // For HTTP mode, we can log to stdout since HTTP uses a different channel
+    // For TUI mode, log to a file so ratatui's terminal is not corrupted
     let filter = if cli.verbose {
         EnvFilter::new("warn,codesearch=debug")
     } else {
         EnvFilter::new("warn,codesearch=info")
     };
 
-    if is_mcp && http_port.is_none() {
+    if is_tui {
+        // Ratatui owns the terminal; any write to stderr corrupts the display.
+        // Redirect logs to ~/.codesearch/tui.log so they are still accessible.
+        let log_dir = expand_tilde(&cli.data_dir);
+        std::fs::create_dir_all(&log_dir)?;
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(format!("{}/tui.log", log_dir))
+            .map_err(|e| anyhow::anyhow!("Failed to open TUI log file: {}", e))?;
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .with_writer(log_file)
+            .with_ansi(false)
+            .init();
+    } else if is_mcp && http_port.is_none() {
         // Stdio mode - log to stderr
         tracing_subscriber::fmt()
             .with_env_filter(filter)
@@ -185,7 +203,6 @@ async fn main() -> Result<()> {
         let app = TuiApp::new(
             Arc::new(container.search_use_case()),
             Arc::new(container.impact_use_case()),
-            Arc::new(container.context_use_case()),
             Arc::new(container.snippet_lookup_use_case()),
             repository,
         );

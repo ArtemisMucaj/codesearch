@@ -1,4 +1,4 @@
-use crate::application::{ImpactAnalysis, SymbolContext};
+use crate::application::ImpactAnalysis;
 use crate::domain::{CodeChunk, SearchResult};
 use crate::tui::cache::SnippetKey;
 
@@ -7,14 +7,22 @@ use crate::tui::cache::SnippetKey;
 pub enum ActiveMode {
     Search,
     Impact,
-    Context,
 }
 
-/// Which pane in the context view has keyboard focus.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ContextPane {
-    Callers,
-    Callees,
+/// Which pane in the search view has keyboard focus.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SearchPane {
+    #[default]
+    List,
+    Code,
+}
+
+/// Which pane in the impact view has keyboard focus.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ImpactPane {
+    #[default]
+    EntryPoints,
+    Chain,
 }
 
 // ── Per-mode state ────────────────────────────────────────────────────────────
@@ -22,6 +30,8 @@ pub enum ContextPane {
 #[derive(Debug, Default)]
 pub struct SearchState {
     pub input: String,
+    /// Cursor position within `input`, measured in characters (not bytes).
+    pub cursor: usize,
     pub results: Vec<SearchResult>,
     pub selected: usize,
     pub loading: bool,
@@ -32,63 +42,41 @@ pub struct SearchState {
     pub repository: Option<String>,
     /// Cache key of the most recently dispatched search request.
     pub pending_key: Option<String>,
+    /// Cache key of the last request that returned an error. Prevents the
+    /// event loop from re-dispatching the same failing query on key-repeat.
+    pub errored_key: Option<String>,
+    /// Which pane currently has keyboard focus.
+    pub focused_pane: SearchPane,
 }
 
 #[derive(Debug, Default)]
 pub struct ImpactState {
     pub input: String,
+    /// Cursor position within `input`, measured in characters (not bytes).
+    pub cursor: usize,
     pub analysis: Option<ImpactAnalysis>,
-    /// Index into the flat affected-node list shown in the left pane.
+    /// Index into the leaf-node list shown in the left pane.
     pub selected: usize,
     pub loading: bool,
     pub error: Option<String>,
-    /// Vertical scroll offset for the flame graph.
+    /// Vertical scroll offset for the chain / code panel (right pane).
     pub flame_scroll: u16,
     pub repository: Option<String>,
     /// Cache key of the most recently dispatched impact request.
     pub pending_key: Option<String>,
-}
-
-#[derive(Debug)]
-pub struct ContextState {
-    pub input: String,
-    pub context: Option<SymbolContext>,
-    pub selected_caller: usize,
-    pub selected_callee: usize,
-    pub focused_pane: ContextPane,
-    /// Indexed chunk fetched from the store for the selected edge.
-    pub snippet: Option<CodeChunk>,
-    pub loading: bool,
-    pub snippet_loading: bool,
-    pub error: Option<String>,
-    /// Vertical scroll offset for the code panel.
-    pub snippet_scroll: u16,
-    pub repository: Option<String>,
-    /// Cache key of the most recently dispatched context request.
-    pub pending_key: Option<String>,
-    /// Cache key of the most recently dispatched snippet request.
-    /// Used to discard SnippetDone events that arrived out of order.
-    pub pending_snippet_key: Option<SnippetKey>,
-}
-
-impl Default for ContextState {
-    fn default() -> Self {
-        Self {
-            input: String::new(),
-            context: None,
-            selected_caller: 0,
-            selected_callee: 0,
-            focused_pane: ContextPane::Callers,
-            snippet: None,
-            loading: false,
-            snippet_loading: false,
-            error: None,
-            snippet_scroll: 0,
-            repository: None,
-            pending_key: None,
-            pending_snippet_key: None,
-        }
-    }
+    /// Cache key of the last request that returned an error.
+    pub errored_key: Option<String>,
+    /// Which pane currently has keyboard focus.
+    pub focused_pane: ImpactPane,
+    /// Selected node index within the current call chain (right pane).
+    pub chain_selected: usize,
+    /// Code snippet for the selected chain node (Some = code view is active).
+    pub chain_snippet: Option<CodeChunk>,
+    pub chain_snippet_loading: bool,
+    /// Vertical scroll offset for the chain code view.
+    pub chain_snippet_scroll: u16,
+    /// Pending key for an in-flight chain snippet request.
+    pub chain_snippet_pending_key: Option<SnippetKey>,
 }
 
 // ── Top-level app state ───────────────────────────────────────────────────────
@@ -98,7 +86,6 @@ pub struct AppState {
     pub mode: ActiveMode,
     pub search: SearchState,
     pub impact: ImpactState,
-    pub context: ContextState,
     pub should_quit: bool,
 }
 
@@ -111,10 +98,6 @@ impl AppState {
                 ..Default::default()
             },
             impact: ImpactState {
-                repository: repository.clone(),
-                ..Default::default()
-            },
-            context: ContextState {
                 repository,
                 ..Default::default()
             },
@@ -127,7 +110,6 @@ impl AppState {
         match self.mode {
             ActiveMode::Search => &self.search.input,
             ActiveMode::Impact => &self.impact.input,
-            ActiveMode::Context => &self.context.input,
         }
     }
 
@@ -135,7 +117,20 @@ impl AppState {
         match self.mode {
             ActiveMode::Search => &mut self.search.input,
             ActiveMode::Impact => &mut self.impact.input,
-            ActiveMode::Context => &mut self.context.input,
+        }
+    }
+
+    pub fn active_cursor(&self) -> usize {
+        match self.mode {
+            ActiveMode::Search => self.search.cursor,
+            ActiveMode::Impact => self.impact.cursor,
+        }
+    }
+
+    pub fn active_cursor_mut(&mut self) -> &mut usize {
+        match self.mode {
+            ActiveMode::Search => &mut self.search.cursor,
+            ActiveMode::Impact => &mut self.impact.cursor,
         }
     }
 
@@ -143,7 +138,6 @@ impl AppState {
         match self.mode {
             ActiveMode::Search => self.search.loading,
             ActiveMode::Impact => self.impact.loading,
-            ActiveMode::Context => self.context.loading || self.context.snippet_loading,
         }
     }
 }

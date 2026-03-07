@@ -1,10 +1,11 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use crate::tui::state::AppState;
-use crate::tui::widgets::{code_panel, result_list};
+use crate::tui::state::{AppState, SearchPane};
+use crate::tui::widgets::result_list;
 use crate::tui::widgets::result_list::ListEntry;
 
 use super::format::shorten_path;
@@ -29,7 +30,9 @@ fn render_results(frame: &mut Frame, area: Rect, state: &AppState) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Red));
         frame.render_widget(
-            Paragraph::new(format!("Error: {}", err)).block(block),
+            Paragraph::new(format!("Error: {}", err))
+                .block(block)
+                .wrap(Wrap { trim: false }),
             area,
         );
         return;
@@ -60,12 +63,16 @@ fn render_results(frame: &mut Frame, area: Rect, state: &AppState) {
 fn render_snippet(frame: &mut Frame, area: Rect, state: &AppState) {
     let s = &state.search;
 
-    // Do not render a (potentially stale) snippet when an error is active.
+    // Suppress stale snippet when an error is active.
     let selected = if s.error.is_some() {
         None
     } else {
         s.results.get(s.selected)
     };
+
+    // Border color reflects which pane has focus.
+    let focused = s.focused_pane == SearchPane::Code;
+    let border_color = if focused { Color::Cyan } else { Color::White };
 
     let (content, title, start_line) = match selected {
         Some(r) => (
@@ -73,9 +80,47 @@ fn render_snippet(frame: &mut Frame, area: Rect, state: &AppState) {
             shorten_path(r.chunk().file_path()),
             r.chunk().start_line(),
         ),
-        None => (String::new(), String::new(), 0),
+        None => {
+            let block = Block::default()
+                .title("  ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(
+                Paragraph::new("  No snippet available.")
+                    .block(block)
+                    .style(Style::default().fg(Color::DarkGray)),
+                area,
+            );
+            return;
+        }
     };
 
-    code_panel::render(frame, area, &title, &content, start_line, s.snippet_scroll);
-}
+    let block = Block::default()
+        .title(format!(" {} ", title))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
 
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines: Vec<Line> = content
+        .lines()
+        .enumerate()
+        .map(|(i, line)| {
+            let lineno = start_line as usize + i;
+            Line::from(vec![
+                Span::styled(
+                    format!("{:>4}  ", lineno),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(line.to_string()),
+            ])
+        })
+        .collect();
+
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((s.snippet_scroll, 0));
+
+    frame.render_widget(para, inner);
+}

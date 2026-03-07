@@ -1,4 +1,4 @@
-use crate::application::{ImpactAnalysis, SymbolContext};
+use crate::application::ImpactAnalysis;
 use crate::domain::{CodeChunk, SearchResult};
 use crate::tui::cache::SnippetKey;
 
@@ -14,13 +14,8 @@ pub enum TuiEvent {
         key: String,
         result: Result<ImpactAnalysis, String>,
     },
-    /// Symbol context use case completed.
-    ContextDone {
-        key: String,
-        result: Result<SymbolContext, String>,
-    },
-    /// Snippet lookup for the context right-pane completed.
-    SnippetDone {
+    /// Snippet lookup for a selected impact chain node completed.
+    ChainSnippetDone {
         key: SnippetKey,
         result: Result<Option<CodeChunk>, String>,
     },
