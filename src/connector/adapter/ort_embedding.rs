@@ -20,6 +20,10 @@ pub struct OrtEmbedding {
     session: Arc<Mutex<Session>>,
     tokenizer: Arc<Tokenizer>,
     config: EmbeddingConfig,
+    /// True when the loaded ONNX model declares `token_type_ids` as a required
+    /// input (e.g. BERT-style models).  All-zero segment IDs are used because
+    /// embedding models always encode a single sequence.
+    needs_token_type_ids: bool,
 }
 
 impl OrtEmbedding {
@@ -66,6 +70,11 @@ impl OrtEmbedding {
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| DomainError::internal(format!("Failed to load tokenizer: {}", e)))?;
 
+        let needs_token_type_ids = session
+            .inputs()
+            .iter()
+            .any(|i| i.name() == "token_type_ids");
+
         let config = EmbeddingConfig::new(
             model_name.to_string(),
             DEFAULT_DIMENSIONS,
@@ -76,6 +85,7 @@ impl OrtEmbedding {
             session: Arc::new(Mutex::new(session)),
             tokenizer: Arc::new(tokenizer),
             config,
+            needs_token_type_ids,
         })
     }
 
@@ -127,12 +137,27 @@ impl OrtEmbedding {
             .lock()
             .map_err(|e| DomainError::internal(format!("Failed to lock session: {}", e)))?;
 
-        let outputs = session
-            .run(ort::inputs![
+        let outputs = if self.needs_token_type_ids {
+            let token_type_ids = vec![0i64; batch_size * max_len];
+            let token_type_ids_tensor =
+                Tensor::from_array((shape, token_type_ids)).map_err(|e| {
+                    DomainError::internal(format!(
+                        "Failed to create token_type_ids tensor: {}",
+                        e
+                    ))
+                })?;
+            session.run(ort::inputs![
+                "input_ids" => input_ids_tensor,
+                "attention_mask" => attention_mask_tensor,
+                "token_type_ids" => token_type_ids_tensor,
+            ])
+        } else {
+            session.run(ort::inputs![
                 "input_ids" => input_ids_tensor,
                 "attention_mask" => attention_mask_tensor,
             ])
-            .map_err(|e| DomainError::internal(format!("Inference failed: {}", e)))?;
+        }
+        .map_err(|e| DomainError::internal(format!("Inference failed: {}", e)))?;
 
         let output_value = outputs
             .iter()

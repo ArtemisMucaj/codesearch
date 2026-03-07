@@ -80,7 +80,12 @@ impl<'a> Router<'a> {
                     .context(symbol, repository, limit, format)
                     .await
             }
-            Commands::Mcp { .. } => unreachable!("MCP command is handled separately in main"),
+            Commands::Mcp { .. } => {
+                Err(anyhow::anyhow!("MCP command is handled separately in main"))
+            }
+            Commands::Tui { .. } => {
+                Err(anyhow::anyhow!("TUI command is handled separately in main"))
+            }
         }
     }
 }

@@ -144,4 +144,11 @@ pub enum Commands {
         #[arg(long)]
         public: bool,
     },
+
+    /// Launch the interactive TUI (search, impact, context in one terminal UI)
+    Tui {
+        /// Restrict all queries to a specific repository ID
+        #[arg(short, long)]
+        repository: Option<String>,
+    },
 }
