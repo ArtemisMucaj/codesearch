@@ -13,7 +13,7 @@ const MESSAGES_PATH: &str = "/v1/messages";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 /// Default model matches the LM Studio local-first default.
 const DEFAULT_MODEL: &str = "qwen/qwen3.5-4b";
-const MAX_TOKENS: u32 = 256;
+const MAX_TOKENS: u32 = 4096;
 
 #[derive(Serialize)]
 struct ApiRequest<'a> {
@@ -83,9 +83,9 @@ impl AnthropicClient {
         let base_url = format!("{trimmed}/");
         Self {
             client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
+                .timeout(Duration::from_secs(300))
                 .build()
-                .expect("reqwest::Client with 30-second timeout failed to build"),
+                .expect("reqwest::Client with 300-second timeout failed to build"),
             probe_client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(2))
                 .timeout(Duration::from_secs(2))

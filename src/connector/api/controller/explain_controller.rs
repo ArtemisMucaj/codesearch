@@ -40,7 +40,7 @@ impl<'a> ExplainController<'a> {
             .context("Explain use case failed")?;
 
         let mut output = format!(
-            "Explanation for `{}`\n{}\n\n{}\n\n---\nAnalysed {} symbols across {} call levels.\n",
+            "Explanation for `{}`\n{}\n\n{}\n\n---\nAnalysed {} symbols across {} call levels.\n\n",
             result.root_symbol,
             "═".repeat(60),
             result.explanation,
@@ -52,11 +52,11 @@ impl<'a> ExplainController<'a> {
             for (symbol, file_path, line, src) in &result.symbol_sources {
                 match src {
                     Some(s) => output.push_str(&format!(
-                        "```{}:{} — {}\n{}\n```\n\n",
+                        "{}:{} — {}\n```\n{}\n```\n\n",
                         file_path, line, symbol, s
                     )),
                     None => output.push_str(&format!(
-                        "`{}:{}` — `{}` _(source not available)_\n\n",
+                        "{}:{} — {} _(source not available)_\n\n",
                         file_path, line, symbol
                     )),
                 }

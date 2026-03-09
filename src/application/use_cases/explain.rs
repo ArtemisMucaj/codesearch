@@ -11,15 +11,79 @@ use super::snippet_lookup::SnippetLookupUseCase;
 
 const SYSTEM_PROMPT: &str = "\
 You are a senior software engineer performing call-flow analysis. \
-Given a symbol's source code and its call graph, write a clear and precise explanation covering:
+You will receive a root symbol and one or more call paths. \
+Each path lists every caller in the chain from the outermost entry point down to the root symbol, \
+with source code for each hop.
 
-1. **Purpose** — what the root symbol does and why it exists.
-2. **Data / control flow** — how data enters, transforms, and exits through each call level.
-3. **Business feature** — the user-visible capability or requirement this code implements.
-4. **Key patterns & dependencies** — notable abstractions, external services, or design patterns used.
+You MUST analyse every symbol and every hop present in the provided call paths. \
+Do not summarise or skip any symbol. \
+If multiple paths share a symbol, mention it once but note which paths it appears in.
 
-Be concrete: reference specific function names, file paths, and argument names where helpful. \
-Format your response with Markdown headings.";
+Respond using exactly the four XML sections below. \
+Do not add, rename, reorder, or skip any section. \
+Do not output anything outside these XML tags. \
+Replace the example content with your actual analysis.
+
+<purpose>
+[One paragraph. State what the root symbol does and why it exists, \
+grounded in what the full call chain reveals about its role.
+
+Example: compute_checksum validates the integrity of an incoming payload by \
+hashing its bytes with SHA-256. The call chain shows it is invoked only after \
+the payload has been decoded, making it the last defence against data corruption \
+before the record is persisted.]
+</purpose>
+
+<data_and_control_flow>
+[One entry per hop across ALL call paths, outermost caller first, root symbol last. \
+Every symbol in the provided paths must appear in at least one entry. \
+Use this format for each entry:
+
+• `<caller>` → `<callee>`
+  - What the caller validates, prepares, or checks before the call.
+  - What arguments it passes and what the callee does with them.
+  - Any conditional or secondary calls made within this hop.
+
+Example:
+• `handle_request` → `decode_payload`
+  - Receives the raw HTTP body and the request context.
+  - Calls `decode_payload(body)` to deserialise the bytes into a Record struct.
+• `decode_payload` → `validate_record`
+  - Passes the Record to `validate_record(record)`, which checks required fields \
+    and rejects malformed input.
+• `validate_record` → `compute_checksum`
+  - Passes the validated Record to `compute_checksum(record)`, which hashes the \
+    payload bytes and compares the digest to the expected value.]
+</data_and_control_flow>
+
+<business_feature>
+[One paragraph describing the end-to-end user-visible capability the entire call chain implements. \
+Mention the entry-point symbols (API endpoints, CLI commands, event handlers, etc.) \
+and the root symbol's contribution to that capability.
+
+Example: The chain implements the record-ingestion API endpoint exposed by handle_request. \
+A client posts a JSON payload; the system decodes, validates, and checksums it before \
+writing it to the database. compute_checksum is the integrity gate that ensures \
+no corrupted record is ever persisted.]
+</business_feature>
+
+<key_patterns_and_dependencies>
+[One entry per notable abstraction, external service, framework, or design pattern \
+that appears in the provided source snippets. \
+Use this format for each entry:
+
+• `<item name>` (<source or type>) — used by `<symbol>`
+  - What the item is.
+  - Why it is used here.
+
+Example:
+• `SHA-256` (ring crate) — used by `compute_checksum`
+  - Cryptographic hash function that produces a deterministic 256-bit digest.
+  - Used to verify payload integrity before persisting the record.
+• Repository pattern — used by `validate_record`
+  - `validate_record` depends on a `RecordRepository` trait rather than a concrete type.
+  - Decouples business validation logic from the storage backend.]
+</key_patterns_and_dependencies>";
 
 /// Output produced by [`ExplainUseCase::execute`].
 pub struct ExplainResult {
@@ -119,7 +183,7 @@ impl ExplainUseCase {
 
         Ok(ExplainResult {
             root_symbol: analysis.root_symbol,
-            explanation,
+            explanation: xml_to_markdown(&explanation),
             total_affected: analysis.total_affected,
             max_depth_reached: analysis.max_depth_reached,
             symbol_sources,
@@ -130,6 +194,106 @@ impl ExplainUseCase {
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+/// Convert an XML-tagged LLM response into Markdown sections.
+///
+/// Extracts the four expected tags and renders them under `##` headings.
+/// Falls back to returning the raw response if no recognised tags are found,
+/// so older/non-conforming model output still passes through.
+fn xml_to_markdown(s: &str) -> String {
+    const SECTIONS: &[(&str, &str)] = &[
+        ("purpose", "## Purpose"),
+        ("data_and_control_flow", "## Data and control flow"),
+        ("business_feature", "## Business feature"),
+        ("key_patterns_and_dependencies", "## Key patterns and dependencies"),
+    ];
+
+    let mut out = String::new();
+    for &(tag, heading) in SECTIONS {
+        if let Some(content) = extract_xml_tag(s, tag) {
+            out.push_str(heading);
+            out.push('\n');
+            out.push_str(strip_markdown_emphasis(content.trim()).trim_end());
+            out.push_str("\n\n");
+        }
+    }
+
+    if out.is_empty() {
+        // No XML tags found — fall back to stripping emphasis on the raw response.
+        strip_markdown_emphasis(s)
+    } else {
+        out.trim_end().to_string()
+    }
+}
+
+/// Return the text content between `<tag>` and `</tag>`, if present.
+fn extract_xml_tag<'a>(s: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = s.find(open.as_str())? + open.len();
+    let end = s[start..].find(close.as_str()).map(|i| start + i)?;
+    Some(&s[start..end])
+}
+
+/// Strip Markdown bold (`**text**`, `__text__`) and italic (`*text*`, `_text_`)
+/// markers from `s`, leaving the inner text intact.
+///
+/// Operates line-by-line so that fenced code blocks (` ``` `) are left
+/// untouched: lines inside a code fence are passed through verbatim.
+fn strip_markdown_emphasis(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_code_fence = false;
+
+    for line in s.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_code_fence = !in_code_fence;
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if in_code_fence {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        out.push_str(&strip_emphasis_in_line(line));
+        out.push('\n');
+    }
+
+    // Preserve the original trailing-newline behaviour.
+    if !s.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+/// Remove paired `**` delimiters from a single line, leaving `_`, `__`, and `*` intact
+/// (underscores and single asterisks can be significant in code tokens).
+fn strip_emphasis_in_line(line: &str) -> String {
+    remove_paired(line, "**")
+}
+
+/// Remove all paired occurrences of `delim` from `s`, keeping the inner text.
+fn remove_paired(s: &str, delim: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find(delim) {
+        out.push_str(&rest[..start]);
+        rest = &rest[start + delim.len()..];
+        // Look for the closing delimiter on the same line.
+        if let Some(end) = rest.find(delim) {
+            out.push_str(&rest[..end]);
+            rest = &rest[end + delim.len()..];
+        } else {
+            // No closing delimiter — emit the opening one verbatim and stop.
+            out.push_str(delim);
+            break;
+        }
+    }
+    out.push_str(rest);
+    out
+}
 
 /// Reconstruct all call paths from the BFS result.
 ///
@@ -264,6 +428,9 @@ async fn build_prompt(
 
     prompt.push_str(&format!("## Call paths ({total_paths} total)\n\n"));
 
+    // Collect the full symbol roster so the model knows exactly what to cover.
+    let mut all_symbols: Vec<String> = vec![root_symbol.to_string()];
+
     for (i, path) in paths.iter().enumerate() {
         let chain: String = path
             .iter()
@@ -283,8 +450,18 @@ async fn build_prompt(
                 "#### `{}` — `{}:{}`\n{}\n\n",
                 node.symbol, node.file_path, node.line, src_block
             ));
+            if !all_symbols.contains(&node.symbol) {
+                all_symbols.push(node.symbol.clone());
+            }
         }
     }
+
+    // Explicit checklist so the model cannot skip any symbol.
+    prompt.push_str("## Symbols you MUST cover in your response\n\n");
+    for sym in &all_symbols {
+        prompt.push_str(&format!("- `{sym}`\n"));
+    }
+    prompt.push('\n');
 
     // Collect symbol sources in stable insertion order.
     let mut symbol_sources: Vec<(String, String, u32, Option<String>)> = Vec::new();
