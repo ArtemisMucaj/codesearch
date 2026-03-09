@@ -146,6 +146,11 @@ pub enum Commands {
         ///   'open-ai'   — /v1/chat/completions (OPENAI_BASE_URL, OPENAI_MODEL).
         #[arg(long, value_enum, default_value = "anthropic")]
         llm: LlmTarget,
+
+        /// Print every analyzed symbol together with the source chunk that was
+        /// sent to the LLM, after the explanation.
+        #[arg(long)]
+        dump_symbols: bool,
     },
 
     /// Start MCP (Model Context Protocol) server for integration with AI tools

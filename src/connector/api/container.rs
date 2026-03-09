@@ -12,7 +12,7 @@ use crate::connector::adapter::NamespaceEmbeddingConfig;
 use crate::{
     AnthropicClient, AnthropicReranking, DeleteRepositoryUseCase, DuckdbCallGraphRepository,
     DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
-    ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
+    ExplainUseCase, ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
     ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding, MockReranking, OpenAiChatClient,
     OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, RerankingService, Scip,
     SearchCodeUseCase, SnippetLookupUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
@@ -500,6 +500,14 @@ impl Container {
 
     pub fn snippet_lookup_use_case(&self) -> SnippetLookupUseCase {
         SnippetLookupUseCase::new(self.vector_repo.clone())
+    }
+
+    pub fn explain_use_case(&self) -> ExplainUseCase {
+        ExplainUseCase::new(
+            self.impact_use_case(),
+            self.call_graph_use_case.clone(),
+            self.snippet_lookup_use_case(),
+        )
     }
 
     pub fn data_dir(&self) -> &str {

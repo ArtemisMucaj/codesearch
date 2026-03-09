@@ -5,17 +5,18 @@ pub mod domain;
 pub mod tui;
 
 pub use application::{
-    CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase, ContextEdge,
-    DeleteRepositoryUseCase, EmbeddingService, FileHashRepository, ImpactAnalysis,
-    ImpactAnalysisUseCase, ImpactNode, IndexRepositoryUseCase, ListRepositoriesUseCase,
-    MetadataRepository, ParserService, QueryExpander, RerankingService, Scip,
-    SearchCodeUseCase, SnippetLookupUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
+    CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase, ChatClient, ContextEdge,
+    DeleteRepositoryUseCase, EmbeddingService, ExplainResult, ExplainUseCase, FileHashRepository,
+    ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode, IndexRepositoryUseCase,
+    ListRepositoriesUseCase, MetadataRepository, ParserService, QueryExpander, RerankingService,
+    Scip, SearchCodeUseCase, SnippetLookupUseCase, SymbolContext, SymbolContextUseCase,
+    VectorRepository,
 };
 
 pub use cli::{Commands, EmbeddingTarget, LlmTarget, OutputFormat, RerankingTarget};
 
 pub use connector::{
-    AnthropicClient, AnthropicReranking, ChatClient, DuckdbCallGraphRepository,
+    AnthropicClient, AnthropicReranking, DuckdbCallGraphRepository,
     DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository,
     InMemoryVectorRepository, LlmQueryExpander, MockEmbedding, MockReranking, NamespaceEmbeddingConfig,
     OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterParser,

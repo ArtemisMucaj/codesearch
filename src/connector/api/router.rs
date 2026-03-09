@@ -85,9 +85,10 @@ impl<'a> Router<'a> {
                 symbol,
                 repository,
                 llm,
+                dump_symbols,
             } => {
                 self.explain_controller
-                    .explain(symbol, repository, llm)
+                    .explain(symbol, repository, llm, dump_symbols)
                     .await
             }
             Commands::Mcp { .. } => {
