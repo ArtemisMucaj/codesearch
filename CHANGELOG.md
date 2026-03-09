@@ -22,6 +22,19 @@
 * unit tests for `InMemoryVectorRepository` hybrid paths: cosine vs RRF score ranges, dual-leg ranking, post-fusion `min_score` filtering, no early pruning, empty-term fallback, and limit enforcement
 * integration tests for end-to-end hybrid search: results returned with positive scores, keyword-matched chunk surfaces, special SQL characters (`%`, `_`, `!`) do not cause errors, and semantic-only baseline confirms the flag gates the BM25 leg
 
+## [0.15.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.14.0...v0.15.0) (2026-03-09)
+
+
+### Features
+
+* implement TUI interactive cli ([#104](https://github.com/ArtemisMucaj/codesearch/issues/104)) ([2f6608f](https://github.com/ArtemisMucaj/codesearch/commit/2f6608f850a0509899462e2945f37a75be90aacd))
+* llm exploration ([#105](https://github.com/ArtemisMucaj/codesearch/issues/105)) ([75269f0](https://github.com/ArtemisMucaj/codesearch/commit/75269f0f73ef0a1b99a97184a5a061eb71e0ebcf))
+
+
+### Bug Fixes
+
+* update default LM Studio model from ministral-3b to qwen3.5-4b ([#106](https://github.com/ArtemisMucaj/codesearch/issues/106)) ([d692a79](https://github.com/ArtemisMucaj/codesearch/commit/d692a79aaa3f0a4a9bddc3d9f40a817caec79aac))
+
 ## [0.14.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.13.1...v0.14.0) (2026-03-04)
 
 
