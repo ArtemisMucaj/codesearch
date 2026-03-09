@@ -52,12 +52,12 @@ impl<'a> ExplainController<'a> {
             for (symbol, file_path, line, src) in &result.symbol_sources {
                 match src {
                     Some(s) => output.push_str(&format!(
-                        "{}:{} — {}\n```\n{}\n```\n\n",
-                        file_path, line, symbol, s
+                        "**`{}`** — `{}:{}`\n```\n{}\n```\n\n",
+                        symbol, file_path, line, s
                     )),
                     None => output.push_str(&format!(
-                        "{}:{} — {} _(source not available)_\n\n",
-                        file_path, line, symbol
+                        "**`{}`** — `{}:{}` _(source not available)_\n\n",
+                        symbol, file_path, line
                     )),
                 }
             }

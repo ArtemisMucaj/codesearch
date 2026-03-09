@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::application::{CallGraphQuery, CallGraphUseCase, ChatClient};
 use crate::domain::DomainError;
@@ -417,19 +417,33 @@ async fn build_prompt(
     // Fetch sources from the indexed store sequentially (cannot await inside a closure).
     let mut source_cache: HashMap<(&str, &str), Option<String>> = HashMap::new();
     for node in nodes_to_fetch {
-        let src = snippet_lookup
+        match snippet_lookup
             .get_snippet(&node.repository_id, &node.file_path, node.line)
             .await
-            .ok()
-            .flatten()
-            .map(|chunk| chunk.content().to_string());
-        source_cache.insert((node.symbol.as_str(), node.file_path.as_str()), src);
+        {
+            Ok(chunk) => {
+                let src = chunk.map(|c| c.content().to_string());
+                source_cache.insert((node.symbol.as_str(), node.file_path.as_str()), src);
+            }
+            Err(e) => {
+                debug!(
+                    error = %e,
+                    repository_id = %node.repository_id,
+                    file_path = %node.file_path,
+                    line = %node.line,
+                    symbol = %node.symbol,
+                    "snippet lookup failed; source will be unavailable"
+                );
+                source_cache.insert((node.symbol.as_str(), node.file_path.as_str()), None);
+            }
+        }
     }
 
     prompt.push_str(&format!("## Call paths ({total_paths} total)\n\n"));
 
     // Collect the full symbol roster so the model knows exactly what to cover.
     let mut all_symbols: Vec<String> = vec![root_symbol.to_string()];
+    let mut seen_symbols: HashSet<String> = HashSet::from([root_symbol.to_string()]);
 
     for (i, path) in paths.iter().enumerate() {
         let chain: String = path
@@ -450,7 +464,7 @@ async fn build_prompt(
                 "#### `{}` — `{}:{}`\n{}\n\n",
                 node.symbol, node.file_path, node.line, src_block
             ));
-            if !all_symbols.contains(&node.symbol) {
+            if seen_symbols.insert(node.symbol.clone()) {
                 all_symbols.push(node.symbol.clone());
             }
         }

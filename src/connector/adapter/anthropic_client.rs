@@ -125,7 +125,7 @@ impl ChatClient for AnthropicClient {
     async fn complete(&self, system: &str, user: &str) -> Result<String, DomainError> {
         // Connectivity probe — runs exactly once; result is cached for all
         // subsequent calls.  On connection-refused / timeout we fail fast
-        // instead of hanging for the full 30-second request timeout.
+        // instead of hanging for the full 300-second request timeout.
         // Any HTTP response (even 4xx/5xx) means the server is up.
         let probe_client = &self.probe_client;
         let base_url = &self.base_url;

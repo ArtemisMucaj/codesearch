@@ -15,7 +15,6 @@ use super::state::{ActiveMode, AppState, ImpactPane, SearchPane};
 use super::views;
 
 const SEARCH_LIMIT: usize = 20;
-const IMPACT_DEPTH: usize = 5;
 const SCROLL_STEP: u16 = 5;
 
 pub struct TuiApp {
@@ -26,6 +25,7 @@ pub struct TuiApp {
     snippet_uc: Arc<SnippetLookupUseCase>,
     event_tx: mpsc::UnboundedSender<TuiEvent>,
     event_rx: mpsc::UnboundedReceiver<TuiEvent>,
+    impact_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl TuiApp {
@@ -44,6 +44,7 @@ impl TuiApp {
             snippet_uc,
             event_tx: tx,
             event_rx: rx,
+            impact_task: None,
         }
     }
 
@@ -433,11 +434,7 @@ impl TuiApp {
             return;
         }
 
-        let key = TuiCache::impact_key(
-            &symbol,
-            IMPACT_DEPTH,
-            self.state.impact.repository.as_deref(),
-        );
+        let key = TuiCache::impact_key(&symbol, self.state.impact.repository.as_deref());
 
         if let Some(cached) = self.cache.impacts.get(&key).cloned() {
             self.state.impact.analysis = Some(cached);
@@ -474,7 +471,10 @@ impl TuiApp {
         let tx = self.event_tx.clone();
         let repository = self.state.impact.repository.clone();
 
-        tokio::spawn(async move {
+        if let Some(handle) = self.impact_task.take() {
+            handle.abort();
+        }
+        self.impact_task = Some(tokio::spawn(async move {
             let result = uc
                 .analyze(&symbol, repository.as_deref())
                 .await
@@ -482,7 +482,7 @@ impl TuiApp {
             if let Err(e) = tx.send(TuiEvent::ImpactDone { key, result }) {
                 debug!("ImpactDone send failed (app already exited): {}", e);
             }
-        });
+        }));
     }
 
     fn dispatch_chain_snippet(&mut self) {
