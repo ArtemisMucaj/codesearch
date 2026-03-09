@@ -28,9 +28,9 @@ impl TuiCache {
     }
 
     /// Build the cache key for an impact analysis.
-    pub fn impact_key(symbol: &str, depth: usize, repository: Option<&str>) -> String {
-        serde_json::to_string(&(symbol, depth, repository.unwrap_or("")))
-            .expect("serde_json serialisation of (&str, usize, &str) is infallible")
+    pub fn impact_key(symbol: &str, repository: Option<&str>) -> String {
+        serde_json::to_string(&(symbol, repository.unwrap_or("")))
+            .expect("serde_json serialisation of (&str, &str) is infallible")
     }
 
     /// Build the cache key for a snippet lookup.

@@ -1,4 +1,5 @@
 pub mod delete_controller;
+pub mod explain_controller;
 pub mod impact_controller;
 pub mod index_controller;
 pub mod list_repositories_controller;
@@ -7,6 +8,7 @@ pub mod stats_controller;
 pub mod symbol_context_controller;
 
 pub use delete_controller::DeleteController;
+pub use explain_controller::ExplainController;
 pub use impact_controller::ImpactController;
 pub use index_controller::IndexController;
 pub use list_repositories_controller::ListRepositoriesController;

@@ -116,7 +116,6 @@ impl ImpactAnalysisUseCase {
     /// Compute blast radius.
     ///
     /// `symbol`       – symbol name to analyse (e.g. `"authenticate"`)
-    /// `max_depth`    – maximum BFS hops (default: 5)
     /// `repository_id` – optional repository filter
     ///
     /// If an exact match for `symbol` returns no results, falls back to a
@@ -125,7 +124,6 @@ impl ImpactAnalysisUseCase {
     pub async fn analyze(
         &self,
         symbol: &str,
-        max_depth: usize,
         repository_id: Option<&str>,
     ) -> Result<ImpactAnalysis, DomainError> {
         let mut query = CallGraphQuery::new();
@@ -163,10 +161,6 @@ impl ImpactAnalysisUseCase {
         let mut by_depth: Vec<Vec<ImpactNode>> = Vec::new();
 
         while let Some((current, depth)) = queue.pop_front() {
-            if depth >= max_depth {
-                continue;
-            }
-
             let callers = self.call_graph.find_callers(&current, &query).await?;
             if callers.is_empty() {
                 continue;

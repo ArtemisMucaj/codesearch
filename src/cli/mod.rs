@@ -23,9 +23,9 @@ pub enum EmbeddingTarget {
     Api,
 }
 
-/// Provider to use for LLM-based query expansion.
+/// Provider to use for LLM calls (query expansion, explain, etc.).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum QueryExpansionTarget {
+pub enum LlmTarget {
     /// Anthropic-compatible `/v1/messages` endpoint (default). Controlled by
     /// `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and `ANTHROPIC_API_KEY`.
     #[default]
@@ -103,10 +103,6 @@ pub enum Commands {
         /// Symbol name to analyse (e.g. "authenticate" or "MyStruct::new")
         symbol: String,
 
-        /// Maximum hop depth to traverse (default: 5)
-        #[arg(long, default_value = "5")]
-        depth: usize,
-
         /// Restrict analysis to a specific repository ID
         #[arg(short, long)]
         repository: Option<String>,
@@ -132,6 +128,29 @@ pub enum Commands {
         /// Output format: text or json
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormat,
+    },
+
+    /// LLM-driven explanation of a symbol's complete call flow, data flow, and
+    /// business purpose. Runs impact analysis then passes each affected symbol's
+    /// source code to the configured LLM and returns a structured description.
+    Explain {
+        /// Symbol name to explain (e.g. "authenticate" or "MyStruct::new")
+        symbol: String,
+
+        /// Restrict analysis to a specific repository ID
+        #[arg(short, long)]
+        repository: Option<String>,
+
+        /// LLM backend to use for the explanation:
+        ///   'anthropic' — /v1/messages (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, default).
+        ///   'open-ai'   — /v1/chat/completions (OPENAI_BASE_URL, OPENAI_MODEL).
+        #[arg(long, value_enum, default_value = "anthropic")]
+        llm: LlmTarget,
+
+        /// Print every analyzed symbol together with the source chunk that was
+        /// sent to the LLM, after the explanation.
+        #[arg(long)]
+        dump_symbols: bool,
     },
 
     /// Start MCP (Model Context Protocol) server for integration with AI tools

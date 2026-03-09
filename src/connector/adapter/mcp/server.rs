@@ -25,9 +25,6 @@ fn default_limit() -> usize {
     10
 }
 
-fn default_depth() -> usize {
-    5
-}
 
 fn default_text_search() -> bool {
     true
@@ -65,10 +62,6 @@ pub struct SearchToolInput {
 pub struct ImpactToolInput {
     /// Symbol name to analyse (e.g. "authenticate" or "MyStruct::new")
     pub symbol: String,
-
-    /// Maximum hop depth to traverse (default: 5)
-    #[serde(default = "default_depth")]
-    pub depth: usize,
 
     /// Restrict analysis to a specific repository ID
     pub repository_id: Option<String>,
@@ -171,11 +164,10 @@ impl CodesearchMcpServer {
         params: Parameters<ImpactToolInput>,
     ) -> Result<CallToolResult, McpError> {
         let input = params.0;
-        let depth = input.depth;
 
         let use_case = self.container.impact_use_case();
         let analysis = use_case
-            .analyze(&input.symbol, depth, input.repository_id.as_deref())
+            .analyze(&input.symbol, input.repository_id.as_deref())
             .await
             .map_err(|e| {
                 McpError::internal_error(format!("Impact analysis failed: {}", e), None)

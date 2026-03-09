@@ -1,5 +1,6 @@
 mod call_graph;
 mod delete_repository;
+mod explain;
 mod impact_analysis;
 mod index_repository;
 mod list_repositories;
@@ -10,6 +11,7 @@ mod symbol_context;
 
 pub use call_graph::*;
 pub use delete_repository::*;
+pub use explain::*;
 pub use impact_analysis::*;
 pub use index_repository::*;
 pub use list_repositories::*;
