@@ -906,4 +906,58 @@ impl VectorRepository for DuckdbVectorRepository {
             .map_err(|e| DomainError::storage(format!("Failed to count chunks: {}", e)))?;
         Ok(count as u64)
     }
+
+    async fn find_chunks_by_file(
+        &self,
+        repository_id: &str,
+        file_path: &str,
+    ) -> Result<Vec<CodeChunk>, DomainError> {
+        let conn = self.conn.lock().await;
+
+        let (sql, use_repo_filter) = if repository_id.is_empty() {
+            (
+                format!(
+                    "SELECT id, file_path, content, start_line, end_line, language, node_type, \
+                     symbol_name, parent_symbol, repository_id \
+                     FROM \"{}\".chunks WHERE file_path = ? ORDER BY start_line",
+                    self.namespace
+                ),
+                false,
+            )
+        } else {
+            (
+                format!(
+                    "SELECT id, file_path, content, start_line, end_line, language, node_type, \
+                     symbol_name, parent_symbol, repository_id \
+                     FROM \"{}\".chunks WHERE file_path = ? AND repository_id = ? \
+                     ORDER BY start_line",
+                    self.namespace
+                ),
+                true,
+            )
+        };
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| DomainError::storage(format!("Failed to prepare file lookup: {e}")))?;
+
+        let mut rows = if use_repo_filter {
+            stmt.query(params![file_path, repository_id])
+        } else {
+            stmt.query(params![file_path])
+        }
+        .map_err(|e| DomainError::storage(format!("Failed to run file lookup: {e}")))?;
+
+        let mut chunks = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| DomainError::storage(format!("Failed to read file lookup row: {e}")))?
+        {
+            let chunk = Self::row_to_chunk(row).map_err(|e| {
+                DomainError::storage(format!("Failed to parse file lookup chunk: {e}"))
+            })?;
+            chunks.push(chunk);
+        }
+        Ok(chunks)
+    }
 }
