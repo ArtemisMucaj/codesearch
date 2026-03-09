@@ -2,13 +2,14 @@ pub mod application;
 pub mod cli;
 pub mod connector;
 pub mod domain;
+pub mod tui;
 
 pub use application::{
     CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase, ContextEdge,
     DeleteRepositoryUseCase, EmbeddingService, FileHashRepository, ImpactAnalysis,
     ImpactAnalysisUseCase, ImpactNode, IndexRepositoryUseCase, ListRepositoriesUseCase,
     MetadataRepository, ParserService, QueryExpander, RerankingService, Scip,
-    SearchCodeUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
+    SearchCodeUseCase, SnippetLookupUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
 };
 
 pub use cli::{Commands, EmbeddingTarget, LlmTarget, OutputFormat, RerankingTarget};

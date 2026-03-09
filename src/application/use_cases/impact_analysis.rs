@@ -49,6 +49,59 @@ pub struct ImpactAnalysis {
     pub by_depth: Vec<Vec<ImpactNode>>,
 }
 
+impl ImpactAnalysis {
+    /// Leaf nodes: symbols that are not the `via_symbol` of any other node.
+    ///
+    /// These are the furthest BFS-hop callers — the "entry-point" roots of each
+    /// call chain.  A symbol can be called from multiple unrelated spots, so
+    /// there may be several leaves.
+    pub fn leaf_nodes(&self) -> Vec<&ImpactNode> {
+        use std::collections::HashSet;
+        let all: Vec<&ImpactNode> = self.by_depth.iter().flatten().collect();
+        let via_set: HashSet<&str> = all
+            .iter()
+            .filter_map(|n| n.via_symbol.as_deref())
+            .collect();
+        all.into_iter()
+            .filter(|n| !via_set.contains(n.symbol.as_str()))
+            .collect()
+    }
+
+    /// Build the call chain for `leaf` by walking `via_symbol` back toward the
+    /// root.  Returns nodes in **leaf-first** order (entry point at index 0,
+    /// closest-to-root at the end).
+    pub fn path_for_leaf<'a>(&'a self, leaf: &'a ImpactNode) -> Vec<&'a ImpactNode> {
+        use std::collections::HashMap;
+        let mut by_depth_sym: HashMap<(usize, &str), &ImpactNode> = HashMap::new();
+        for node in self.by_depth.iter().flatten() {
+            by_depth_sym
+                .entry((node.depth, node.symbol.as_str()))
+                .or_insert(node);
+        }
+
+        let mut path: Vec<&'a ImpactNode> = vec![leaf];
+        let mut current = leaf;
+        loop {
+            let via = match current.via_symbol.as_deref() {
+                Some(v) => v,
+                None => break,
+            };
+            let parent_depth = current.depth.saturating_sub(1);
+            if parent_depth == 0 {
+                break;
+            }
+            match by_depth_sym.get(&(parent_depth, via)) {
+                Some(&parent) => {
+                    path.push(parent);
+                    current = parent;
+                }
+                None => break,
+            }
+        }
+        path // leaf-first
+    }
+}
+
 /// Use case: BFS outward from a symbol through the call graph to identify
 /// every symbol that would be affected if the root symbol changes.
 pub struct ImpactAnalysisUseCase {
