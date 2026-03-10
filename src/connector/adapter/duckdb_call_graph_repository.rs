@@ -583,10 +583,10 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
         //   No post-filter needed; LIMIT is applied in SQL.
         //
         // • Suffix mode — `col LIKE '%<short_name>'` followed by a word-boundary
-        //   post-filter in Rust (requires `#`, `/`, `\`, or `::` before the short
-        //   name).  We must NOT apply LIMIT in SQL here because the post-filter
-        //   can discard rows, causing valid results to be silently dropped.  The
-        //   limit is instead enforced in Rust after the post-filter.
+        //   post-filter in Rust (requires `#`, `/`, `\`, `::`, or `.` before the
+        //   short name).  We must NOT apply LIMIT in SQL here because the
+        //   post-filter can discard rows, causing valid results to be silently
+        //   dropped.  The limit is instead enforced in Rust after the post-filter.
         let (callee_cond, caller_cond) = if query.is_regex {
             (
                 "regexp_matches(callee_symbol, ?)".to_string(),
@@ -690,14 +690,15 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
                 results.push(symbol);
             } else {
                 // Word-boundary post-filter: the short name must be preceded by
-                // `#`, `/`, `\` (PHP/JS namespaces), `::` (Rust/C++), or be
-                // the entire string.  LIMIT is NOT in the SQL for suffix mode,
-                // so we enforce it here after filtering.
+                // `#`, `/`, `\` (PHP/JS namespaces), `::` (Rust/C++), `.`
+                // (Python/Java), or be the entire string.  LIMIT is NOT in the
+                // SQL for suffix mode, so we enforce it here after filtering.
                 if symbol == short_name
                     || symbol.ends_with(&format!("#{}", short_name))
                     || symbol.ends_with(&format!("/{}", short_name))
                     || symbol.ends_with(&format!("\\{}", short_name))
                     || symbol.ends_with(&format!("::{}", short_name))
+                    || symbol.ends_with(&format!(".{}", short_name))
                 {
                     results.push(symbol);
                     if results.len() >= resolve_limit as usize {

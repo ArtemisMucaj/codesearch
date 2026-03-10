@@ -1,8 +1,8 @@
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::Frame;
 
 use crate::application::ImpactNode;
 use crate::tui::state::{AppState, ImpactPane};
@@ -13,11 +13,8 @@ use crate::tui::widgets::syntax;
 use super::format::{short_symbol, shorten_path};
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
-    let panes = Layout::horizontal([
-        Constraint::Percentage(35),
-        Constraint::Percentage(65),
-    ])
-    .split(area);
+    let panes =
+        Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).split(area);
 
     render_entry_points(frame, panes[0], state);
     render_right(frame, panes[1], state);
@@ -121,7 +118,11 @@ fn render_right(frame: &mut Frame, area: Rect, state: &AppState) {
 
     // Code view: if a chain node snippet is loaded or loading, show it.
     if s.chain_snippet_loading {
-        let border_color = if chain_focused { Color::Cyan } else { Color::White };
+        let border_color = if chain_focused {
+            Color::Cyan
+        } else {
+            Color::White
+        };
         let block = Block::default()
             .title(" Code ")
             .borders(Borders::ALL)
@@ -136,7 +137,11 @@ fn render_right(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 
     if let Some(chunk) = &s.chain_snippet {
-        let border_color = if chain_focused { Color::Cyan } else { Color::White };
+        let border_color = if chain_focused {
+            Color::Cyan
+        } else {
+            Color::White
+        };
         let title = format!(" {} ", shorten_path(chunk.file_path()));
         let block = Block::default()
             .title(title)
@@ -147,8 +152,11 @@ fn render_right(frame: &mut Frame, area: Rect, state: &AppState) {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let lines =
-            syntax::highlight_code(chunk.content(), chunk.file_path(), chunk.start_line() as usize);
+        let lines = syntax::highlight_code(
+            chunk.content(),
+            chunk.file_path(),
+            chunk.start_line() as usize,
+        );
 
         let para = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -160,7 +168,11 @@ fn render_right(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 
     // Default: call chain with node selection.
-    let border_color = if chain_focused { Color::Cyan } else { Color::White };
+    let border_color = if chain_focused {
+        Color::Cyan
+    } else {
+        Color::White
+    };
     render_path_tree(
         frame,
         area,
@@ -215,14 +227,17 @@ fn render_path_tree(
             Span::styled(marker, Style::default().fg(Color::Cyan).bg(bg)),
             Span::styled(
                 short_symbol(&leaf.symbol).to_string(),
-                Style::default()
-                    .fg(fg)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("  {}:{}", shorten_path(&leaf.file_path), leaf.line),
-                Style::default().fg(if is_sel { Color::Black } else { Color::DarkGray }).bg(bg),
+                Style::default()
+                    .fg(if is_sel {
+                        Color::Black
+                    } else {
+                        Color::DarkGray
+                    })
+                    .bg(bg),
             ),
         ]));
     }
@@ -253,7 +268,13 @@ fn render_path_tree(
             ),
             Span::styled(
                 format!("  {}:{}", shorten_path(&node.file_path), node.line),
-                Style::default().fg(if is_sel { Color::Black } else { Color::DarkGray }).bg(bg),
+                Style::default()
+                    .fg(if is_sel {
+                        Color::Black
+                    } else {
+                        Color::DarkGray
+                    })
+                    .bg(bg),
             ),
         ]));
     }
@@ -274,9 +295,7 @@ fn render_path_tree(
             Span::styled("◉  ", Style::default().fg(Color::Red)),
             Span::styled(
                 root_symbol.to_string(),
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
         ]));
     }

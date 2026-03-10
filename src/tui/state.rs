@@ -87,6 +87,9 @@ pub struct AppState {
     pub search: SearchState,
     pub impact: ImpactState,
     pub should_quit: bool,
+    /// `false` while the ONNX models are still loading in the background.
+    /// The status bar displays a hint and `Enter` is held until this is `true`.
+    pub models_ready: bool,
 }
 
 impl AppState {
@@ -94,6 +97,7 @@ impl AppState {
         repository: Option<String>,
         initial_mode: ActiveMode,
         initial_query: Option<String>,
+        models_ready: bool,
     ) -> Self {
         let mut state = Self {
             mode: initial_mode.clone(),
@@ -106,6 +110,7 @@ impl AppState {
                 ..Default::default()
             },
             should_quit: false,
+            models_ready,
         };
         if let Some(query) = initial_query {
             match initial_mode {

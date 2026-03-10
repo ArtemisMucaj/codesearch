@@ -323,12 +323,22 @@ mod tests {
     }
 
     fn make_chunk(id: &str, content: &str, symbol: Option<&str>) -> CodeChunk {
+        // Derive a unique start_line from the id so that distinct chunks do not
+        // share the same (repo, file, start_line) tuple, which would cause the
+        // post-fusion location dedup in rrf_fuse to collapse them.
+        let line: u32 = id
+            .bytes()
+            .enumerate()
+            .fold(0u32, |acc, (i, b)| {
+                acc.wrapping_add((b as u32).wrapping_mul(i as u32 + 1))
+            })
+            .saturating_add(1);
         CodeChunk::reconstitute(
             id.to_string(),
             "file.rs".to_string(),
             content.to_string(),
-            1,
-            1,
+            line,
+            line,
             Language::Rust,
             NodeType::Function,
             symbol.map(|s| s.to_string()),

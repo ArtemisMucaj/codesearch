@@ -1,6 +1,6 @@
 mod app;
 mod cache;
-mod event;
+pub mod event;
 mod state;
 mod views;
 pub mod widgets;

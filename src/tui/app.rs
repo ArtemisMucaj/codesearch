@@ -21,15 +21,46 @@ const SCROLL_STEP: u16 = 5;
 pub struct TuiApp {
     state: AppState,
     cache: TuiCache,
-    search_uc: Arc<SearchCodeUseCase>,
-    impact_uc: Arc<ImpactAnalysisUseCase>,
-    snippet_uc: Arc<SnippetLookupUseCase>,
+    /// `None` while the background container task is still running.
+    search_uc: Option<Arc<SearchCodeUseCase>>,
+    /// `None` while the background container task is still running.
+    impact_uc: Option<Arc<ImpactAnalysisUseCase>>,
+    /// `None` while the background container task is still running.
+    snippet_uc: Option<Arc<SnippetLookupUseCase>>,
     event_tx: mpsc::UnboundedSender<TuiEvent>,
     event_rx: mpsc::UnboundedReceiver<TuiEvent>,
     impact_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl TuiApp {
+    /// Create a TUI app that waits for the container to finish loading in the
+    /// background.  The caller spawns `Container::new()` and sends the result
+    /// via `container_tx`; `TuiApp` shows a status-bar hint while waiting and
+    /// enables dispatching once the event arrives.
+    pub fn new_loading(
+        repository: Option<String>,
+        mode: TuiMode,
+        query: Option<String>,
+        event_tx: mpsc::UnboundedSender<TuiEvent>,
+        event_rx: mpsc::UnboundedReceiver<TuiEvent>,
+    ) -> Self {
+        let initial_mode = match mode {
+            TuiMode::Search => ActiveMode::Search,
+            TuiMode::Impact => ActiveMode::Impact,
+        };
+        Self {
+            state: AppState::new(repository, initial_mode, query, false),
+            cache: TuiCache::default(),
+            search_uc: None,
+            impact_uc: None,
+            snippet_uc: None,
+            event_tx,
+            event_rx,
+            impact_task: None,
+        }
+    }
+
+    /// Create a TUI app when use-cases are already available (models loaded).
     pub fn new(
         search_uc: Arc<SearchCodeUseCase>,
         impact_uc: Arc<ImpactAnalysisUseCase>,
@@ -44,11 +75,11 @@ impl TuiApp {
             TuiMode::Impact => ActiveMode::Impact,
         };
         Self {
-            state: AppState::new(repository, initial_mode, query),
+            state: AppState::new(repository, initial_mode, query, true),
             cache: TuiCache::default(),
-            search_uc,
-            impact_uc,
-            snippet_uc,
+            search_uc: Some(search_uc),
+            impact_uc: Some(impact_uc),
+            snippet_uc: Some(snippet_uc),
             event_tx: tx,
             event_rx: rx,
             impact_task: None,
@@ -56,20 +87,36 @@ impl TuiApp {
     }
 
     pub async fn run(mut self) -> Result<()> {
-        // Auto-dispatch the initial query if one was provided via CLI.
-        match self.state.mode {
-            ActiveMode::Search if !self.state.search.input.is_empty() => {
-                self.dispatch_search();
-            }
-            ActiveMode::Impact if !self.state.impact.input.is_empty() => {
-                self.dispatch_impact();
-            }
-            _ => {}
-        }
         let mut terminal = ratatui::init();
-        let result = self.run_loop(&mut terminal).await;
+        let result = self.run_with_terminal(&mut terminal).await;
         ratatui::restore();
         result
+    }
+
+    /// Run the TUI using an already-initialised terminal.
+    ///
+    /// Use this when the caller has already called `ratatui::init()` (e.g. to
+    /// show a loading splash before the container is built).  The caller is
+    /// responsible for calling `ratatui::restore()` after this returns.
+    pub async fn run_with_terminal(
+        &mut self,
+        terminal: &mut ratatui::DefaultTerminal,
+    ) -> Result<()> {
+        // Auto-dispatch the initial query only when models are already ready.
+        // If we are in the lazy-loading path the auto-dispatch is triggered
+        // from `handle_app_event` once `ContainerReady` arrives.
+        if self.state.models_ready {
+            match self.state.mode {
+                ActiveMode::Search if !self.state.search.input.is_empty() => {
+                    self.dispatch_search();
+                }
+                ActiveMode::Impact if !self.state.impact.input.is_empty() => {
+                    self.dispatch_impact();
+                }
+                _ => {}
+            }
+        }
+        self.run_loop(terminal).await
     }
 
     async fn run_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
@@ -376,6 +423,10 @@ impl TuiApp {
     // ── Dispatch (cache-first) ────────────────────────────────────────────────
 
     fn dispatch_current(&mut self) {
+        // Silently ignore Enter while models are still loading.
+        if !self.state.models_ready {
+            return;
+        }
         match self.state.mode {
             ActiveMode::Search => self.dispatch_search(),
             ActiveMode::Impact => {
@@ -395,6 +446,11 @@ impl TuiApp {
     }
 
     fn dispatch_search(&mut self) {
+        let uc = match &self.search_uc {
+            Some(uc) => Arc::clone(uc),
+            None => return, // models not yet ready
+        };
+
         let input = self.state.search.input.trim().to_string();
         if input.is_empty() {
             return;
@@ -427,7 +483,6 @@ impl TuiApp {
         self.state.search.pending_key = Some(key.clone());
         self.state.search.errored_key = None;
 
-        let uc = Arc::clone(&self.search_uc);
         let tx = self.event_tx.clone();
         let repository = self.state.search.repository.clone();
 
@@ -446,6 +501,11 @@ impl TuiApp {
     }
 
     fn dispatch_impact(&mut self) {
+        let uc = match &self.impact_uc {
+            Some(uc) => Arc::clone(uc),
+            None => return, // models not yet ready
+        };
+
         let symbol = self.state.impact.input.trim().to_string();
         if symbol.is_empty() {
             return;
@@ -484,7 +544,6 @@ impl TuiApp {
         self.state.impact.pending_key = Some(key.clone());
         self.state.impact.errored_key = None;
 
-        let uc = Arc::clone(&self.impact_uc);
         let tx = self.event_tx.clone();
         let repository = self.state.impact.repository.clone();
 
@@ -503,6 +562,11 @@ impl TuiApp {
     }
 
     fn dispatch_chain_snippet(&mut self) {
+        let uc = match &self.snippet_uc {
+            Some(uc) => Arc::clone(uc),
+            None => return, // models not yet ready
+        };
+
         // Extract the (repo_id, file_path, line) for the selected chain node.
         let node_coords = {
             let analysis = match &self.state.impact.analysis {
@@ -536,7 +600,6 @@ impl TuiApp {
         self.state.impact.chain_snippet_pending_key = Some(key.clone());
         self.state.impact.chain_snippet_scroll = 0;
 
-        let uc = Arc::clone(&self.snippet_uc);
         let tx = self.event_tx.clone();
         let (repo_id, file_path, line) = node_coords;
 
@@ -555,6 +618,39 @@ impl TuiApp {
 
     fn handle_app_event(&mut self, event: TuiEvent) {
         match event {
+            TuiEvent::ContainerReady(result) => {
+                match result {
+                    Ok(container) => {
+                        self.search_uc = Some(Arc::new(container.search_use_case()));
+                        self.impact_uc = Some(Arc::new(container.impact_use_case()));
+                        self.snippet_uc = Some(Arc::new(container.snippet_lookup_use_case()));
+                        self.state.models_ready = true;
+                        // If the user had pre-typed a query (via --query CLI arg),
+                        // auto-dispatch it now that models are ready.
+                        match self.state.mode {
+                            ActiveMode::Search if !self.state.search.input.is_empty() => {
+                                self.dispatch_search();
+                            }
+                            ActiveMode::Impact if !self.state.impact.input.is_empty() => {
+                                self.dispatch_impact();
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(e) => {
+                        // Show the error in the active pane and let the user quit.
+                        warn!("container init failed: {}", e);
+                        match self.state.mode {
+                            ActiveMode::Search => {
+                                self.state.search.error = Some(format!("Model load error: {e}"));
+                            }
+                            ActiveMode::Impact => {
+                                self.state.impact.error = Some(format!("Model load error: {e}"));
+                            }
+                        }
+                    }
+                }
+            }
             TuiEvent::SearchDone { key, result } => {
                 if self.state.search.pending_key.as_deref() != Some(&key) {
                     return;
