@@ -12,6 +12,7 @@ use crate::domain::SearchQuery;
 use super::cache::TuiCache;
 use super::event::TuiEvent;
 use super::state::{ActiveMode, AppState, ImpactPane, SearchPane};
+use crate::cli::TuiMode;
 use super::views;
 
 const SEARCH_LIMIT: usize = 20;
@@ -34,10 +35,16 @@ impl TuiApp {
         impact_uc: Arc<ImpactAnalysisUseCase>,
         snippet_uc: Arc<SnippetLookupUseCase>,
         repository: Option<String>,
+        mode: TuiMode,
+        query: Option<String>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let initial_mode = match mode {
+            TuiMode::Search => ActiveMode::Search,
+            TuiMode::Impact => ActiveMode::Impact,
+        };
         Self {
-            state: AppState::new(repository),
+            state: AppState::new(repository, initial_mode, query),
             cache: TuiCache::default(),
             search_uc,
             impact_uc,
@@ -49,6 +56,16 @@ impl TuiApp {
     }
 
     pub async fn run(mut self) -> Result<()> {
+        // Auto-dispatch the initial query if one was provided via CLI.
+        match self.state.mode {
+            ActiveMode::Search if !self.state.search.input.is_empty() => {
+                self.dispatch_search();
+            }
+            ActiveMode::Impact if !self.state.impact.input.is_empty() => {
+                self.dispatch_impact();
+            }
+            _ => {}
+        }
         let mut terminal = ratatui::init();
         let result = self.run_loop(&mut terminal).await;
         ratatui::restore();

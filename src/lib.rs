@@ -13,7 +13,7 @@ pub use application::{
     VectorRepository,
 };
 
-pub use cli::{Commands, EmbeddingTarget, LlmTarget, OutputFormat, RerankingTarget};
+pub use cli::{Commands, EmbeddingTarget, LlmTarget, OutputFormat, RerankingTarget, TuiMode};
 
 pub use connector::{
     AnthropicClient, AnthropicReranking, DuckdbCallGraphRepository,
