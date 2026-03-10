@@ -22,6 +22,14 @@
 * unit tests for `InMemoryVectorRepository` hybrid paths: cosine vs RRF score ranges, dual-leg ranking, post-fusion `min_score` filtering, no early pruning, empty-term fallback, and limit enforcement
 * integration tests for end-to-end hybrid search: results returned with positive scores, keyword-matched chunk surfaces, special SQL characters (`%`, `_`, `!`) do not cause errors, and semantic-only baseline confirms the flag gates the BM25 leg
 
+## [0.16.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.15.0...v0.16.0) (2026-03-10)
+
+
+### Features
+
+* add syntax highlighting to TUI code views ([#113](https://github.com/ArtemisMucaj/codesearch/issues/113)) ([ae728ac](https://github.com/ArtemisMucaj/codesearch/commit/ae728acd6fe28c14e5adc20d4f59e821386a521b))
+* replace Zed FZF integration with TUI ([#114](https://github.com/ArtemisMucaj/codesearch/issues/114)) ([ce5596f](https://github.com/ArtemisMucaj/codesearch/commit/ce5596fc714aa7a947b30a291776bbe0a52c7301))
+
 ## [0.15.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.14.0...v0.15.0) (2026-03-09)
 
 
