@@ -1,4 +1,5 @@
 use crate::application::ImpactAnalysis;
+use crate::application::SymbolContext;
 use crate::domain::{CodeChunk, SearchResult};
 use crate::tui::cache::SnippetKey;
 
@@ -7,6 +8,7 @@ use crate::tui::cache::SnippetKey;
 pub enum ActiveMode {
     Search,
     Impact,
+    Context,
 }
 
 /// Which pane in the search view has keyboard focus.
@@ -23,6 +25,14 @@ pub enum ImpactPane {
     #[default]
     EntryPoints,
     Chain,
+}
+
+/// Which pane in the context view has keyboard focus.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ContextPane {
+    #[default]
+    EntryPoints,
+    Tree,
 }
 
 // ── Per-mode state ────────────────────────────────────────────────────────────
@@ -79,6 +89,37 @@ pub struct ImpactState {
     pub chain_snippet_pending_key: Option<SnippetKey>,
 }
 
+#[derive(Debug, Default)]
+pub struct ContextState {
+    pub input: String,
+    /// Cursor position within `input`, measured in characters (not bytes).
+    pub cursor: usize,
+    pub context: Option<SymbolContext>,
+    /// Index into the entry-point list shown in the left pane.
+    pub selected: usize,
+    pub loading: bool,
+    pub error: Option<String>,
+    /// Vertical scroll offset for the tree pane (right pane).
+    pub tree_scroll: u16,
+    /// Optional repository filter forwarded to the use case.
+    pub repository: Option<String>,
+    /// Cache key of the most recently dispatched context request.
+    pub pending_key: Option<String>,
+    /// Cache key of the last request that returned an error.
+    pub errored_key: Option<String>,
+    /// Which pane currently has keyboard focus.
+    pub focused_pane: ContextPane,
+    /// Selected node index within the current call chain (tree pane, callers side only).
+    pub chain_selected: usize,
+    /// Code snippet for the selected chain node (Some = code view is active).
+    pub chain_snippet: Option<CodeChunk>,
+    pub chain_snippet_loading: bool,
+    /// Vertical scroll offset for the chain code view.
+    pub chain_snippet_scroll: u16,
+    /// Pending key for an in-flight chain snippet request.
+    pub chain_snippet_pending_key: Option<SnippetKey>,
+}
+
 // ── Top-level app state ───────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -86,6 +127,7 @@ pub struct AppState {
     pub mode: ActiveMode,
     pub search: SearchState,
     pub impact: ImpactState,
+    pub context: ContextState,
     pub should_quit: bool,
     /// `false` while the ONNX models are still loading in the background.
     /// The status bar displays a hint and `Enter` is held until this is `true`.
@@ -106,6 +148,10 @@ impl AppState {
                 ..Default::default()
             },
             impact: ImpactState {
+                repository: repository.clone(),
+                ..Default::default()
+            },
+            context: ContextState {
                 repository,
                 ..Default::default()
             },
@@ -122,6 +168,10 @@ impl AppState {
                     state.impact.cursor = query.chars().count();
                     state.impact.input = query;
                 }
+                ActiveMode::Context => {
+                    state.context.cursor = query.chars().count();
+                    state.context.input = query;
+                }
             }
         }
         state
@@ -132,6 +182,7 @@ impl AppState {
         match self.mode {
             ActiveMode::Search => &self.search.input,
             ActiveMode::Impact => &self.impact.input,
+            ActiveMode::Context => &self.context.input,
         }
     }
 
@@ -139,6 +190,7 @@ impl AppState {
         match self.mode {
             ActiveMode::Search => &mut self.search.input,
             ActiveMode::Impact => &mut self.impact.input,
+            ActiveMode::Context => &mut self.context.input,
         }
     }
 
@@ -146,6 +198,7 @@ impl AppState {
         match self.mode {
             ActiveMode::Search => self.search.cursor,
             ActiveMode::Impact => self.impact.cursor,
+            ActiveMode::Context => self.context.cursor,
         }
     }
 
@@ -153,6 +206,7 @@ impl AppState {
         match self.mode {
             ActiveMode::Search => &mut self.search.cursor,
             ActiveMode::Impact => &mut self.impact.cursor,
+            ActiveMode::Context => &mut self.context.cursor,
         }
     }
 
@@ -160,6 +214,7 @@ impl AppState {
         match self.mode {
             ActiveMode::Search => self.search.loading,
             ActiveMode::Impact => self.impact.loading,
+            ActiveMode::Context => self.context.loading,
         }
     }
 }
