@@ -90,9 +90,13 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(repository: Option<String>) -> Self {
-        Self {
-            mode: ActiveMode::Search,
+    pub fn new(
+        repository: Option<String>,
+        initial_mode: ActiveMode,
+        initial_query: Option<String>,
+    ) -> Self {
+        let mut state = Self {
+            mode: initial_mode.clone(),
             search: SearchState {
                 repository: repository.clone(),
                 ..Default::default()
@@ -102,7 +106,20 @@ impl AppState {
                 ..Default::default()
             },
             should_quit: false,
+        };
+        if let Some(query) = initial_query {
+            match initial_mode {
+                ActiveMode::Search => {
+                    state.search.cursor = query.chars().count();
+                    state.search.input = query;
+                }
+                ActiveMode::Impact => {
+                    state.impact.cursor = query.chars().count();
+                    state.impact.input = query;
+                }
+            }
         }
+        state
     }
 
     /// The text currently typed in the active mode's input box.

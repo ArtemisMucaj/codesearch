@@ -1,27 +1,19 @@
 [
   {
-    "label": "codesearch: search",
-    "command": "bash -c 'printf \"Semantic search: \"; read -r q; [[ -z \"$q\" ]] && exit 0; if command -v bat &>/dev/null; then p=\"bat --color=always --style=numbers --highlight-line {2} -- {1} 2>/dev/null\"; else p=\"cat -n -- {1} 2>/dev/null\"; fi; r=$(codesearch search \"$q\" --format vimgrep 2>/dev/null | fzf --ansi --delimiter : --prompt \"codesearch> \" --header \"Query: $q  ·  Enter to open  ·  Ctrl-C to quit\" --layout reverse --preview \"$p\" --preview-window \"right,60%,border-left,+{2}+3/3,~3\"); [[ -n \"$r\" ]] || exit 0; file=$(echo \"$r\" | cut -d: -f1); line=$(echo \"$r\" | cut -d: -f2); zed \"$file:$line\"'",
+    "label": "codesearch: tui",
+    "command": "codesearch tui",
     "tags": ["codesearch"],
     "hide": "always",
-    "use_new_terminal": true,
-    "allow_concurrent_runs": true
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false
   },
   {
-    "label": "codesearch: symbol context",
-    "command": "bash -c 'if command -v bat &>/dev/null; then p=\"bat --color=always --style=numbers --highlight-line {2} -- {1} 2>/dev/null\"; else p=\"cat -n -- {1} 2>/dev/null\"; fi; r=$(codesearch context \"$ZED_SYMBOL\" --format vimgrep 2>/dev/null | fzf --ansi --delimiter : --prompt \"context> \" --header \"Symbol: $ZED_SYMBOL  ·  Enter to open  ·  Ctrl-C to quit\" --layout reverse --preview \"$p\" --preview-window \"right,60%,border-left,+{2}+3/3,~3\"); [[ -n \"$r\" ]] || exit 0; file=$(echo \"$r\" | cut -d: -f1); line=$(echo \"$r\" | cut -d: -f2); zed \"$file:$line\"'",
+    "label": "codesearch: tui impact",
+    "command": "codesearch tui --mode impact --query \"$ZED_SYMBOL\"",
     "tags": ["codesearch"],
     "hide": "always",
-    "use_new_terminal": true,
-    "allow_concurrent_runs": true
-  },
-  {
-    "label": "codesearch: impact analysis",
-    "command": "bash -c 'if command -v bat &>/dev/null; then p=\"bat --color=always --style=numbers --highlight-line {2} -- {1} 2>/dev/null\"; else p=\"cat -n -- {1} 2>/dev/null\"; fi; r=$(codesearch impact \"$ZED_SYMBOL\" --format vimgrep 2>/dev/null | fzf --ansi --delimiter : --prompt \"impact> \" --header \"Impact: $ZED_SYMBOL  ·  Enter to open  ·  Ctrl-C to quit\" --layout reverse --preview \"$p\" --preview-window \"right,60%,border-left,+{2}+3/3,~3\"); [[ -n \"$r\" ]] || exit 0; file=$(echo \"$r\" | cut -d: -f1); line=$(echo \"$r\" | cut -d: -f2); zed \"$file:$line\"'",
-    "tags": ["codesearch"],
-    "hide": "always",
-    "use_new_terminal": true,
-    "allow_concurrent_runs": true
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false
   },
   {
     "label": "codesearch: index current directory",

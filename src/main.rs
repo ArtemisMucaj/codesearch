@@ -204,13 +204,15 @@ async fn main() -> Result<()> {
     let container = Container::new(config).await?;
 
     // Handle TUI command specially — it takes over the terminal for its lifetime.
-    if let Commands::Tui { repository } = cli.command {
+    if let Commands::Tui { repository, query, mode } = cli.command {
         use codesearch::tui::TuiApp;
         let app = TuiApp::new(
             Arc::new(container.search_use_case()),
             Arc::new(container.impact_use_case()),
             Arc::new(container.snippet_lookup_use_case()),
             repository,
+            mode,
+            query,
         );
         return app.run().await;
     }

@@ -12,6 +12,16 @@ pub enum OutputFormat {
     Vimgrep,
 }
 
+/// Initial mode for the interactive TUI.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum TuiMode {
+    /// Open in search mode (default).
+    #[default]
+    Search,
+    /// Open in impact analysis mode.
+    Impact,
+}
+
 /// Embedding backend to use for indexing and search.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum EmbeddingTarget {
@@ -169,5 +179,13 @@ pub enum Commands {
         /// Restrict all queries to a specific repository ID
         #[arg(short, long)]
         repository: Option<String>,
+
+        /// Pre-populate the input box with this query and immediately dispatch it.
+        #[arg(long)]
+        query: Option<String>,
+
+        /// Which mode to open the TUI in: 'search' (default) or 'impact'.
+        #[arg(long, value_enum, default_value = "search")]
+        mode: TuiMode,
     },
 }
