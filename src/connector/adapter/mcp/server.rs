@@ -209,7 +209,7 @@ impl CodesearchMcpServer {
 
         let use_case = self.container.context_use_case();
         let ctx = use_case
-            .get_context(&input.symbol, input.repository_id.as_deref(), input.limit, input.regex)
+            .get_context(&input.symbol, input.repository_id.as_deref(), input.regex)
             .await
             .map_err(|e| McpError::internal_error(format!("Context lookup failed: {}", e), None))?;
 

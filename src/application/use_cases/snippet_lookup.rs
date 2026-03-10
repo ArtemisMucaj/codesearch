@@ -5,7 +5,7 @@ use crate::domain::{CodeChunk, DomainError};
 
 /// Retrieves an indexed [`CodeChunk`] for a reference location shown in the TUI.
 ///
-/// Given a file path and a line number (as returned by [`ContextEdge`] or
+/// Given a file path and a line number (as returned by [`ContextNode`] or
 /// [`ImpactNode`]), this use case queries the vector store for the chunks that
 /// belong to that file and returns the smallest chunk whose line range contains
 /// the reference line. Code is therefore always sourced from the indexed store,

@@ -5,7 +5,7 @@ pub mod domain;
 pub mod tui;
 
 pub use application::{
-    CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase, ChatClient, ContextEdge,
+    CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase, ChatClient, ContextNode,
     DeleteRepositoryUseCase, EmbeddingService, ExplainResult, ExplainUseCase, FileHashRepository,
     ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode, IndexRepositoryUseCase,
     ListRepositoriesUseCase, MetadataRepository, ParserService, QueryExpander, RerankingService,
