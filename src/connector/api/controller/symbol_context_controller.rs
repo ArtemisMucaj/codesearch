@@ -3,8 +3,8 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
-use crate::{ContextNode, SymbolContext};
 use crate::cli::OutputFormat;
+use crate::{ContextNode, SymbolContext};
 
 use super::super::Container;
 
@@ -126,14 +126,12 @@ impl<'a> SymbolContextController<'a> {
     }
 
     /// Build a map from parent_symbol → direct callee nodes (keyed by via_symbol).
-    fn build_callee_children_map<'b>(ctx: &'b SymbolContext) -> HashMap<String, Vec<&'b ContextNode>> {
+    fn build_callee_children_map<'b>(
+        ctx: &'b SymbolContext,
+    ) -> HashMap<String, Vec<&'b ContextNode>> {
         let mut map: HashMap<String, Vec<&'b ContextNode>> = HashMap::new();
         for node in ctx.callees_by_depth.iter().flatten() {
-            let key = node
-                .via_symbol
-                .as_deref()
-                .unwrap_or(&ctx.symbol)
-                .to_owned();
+            let key = node.via_symbol.as_deref().unwrap_or(&ctx.symbol).to_owned();
             map.entry(key).or_default().push(node);
         }
         // For multi-root-symbol queries, `ctx.symbol` is a display label like

@@ -70,7 +70,9 @@ async fn seed_chain(cg: &Arc<CallGraphUseCase>) {
             "repo1".to_string(),
         ),
     ];
-    cg.save_references(&refs).await.expect("Failed to seed references");
+    cg.save_references(&refs)
+        .await
+        .expect("Failed to seed references");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -48,8 +48,8 @@ pub struct AnthropicReranking {
 
 impl AnthropicReranking {
     pub fn new(client: Arc<dyn ChatClient>) -> Self {
-        let model_name = std::env::var("ANTHROPIC_MODEL")
-            .unwrap_or_else(|_| "anthropic-reranker".to_string());
+        let model_name =
+            std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "anthropic-reranker".to_string());
         Self { client, model_name }
     }
 

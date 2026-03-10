@@ -12,8 +12,8 @@ use crate::domain::SearchQuery;
 use super::cache::TuiCache;
 use super::event::TuiEvent;
 use super::state::{ActiveMode, AppState, ImpactPane, SearchPane};
-use crate::cli::TuiMode;
 use super::views;
+use crate::cli::TuiMode;
 
 const SEARCH_LIMIT: usize = 20;
 const SCROLL_STEP: u16 = 5;
@@ -219,8 +219,7 @@ impl TuiApp {
                 }
             }
             KeyCode::Char(c)
-                if key.modifiers == KeyModifiers::NONE
-                    || key.modifiers == KeyModifiers::SHIFT =>
+                if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
             {
                 let cursor = self.state.active_cursor();
                 {
@@ -280,9 +279,7 @@ impl TuiApp {
     // ── Esc ───────────────────────────────────────────────────────────────────
 
     fn handle_esc(&mut self) {
-        if self.state.mode == ActiveMode::Impact
-            && self.state.impact.chain_snippet.is_some()
-        {
+        if self.state.mode == ActiveMode::Impact && self.state.impact.chain_snippet.is_some() {
             // Return from chain code view to chain navigation.
             self.state.impact.chain_snippet = None;
             self.state.impact.chain_snippet_loading = false;
@@ -298,16 +295,17 @@ impl TuiApp {
             ActiveMode::Search => {
                 // Right pane focused → scroll the code panel.
                 if self.state.search.focused_pane == SearchPane::Code {
-                    self.state.search.snippet_scroll =
-                        bounded_scroll(self.state.search.snippet_scroll, delta * SCROLL_STEP as i32);
+                    self.state.search.snippet_scroll = bounded_scroll(
+                        self.state.search.snippet_scroll,
+                        delta * SCROLL_STEP as i32,
+                    );
                     return;
                 }
                 let len = self.state.search.results.len();
                 if len == 0 {
                     return;
                 }
-                self.state.search.selected =
-                    bounded_add(self.state.search.selected, delta, len);
+                self.state.search.selected = bounded_add(self.state.search.selected, delta, len);
                 self.state.search.snippet_scroll = 0;
             }
             ActiveMode::Impact => {
@@ -583,7 +581,11 @@ impl TuiApp {
                 Some(n) => *n,
                 None => return,
             };
-            (node.repository_id.clone(), node.file_path.clone(), node.line)
+            (
+                node.repository_id.clone(),
+                node.file_path.clone(),
+                node.line,
+            )
         };
 
         let key = TuiCache::snippet_key(&node_coords.0, &node_coords.1, node_coords.2);

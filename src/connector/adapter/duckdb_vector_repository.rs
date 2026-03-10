@@ -252,7 +252,11 @@ impl DuckdbVectorRepository {
             CREATE INDEX IF NOT EXISTS embedding_hnsw_idx
                 ON "{}".embeddings USING HNSW (vector) WITH (metric = 'cosine');
             "#,
-            schema_name, schema_name, schema_name, schema_name, dims = dims
+            schema_name,
+            schema_name,
+            schema_name,
+            schema_name,
+            dims = dims
         );
 
         conn.execute_batch(&schema_sql).map_err(|e| {

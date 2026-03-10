@@ -117,7 +117,11 @@ impl ExplainUseCase {
         call_graph: Arc<CallGraphUseCase>,
         snippet_lookup: SnippetLookupUseCase,
     ) -> Self {
-        Self { impact, call_graph, snippet_lookup }
+        Self {
+            impact,
+            call_graph,
+            snippet_lookup,
+        }
     }
 
     /// Run the full explain pipeline and return the result.
@@ -174,7 +178,11 @@ impl ExplainUseCase {
         };
 
         let root_source = {
-            let callees = match self.call_graph.find_callees(&analysis.root_symbol, &cg_query).await {
+            let callees = match self
+                .call_graph
+                .find_callees(&analysis.root_symbol, &cg_query)
+                .await
+            {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(
@@ -189,7 +197,11 @@ impl ExplainUseCase {
                 Some(ref_) => {
                     let src = self
                         .snippet_lookup
-                        .get_snippet(ref_.repository_id(), ref_.caller_file_path(), ref_.reference_line())
+                        .get_snippet(
+                            ref_.repository_id(),
+                            ref_.caller_file_path(),
+                            ref_.reference_line(),
+                        )
                         .await
                         .ok()
                         .flatten()
@@ -200,8 +212,13 @@ impl ExplainUseCase {
             }
         };
 
-        let (prompt, symbol_sources) =
-            build_prompt(&analysis.root_symbol, root_source, &analysis.by_depth, &self.snippet_lookup).await;
+        let (prompt, symbol_sources) = build_prompt(
+            &analysis.root_symbol,
+            root_source,
+            &analysis.by_depth,
+            &self.snippet_lookup,
+        )
+        .await;
 
         let explanation = chat_client
             .complete(SYSTEM_PROMPT, &prompt)
@@ -234,7 +251,10 @@ fn xml_to_markdown(s: &str) -> String {
         ("purpose", "## Purpose"),
         ("data_and_control_flow", "## Data and control flow"),
         ("business_feature", "## Business feature"),
-        ("key_patterns_and_dependencies", "## Key patterns and dependencies"),
+        (
+            "key_patterns_and_dependencies",
+            "## Key patterns and dependencies",
+        ),
     ];
 
     let mut out = String::new();
@@ -484,11 +504,11 @@ async fn build_prompt(
         prompt.push_str(&format!("### Path {} — `{}`\n\n", i + 1, chain));
 
         for node in path {
-            let src_block =
-                match source_cache.get(&(node.symbol.as_str(), node.file_path.as_str())) {
-                    Some(Some(src)) => format!("```\n{src}\n```"),
-                    _ => "_(source not available)_".to_string(),
-                };
+            let src_block = match source_cache.get(&(node.symbol.as_str(), node.file_path.as_str()))
+            {
+                Some(Some(src)) => format!("```\n{src}\n```"),
+                _ => "_(source not available)_".to_string(),
+            };
             prompt.push_str(&format!(
                 "#### `{}` — `{}:{}`\n{}\n\n",
                 node.symbol, node.file_path, node.line, src_block
@@ -516,12 +536,7 @@ async fn build_prompt(
                     .get(&(node.symbol.as_str(), node.file_path.as_str()))
                     .cloned()
                     .flatten();
-                symbol_sources.push((
-                    node.symbol.clone(),
-                    node.file_path.clone(),
-                    node.line,
-                    src,
-                ));
+                symbol_sources.push((node.symbol.clone(), node.file_path.clone(), node.line, src));
             }
         }
     }

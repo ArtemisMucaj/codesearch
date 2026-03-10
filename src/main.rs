@@ -5,8 +5,8 @@ use clap::Parser;
 use rmcp::ServiceExt;
 use tracing_subscriber::EnvFilter;
 
-use codesearch::connector::adapter::mcp::CodesearchMcpServer;
 use codesearch::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
+use codesearch::connector::adapter::mcp::CodesearchMcpServer;
 use codesearch::{Commands, Container, ContainerConfig, Router};
 
 #[derive(Parser)]
@@ -205,9 +205,14 @@ async fn main() -> Result<()> {
         // For TUI: take over the terminal immediately so the user sees the UI
         // at once, then load the ONNX models in the background.  The TUI event
         // loop wakes up when `ContainerReady` arrives on the mpsc channel.
-        if let Commands::Tui { repository, query, mode } = cli.command {
-            use codesearch::tui::TuiApp;
+        if let Commands::Tui {
+            repository,
+            query,
+            mode,
+        } = cli.command
+        {
             use codesearch::tui::event::TuiEvent;
+            use codesearch::tui::TuiApp;
             use tokio::sync::mpsc;
 
             let mut terminal = ratatui::init();
@@ -317,4 +322,3 @@ fn expand_tilde(path: &str) -> String {
     }
     path.to_string()
 }
-

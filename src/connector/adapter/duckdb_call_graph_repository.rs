@@ -8,7 +8,6 @@ use tracing::debug;
 use crate::application::{CallGraphQuery, CallGraphRepository, CallGraphStats};
 use crate::domain::{DomainError, Language, ReferenceKind, SymbolReference};
 
-
 pub struct DuckdbCallGraphRepository {
     conn: Arc<Mutex<Connection>>,
 }
@@ -665,13 +664,25 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
         //               pattern (caller leg), extra filters (caller leg).
         let mut params_vec: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
         params_vec.push(Box::new(pattern.clone()));
-        if let Some(ref v) = query.repository_id { params_vec.push(Box::new(v.clone())); }
-        if let Some(ref v) = query.language      { params_vec.push(Box::new(v.clone())); }
-        if let Some(ref v) = query.reference_kind { params_vec.push(Box::new(v.clone())); }
+        if let Some(ref v) = query.repository_id {
+            params_vec.push(Box::new(v.clone()));
+        }
+        if let Some(ref v) = query.language {
+            params_vec.push(Box::new(v.clone()));
+        }
+        if let Some(ref v) = query.reference_kind {
+            params_vec.push(Box::new(v.clone()));
+        }
         params_vec.push(Box::new(pattern));
-        if let Some(ref v) = query.repository_id { params_vec.push(Box::new(v.clone())); }
-        if let Some(ref v) = query.language      { params_vec.push(Box::new(v.clone())); }
-        if let Some(ref v) = query.reference_kind { params_vec.push(Box::new(v.clone())); }
+        if let Some(ref v) = query.repository_id {
+            params_vec.push(Box::new(v.clone()));
+        }
+        if let Some(ref v) = query.language {
+            params_vec.push(Box::new(v.clone()));
+        }
+        if let Some(ref v) = query.reference_kind {
+            params_vec.push(Box::new(v.clone()));
+        }
 
         let params_refs: Vec<&dyn duckdb::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
 

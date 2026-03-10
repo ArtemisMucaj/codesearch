@@ -16,10 +16,10 @@ pub use application::{
 pub use cli::{Commands, EmbeddingTarget, LlmTarget, OutputFormat, RerankingTarget, TuiMode};
 
 pub use connector::{
-    AnthropicClient, AnthropicReranking, DuckdbCallGraphRepository,
-    DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository,
-    InMemoryVectorRepository, LlmQueryExpander, MockEmbedding, MockReranking, NamespaceEmbeddingConfig,
-    OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterParser,
+    AnthropicClient, AnthropicReranking, DuckdbCallGraphRepository, DuckdbFileHashRepository,
+    DuckdbMetadataRepository, DuckdbVectorRepository, InMemoryVectorRepository, LlmQueryExpander,
+    MockEmbedding, MockReranking, NamespaceEmbeddingConfig, OpenAiChatClient, OpenAiEmbedding,
+    OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterParser,
 };
 
 pub use domain::{

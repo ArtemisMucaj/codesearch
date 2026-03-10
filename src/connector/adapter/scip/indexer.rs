@@ -42,10 +42,7 @@ impl IndexerKind {
                 "--output".to_string(),
                 output_path.to_string_lossy().to_string(),
             ],
-            IndexerKind::Php => vec![
-                "-o".to_string(),
-                output_path.to_string_lossy().to_string(),
-            ],
+            IndexerKind::Php => vec!["-o".to_string(), output_path.to_string_lossy().to_string()],
         }
     }
 

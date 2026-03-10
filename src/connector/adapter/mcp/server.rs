@@ -25,7 +25,6 @@ fn default_limit() -> usize {
     10
 }
 
-
 fn default_text_search() -> bool {
     true
 }

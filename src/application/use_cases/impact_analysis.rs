@@ -66,10 +66,7 @@ impl ImpactAnalysis {
     pub fn leaf_nodes(&self) -> Vec<&ImpactNode> {
         use std::collections::HashSet;
         let all: Vec<&ImpactNode> = self.by_depth.iter().flatten().collect();
-        let via_set: HashSet<&str> = all
-            .iter()
-            .filter_map(|n| n.via_symbol.as_deref())
-            .collect();
+        let via_set: HashSet<&str> = all.iter().filter_map(|n| n.via_symbol.as_deref()).collect();
         all.into_iter()
             .filter(|n| !via_set.contains(n.symbol.as_str()))
             .collect()
@@ -176,7 +173,12 @@ impl ImpactAnalysisUseCase {
                 .resolve_symbols(symbol, &query, RESOLVE_SYMBOLS_LIMIT)
                 .await?;
             if !exact_resolved.is_empty() {
-                debug!(symbol, found = exact_resolved.len(), "impact: exact-match found {} symbols", exact_resolved.len());
+                debug!(
+                    symbol,
+                    found = exact_resolved.len(),
+                    "impact: exact-match found {} symbols",
+                    exact_resolved.len()
+                );
                 let display = if exact_resolved.len() == 1 {
                     exact_resolved[0].clone()
                 } else {
@@ -186,14 +188,25 @@ impl ImpactAnalysisUseCase {
             } else {
                 let auto_pattern = format!(".*{}.*", build_fuzzy_pattern(symbol));
                 let auto_query = query.clone().with_regex();
-                debug!(symbol, auto_pattern, "impact: exact-match empty, trying auto-wrap regex");
+                debug!(
+                    symbol,
+                    auto_pattern, "impact: exact-match empty, trying auto-wrap regex"
+                );
                 let resolved = self
                     .call_graph
                     .resolve_symbols(&auto_pattern, &auto_query, RESOLVE_SYMBOLS_LIMIT)
                     .await?;
-                debug!(symbol, resolved_count = resolved.len(), ?resolved, "impact: auto-wrap resolved");
+                debug!(
+                    symbol,
+                    resolved_count = resolved.len(),
+                    ?resolved,
+                    "impact: auto-wrap resolved"
+                );
                 if resolved.is_empty() {
-                    debug!(symbol, "impact: no rows match pattern — symbol may not be indexed");
+                    debug!(
+                        symbol,
+                        "impact: no rows match pattern — symbol may not be indexed"
+                    );
                     (vec![symbol.to_string()], symbol.to_string())
                 } else if resolved.len() == 1 {
                     let s = resolved[0].clone();
@@ -299,4 +312,3 @@ impl ImpactAnalysisUseCase {
         })
     }
 }
-

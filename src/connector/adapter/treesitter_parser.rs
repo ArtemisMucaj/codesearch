@@ -252,7 +252,6 @@ impl TreeSitterParser {
             _ => NodeType::Block,
         }
     }
-
 }
 
 impl Default for TreeSitterParser {

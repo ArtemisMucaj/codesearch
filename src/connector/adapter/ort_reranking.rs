@@ -154,10 +154,7 @@ impl OrtReranking {
         let outputs = if self.needs_token_type_ids {
             let token_type_ids_tensor =
                 Tensor::from_array((shape, token_type_ids)).map_err(|e| {
-                    DomainError::internal(format!(
-                        "Failed to create token_type_ids tensor: {}",
-                        e
-                    ))
+                    DomainError::internal(format!("Failed to create token_type_ids tensor: {}", e))
                 })?;
             session.run(ort::inputs![
                 "input_ids" => input_ids_tensor,

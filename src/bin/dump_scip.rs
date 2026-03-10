@@ -53,7 +53,11 @@ fn main() {
         println!("  Definitions: {} ({:.1}%)", definitions, pct(definitions));
         println!("  Locals:      {} ({:.1}%)", locals, pct(locals));
         println!("  Empty range: {} ({:.1}%)", empty_range, pct(empty_range));
-        println!("  Empty symbol:{} ({:.1}%)", empty_symbol, pct(empty_symbol));
+        println!(
+            "  Empty symbol:{} ({:.1}%)",
+            empty_symbol,
+            pct(empty_symbol)
+        );
         println!("  References:  {} ({:.1}%)", references, pct(references));
         return;
     }

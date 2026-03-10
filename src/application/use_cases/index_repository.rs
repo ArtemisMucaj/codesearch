@@ -609,9 +609,12 @@ impl IndexRepositoryUseCase {
         }
 
         // SCIP: same as the full-index path.
-        let has_js_ts = current_files
-            .keys()
-            .any(|p| matches!(Language::from_path(Path::new(p)), Language::JavaScript | Language::TypeScript));
+        let has_js_ts = current_files.keys().any(|p| {
+            matches!(
+                Language::from_path(Path::new(p)),
+                Language::JavaScript | Language::TypeScript
+            )
+        });
         let has_php = current_files
             .keys()
             .any(|p| Language::from_path(Path::new(p)) == Language::Php);

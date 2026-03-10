@@ -1,8 +1,8 @@
-use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
+use ratatui::Frame;
 
 /// A list entry with a display label and an optional score badge.
 pub struct ListEntry {
@@ -19,10 +19,7 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, entries: &[ListEntry],
         .map(|(i, e)| {
             let is_selected = i == selected;
             let bullet = if is_selected { "●" } else { "○" };
-            let score_badge = e
-                .score
-                .map(|s| format!("  {:.2}", s))
-                .unwrap_or_default();
+            let score_badge = e.score.map(|s| format!("  {:.2}", s)).unwrap_or_default();
 
             let label_style = if is_selected {
                 Style::default()
