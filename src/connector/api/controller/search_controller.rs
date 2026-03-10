@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::cli::OutputFormat;
+use crate::tui::widgets::syntax::dedent;
 use crate::{SearchQuery, SearchResult};
 
 use super::super::Container;
@@ -86,9 +87,7 @@ impl<'a> SearchController<'a> {
                 ));
             }
 
-            let preview: String = result
-                .chunk()
-                .content()
+            let preview: String = dedent(result.chunk().content())
                 .lines()
                 .take(10)
                 .map(|l| format!("   | {}", l))

@@ -17,6 +17,32 @@ fn theme_set() -> &'static ThemeSet {
     THEME_SET.get_or_init(ThemeSet::load_defaults)
 }
 
+/// Strips the common leading whitespace from every non-empty line so that
+/// code extracted from inside a class or nested block is displayed at column 0.
+pub fn dedent(code: &str) -> String {
+    let min_indent = code
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+
+    if min_indent == 0 {
+        return code.to_owned();
+    }
+
+    code.lines()
+        .map(|l| {
+            if l.trim().is_empty() {
+                ""
+            } else {
+                &l[min_indent..]
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Returns highlighted ratatui `Line`s with leading line numbers.
 ///
 /// The `file_path` argument (full or shortened) is used to detect the language
@@ -36,8 +62,9 @@ pub fn highlight_code(content: &str, file_path: &str, start_line: usize) -> Vec<
     let theme = &ts.themes["base16-ocean.dark"];
     let mut h = HighlightLines::new(syntax, theme);
 
+    let dedented = dedent(content);
     let mut lines = Vec::new();
-    for (i, raw_line) in LinesWithEndings::from(content).enumerate() {
+    for (i, raw_line) in LinesWithEndings::from(&dedented).enumerate() {
         let lineno = start_line + i;
         let ranges = h.highlight_line(raw_line, ps).unwrap_or_default();
 
