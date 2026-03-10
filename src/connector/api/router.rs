@@ -75,12 +75,11 @@ impl<'a> Router<'a> {
             Commands::Context {
                 symbol,
                 repository,
-                limit,
                 format,
                 regex,
             } => {
                 self.symbol_context_controller
-                    .context(symbol, repository, limit, format, regex)
+                    .context(symbol, repository, format, regex)
                     .await
             }
             Commands::Explain {

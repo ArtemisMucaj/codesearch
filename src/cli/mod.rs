@@ -131,7 +131,9 @@ pub enum Commands {
         regex: bool,
     },
 
-    /// Show 360-degree context for a symbol: its callers and callees.
+    /// Show full end-to-end call chain tree for a symbol: callers BFS (top-most
+    /// entry points → symbol) and callees BFS (symbol → deepest callees), merged
+    /// into one contiguous indented tree per caller chain.
     Context {
         /// Symbol name to look up (e.g. "authenticate" or "MyStruct::new").
         /// When --regex is set, treated as a POSIX regular expression matched
@@ -142,11 +144,7 @@ pub enum Commands {
         #[arg(short, long)]
         repository: Option<String>,
 
-        /// Maximum number of callers/callees to return per direction
-        #[arg(short, long)]
-        limit: Option<u32>,
-
-        /// Output format: text or json
+        /// Output format: text, json, or vimgrep
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormat,
 

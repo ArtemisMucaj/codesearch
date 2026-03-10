@@ -18,7 +18,6 @@ impl<'a> SymbolContextController<'a> {
         &self,
         symbol: String,
         repository: Option<String>,
-        limit: Option<u32>,
         format: OutputFormat,
         is_regex: bool,
     ) -> Result<String> {
@@ -26,11 +25,6 @@ impl<'a> SymbolContextController<'a> {
         let ctx = use_case
             .get_context(&symbol, repository.as_deref(), is_regex)
             .await?;
-
-        // `limit` is no longer forwarded to get_context (removed in BFS refactor).
-        // It is retained in the function signature for CLI compatibility and will be
-        // wired to output truncation in Task 2.
-        let _ = limit;
 
         Ok(match format {
             OutputFormat::Json => serde_json::to_string_pretty(&ctx)?,
