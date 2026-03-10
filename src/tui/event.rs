@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::application::ImpactAnalysis;
+use crate::application::SymbolContext;
 use crate::connector::api::container::Container;
 use crate::domain::{CodeChunk, SearchResult};
 use crate::tui::cache::SnippetKey;
@@ -22,6 +23,16 @@ pub enum TuiEvent {
     },
     /// Snippet lookup for a selected impact chain node completed.
     ChainSnippetDone {
+        key: SnippetKey,
+        result: Result<Option<CodeChunk>, String>,
+    },
+    /// Symbol context use case completed.
+    ContextDone {
+        key: String,
+        result: Result<SymbolContext, String>,
+    },
+    /// Snippet lookup for a selected context chain node completed.
+    ContextSnippetDone {
         key: SnippetKey,
         result: Result<Option<CodeChunk>, String>,
     },
