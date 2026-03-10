@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::domain::SearchResult;
 
@@ -100,9 +100,25 @@ pub fn rrf_fuse(lists: Vec<Vec<SearchResult>>, limit: usize) -> Vec<SearchResult
     }
 
     fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Deduplicate by physical location: if two chunks share the same
+    // (repository_id, file_path, start_line, end_line) they are the same code
+    // block stored under different UUIDs (e.g. from two index runs).  The list
+    // is already sorted by descending score, so the first occurrence is kept.
+    let mut seen_locations: HashSet<(String, String, u32, u32)> = HashSet::new();
+
     fused
         .into_iter()
         .filter(|(_, score)| *score >= RRF_MIN_SCORE)
+        .filter(|(r, _)| {
+            let loc = (
+                r.chunk().repository_id().to_string(),
+                r.chunk().file_path().to_string(),
+                r.chunk().start_line(),
+                r.chunk().end_line(),
+            );
+            seen_locations.insert(loc)
+        })
         .take(limit)
         .map(|(r, score)| SearchResult::new(r.chunk().clone(), score))
         .collect()
@@ -115,17 +131,42 @@ mod tests {
 
     /// Build a minimal SearchResult with a known ID; the raw score is irrelevant
     /// because rrf_fuse re-scores everything by rank position.
+    /// Each distinct `id` gets a unique `start_line` so the location-dedup in
+    /// `rrf_fuse` does not collapse results that are meant to be independent.
     fn make_result(id: &str) -> SearchResult {
-        make_result_at(id, "file.rs")
+        // Use the length of `id` plus a simple hash to produce a unique line.
+        // This keeps every call-site short while guaranteeing no two distinct
+        // IDs collide on (file_path, start_line).
+        let line: u32 = id
+            .bytes()
+            .enumerate()
+            .fold(0u32, |acc, (i, b)| {
+                acc.wrapping_add((b as u32).wrapping_mul(i as u32 + 1))
+            })
+            .saturating_add(1); // ensure > 0
+        make_result_at_line(id, "file.rs", line)
     }
 
     fn make_result_at(id: &str, path: &str) -> SearchResult {
+        make_result_at_line(id, path, 1)
+    }
+
+    fn make_result_at_line(id: &str, path: &str, start_line: u32) -> SearchResult {
+        make_result_at_line_range(id, path, start_line, start_line)
+    }
+
+    fn make_result_at_line_range(
+        id: &str,
+        path: &str,
+        start_line: u32,
+        end_line: u32,
+    ) -> SearchResult {
         let chunk = CodeChunk::reconstitute(
             id.to_string(),
             path.to_string(),
             "fn foo() {}".to_string(),
-            1,
-            1,
+            start_line,
+            end_line,
             Language::Rust,
             NodeType::Function,
             None,
@@ -280,5 +321,35 @@ mod tests {
         assert_eq!(fused.len(), 2);
         assert!(fused[0].score() > fused[1].score());
         assert_eq!(fused[0].chunk().id(), "first");
+    }
+
+    #[test]
+    fn duplicate_location_different_uuid_deduplicated() {
+        // Simulate two index runs that produced chunks with different UUIDs for
+        // the same (repo, file, start_line, end_line).  Only one result should survive.
+        let a = make_result_at_line("uuid-a", "src/lib.rs", 10);
+        let b = make_result_at_line("uuid-b", "src/lib.rs", 10);
+        // Put both in the same list so they both clear RRF_MIN_SCORE.
+        let fused = rrf_fuse(vec![vec![a, b]], 10);
+        assert_eq!(fused.len(), 1);
+    }
+
+    #[test]
+    fn same_start_line_different_end_line_not_deduplicated() {
+        // Two chunks that share a start_line but differ in end_line are distinct
+        // code blocks and must both survive dedup.
+        let a = make_result_at_line_range("uuid-a", "src/lib.rs", 10, 15);
+        let b = make_result_at_line_range("uuid-b", "src/lib.rs", 10, 20);
+        let fused = rrf_fuse(vec![vec![a, b]], 10);
+        assert_eq!(fused.len(), 2);
+    }
+
+    #[test]
+    fn different_start_lines_same_file_not_deduplicated() {
+        // Two chunks from the same file but at different lines are distinct.
+        let a = make_result_at_line("uuid-a", "src/lib.rs", 10);
+        let b = make_result_at_line("uuid-b", "src/lib.rs", 20);
+        let fused = rrf_fuse(vec![vec![a, b]], 10);
+        assert_eq!(fused.len(), 2);
     }
 }

@@ -2,10 +2,10 @@ mod format;
 mod impact;
 mod search;
 
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::Frame;
 
 use crate::tui::state::{ActiveMode, AppState, ImpactPane, SearchPane};
 use crate::tui::widgets::input_bar;
@@ -30,6 +30,17 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 }
 
 fn render_status(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppState) {
+    // While the ONNX models are still loading in the background, replace the
+    // normal keybinding hints with a loading notice so the user knows why
+    // Enter doesn't work yet.
+    if !state.models_ready {
+        let status = Paragraph::new(" Models loading… (you can start typing)")
+            .style(Style::default().fg(Color::Yellow))
+            .block(Block::default().borders(Borders::NONE));
+        frame.render_widget(status, area);
+        return;
+    }
+
     let hints: &str = match state.mode {
         ActiveMode::Search => match state.search.focused_pane {
             SearchPane::List => {

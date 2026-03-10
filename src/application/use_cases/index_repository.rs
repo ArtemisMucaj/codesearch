@@ -230,7 +230,6 @@ impl IndexRepositoryUseCase {
         let mut file_count = 0u64;
         let mut chunk_count = 0u64;
         let mut reference_count = 0u64;
-        let mut file_hashes = Vec::new();
         let mut language_stats: HashMap<String, LanguageStats> = HashMap::new();
 
         // Phase 1 (concurrent): read → parse → embed
@@ -269,6 +268,14 @@ impl IndexRepositoryUseCase {
 
             progress_bar.set_message(result.relative_path.clone());
 
+            // Delete any pre-existing chunks for this file before inserting new
+            // ones.  On a clean first-time index this is a no-op; on a
+            // crash-resume it removes stale chunks that were written in the
+            // interrupted run, preventing UUID-keyed duplicates.
+            self.vector_repo
+                .delete_by_file_path(repository.id(), &result.relative_path)
+                .await?;
+
             if !result.chunks.is_empty() {
                 self.vector_repo
                     .save_batch(&result.chunks, &result.embeddings)
@@ -281,6 +288,12 @@ impl IndexRepositoryUseCase {
                     scip_file_refs.len(),
                     result.relative_path
                 );
+                // Delete stale call-graph rows before inserting new ones.  On a
+                // clean first-time index this is a no-op; on a crash-resume it
+                // removes any references written in the interrupted run.
+                self.call_graph_use_case
+                    .delete_by_file(repository.id(), &result.relative_path)
+                    .await?;
                 self.call_graph_use_case
                     .save_references(scip_file_refs)
                     .await
@@ -290,11 +303,18 @@ impl IndexRepositoryUseCase {
             };
             reference_count += refs_count;
 
-            file_hashes.push(FileHash::new(
-                result.relative_path.clone(),
-                result.content_hash,
-                repository.id().to_string(),
-            ));
+            // Write the file hash immediately after its chunks so that a crash
+            // between two files never leaves the DB in a state where chunks
+            // exist without a corresponding hash record.  A subsequent index run
+            // will then correctly treat any hash-less file as new (and will
+            // delete+rewrite it via the delete_by_file_path call above).
+            self.file_hash_repo
+                .save_batch(&[FileHash::new(
+                    result.relative_path.clone(),
+                    result.content_hash,
+                    repository.id().to_string(),
+                )])
+                .await?;
 
             file_count += 1;
             chunk_count += result.chunks.len() as u64;
@@ -313,8 +333,6 @@ impl IndexRepositoryUseCase {
         }
 
         progress_bar.finish_and_clear();
-
-        self.file_hash_repo.save_batch(&file_hashes).await?;
 
         self.repository_repo
             .update_stats(repository.id(), chunk_count, file_count)
@@ -485,7 +503,7 @@ impl IndexRepositoryUseCase {
                 .progress_chars("━━─"),
         );
 
-        let mut new_file_hashes = Vec::new();
+        let mut new_processed_paths: HashSet<String> = HashSet::new();
         let mut processed_count = 0u64;
         let mut new_chunk_count = 0u64;
         let mut new_reference_count = 0u64;
@@ -529,6 +547,15 @@ impl IndexRepositoryUseCase {
 
             progress_bar.set_message(result.relative_path.clone());
 
+            // Delete any pre-existing chunks for this file before inserting.
+            // For modified files the outer loop already deleted the old chunks,
+            // but this also covers the case where an added file's chunks were
+            // written in an interrupted prior run (hash not yet saved → the file
+            // still looks "added" on restart and must not accumulate duplicates).
+            self.vector_repo
+                .delete_by_file_path(repository.id(), &result.relative_path)
+                .await?;
+
             if !result.chunks.is_empty() {
                 self.vector_repo
                     .save_batch(&result.chunks, &result.embeddings)
@@ -541,6 +568,13 @@ impl IndexRepositoryUseCase {
                     scip_file_refs.len(),
                     result.relative_path
                 );
+                // For modified files the outer loop already deleted old call-graph
+                // rows, but this also covers added files whose references were
+                // written in an interrupted prior run (hash not yet saved → the
+                // file still looks "added" on restart).
+                self.call_graph_use_case
+                    .delete_by_file(repository.id(), &result.relative_path)
+                    .await?;
                 self.call_graph_use_case
                     .save_references(scip_file_refs)
                     .await
@@ -555,12 +589,17 @@ impl IndexRepositoryUseCase {
                 .cloned()
                 .unwrap_or(result.content_hash);
 
-            new_file_hashes.push(FileHash::new(
-                result.relative_path.clone(),
-                content_hash,
-                repository.id().to_string(),
-            ));
+            // Persist the hash immediately after the chunks so that a crash
+            // between files never leaves chunks without a hash record.
+            self.file_hash_repo
+                .save_batch(&[FileHash::new(
+                    result.relative_path.clone(),
+                    content_hash,
+                    repository.id().to_string(),
+                )])
+                .await?;
 
+            new_processed_paths.insert(result.relative_path.clone());
             processed_count += 1;
             new_chunk_count += result.chunks.len() as u64;
 
@@ -580,12 +619,8 @@ impl IndexRepositoryUseCase {
         progress_bar.finish_and_clear();
 
         // SCIP references for unchanged files.
-        let processed_set: HashSet<String> = new_file_hashes
-            .iter()
-            .map(|h| h.file_path().to_string())
-            .collect();
         for (relative_path, file_refs) in &scip_refs {
-            if processed_set.contains(relative_path) {
+            if new_processed_paths.contains(relative_path) {
                 continue;
             }
             self.call_graph_use_case
@@ -609,10 +644,6 @@ impl IndexRepositoryUseCase {
                     stats.file_count += 1;
                 }
             }
-        }
-
-        if !new_file_hashes.is_empty() {
-            self.file_hash_repo.save_batch(&new_file_hashes).await?;
         }
 
         let total_file_count = unchanged_count as u64 + processed_count;

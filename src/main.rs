@@ -201,21 +201,51 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let container = Container::new(config).await?;
+    let container = if is_tui {
+        // For TUI: take over the terminal immediately so the user sees the UI
+        // at once, then load the ONNX models in the background.  The TUI event
+        // loop wakes up when `ContainerReady` arrives on the mpsc channel.
+        if let Commands::Tui { repository, query, mode } = cli.command {
+            use codesearch::tui::TuiApp;
+            use codesearch::tui::event::TuiEvent;
+            use tokio::sync::mpsc;
 
-    // Handle TUI command specially — it takes over the terminal for its lifetime.
-    if let Commands::Tui { repository, query, mode } = cli.command {
-        use codesearch::tui::TuiApp;
-        let app = TuiApp::new(
-            Arc::new(container.search_use_case()),
-            Arc::new(container.impact_use_case()),
-            Arc::new(container.snippet_lookup_use_case()),
-            repository,
-            mode,
-            query,
-        );
-        return app.run().await;
-    }
+            let mut terminal = ratatui::init();
+
+            let (tx, rx) = mpsc::unbounded_channel::<TuiEvent>();
+            let tx_bg = tx.clone();
+
+            // Spawn container init as a background task so the TUI is
+            // immediately interactive while models are compiling.
+            // Capture the handle so we can detect panics and forward them to
+            // the UI rather than leaving it in a perpetual loading state.
+            let handle = tokio::spawn(async move {
+                Container::new(config)
+                    .await
+                    .map(Arc::new)
+                    .map_err(|e| e.to_string())
+            });
+            tokio::spawn(async move {
+                let result = match handle.await {
+                    Ok(r) => r,
+                    Err(join_err) => Err(format!("container init panicked: {join_err}")),
+                };
+                // Ignore send errors: the user may have quit before models loaded.
+                let _ = tx_bg.send(TuiEvent::ContainerReady(result));
+            });
+
+            let mut app = TuiApp::new_loading(repository, mode, query, tx, rx);
+            let result = app.run_with_terminal(&mut terminal).await;
+            ratatui::restore();
+            return result;
+        }
+
+        // Unreachable: is_tui is only true when cli.command is Commands::Tui,
+        // and the branch above always returns.
+        unreachable!("TUI command variant not matched")
+    } else {
+        Container::new(config).await?
+    };
 
     let router = Router::new(&container);
     let output = router.route(cli.command).await?;
@@ -287,3 +317,4 @@ fn expand_tilde(path: &str) -> String {
     }
     path.to_string()
 }
+

@@ -52,28 +52,29 @@ Copy [`ide/zed/keybindings.json`](../../ide/zed/keybindings.json) into `~/.confi
 
 | Keybinding | Action | Context |
 |---|---|---|
-| `ctrl-shift-f` | codesearch: search | Global |
-| `ctrl-shift-i` | codesearch: impact analysis | Editor |
-| `ctrl-shift-x` | codesearch: symbol context | Editor |
+| `ctrl-shift-f` | codesearch: tui | Global |
+| `ctrl-shift-i` | codesearch: tui impact | Editor |
 
-### fzf (fuzzy-picker integration)
+### TUI (interactive terminal UI)
 
-All codesearch tasks use [fzf](https://github.com/junegunn/fzf) as their interactive result picker. Each task pipes `--format vimgrep` output through fzf and opens the selected `file:line` in Zed.
-
-#### Prerequisites
-
-- `fzf` on your `$PATH` (`brew install fzf` / `apt install fzf`)
-- `bat` on your `$PATH` for syntax-highlighted previews (`brew install bat` / `apt install bat`) — optional, falls back to `cat`
+All codesearch tasks open the built-in interactive TUI — a full-screen terminal interface with search, impact analysis, and symbol context in a single pane. No external tools required.
 
 #### How each task works
 
-| Task | How it works |
-|---|---|
-| `codesearch: search` | Prompts for a query, pipes results through fzf |
-| `codesearch: symbol context` | Runs `codesearch context "$ZED_SYMBOL"`, fzf picks from results |
-| `codesearch: impact analysis` | Runs `codesearch impact "$ZED_SYMBOL"`, fzf picks from results |
+| Task | Command | What it does |
+|---|---|---|
+| `codesearch: tui` | `codesearch tui` | Opens the TUI in search mode |
+| `codesearch: tui impact` | `codesearch tui --mode impact --query "$ZED_SYMBOL"` | Opens the TUI pre-loaded with the symbol under the cursor for instant impact analysis |
+| `codesearch: index current directory` | `codesearch index $ZED_WORKTREE_ROOT` | Indexes (or re-indexes) the current project |
 
 All tasks are defined in [`ide/zed/tasks.json`](../../ide/zed/tasks.json) and installed by `setup.sh`.
+
+#### TUI options passed from Zed
+
+| Flag | Purpose |
+|---|---|
+| `--mode impact` | Start in impact analysis mode instead of search mode |
+| `--query <text>` | Pre-populate the input and immediately dispatch the query |
 
 ## Neovim
 
