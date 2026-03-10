@@ -3,6 +3,6 @@ mod cache;
 mod event;
 mod state;
 mod views;
-mod widgets;
+pub mod widgets;
 
 pub use app::TuiApp;
