@@ -1,12 +1,12 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::tui::state::{AppState, SearchPane};
 use crate::tui::widgets::result_list;
 use crate::tui::widgets::result_list::ListEntry;
+use crate::tui::widgets::syntax;
 
 use super::format::shorten_path;
 
@@ -74,10 +74,11 @@ fn render_snippet(frame: &mut Frame, area: Rect, state: &AppState) {
     let focused = s.focused_pane == SearchPane::Code;
     let border_color = if focused { Color::Cyan } else { Color::White };
 
-    let (content, title, start_line) = match selected {
+    let (content, title, file_path, start_line) = match selected {
         Some(r) => (
             r.chunk().content().to_string(),
             shorten_path(r.chunk().file_path()),
+            r.chunk().file_path().to_string(),
             r.chunk().start_line(),
         ),
         None => {
@@ -103,20 +104,7 @@ fn render_snippet(frame: &mut Frame, area: Rect, state: &AppState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let lines: Vec<Line> = content
-        .lines()
-        .enumerate()
-        .map(|(i, line)| {
-            let lineno = start_line as usize + i;
-            Line::from(vec![
-                Span::styled(
-                    format!("{:>4}  ", lineno),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::raw(line.to_string()),
-            ])
-        })
-        .collect();
+    let lines = syntax::highlight_code(&content, &file_path, start_line as usize);
 
     let para = Paragraph::new(lines)
         .wrap(Wrap { trim: false })

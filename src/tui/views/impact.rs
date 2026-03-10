@@ -8,6 +8,7 @@ use crate::application::ImpactNode;
 use crate::tui::state::{AppState, ImpactPane};
 use crate::tui::widgets::result_list;
 use crate::tui::widgets::result_list::ListEntry;
+use crate::tui::widgets::syntax;
 
 use super::format::{short_symbol, shorten_path};
 
@@ -146,21 +147,8 @@ fn render_right(frame: &mut Frame, area: Rect, state: &AppState) {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let lines: Vec<Line> = chunk
-            .content()
-            .lines()
-            .enumerate()
-            .map(|(i, line)| {
-                let lineno = chunk.start_line() as usize + i;
-                Line::from(vec![
-                    Span::styled(
-                        format!("{:>4}  ", lineno),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::raw(line.to_string()),
-                ])
-            })
-            .collect();
+        let lines =
+            syntax::highlight_code(chunk.content(), chunk.file_path(), chunk.start_line() as usize);
 
         let para = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
