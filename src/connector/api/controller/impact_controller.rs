@@ -21,10 +21,11 @@ impl<'a> ImpactController<'a> {
         symbol: String,
         repository: Option<String>,
         format: OutputFormat,
+        is_regex: bool,
     ) -> Result<String> {
         let use_case = self.container.impact_use_case();
         let analysis = use_case
-            .analyze(&symbol, repository.as_deref())
+            .analyze(&symbol, repository.as_deref(), is_regex)
             .await?;
 
         Ok(match format {

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::application::use_cases::pattern_utils::build_fuzzy_pattern;
 use crate::application::{CallGraphQuery, CallGraphUseCase};
 use crate::domain::{DomainError, SymbolReference};
 
@@ -55,15 +56,19 @@ impl SymbolContextUseCase {
     /// Fetch callers and callees for `symbol` in parallel and combine them.
     ///
     /// `repository_id` – optional filter; `limit` caps each direction independently.
-    ///
-    /// If an exact match for `symbol` returns no results, falls back to a
-    /// suffix-based symbol resolution (e.g. "loadMappedFile" matches
-    /// "Netatmo/Autoloader#loadMappedFile").
+    /// `is_regex`      – when `true`, `symbol` is used as-is as a POSIX regex
+    ///                   (no auto-wrapping).  When `false` (the default), the
+    ///                   symbol is first tried as an exact match; if that returns
+    ///                   nothing it is automatically wrapped as `.*<symbol>.*` so
+    ///                   that `codesearch context load` finds every FQN containing
+    ///                   the substring "load".  Pass `--regex` to supply your own
+    ///                   full pattern without auto-wrapping.
     pub async fn get_context(
         &self,
         symbol: &str,
         repository_id: Option<&str>,
         limit: Option<u32>,
+        is_regex: bool,
     ) -> Result<SymbolContext, DomainError> {
         let mut query = CallGraphQuery::new();
         if let Some(repo_id) = repository_id {
@@ -72,34 +77,67 @@ impl SymbolContextUseCase {
         if let Some(l) = limit {
             query = query.with_limit(l);
         }
-
-        // Try exact match first.
-        let (callers_result, callees_result) = tokio::join!(
-            self.call_graph.find_callers(symbol, &query),
-            self.call_graph.find_callees(symbol, &query),
-        );
-
-        let callers = callers_result?;
-        let callees = callees_result?;
-
-        // If exact match found results, return them.
-        if !callers.is_empty() || !callees.is_empty() {
-            let caller_count = callers.len();
-            let callee_count = callees.len();
-
-            return Ok(SymbolContext {
-                symbol: symbol.to_string(),
-                callers: callers.iter().map(Self::to_edge_caller).collect(),
-                callees: callees.iter().map(Self::to_edge_callee).collect(),
-                caller_count,
-                callee_count,
-            });
+        if is_regex {
+            query = query.with_regex();
         }
 
-        // Fallback: resolve short name to fully-qualified symbol(s).
+        if !is_regex {
+            // Try exact match first (existing fast-path, only in suffix mode).
+            let (callers_result, callees_result) = tokio::join!(
+                self.call_graph.find_callers(symbol, &query),
+                self.call_graph.find_callees(symbol, &query),
+            );
+
+            let callers = callers_result?;
+            let callees = callees_result?;
+
+            if !callers.is_empty() || !callees.is_empty() {
+                let caller_count = callers.len();
+                let callee_count = callees.len();
+
+                return Ok(SymbolContext {
+                    symbol: symbol.to_string(),
+                    callers: callers.iter().map(Self::to_edge_caller).collect(),
+                    callees: callees.iter().map(Self::to_edge_callee).collect(),
+                    caller_count,
+                    callee_count,
+                });
+            }
+
+            // Zero edges found — confirm whether the symbol actually exists in the
+            // DB before expanding to fuzzy/regex.  resolve_symbols queries both
+            // callee_symbol and caller_symbol, so isolated nodes (no edges yet) are
+            // detected without falling through to pattern matching.
+            let exact_resolved = self
+                .call_graph
+                .resolve_symbols(symbol, &query, 1)
+                .await?;
+            if !exact_resolved.is_empty() {
+                return Ok(SymbolContext {
+                    symbol: symbol.to_string(),
+                    callers: vec![],
+                    callees: vec![],
+                    caller_count: 0,
+                    callee_count: 0,
+                });
+            }
+        }
+
+        // Regex mode  — use pattern as-is.
+        // Auto-wrap mode — wrap as `.*<escaped>.*` so a bare name like "loadFile"
+        // matches any FQN that contains it as a substring.
+        let (resolve_pattern, resolve_query) = if is_regex {
+            (symbol.to_string(), query.clone())
+        } else {
+            (
+                format!(".*{}.*", build_fuzzy_pattern(symbol)),
+                query.clone().with_regex(),
+            )
+        };
+
         let resolved = self
             .call_graph
-            .resolve_symbols(symbol, &query, Some(FALLBACK_RESOLUTION_LIMIT))
+            .resolve_symbols(&resolve_pattern, &resolve_query, FALLBACK_RESOLUTION_LIMIT)
             .await?;
 
         if resolved.is_empty() {
@@ -179,3 +217,4 @@ impl SymbolContextUseCase {
         }
     }
 }
+

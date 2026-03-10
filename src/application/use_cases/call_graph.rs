@@ -121,7 +121,7 @@ impl CallGraphUseCase {
         &self,
         short_name: &str,
         query: &CallGraphQuery,
-        limit: Option<u32>,
+        limit: u32,
     ) -> Result<Vec<String>, DomainError> {
         self.repository
             .resolve_symbols(short_name, query, limit)

@@ -3,6 +3,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use tracing::debug;
+
+use crate::application::use_cases::pattern_utils::build_fuzzy_pattern;
 use crate::application::{CallGraphQuery, CallGraphUseCase};
 use crate::domain::DomainError;
 
@@ -39,8 +42,13 @@ pub struct ImpactNode {
 /// Full blast-radius report for a symbol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImpactAnalysis {
-    /// The symbol whose change was analysed.
+    /// Display label for the analysed symbol (may contain a summary like
+    /// `"foo (3 symbols)"` when multiple FQNs were resolved). Use this
+    /// field for UI rendering only.
     pub root_symbol: String,
+    /// The fully-qualified symbol names that were used as BFS roots.
+    /// Use this field for programmatic lookups (e.g. further DB queries).
+    pub root_symbols: Vec<String>,
     /// Total number of transitively affected symbols (excluding the root).
     pub total_affected: usize,
     /// Deepest hop level reached that contained at least one result.
@@ -115,47 +123,97 @@ impl ImpactAnalysisUseCase {
 
     /// Compute blast radius.
     ///
-    /// `symbol`       – symbol name to analyse (e.g. `"authenticate"`)
-    /// `repository_id` – optional repository filter
+    /// `symbol`        – symbol name or substring to analyse (e.g. `"authenticate"`),
+    ///                   or a full POSIX regex when `is_regex` is `true`.
+    /// `repository_id` – optional repository filter.
+    /// `is_regex`      – when `true`, `symbol` is used as-is as a regex pattern
+    ///                   (no auto-wrapping).  When `false` (the default), the
+    ///                   symbol is first tried as an exact match; if that returns
+    ///                   nothing it is automatically wrapped as `.*<symbol>.*` so
+    ///                   that `codesearch impact load` finds every FQN containing
+    ///                   the substring "load".  Pass `--regex` to supply your own
+    ///                   full pattern without auto-wrapping.
     ///
-    /// If an exact match for `symbol` returns no results, falls back to a
-    /// suffix-based symbol resolution (e.g. "loadMappedFile" matches
-    /// "Netatmo/Autoloader#loadMappedFile").
+    /// When multiple symbols resolve, results from **all** of them are merged.
     pub async fn analyze(
         &self,
         symbol: &str,
         repository_id: Option<&str>,
+        is_regex: bool,
     ) -> Result<ImpactAnalysis, DomainError> {
         let mut query = CallGraphQuery::new();
         if let Some(repo_id) = repository_id {
             query = query.with_repository(repo_id);
         }
+        if is_regex {
+            query = query.with_regex();
+        }
 
-        // Try exact match first; if nothing found, resolve short name.
-        let root_symbol = {
-            let exact_callers = self.call_graph.find_callers(symbol, &query).await?;
-            if !exact_callers.is_empty() {
-                symbol.to_string()
+        // Determine the set of root symbols to BFS from and a display label.
+        let (root_symbols, display_symbol): (Vec<String>, String) = if is_regex {
+            // Regex mode: always resolve via pattern matching; never try an exact hit.
+            let resolved = self
+                .call_graph
+                .resolve_symbols(symbol, &query, RESOLVE_SYMBOLS_LIMIT)
+                .await?;
+            if resolved.is_empty() {
+                (vec![symbol.to_string()], symbol.to_string())
+            } else if resolved.len() == 1 {
+                let s = resolved[0].clone();
+                (resolved, s)
             } else {
+                let display = format!("{} ({} symbols)", symbol, resolved.len());
+                (resolved, display)
+            }
+        } else {
+            // Auto-wrap mode: first check if the symbol exists in the call graph
+            // using resolve_symbols (which queries both callee_symbol and
+            // caller_symbol).  This correctly handles root entry-point symbols
+            // that have zero callers but appear as caller_symbol — find_callers
+            // would return empty for them, incorrectly triggering fuzzy expansion.
+            let exact_resolved = self
+                .call_graph
+                .resolve_symbols(symbol, &query, RESOLVE_SYMBOLS_LIMIT)
+                .await?;
+            if !exact_resolved.is_empty() {
+                debug!(symbol, found = exact_resolved.len(), "impact: exact-match found {} symbols", exact_resolved.len());
+                let display = if exact_resolved.len() == 1 {
+                    exact_resolved[0].clone()
+                } else {
+                    format!("{} ({} symbols)", symbol, exact_resolved.len())
+                };
+                (exact_resolved, display)
+            } else {
+                let auto_pattern = format!(".*{}.*", build_fuzzy_pattern(symbol));
+                let auto_query = query.clone().with_regex();
+                debug!(symbol, auto_pattern, "impact: exact-match empty, trying auto-wrap regex");
                 let resolved = self
                     .call_graph
-                    .resolve_symbols(symbol, &query, Some(RESOLVE_SYMBOLS_LIMIT))
+                    .resolve_symbols(&auto_pattern, &auto_query, RESOLVE_SYMBOLS_LIMIT)
                     .await?;
-                if resolved.len() == 1 {
-                    resolved.into_iter().next().unwrap()
+                debug!(symbol, resolved_count = resolved.len(), ?resolved, "impact: auto-wrap resolved");
+                if resolved.is_empty() {
+                    debug!(symbol, "impact: no rows match pattern — symbol may not be indexed");
+                    (vec![symbol.to_string()], symbol.to_string())
+                } else if resolved.len() == 1 {
+                    let s = resolved[0].clone();
+                    (resolved, s)
                 } else {
-                    // No resolution or ambiguous — proceed with original symbol.
-                    symbol.to_string()
+                    let display = format!("{} ({} symbols)", symbol, resolved.len());
+                    (resolved, display)
                 }
             }
         };
 
         let mut visited: HashSet<String> = HashSet::new();
-        visited.insert(root_symbol.clone());
 
-        // (symbol, depth)
+        // Seed the BFS with every root symbol.
         let mut queue: VecDeque<(String, usize)> = VecDeque::new();
-        queue.push_back((root_symbol.clone(), 0));
+        for sym in &root_symbols {
+            if visited.insert(sym.clone()) {
+                queue.push_back((sym.clone(), 0));
+            }
+        }
 
         // by_depth[i] holds nodes at depth i+1
         let mut by_depth: Vec<Vec<ImpactNode>> = Vec::new();
@@ -233,10 +291,12 @@ impl ImpactAnalysisUseCase {
             .unwrap_or(0);
 
         Ok(ImpactAnalysis {
-            root_symbol,
+            root_symbol: display_symbol,
+            root_symbols,
             total_affected,
             max_depth_reached,
             by_depth,
         })
     }
 }
+

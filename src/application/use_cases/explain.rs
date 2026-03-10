@@ -94,6 +94,9 @@ pub struct ExplainResult {
     /// Unique symbols whose source chunks were sent to the LLM.
     /// Each entry is `(symbol, file_path, line, source)`.
     pub symbol_sources: Vec<(String, String, u32, Option<String>)>,
+    /// When non-empty, the input symbol matched multiple FQNs and the user
+    /// must pick one.  `explanation` is empty and no LLM call was made.
+    pub ambiguous_candidates: Vec<String>,
 }
 
 /// Orchestrates impact analysis, call-graph traversal, snippet retrieval,
@@ -118,13 +121,31 @@ impl ExplainUseCase {
     ///
     /// `chat_client` is provided by the caller so the choice of LLM backend
     /// (Anthropic, OpenAI, …) remains a connector-layer concern.
+    /// `is_regex` is forwarded to the underlying impact analysis; see
+    /// [`ImpactAnalysisUseCase::analyze`] for semantics.
     pub async fn execute(
         &self,
         symbol: &str,
         repository: Option<&str>,
         chat_client: &dyn ChatClient,
+        is_regex: bool,
     ) -> Result<ExplainResult, DomainError> {
-        let analysis = self.impact.analyze(symbol, repository).await?;
+        let analysis = self.impact.analyze(symbol, repository, is_regex).await?;
+
+        // When the input matches multiple FQNs, ask the user to pick one before
+        // running the expensive LLM call.  There is no meaningful "explain all"
+        // mode: the root-source lookup only covers one symbol anyway, and merging
+        // callers from multiple unrelated FQNs produces a confusing result.
+        if analysis.root_symbols.len() > 1 {
+            return Ok(ExplainResult {
+                root_symbol: symbol.to_string(),
+                explanation: String::new(),
+                total_affected: 0,
+                max_depth_reached: 0,
+                symbol_sources: Vec::new(),
+                ambiguous_candidates: analysis.root_symbols,
+            });
+        }
 
         if analysis.total_affected == 0 {
             return Ok(ExplainResult {
@@ -137,6 +158,7 @@ impl ExplainUseCase {
                 total_affected: 0,
                 max_depth_reached: 0,
                 symbol_sources: Vec::new(),
+                ambiguous_candidates: Vec::new(),
             });
         }
 
@@ -187,6 +209,7 @@ impl ExplainUseCase {
             total_affected: analysis.total_affected,
             max_depth_reached: analysis.max_depth_reached,
             symbol_sources,
+            ambiguous_candidates: Vec::new(),
         })
     }
 }

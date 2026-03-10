@@ -13,6 +13,10 @@ pub struct CallGraphQuery {
     pub reference_kind: Option<String>,
     /// Maximum number of results to return
     pub limit: Option<u32>,
+    /// When true, `resolve_symbols` treats the short name as a regexp pattern
+    /// (passed directly to DuckDB's `regexp_matches`) instead of a suffix
+    /// substring match.  Use `with_regex()` to set this flag.
+    pub is_regex: bool,
 }
 
 impl CallGraphQuery {
@@ -37,6 +41,12 @@ impl CallGraphQuery {
 
     pub fn with_limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
+        self
+    }
+
+    /// Treat the symbol passed to `resolve_symbols` as a regular expression.
+    pub fn with_regex(mut self) -> Self {
+        self.is_regex = true;
         self
     }
 }
@@ -102,7 +112,7 @@ pub trait CallGraphRepository: Send + Sync {
         &self,
         short_name: &str,
         query: &CallGraphQuery,
-        limit: Option<u32>,
+        limit: u32,
     ) -> Result<Vec<String>, DomainError>;
 }
 

@@ -60,17 +60,27 @@ pub struct SearchToolInput {
 /// Input parameters for the analyze_impact tool
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ImpactToolInput {
-    /// Symbol name to analyse (e.g. "authenticate" or "MyStruct::new")
+    /// Symbol name to analyse (e.g. "authenticate" or "MyStruct::new").
+    /// When `regex` is true, treated as a POSIX regular expression matched
+    /// against all indexed fully-qualified symbol names.
     pub symbol: String,
 
     /// Restrict analysis to a specific repository ID
     pub repository_id: Option<String>,
+
+    /// When true, `symbol` is treated as a POSIX regular expression.
+    /// All matching symbols are used as BFS roots and their results merged.
+    /// Defaults to false.
+    #[serde(default)]
+    pub regex: bool,
 }
 
 /// Input parameters for the get_symbol_context tool
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ContextToolInput {
-    /// Symbol name to look up (e.g. "authenticate" or "MyStruct::new")
+    /// Symbol name to look up (e.g. "authenticate" or "MyStruct::new").
+    /// When `regex` is true, treated as a POSIX regular expression matched
+    /// against all indexed fully-qualified symbol names.
     pub symbol: String,
 
     /// Restrict context to a specific repository ID
@@ -78,6 +88,12 @@ pub struct ContextToolInput {
 
     /// Maximum number of callers/callees to return per direction
     pub limit: Option<u32>,
+
+    /// When true, `symbol` is treated as a POSIX regular expression.
+    /// All matching symbols are resolved and their edges aggregated.
+    /// Defaults to false.
+    #[serde(default)]
+    pub regex: bool,
 }
 
 // ── MCP Server ───────────────────────────────────────────────────────────────
@@ -167,7 +183,7 @@ impl CodesearchMcpServer {
 
         let use_case = self.container.impact_use_case();
         let analysis = use_case
-            .analyze(&input.symbol, input.repository_id.as_deref())
+            .analyze(&input.symbol, input.repository_id.as_deref(), input.regex)
             .await
             .map_err(|e| {
                 McpError::internal_error(format!("Impact analysis failed: {}", e), None)
@@ -193,7 +209,7 @@ impl CodesearchMcpServer {
 
         let use_case = self.container.context_use_case();
         let ctx = use_case
-            .get_context(&input.symbol, input.repository_id.as_deref(), input.limit)
+            .get_context(&input.symbol, input.repository_id.as_deref(), input.limit, input.regex)
             .await
             .map_err(|e| McpError::internal_error(format!("Context lookup failed: {}", e), None))?;
 

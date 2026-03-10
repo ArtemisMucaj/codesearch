@@ -476,7 +476,7 @@ impl TuiApp {
         }
         self.impact_task = Some(tokio::spawn(async move {
             let result = uc
-                .analyze(&symbol, repository.as_deref())
+                .analyze(&symbol, repository.as_deref(), false)
                 .await
                 .map_err(|e| e.to_string());
             if let Err(e) = tx.send(TuiEvent::ImpactDone { key, result }) {

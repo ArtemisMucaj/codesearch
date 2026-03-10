@@ -23,6 +23,7 @@ impl<'a> ExplainController<'a> {
         repository: Option<String>,
         llm: LlmTarget,
         dump_symbols: bool,
+        is_regex: bool,
     ) -> Result<String> {
         let chat_client: Arc<dyn ChatClient> = match llm {
             LlmTarget::Anthropic => Arc::new(AnthropicClient::from_env()),
@@ -35,9 +36,24 @@ impl<'a> ExplainController<'a> {
         let result: crate::application::ExplainResult = self
             .container
             .explain_use_case()
-            .execute(&symbol, repository.as_deref(), chat_client.as_ref())
+            .execute(&symbol, repository.as_deref(), chat_client.as_ref(), is_regex)
             .await
             .context("Explain use case failed")?;
+
+        if !result.ambiguous_candidates.is_empty() {
+            let mut output = format!(
+                "'{}' matches {} symbols — please pick one and re-run with the full name:\n\n",
+                result.root_symbol,
+                result.ambiguous_candidates.len(),
+            );
+            for (i, candidate) in result.ambiguous_candidates.iter().enumerate() {
+                output.push_str(&format!("  {}. {}\n", i + 1, candidate));
+            }
+            output.push_str(
+                "\nRun with the full symbol name to explain a specific one.\n",
+            );
+            return Ok(output);
+        }
 
         let mut output = format!(
             "Explanation for `{}`\n{}\n\n{}\n\n---\nAnalysed {} symbols across {} call levels.\n\n",
