@@ -20,6 +20,8 @@ pub enum TuiMode {
     Search,
     /// Open in impact analysis mode.
     Impact,
+    /// Open in context mode.
+    Context,
 }
 
 /// Embedding backend to use for indexing and search.
@@ -209,7 +211,7 @@ pub enum Commands {
         #[arg(long)]
         query: Option<String>,
 
-        /// Which mode to open the TUI in: 'search' (default) or 'impact'.
+        /// Which mode to open the TUI in: 'search' (default), 'impact', or 'context'.
         #[arg(long, value_enum, default_value = "search")]
         mode: TuiMode,
     },
