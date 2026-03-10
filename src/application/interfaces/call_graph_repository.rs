@@ -108,11 +108,15 @@ pub trait CallGraphRepository: Send + Sync {
     /// Returns distinct callee_symbol values whose name ends with the given suffix
     /// (matching after `#`, `/`, or at the start of the string).
     /// Used as a fallback when exact match returns zero results.
+    ///
+    /// `resolve_limit` caps the number of resolved symbols returned.  Named
+    /// distinctly from [`CallGraphQuery::limit`] (which caps edge results) to
+    /// prevent callers from confusing the two different limit semantics.
     async fn resolve_symbols(
         &self,
         short_name: &str,
         query: &CallGraphQuery,
-        limit: u32,
+        resolve_limit: u32,
     ) -> Result<Vec<String>, DomainError>;
 }
 

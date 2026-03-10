@@ -571,21 +571,22 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
         &self,
         short_name: &str,
         query: &CallGraphQuery,
-        limit: u32,
+        resolve_limit: u32,
     ) -> Result<Vec<String>, DomainError> {
         let conn = self.conn.lock().await;
-
-        let limit_clause = limit.to_string();
 
         // We search BOTH callee_symbol and caller_symbol so that root entry-point
         // symbols (which only ever appear as callers, never as callees) can still
         // be resolved to their fully-qualified names.
         //
         // • Regex mode  — `regexp_matches(col, ?)` matches the full POSIX pattern.
-        //   No post-filter needed.
+        //   No post-filter needed; LIMIT is applied in SQL.
         //
         // • Suffix mode — `col LIKE '%<short_name>'` followed by a word-boundary
-        //   post-filter (requires `#`, `/`, or `\` before the short name).
+        //   post-filter in Rust (requires `#`, `/`, `\`, or `::` before the short
+        //   name).  We must NOT apply LIMIT in SQL here because the post-filter
+        //   can discard rows, causing valid results to be silently dropped.  The
+        //   limit is instead enforced in Rust after the post-filter.
         let (callee_cond, caller_cond) = if query.is_regex {
             (
                 "regexp_matches(callee_symbol, ?)".to_string(),
@@ -618,19 +619,36 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
 
         // UNION of callee leg (symbols that get called) and caller leg (symbols
         // that call others).  The caller leg excludes NULLs (anonymous callers).
-        let sql = format!(
-            "SELECT DISTINCT sym FROM (\
-               SELECT callee_symbol AS sym FROM symbol_references \
-               WHERE {callee_cond}{extra} \
-               UNION \
-               SELECT caller_symbol AS sym FROM symbol_references \
-               WHERE caller_symbol IS NOT NULL AND {caller_cond}{extra}\
-             ) ORDER BY sym LIMIT {limit}",
-            callee_cond = callee_cond,
-            caller_cond = caller_cond,
-            extra = extra_clause,
-            limit = limit_clause,
-        );
+        // In regex mode apply the LIMIT in SQL for performance; in suffix mode
+        // omit it so the Rust word-boundary post-filter sees all candidates.
+        let sql = if query.is_regex {
+            format!(
+                "SELECT DISTINCT sym FROM (\
+                   SELECT callee_symbol AS sym FROM symbol_references \
+                   WHERE {callee_cond}{extra} \
+                   UNION \
+                   SELECT caller_symbol AS sym FROM symbol_references \
+                   WHERE caller_symbol IS NOT NULL AND {caller_cond}{extra}\
+                 ) ORDER BY sym LIMIT {resolve_limit}",
+                callee_cond = callee_cond,
+                caller_cond = caller_cond,
+                extra = extra_clause,
+                resolve_limit = resolve_limit,
+            )
+        } else {
+            format!(
+                "SELECT DISTINCT sym FROM (\
+                   SELECT callee_symbol AS sym FROM symbol_references \
+                   WHERE {callee_cond}{extra} \
+                   UNION \
+                   SELECT caller_symbol AS sym FROM symbol_references \
+                   WHERE caller_symbol IS NOT NULL AND {caller_cond}{extra}\
+                 ) ORDER BY sym",
+                callee_cond = callee_cond,
+                caller_cond = caller_cond,
+                extra = extra_clause,
+            )
+        };
 
         let mut stmt = conn
             .prepare(&sql)
@@ -667,17 +685,24 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
                 row.map_err(|e| DomainError::storage(format!("Failed to read row: {}", e)))?;
 
             if query.is_regex {
-                // regexp_matches() already guarantees a full-pattern match.
+                // regexp_matches() already guarantees a full-pattern match;
+                // LIMIT was already applied in SQL.
                 results.push(symbol);
             } else {
                 // Word-boundary post-filter: the short name must be preceded by
-                // `#`, `/`, or `\` (PHP namespaces), or be the entire string.
+                // `#`, `/`, `\` (PHP/JS namespaces), `::` (Rust/C++), or be
+                // the entire string.  LIMIT is NOT in the SQL for suffix mode,
+                // so we enforce it here after filtering.
                 if symbol == short_name
                     || symbol.ends_with(&format!("#{}", short_name))
                     || symbol.ends_with(&format!("/{}", short_name))
                     || symbol.ends_with(&format!("\\{}", short_name))
+                    || symbol.ends_with(&format!("::{}", short_name))
                 {
                     results.push(symbol);
+                    if results.len() >= resolve_limit as usize {
+                        break;
+                    }
                 }
             }
         }

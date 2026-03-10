@@ -6,17 +6,17 @@
 /// `NetatmoModelsHomesHome#method`.  This function generates a pattern that
 /// matches **both** forms by:
 ///
-/// 1. Converting any separator character (`\`, `/`, `#`, `.`) already present
-///    in the input into the flexible class `[/\\#.]*` (zero or more of any
+/// 1. Converting any separator character (`\`, `/`, `#`, `.`, `:`) already present
+///    in the input into the flexible class `[/\\#.:]*` (zero or more of any
 ///    separator).
-/// 2. Inserting `[/\\#.]*` at lowercase→uppercase PascalCase word boundaries
+/// 2. Inserting `[/\\#.:]*` at lowercase→uppercase PascalCase word boundaries
 ///    so that shell-stripped segments (e.g. `NetatmoModels`) also match their
 ///    separated form (e.g. `Netatmo\Models`).
 ///
 /// All other POSIX ERE metacharacters are escaped so they match literally.
 pub fn build_fuzzy_pattern(s: &str) -> String {
-    /// RE2 character class matching 0 or more of `/`, `\`, `#`, `.`
-    const SEP: &str = r"[/\\#.]*";
+    /// RE2 character class matching 0 or more of `/`, `\`, `#`, `.`, `:`
+    const SEP: &str = r"[/\\#.:]*";
 
     let mut out = String::new();
     let chars: Vec<char> = s.chars().collect();
@@ -24,7 +24,7 @@ pub fn build_fuzzy_pattern(s: &str) -> String {
     for (i, &c) in chars.iter().enumerate() {
         match c {
             // Existing separator char → flexible separator class.
-            '\\' | '/' | '#' | '.' => {
+            '\\' | '/' | '#' | '.' | ':' => {
                 // Avoid two consecutive SEP tokens.
                 if !out.ends_with(SEP) {
                     out.push_str(SEP);

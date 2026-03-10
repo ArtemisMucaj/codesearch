@@ -49,9 +49,16 @@ impl<'a> ExplainController<'a> {
             for (i, candidate) in result.ambiguous_candidates.iter().enumerate() {
                 output.push_str(&format!("  {}. {}\n", i + 1, candidate));
             }
-            output.push_str(
-                "\nRun with the full symbol name to explain a specific one.\n",
-            );
+            if result.is_regex {
+                output.push_str(
+                    "\nTip: narrow or anchor your regex to match a single symbol, \
+                     e.g. use `^pattern` or `pattern$`.\n",
+                );
+            } else {
+                output.push_str(
+                    "\nRun with the full symbol name to explain a specific one.\n",
+                );
+            }
             return Ok(output);
         }
 

@@ -97,6 +97,9 @@ pub struct ExplainResult {
     /// When non-empty, the input symbol matched multiple FQNs and the user
     /// must pick one.  `explanation` is empty and no LLM call was made.
     pub ambiguous_candidates: Vec<String>,
+    /// Whether the query was interpreted as a regular expression.
+    /// Used by the controller to tailor the disambiguation hint.
+    pub is_regex: bool,
 }
 
 /// Orchestrates impact analysis, call-graph traversal, snippet retrieval,
@@ -144,6 +147,7 @@ impl ExplainUseCase {
                 max_depth_reached: 0,
                 symbol_sources: Vec::new(),
                 ambiguous_candidates: analysis.root_symbols,
+                is_regex,
             });
         }
 
@@ -159,6 +163,7 @@ impl ExplainUseCase {
                 max_depth_reached: 0,
                 symbol_sources: Vec::new(),
                 ambiguous_candidates: Vec::new(),
+                is_regex,
             });
         }
 
@@ -210,6 +215,7 @@ impl ExplainUseCase {
             max_depth_reached: analysis.max_depth_reached,
             symbol_sources,
             ambiguous_candidates: Vec::new(),
+            is_regex,
         })
     }
 }

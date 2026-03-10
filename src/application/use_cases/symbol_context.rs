@@ -106,13 +106,16 @@ impl SymbolContextUseCase {
 
             // Zero edges found — confirm whether the symbol actually exists in the
             // DB before expanding to fuzzy/regex.  resolve_symbols queries both
-            // callee_symbol and caller_symbol, so isolated nodes (no edges yet) are
-            // detected without falling through to pattern matching.
-            let exact_resolved = self
+            // callee_symbol and caller_symbol with a suffix match; we then require
+            // an exact string match so that a short name like "new" does not
+            // falsely match a fully-qualified "MyStruct::new" and trigger an
+            // early return.
+            let probe = self
                 .call_graph
                 .resolve_symbols(symbol, &query, 1)
                 .await?;
-            if !exact_resolved.is_empty() {
+            let exact_resolved = probe.iter().any(|s| s == symbol);
+            if exact_resolved {
                 return Ok(SymbolContext {
                     symbol: symbol.to_string(),
                     callers: vec![],
