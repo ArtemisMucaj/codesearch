@@ -109,7 +109,9 @@ pub struct ContextState {
     pub errored_key: Option<String>,
     /// Which pane currently has keyboard focus.
     pub focused_pane: ContextPane,
-    /// Selected node index within the current call chain (tree pane, callers side only).
+    /// Flat cursor index across all rendered tree nodes (callers path + callees DFS).
+    /// Index 0 = first caller (leaf), last caller index = path.len()-1,
+    /// then callee nodes follow in DFS order.
     pub chain_selected: usize,
     /// Code snippet for the selected chain node (Some = code view is active).
     pub chain_snippet: Option<CodeChunk>,
@@ -118,6 +120,10 @@ pub struct ContextState {
     pub chain_snippet_scroll: u16,
     /// Pending key for an in-flight chain snippet request.
     pub chain_snippet_pending_key: Option<SnippetKey>,
+    /// Last-known inner height of the tree pane (updated each render frame).
+    /// Used by the navigator to keep the cursor in view.
+    /// Wrapped in `Cell` so the renderer can update it through `&AppState`.
+    pub tree_pane_height: std::cell::Cell<u16>,
 }
 
 // ── Top-level app state ───────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-mod context;
+pub(crate) mod context;
 mod format;
 mod impact;
 mod search;
@@ -72,7 +72,7 @@ fn render_status(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppStat
                 if state.context.chain_snippet.is_some() {
                     " ↑↓/PgUp/Dn: scroll  Esc: back to tree  q: quit"
                 } else {
-                    " ↑↓: scroll tree  PgUp/Dn: scroll fast  Enter: view code  Ctrl+←: focus list  Tab: switch  q: quit"
+                    " ↑↓: navigate nodes  Enter: view code  PgUp/Dn: scroll fast  Ctrl+←: focus list  Tab: switch  q: quit"
                 }
             }
         },

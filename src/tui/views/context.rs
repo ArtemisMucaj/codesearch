@@ -180,6 +180,11 @@ fn render_right(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let callee_children = build_callee_children_map(ctx);
 
+    // Record the inner pane height so the navigator can auto-scroll.
+    // We compute it here (same formula as the renderer uses internally).
+    let inner_height = area.height.saturating_sub(2); // subtract top+bottom border
+    state.context.tree_pane_height.set(inner_height);
+
     render_call_context_tree(
         frame,
         area,
@@ -195,6 +200,25 @@ fn render_right(frame: &mut Frame, area: Rect, state: &AppState) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Convenience: build the flat tree node list for the currently selected entry-point.
+///
+/// Returns `None` if the context hasn't loaded yet.
+pub fn build_flat_tree_for_selected(ctx: &SymbolContext, selected_entry: usize) -> Vec<FlatNode> {
+    let all_callers: Vec<&ContextNode> = ctx.callers_by_depth.iter().flatten().collect();
+    let leaves = leaf_caller_nodes(ctx);
+    let callee_children = build_callee_children_map(ctx);
+
+    let (path, has_callers) = if leaves.is_empty() {
+        (vec![], false)
+    } else {
+        let leaf = leaves.get(selected_entry).copied().unwrap_or(leaves[0]);
+        let p = trace_caller_path(leaf, &all_callers);
+        (p, true)
+    };
+
+    flat_tree_nodes(&path, &ctx.symbol, &callee_children, has_callers)
+}
 
 /// Extract the top-most entry-point nodes from the callers BFS.
 ///
@@ -250,19 +274,130 @@ fn build_callee_children_map<'a>(ctx: &'a SymbolContext) -> HashMap<String, Vec<
     map
 }
 
+/// A selectable node in the flattened tree.
+#[derive(Debug, Clone)]
+pub struct FlatNode {
+    pub repository_id: String,
+    pub file_path: String,
+    pub line: u32,
+    /// The `lines` index this node occupies in the rendered tree (for auto-scroll).
+    pub lines_index: usize,
+}
+
+/// Flatten the full context tree into a single ordered list of selectable nodes.
+///
+/// Order: caller chain (leaf → direct caller), then root ◉ (not included — not
+/// selectable), then callee nodes in DFS order.
+///
+/// `path` is the caller chain for the currently selected entry-point (leaf-first).
+/// `callee_children` is the map built by `build_callee_children_map`.
+/// `has_callers` mirrors the same flag passed to the tree renderer.
+///
+/// Returns `(flat_nodes, lines_per_caller_node)` where `lines_per_caller_node`
+/// encodes how many rendered lines come before each caller in the `lines` vec.
+pub fn flat_tree_nodes(
+    path: &[&ContextNode],
+    root_symbol: &str,
+    callee_children: &HashMap<String, Vec<&ContextNode>>,
+    has_callers: bool,
+) -> Vec<FlatNode> {
+    let mut result = Vec::new();
+
+    if has_callers {
+        // ── Caller nodes ──────────────────────────────────────────────────────
+        // path[0] (leaf): lines[0]
+        // path[i] (i≥1): lines[i*2]  (each preceded by one connector line)
+        for (i, node) in path.iter().enumerate() {
+            let lines_index = if i == 0 { 0 } else { i * 2 };
+            result.push(FlatNode {
+                repository_id: node.repository_id.clone(),
+                file_path: node.file_path.clone(),
+                line: node.line,
+                lines_index,
+            });
+        }
+
+        // ◉ root is at lines[path.len() * 2] — not selectable, skip.
+        // Callees start at lines[path.len() * 2 + 1].
+        let callee_start_lines = path.len() * 2 + 1;
+        let mut callee_offset = 0usize;
+        let mut visited: HashSet<String> = HashSet::new();
+        collect_flat_callees(
+            root_symbol,
+            callee_children,
+            callee_start_lines,
+            &mut callee_offset,
+            &mut result,
+            &mut visited,
+        );
+    } else {
+        // ◉ root is at lines[0] — not selectable.
+        // Callees start at lines[1].
+        let callee_start_lines = 1;
+        let mut callee_offset = 0usize;
+        let mut visited: HashSet<String> = HashSet::new();
+        collect_flat_callees(
+            root_symbol,
+            callee_children,
+            callee_start_lines,
+            &mut callee_offset,
+            &mut result,
+            &mut visited,
+        );
+    }
+
+    result
+}
+
+fn collect_flat_callees(
+    parent_symbol: &str,
+    callee_children: &HashMap<String, Vec<&ContextNode>>,
+    base_lines_index: usize,
+    offset: &mut usize,
+    result: &mut Vec<FlatNode>,
+    visited: &mut HashSet<String>,
+) {
+    let children = match callee_children.get(parent_symbol) {
+        Some(c) => c,
+        None => return,
+    };
+    for node in children.iter() {
+        if !visited.insert(node.symbol.clone()) {
+            continue;
+        }
+        result.push(FlatNode {
+            repository_id: node.repository_id.clone(),
+            file_path: node.file_path.clone(),
+            line: node.line,
+            lines_index: base_lines_index + *offset,
+        });
+        *offset += 1;
+        collect_flat_callees(
+            &node.symbol,
+            callee_children,
+            base_lines_index,
+            offset,
+            result,
+            visited,
+        );
+    }
+}
+
 // ── Tree renderer ─────────────────────────────────────────────────────────────
 
 /// Render the full call context tree:
 ///
 /// ```text
-/// ★  entry_point  file:line         ← selectable (index 0)
+/// ★  entry_point  file:line         ← flat index 0
 ///    │
-///    └── intermediate  file:line    ← selectable (index 1)
+///    └── intermediate  file:line    ← flat index 1
 ///        │
-///        └── ◉  root_symbol         ← NOT selectable
-///            ├── child_A  file:line ← NOT selectable (callee)
-///            └── child_B  file:line ← NOT selectable (callee)
+///        └── ◉  root_symbol         ← not selectable
+///            ├── child_A  file:line ← flat index path.len()
+///            └── child_B  file:line ← flat index path.len()+1
 /// ```
+///
+/// `selected` is a flat index across callers (0..path.len()-1) then callees.
 #[allow(clippy::too_many_arguments)]
 fn render_call_context_tree(
     frame: &mut Frame,
@@ -285,6 +420,9 @@ fn render_call_context_tree(
     frame.render_widget(block, area);
 
     let mut lines: Vec<Line> = Vec::new();
+
+    // callee_flat_idx: the flat index that the first callee node gets.
+    let callee_flat_base = if has_callers { path.len() } else { 0 };
 
     if has_callers {
         // ── Caller chain ──────────────────────────────────────────────────────
@@ -373,12 +511,17 @@ fn render_call_context_tree(
             // Callee subtree hangs off the root symbol.
             let callee_prefix = "    ".repeat(depth + 1);
             let mut visited: HashSet<String> = HashSet::new();
+            let mut callee_counter = 0usize;
             render_callees_subtree(
                 root_symbol,
                 callee_children,
                 &callee_prefix,
                 &mut lines,
                 &mut visited,
+                tree_focused,
+                selected,
+                callee_flat_base,
+                &mut callee_counter,
             );
         }
     } else {
@@ -391,12 +534,17 @@ fn render_call_context_tree(
             ),
         ]));
         let mut visited: HashSet<String> = HashSet::new();
+        let mut callee_counter = 0usize;
         render_callees_subtree(
             root_symbol,
             callee_children,
             "    ",
             &mut lines,
             &mut visited,
+            tree_focused,
+            selected,
+            callee_flat_base,
+            &mut callee_counter,
         );
     }
 
@@ -410,12 +558,21 @@ fn render_call_context_tree(
 }
 
 /// Recursively render the callees subtree rooted at `parent_symbol`.
+///
+/// `flat_base` is the flat index of the first callee node overall.
+/// `counter` tracks how many callee nodes have been rendered so far (DFS order).
+/// A callee node at DFS position `*counter` has flat index `flat_base + *counter`.
+#[allow(clippy::too_many_arguments)]
 fn render_callees_subtree(
     parent_symbol: &str,
     callee_children: &HashMap<String, Vec<&ContextNode>>,
     prefix: &str,
     lines: &mut Vec<Line>,
     visited: &mut HashSet<String>,
+    tree_focused: bool,
+    selected: usize,
+    flat_base: usize,
+    counter: &mut usize,
 ) {
     let children: &Vec<&ContextNode> = match callee_children.get(parent_symbol) {
         Some(c) => c,
@@ -429,20 +586,35 @@ fn render_callees_subtree(
         let is_last = i == count - 1;
         let branch = if is_last { "└──" } else { "├──" };
 
+        let flat_idx = flat_base + *counter;
+        *counter += 1;
+
+        let is_sel = tree_focused && selected == flat_idx;
+        let fg_name = if is_sel { Color::Black } else { Color::Yellow };
+        let bg = if is_sel { Color::Yellow } else { Color::Reset };
+        let marker = if is_sel { "▶ " } else { "" };
+
         lines.push(Line::from(vec![
             Span::styled(
-                format!("{}{} ", prefix, branch),
-                Style::default().fg(Color::DarkGray),
+                format!("{}{} {}", prefix, branch, marker),
+                Style::default().fg(Color::DarkGray).bg(bg),
             ),
             Span::styled(
                 short_symbol(&node.symbol).to_string(),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(fg_name)
+                    .bg(bg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("  {}:{}", shorten_path(&node.file_path), node.line),
-                Style::default().fg(Color::DarkGray),
+                Style::default()
+                    .fg(if is_sel {
+                        Color::Black
+                    } else {
+                        Color::DarkGray
+                    })
+                    .bg(bg),
             ),
         ]));
 
@@ -451,6 +623,16 @@ fn render_callees_subtree(
         } else {
             format!("{}│   ", prefix)
         };
-        render_callees_subtree(&node.symbol, callee_children, &child_prefix, lines, visited);
+        render_callees_subtree(
+            &node.symbol,
+            callee_children,
+            &child_prefix,
+            lines,
+            visited,
+            tree_focused,
+            selected,
+            flat_base,
+            counter,
+        );
     }
 }

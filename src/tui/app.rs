@@ -15,6 +15,7 @@ use super::cache::TuiCache;
 use super::event::TuiEvent;
 use super::state::{ActiveMode, AppState, ContextPane, ImpactPane, SearchPane};
 use super::views;
+use super::views::context::build_flat_tree_for_selected;
 use crate::cli::TuiMode;
 
 const SEARCH_LIMIT: usize = 20;
@@ -394,10 +395,31 @@ impl TuiApp {
                             delta * SCROLL_STEP as i32,
                         );
                     } else {
-                        // Scroll the tree view one line at a time so the user
-                        // can navigate through the full callee subtree below ◉.
-                        self.state.context.tree_scroll =
-                            bounded_scroll(self.state.context.tree_scroll, delta);
+                        // Navigate through the full flat tree (callers + callees).
+                        let flat = self
+                            .state
+                            .context
+                            .context
+                            .as_ref()
+                            .map(|ctx| {
+                                build_flat_tree_for_selected(ctx, self.state.context.selected)
+                            })
+                            .unwrap_or_default();
+                        let len = flat.len();
+                        if len > 0 {
+                            self.state.context.chain_selected =
+                                bounded_add(self.state.context.chain_selected, delta, len);
+                            // Auto-scroll to keep the cursor visible.
+                            let lines_idx = flat[self.state.context.chain_selected].lines_index;
+                            let height = self.state.context.tree_pane_height.get() as usize;
+                            let scroll = self.state.context.tree_scroll as usize;
+                            if lines_idx < scroll {
+                                self.state.context.tree_scroll = lines_idx as u16;
+                            } else if height > 0 && lines_idx >= scroll + height {
+                                self.state.context.tree_scroll =
+                                    (lines_idx + 1).saturating_sub(height) as u16;
+                            }
+                        }
                     }
                     return;
                 }
@@ -833,46 +855,11 @@ impl TuiApp {
                 None => return,
             };
 
-            let all_callers: Vec<_> = ctx.callers_by_depth.iter().flatten().collect();
-            let leaf_nodes: Vec<_> = all_callers
-                .iter()
-                .copied()
-                .filter(|n| {
-                    !all_callers
-                        .iter()
-                        .any(|m| m.via_symbol.as_deref() == Some(n.symbol.as_str()))
-                })
-                .collect();
-
-            if leaf_nodes.is_empty() {
-                return;
-            }
-
-            let leaf = match leaf_nodes.get(self.state.context.selected) {
-                Some(l) => *l,
-                None => leaf_nodes[0],
-            };
-
-            // Trace the path from leaf back toward the root symbol.
-            let node_by_depth_sym: std::collections::HashMap<(usize, &str), _> = all_callers
-                .iter()
-                .map(|n| ((n.depth, n.symbol.as_str()), *n))
-                .collect();
-
-            let mut path = vec![leaf];
-            let mut current = leaf;
-            while let Some(via) = current.via_symbol.as_deref() {
-                let parent_depth = current.depth.saturating_sub(1);
-                if let Some(&parent) = node_by_depth_sym.get(&(parent_depth, via)) {
-                    path.push(parent);
-                    current = parent;
-                } else {
-                    break;
-                }
-            }
-
-            let node = match path.get(self.state.context.chain_selected) {
-                Some(n) => *n,
+            // Use the flat tree to resolve the selected node (covers both callers
+            // and callees by flat index).
+            let flat = build_flat_tree_for_selected(ctx, self.state.context.selected);
+            let node = match flat.get(self.state.context.chain_selected) {
+                Some(n) => n,
                 None => return,
             };
 
