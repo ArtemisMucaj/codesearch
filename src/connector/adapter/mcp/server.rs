@@ -86,9 +86,6 @@ pub struct ContextToolInput {
     /// Restrict context to a specific repository ID
     pub repository_id: Option<String>,
 
-    /// Maximum number of callers/callees to return per direction
-    pub limit: Option<u32>,
-
     /// When true, `symbol` is treated as a POSIX regular expression.
     /// All matching symbols are resolved and their edges aggregated.
     /// Defaults to false.
