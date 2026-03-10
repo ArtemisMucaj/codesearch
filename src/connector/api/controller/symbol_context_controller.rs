@@ -119,21 +119,40 @@ impl<'a> SymbolContextController<'a> {
             // No callers: render callees subtree rooted at the symbol directly.
             out.push_str(&format!("{}\n", ctx.symbol));
             let mut visited = HashSet::new();
-            Self::render_callees_subtree(&ctx.symbol, &callee_children, 0, &mut out, &mut visited);
+            Self::render_callees_subtree(&ctx.symbol, &callee_children, "", &mut out, &mut visited);
         }
 
         out
     }
 
     /// Build a map from parent_symbol → direct callee nodes (keyed by via_symbol).
-    fn build_callee_children_map(ctx: &SymbolContext) -> HashMap<String, Vec<&ContextNode>> {
-        let mut map: HashMap<String, Vec<&ContextNode>> = HashMap::new();
+    fn build_callee_children_map<'b>(ctx: &'b SymbolContext) -> HashMap<String, Vec<&'b ContextNode>> {
+        let mut map: HashMap<String, Vec<&'b ContextNode>> = HashMap::new();
         for node in ctx.callees_by_depth.iter().flatten() {
             let key = node
                 .via_symbol
-                .clone()
-                .unwrap_or_else(|| ctx.symbol.clone());
+                .as_deref()
+                .unwrap_or(&ctx.symbol)
+                .to_owned();
             map.entry(key).or_default().push(node);
+        }
+        // For multi-root-symbol queries, `ctx.symbol` is a display label like
+        // "authenticate (3 symbols)".  Depth-1 callee nodes have `via_symbol`
+        // pointing to the real FQN (e.g., "MyModule::authenticate"), not to
+        // the display label.  Create a synthetic entry under the display label
+        // that aggregates all depth-1 nodes so that `render_callees_subtree`
+        // can always start from `ctx.symbol`.
+        let root_sym_set: std::collections::HashSet<&str> =
+            ctx.root_symbols.iter().map(String::as_str).collect();
+        let depth1_nodes: Vec<&ContextNode> = ctx
+            .callees_by_depth
+            .first()
+            .map(|d| d.iter().collect())
+            .unwrap_or_default();
+        // Only add the synthetic entry when the display label differs from
+        // all real root symbols (i.e., it's a multi-root aggregation label).
+        if !root_sym_set.contains(ctx.symbol.as_str()) && !depth1_nodes.is_empty() {
+            map.insert(ctx.symbol.clone(), depth1_nodes);
         }
         map
     }
@@ -174,12 +193,12 @@ impl<'a> SymbolContextController<'a> {
         out.push_str(&format!("{}└── {}\n", caller_indent, root_symbol));
 
         // Hang callees subtree off the queried symbol.
-        let callee_base_depth = path.len(); // indent level for depth-1 callees
+        let callee_prefix = "    ".repeat(path.len());
         let mut visited = HashSet::new();
         Self::render_callees_subtree(
             root_symbol,
             callee_children,
-            callee_base_depth,
+            &callee_prefix,
             out,
             &mut visited,
         );
@@ -189,11 +208,11 @@ impl<'a> SymbolContextController<'a> {
     fn render_callees_subtree(
         parent_symbol: &str,
         callee_children: &HashMap<String, Vec<&ContextNode>>,
-        indent_depth: usize,
+        prefix: &str,
         out: &mut String,
         visited: &mut HashSet<String>,
     ) {
-        let children: &Vec<&ContextNode> = match callee_children.get(parent_symbol) {
+        let children = match callee_children.get(parent_symbol) {
             Some(c) => c,
             None => return,
         };
@@ -209,16 +228,22 @@ impl<'a> SymbolContextController<'a> {
                 .unwrap_or_default();
             let is_last = i == count - 1;
             let branch = if is_last { "└──" } else { "├──" };
-            let indent = "    ".repeat(indent_depth);
             out.push_str(&format!(
                 "{}{} {} [{}{}]  {}:{}\n",
-                indent, branch, node.symbol, node.reference_kind, alias, node.file_path, node.line,
+                prefix, branch, node.symbol, node.reference_kind, alias, node.file_path, node.line,
             ));
-            // Recurse into this node's children.
+            // Continuation prefix for this node's children:
+            // - non-last: "│   " keeps the vertical bar connected
+            // - last:     "    " (no bar)
+            let child_prefix = if is_last {
+                format!("{}    ", prefix)
+            } else {
+                format!("{}│   ", prefix)
+            };
             Self::render_callees_subtree(
                 &node.symbol,
                 callee_children,
-                indent_depth + 1,
+                &child_prefix,
                 out,
                 visited,
             );
