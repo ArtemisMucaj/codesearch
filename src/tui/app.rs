@@ -394,7 +394,10 @@ impl TuiApp {
                             delta * SCROLL_STEP as i32,
                         );
                     } else {
-                        self.navigate_context_chain(delta);
+                        // Scroll the tree view one line at a time so the user
+                        // can navigate through the full callee subtree below ◉.
+                        self.state.context.tree_scroll =
+                            bounded_scroll(self.state.context.tree_scroll, delta);
                     }
                     return;
                 }
@@ -452,53 +455,6 @@ impl TuiApp {
         }
         self.state.impact.chain_selected =
             bounded_add(self.state.impact.chain_selected, delta, len);
-    }
-
-    fn navigate_context_chain(&mut self, delta: i32) {
-        let len = self
-            .state
-            .context
-            .context
-            .as_ref()
-            .and_then(|ctx| {
-                let all_callers: Vec<_> = ctx.callers_by_depth.iter().flatten().collect();
-                let leaf_nodes: Vec<_> = all_callers
-                    .iter()
-                    .copied()
-                    .filter(|n| {
-                        !all_callers
-                            .iter()
-                            .any(|m| m.via_symbol.as_deref() == Some(n.symbol.as_str()))
-                    })
-                    .collect();
-                if leaf_nodes.is_empty() {
-                    return Some(0);
-                }
-                let leaf = leaf_nodes.get(self.state.context.selected).copied()?;
-                // Trace path length from leaf back to root.
-                let node_by_depth_sym: std::collections::HashMap<(usize, &str), _> = all_callers
-                    .iter()
-                    .map(|n| ((n.depth, n.symbol.as_str()), *n))
-                    .collect();
-                let mut path_len = 1usize;
-                let mut current = leaf;
-                while let Some(via) = current.via_symbol.as_deref() {
-                    let parent_depth = current.depth.saturating_sub(1);
-                    if let Some(&parent) = node_by_depth_sym.get(&(parent_depth, via)) {
-                        path_len += 1;
-                        current = parent;
-                    } else {
-                        break;
-                    }
-                }
-                Some(path_len)
-            })
-            .unwrap_or(0);
-        if len == 0 {
-            return;
-        }
-        self.state.context.chain_selected =
-            bounded_add(self.state.context.chain_selected, delta, len);
     }
 
     fn scroll_code(&mut self, delta: i32) {
