@@ -4,6 +4,7 @@ mod explain;
 mod impact_analysis;
 mod index_repository;
 mod list_repositories;
+pub(crate) mod pattern_utils;
 mod rrf_fuse;
 mod search_code;
 mod snippet_lookup;

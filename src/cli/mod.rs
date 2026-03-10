@@ -110,7 +110,9 @@ pub enum Commands {
 
     /// Show the blast radius of changing a symbol (BFS over the call graph).
     Impact {
-        /// Symbol name to analyse (e.g. "authenticate" or "MyStruct::new")
+        /// Symbol name to analyse (e.g. "authenticate" or "MyStruct::new").
+        /// When --regex is set, treated as a POSIX regular expression matched
+        /// against all indexed fully-qualified symbol names.
         symbol: String,
 
         /// Restrict analysis to a specific repository ID
@@ -120,11 +122,20 @@ pub enum Commands {
         /// Output format: text or json
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormat,
+
+        /// Use SYMBOL as an explicit regex pattern without auto-wrapping.
+        /// By default the symbol is automatically searched as `.*SYMBOL.*` so
+        /// that "load" matches any FQN containing "load".  Pass --regex when
+        /// you want to control anchoring yourself (e.g. "^MyNs/.*Service#get$").
+        #[arg(long)]
+        regex: bool,
     },
 
     /// Show 360-degree context for a symbol: its callers and callees.
     Context {
-        /// Symbol name to look up (e.g. "authenticate" or "MyStruct::new")
+        /// Symbol name to look up (e.g. "authenticate" or "MyStruct::new").
+        /// When --regex is set, treated as a POSIX regular expression matched
+        /// against all indexed fully-qualified symbol names.
         symbol: String,
 
         /// Restrict context to a specific repository ID
@@ -138,13 +149,22 @@ pub enum Commands {
         /// Output format: text or json
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormat,
+
+        /// Use SYMBOL as an explicit regex pattern without auto-wrapping.
+        /// By default the symbol is automatically searched as `.*SYMBOL.*` so
+        /// that "load" matches any FQN containing "load".  Pass --regex when
+        /// you want to control anchoring yourself (e.g. "^MyNs/.*Service#get$").
+        #[arg(long)]
+        regex: bool,
     },
 
     /// LLM-driven explanation of a symbol's complete call flow, data flow, and
     /// business purpose. Runs impact analysis then passes each affected symbol's
     /// source code to the configured LLM and returns a structured description.
     Explain {
-        /// Symbol name to explain (e.g. "authenticate" or "MyStruct::new")
+        /// Symbol name to explain (e.g. "authenticate" or "MyStruct::new").
+        /// When --regex is set, treated as a POSIX regular expression matched
+        /// against all indexed fully-qualified symbol names.
         symbol: String,
 
         /// Restrict analysis to a specific repository ID
@@ -161,6 +181,13 @@ pub enum Commands {
         /// sent to the LLM, after the explanation.
         #[arg(long)]
         dump_symbols: bool,
+
+        /// Use SYMBOL as an explicit regex pattern without auto-wrapping.
+        /// By default the symbol is automatically searched as `.*SYMBOL.*` so
+        /// that "load" matches any FQN containing "load".  Pass --regex when
+        /// you want to control anchoring yourself (e.g. "^MyNs/.*Service#get$").
+        #[arg(long)]
+        regex: bool,
     },
 
     /// Start MCP (Model Context Protocol) server for integration with AI tools

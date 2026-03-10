@@ -8,6 +8,7 @@ use tracing::debug;
 use crate::application::{CallGraphQuery, CallGraphRepository, CallGraphStats};
 use crate::domain::{DomainError, Language, ReferenceKind, SymbolReference};
 
+
 pub struct DuckdbCallGraphRepository {
     conn: Arc<Mutex<Connection>>,
 }
@@ -570,71 +571,139 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
         &self,
         short_name: &str,
         query: &CallGraphQuery,
-        limit: Option<u32>,
+        resolve_limit: u32,
     ) -> Result<Vec<String>, DomainError> {
         let conn = self.conn.lock().await;
 
-        // Match symbols that end with the short name, preceded by `#`, `/`, or at string start.
-        // This handles patterns like:
-        //   "loadMappedFile" matches "Netatmo/Autoloader#loadMappedFile"
-        //   "Autoloader#loadMappedFile" matches "Netatmo/Autoloader#loadMappedFile"
-        let like_pattern = format!("%{}", short_name);
-        let limit_clause = limit
-            .unwrap_or(20)
-            .to_string();
+        // We search BOTH callee_symbol and caller_symbol so that root entry-point
+        // symbols (which only ever appear as callers, never as callees) can still
+        // be resolved to their fully-qualified names.
+        //
+        // • Regex mode  — `regexp_matches(col, ?)` matches the full POSIX pattern.
+        //   No post-filter needed; LIMIT is applied in SQL.
+        //
+        // • Suffix mode — `col LIKE '%<short_name>'` followed by a word-boundary
+        //   post-filter in Rust (requires `#`, `/`, `\`, or `::` before the short
+        //   name).  We must NOT apply LIMIT in SQL here because the post-filter
+        //   can discard rows, causing valid results to be silently dropped.  The
+        //   limit is instead enforced in Rust after the post-filter.
+        let (callee_cond, caller_cond) = if query.is_regex {
+            (
+                "regexp_matches(callee_symbol, ?)".to_string(),
+                "regexp_matches(caller_symbol, ?)".to_string(),
+            )
+        } else {
+            (
+                "callee_symbol LIKE ?".to_string(),
+                "caller_symbol LIKE ?".to_string(),
+            )
+        };
 
-        let mut conditions = vec!["callee_symbol LIKE ?".to_string()];
+        // Build the extra filter fragment (repo / language / reference_kind).
+        // Applied identically to both legs of the UNION.
+        let mut extra = Vec::new();
         if query.repository_id.is_some() {
-            conditions.push("repository_id = ?".to_string());
+            extra.push("repository_id = ?".to_string());
         }
         if query.language.is_some() {
-            conditions.push("language = ?".to_string());
+            extra.push("language = ?".to_string());
         }
         if query.reference_kind.is_some() {
-            conditions.push("reference_kind = ?".to_string());
+            extra.push("reference_kind = ?".to_string());
         }
-        let where_clause = conditions.join(" AND ");
+        let extra_clause = if extra.is_empty() {
+            String::new()
+        } else {
+            format!(" AND {}", extra.join(" AND "))
+        };
 
-        let sql = format!(
-            "SELECT DISTINCT callee_symbol FROM symbol_references \
-             WHERE {} ORDER BY callee_symbol LIMIT {}",
-            where_clause, limit_clause
-        );
+        // UNION of callee leg (symbols that get called) and caller leg (symbols
+        // that call others).  The caller leg excludes NULLs (anonymous callers).
+        // In regex mode apply the LIMIT in SQL for performance; in suffix mode
+        // omit it so the Rust word-boundary post-filter sees all candidates.
+        let sql = if query.is_regex {
+            format!(
+                "SELECT DISTINCT sym FROM (\
+                   SELECT callee_symbol AS sym FROM symbol_references \
+                   WHERE {callee_cond}{extra} \
+                   UNION \
+                   SELECT caller_symbol AS sym FROM symbol_references \
+                   WHERE caller_symbol IS NOT NULL AND {caller_cond}{extra}\
+                 ) ORDER BY sym LIMIT {resolve_limit}",
+                callee_cond = callee_cond,
+                caller_cond = caller_cond,
+                extra = extra_clause,
+                resolve_limit = resolve_limit,
+            )
+        } else {
+            format!(
+                "SELECT DISTINCT sym FROM (\
+                   SELECT callee_symbol AS sym FROM symbol_references \
+                   WHERE {callee_cond}{extra} \
+                   UNION \
+                   SELECT caller_symbol AS sym FROM symbol_references \
+                   WHERE caller_symbol IS NOT NULL AND {caller_cond}{extra}\
+                 ) ORDER BY sym",
+                callee_cond = callee_cond,
+                caller_cond = caller_cond,
+                extra = extra_clause,
+            )
+        };
 
         let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
+        // In suffix mode supply `%<short_name>`; in regex mode supply the raw pattern.
+        let pattern = if query.is_regex {
+            short_name.to_string()
+        } else {
+            format!("%{}", short_name)
+        };
+
+        // Params order: pattern (callee leg), extra filters (callee leg),
+        //               pattern (caller leg), extra filters (caller leg).
         let mut params_vec: Vec<Box<dyn duckdb::ToSql>> = Vec::new();
-        params_vec.push(Box::new(like_pattern));
-        if let Some(ref repo_id) = query.repository_id {
-            params_vec.push(Box::new(repo_id.clone()));
-        }
-        if let Some(ref lang) = query.language {
-            params_vec.push(Box::new(lang.clone()));
-        }
-        if let Some(ref kind) = query.reference_kind {
-            params_vec.push(Box::new(kind.clone()));
-        }
+        params_vec.push(Box::new(pattern.clone()));
+        if let Some(ref v) = query.repository_id { params_vec.push(Box::new(v.clone())); }
+        if let Some(ref v) = query.language      { params_vec.push(Box::new(v.clone())); }
+        if let Some(ref v) = query.reference_kind { params_vec.push(Box::new(v.clone())); }
+        params_vec.push(Box::new(pattern));
+        if let Some(ref v) = query.repository_id { params_vec.push(Box::new(v.clone())); }
+        if let Some(ref v) = query.language      { params_vec.push(Box::new(v.clone())); }
+        if let Some(ref v) = query.reference_kind { params_vec.push(Box::new(v.clone())); }
 
         let params_refs: Vec<&dyn duckdb::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
 
         let rows = stmt
-            .query_map(params_refs.as_slice(), |row| {
-                row.get::<_, String>(0)
-            })
+            .query_map(params_refs.as_slice(), |row| row.get::<_, String>(0))
             .map_err(|e| DomainError::storage(format!("Failed to resolve symbols: {}", e)))?;
 
         let mut results = Vec::new();
         for row in rows {
-            let symbol = row.map_err(|e| DomainError::storage(format!("Failed to read row: {}", e)))?;
-            // Verify the match is at a word boundary (after #, /, or \ for PHP namespaces, or exact match)
-            if symbol == short_name
-                || symbol.ends_with(&format!("#{}", short_name))
-                || symbol.ends_with(&format!("/{}", short_name))
-                || symbol.ends_with(&format!("\\{}", short_name))
-            {
+            let symbol =
+                row.map_err(|e| DomainError::storage(format!("Failed to read row: {}", e)))?;
+
+            if query.is_regex {
+                // regexp_matches() already guarantees a full-pattern match;
+                // LIMIT was already applied in SQL.
                 results.push(symbol);
+            } else {
+                // Word-boundary post-filter: the short name must be preceded by
+                // `#`, `/`, `\` (PHP/JS namespaces), `::` (Rust/C++), or be
+                // the entire string.  LIMIT is NOT in the SQL for suffix mode,
+                // so we enforce it here after filtering.
+                if symbol == short_name
+                    || symbol.ends_with(&format!("#{}", short_name))
+                    || symbol.ends_with(&format!("/{}", short_name))
+                    || symbol.ends_with(&format!("\\{}", short_name))
+                    || symbol.ends_with(&format!("::{}", short_name))
+                {
+                    results.push(symbol);
+                    if results.len() >= resolve_limit as usize {
+                        break;
+                    }
+                }
             }
         }
 

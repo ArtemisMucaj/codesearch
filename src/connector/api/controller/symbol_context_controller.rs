@@ -20,10 +20,11 @@ impl<'a> SymbolContextController<'a> {
         repository: Option<String>,
         limit: Option<u32>,
         format: OutputFormat,
+        is_regex: bool,
     ) -> Result<String> {
         let use_case = self.container.context_use_case();
         let ctx = use_case
-            .get_context(&symbol, repository.as_deref(), limit)
+            .get_context(&symbol, repository.as_deref(), limit, is_regex)
             .await?;
 
         Ok(match format {

@@ -66,9 +66,10 @@ impl<'a> Router<'a> {
                 symbol,
                 repository,
                 format,
+                regex,
             } => {
                 self.impact_controller
-                    .impact(symbol, repository, format)
+                    .impact(symbol, repository, format, regex)
                     .await
             }
             Commands::Context {
@@ -76,9 +77,10 @@ impl<'a> Router<'a> {
                 repository,
                 limit,
                 format,
+                regex,
             } => {
                 self.symbol_context_controller
-                    .context(symbol, repository, limit, format)
+                    .context(symbol, repository, limit, format, regex)
                     .await
             }
             Commands::Explain {
@@ -86,9 +88,10 @@ impl<'a> Router<'a> {
                 repository,
                 llm,
                 dump_symbols,
+                regex,
             } => {
                 self.explain_controller
-                    .explain(symbol, repository, llm, dump_symbols)
+                    .explain(symbol, repository, llm, dump_symbols, regex)
                     .await
             }
             Commands::Mcp { .. } => {

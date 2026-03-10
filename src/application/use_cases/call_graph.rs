@@ -117,14 +117,18 @@ impl CallGraphUseCase {
     /// Resolve a short symbol name to fully-qualified symbol names.
     /// Returns distinct callee_symbol values that end with the given short name
     /// at a word boundary (after `#` or `/`).
+    ///
+    /// `resolve_limit` caps the number of results; named distinctly from
+    /// [`CallGraphQuery::limit`] to avoid confusion between edge limits and
+    /// resolution limits.
     pub async fn resolve_symbols(
         &self,
         short_name: &str,
         query: &CallGraphQuery,
-        limit: Option<u32>,
+        resolve_limit: u32,
     ) -> Result<Vec<String>, DomainError> {
         self.repository
-            .resolve_symbols(short_name, query, limit)
+            .resolve_symbols(short_name, query, resolve_limit)
             .await
     }
 }
