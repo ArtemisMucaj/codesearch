@@ -83,6 +83,35 @@ codesearch delete abc123
 codesearch delete /path/to/your/project
 ```
 
+### Explain a Symbol with an LLM
+
+Get a natural-language explanation of a symbol's full call flow and business purpose:
+
+```bash
+# Explain `authenticate` (requires ANTHROPIC_API_KEY by default)
+codesearch explain authenticate
+
+# Use an OpenAI-compatible backend (e.g., LM Studio)
+codesearch explain authenticate --llm open-ai
+```
+
+See [Call Graph Analysis](./call-graph.md#llm-explanation-codesearch-explain) for full details.
+
+### Launch the Interactive TUI
+
+A full-screen terminal UI combining search, impact, and context in one interface:
+
+```bash
+# Open in search mode (default)
+codesearch tui
+
+# Open pre-populated with a query
+codesearch tui --query "authentication"
+
+# Open in impact analysis mode
+codesearch tui --mode impact
+```
+
 ### Start the MCP Server
 
 Run CodeSearch as a [Model Context Protocol](https://modelcontextprotocol.io/) server for AI tool integration:
