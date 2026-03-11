@@ -196,7 +196,7 @@ codesearch explain ".*authenticate.*" --regex
 
 ### Example Output
 
-```
+```text
 Explanation for `authenticate`
 ════════════════════════════════════════════════════════════
 
