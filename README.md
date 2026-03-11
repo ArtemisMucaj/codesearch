@@ -72,6 +72,12 @@ codesearch impact authenticate
 # Show 360-degree caller/callee context for a symbol
 codesearch context authenticate
 
+# LLM-powered explanation of a symbol's full call flow and business purpose
+codesearch explain authenticate
+
+# Launch the interactive TUI (search, impact, and context in one terminal UI)
+codesearch tui
+
 # Start MCP server (stdio, for AI tool integration)
 codesearch mcp
 
@@ -214,6 +220,62 @@ Callees (3 total) — what this symbol uses:
 | `-F, --format` | both | `text` | Output format: `text` or `json` |
 
 > **Note:** Call graph data is populated during `codesearch index`. Re-index after code changes to keep the graph up to date.
+
+## LLM Explanation (`explain`)
+
+Uses an LLM to explain a symbol's complete call flow, data flow, and business purpose. CodeSearch runs call-graph analysis, collects source snippets for every symbol in the chain, and passes them to the configured LLM. The response is structured into four sections: **Purpose**, **Data and control flow**, **Business feature**, and **Key patterns and dependencies**.
+
+```bash
+# Explain `authenticate` (uses Anthropic by default — requires ANTHROPIC_API_KEY)
+codesearch explain authenticate
+
+# Use an OpenAI-compatible backend (e.g., LM Studio running locally)
+codesearch explain authenticate --llm open-ai
+
+# Restrict to a specific repository
+codesearch explain authenticate --repository my-api
+
+# Also print each analyzed symbol's source chunk
+codesearch explain authenticate --dump-symbols
+```
+
+### Explain Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--llm` | `anthropic` | LLM backend: `anthropic` or `open-ai` |
+| `-r, --repository` | (none) | Restrict analysis to a specific repository |
+| `--dump-symbols` | off | Print source chunks sent to the LLM after the explanation |
+| `--regex` | off | Treat symbol as an explicit regex pattern (no auto-wrapping) |
+
+## Interactive TUI (`tui`)
+
+A full-screen terminal UI that combines search, impact analysis, and context lookup in one interface. Switch between modes with keyboard shortcuts without re-typing commands.
+
+```bash
+# Open in search mode (default)
+codesearch tui
+
+# Open in impact analysis mode
+codesearch tui --mode impact
+
+# Open in context mode
+codesearch tui --mode context
+
+# Pre-populate the query and immediately run it
+codesearch tui --query "authentication"
+
+# Restrict all queries to a specific repository
+codesearch tui --repository my-api
+```
+
+### TUI Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--mode` | `search` | Initial mode: `search`, `impact`, or `context` |
+| `--query` | (none) | Pre-populate the input box and dispatch on open |
+| `-r, --repository` | (none) | Restrict all queries to a specific repository |
 
 ## Editor Integrations
 
