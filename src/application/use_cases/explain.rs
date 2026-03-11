@@ -96,8 +96,8 @@ pub struct ExplainResult {
     pub total_affected: usize,
     pub max_depth_reached: usize,
     /// Unique symbols whose source chunks were sent to the LLM.
-    /// Each entry is `(symbol, file_path, line, source)`.
-    pub symbol_sources: Vec<(String, String, u32, Option<String>)>,
+    /// Each entry is `(symbol, repository, file_path, line, source)`.
+    pub symbol_sources: Vec<(String, String, String, u32, Option<String>)>,
     /// When non-empty, the input symbol matched multiple FQNs and the user
     /// must pick one.  `explanation` is empty and no LLM call was made.
     pub ambiguous_candidates: Vec<String>,
@@ -356,11 +356,11 @@ fn all_callees(callees_by_depth: &[Vec<ContextNode>]) -> Vec<&ContextNode> {
 /// Construct the structured user prompt from the full symbol context.
 ///
 /// Returns the prompt string and the list of unique symbol sources included —
-/// each entry is `(symbol, file_path, line, source)`.
+/// each entry is `(symbol, repository, file_path, line, source)`.
 async fn build_prompt(
     ctx: &SymbolContext,
     snippet_lookup: &SnippetLookupUseCase,
-) -> (String, Vec<(String, String, u32, Option<String>)>) {
+) -> (String, Vec<(String, String, String, u32, Option<String>)>) {
     let root_symbol = &ctx.symbol;
     let mut prompt = format!("# Call-flow explanation request: `{root_symbol}`\n\n");
 
@@ -550,13 +550,13 @@ async fn build_prompt(
     }
 
     // ── symbol_sources for the ExplainResult ─────────────────────────────────
-    let mut symbol_sources: Vec<(String, String, u32, Option<String>)> = Vec::new();
+    let mut symbol_sources: Vec<(String, String, String, u32, Option<String>)> = Vec::new();
     let mut seen3: HashSet<(String, String)> = HashSet::new();
-    for (symbol, file_path, line, _repo, _is_callee) in &nodes_to_fetch {
+    for (symbol, file_path, line, repo, _is_callee) in &nodes_to_fetch {
         let key = (symbol.to_string(), file_path.to_string());
         if seen3.insert(key.clone()) {
             let src = source_cache.get(&key).cloned().flatten();
-            symbol_sources.push((symbol.to_string(), file_path.to_string(), *line, src));
+            symbol_sources.push((symbol.to_string(), repo.to_string(), file_path.to_string(), *line, src));
         }
     }
 

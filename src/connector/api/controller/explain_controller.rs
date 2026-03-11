@@ -75,18 +75,29 @@ impl<'a> ExplainController<'a> {
         );
 
         if dump_symbols {
-            for (symbol, file_path, line, src) in &result.symbol_sources {
+            for (symbol, repository, file_path, line, src) in &result.symbol_sources {
                 match src {
                     Some(s) => output.push_str(&format!(
-                        "**`{}`** — `{}:{}`\n```\n{}\n```\n\n",
-                        symbol, file_path, line, s
+                        "`{}` (`{}`) — `{}:{}`\n```\n{}\n```\n\n",
+                        symbol, repository, file_path, line, s
                     )),
                     None => output.push_str(&format!(
-                        "**`{}`** — `{}:{}` _(source not available)_\n\n",
-                        symbol, file_path, line
+                        "`{}` (`{}`) — `{}:{}` _(source not available)_\n\n",
+                        symbol, repository, file_path, line
                     )),
                 }
             }
+        }
+
+        if !result.symbol_sources.is_empty() {
+            output.push_str("## Referenced files\n\n");
+            for (symbol, repository, file_path, line, _src) in &result.symbol_sources {
+                output.push_str(&format!(
+                    "- `{}` `{}:{}` — `{}`\n",
+                    repository, file_path, line, symbol
+                ));
+            }
+            output.push('\n');
         }
 
         Ok(output)
