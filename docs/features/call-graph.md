@@ -28,28 +28,25 @@ flowchart LR
 ### Usage
 
 ```bash
-# Show blast radius of `authenticate` (default depth: 5)
+# Show blast radius of `authenticate`
 codesearch impact authenticate
-
-# Limit hop depth
-codesearch impact authenticate --depth 2
 
 # Restrict to a specific repository
 codesearch impact authenticate --repository my-api
 
 # JSON output for scripts
 codesearch impact authenticate --format json
+
+# Vimgrep output (file:line:col:text) for Neovim quickfix
+codesearch impact authenticate --format vimgrep
 ```
 
 ### Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--depth` | `5` | Maximum BFS hop depth (1 = direct callers only) |
 | `-r, --repository` | (none) | Restrict the graph traversal to one repository |
-| `-F, --format` | `text` | Output format: `text` or `json` |
-
-> `--format vimgrep` is not supported for `impact`.
+| `-F, --format` | `text` | Output format: `text`, `json`, or `vimgrep` |
 
 ### Example Text Output
 
@@ -90,39 +87,42 @@ Returns a 360-degree view of a symbol's call-graph relationships — both who ca
 # Show callers and callees of `authenticate`
 codesearch context authenticate
 
-# Limit results per direction
-codesearch context authenticate --limit 10
-
 # Restrict to a specific repository
 codesearch context authenticate --repository my-api
 
 # JSON output
 codesearch context authenticate --format json
+
+# Vimgrep output (file:line:col:text) for Neovim quickfix
+codesearch context authenticate --format vimgrep
 ```
 
 ### Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-l, --limit` | (none) | Max callers/callees to return per direction |
 | `-r, --repository` | (none) | Restrict lookup to one repository |
-| `-F, --format` | `text` | Output format: `text` or `json` |
-
-> `--format vimgrep` is not supported for `context`.
+| `-F, --format` | `text` | Output format: `text`, `json`, or `vimgrep` |
 
 ### Example Text Output
+
+The output renders caller chains as trees (top-most entry point first, queried symbol at the bottom), with callees hanging off the queried symbol:
 
 ```
 Context for 'authenticate'
 ─────────────────────────────────────────
-Callers (2 total) — who uses this symbol:
-  ← handle_login [call]  src/api/auth.rs:42
-  ← verify_session [call]  src/middleware/session.rs:18
+process_request [call]  src/router.rs:10
+└── handle_login [call]  src/api/auth.rs:42
+    └── authenticate
+        ├── hash_password [call]  src/crypto/hash.rs:10
+        ├── lookup_user [call]  src/db/users.rs:55
+        └── generate_token [call]  src/crypto/token.rs:7
 
-Callees (3 total) — what this symbol uses:
-  → hash_password [call]  src/crypto/hash.rs:10
-  → lookup_user [call]  src/db/users.rs:55
-  → generate_token [call]  src/crypto/token.rs:7
+verify_session [call]  src/middleware/session.rs:18
+└── authenticate
+    ├── hash_password [call]  src/crypto/hash.rs:10
+    ├── lookup_user [call]  src/db/users.rs:55
+    └── generate_token [call]  src/crypto/token.rs:7
 ```
 
 ### JSON Schema
@@ -130,14 +130,17 @@ Callees (3 total) — what this symbol uses:
 ```json
 {
   "symbol": "authenticate",
-  "callers": [
-    { "symbol": "handle_login", "reference_kind": "call", "file_path": "src/api/auth.rs", "line": 42 }
+  "root_symbols": ["MyModule::authenticate"],
+  "callers_by_depth": [
+    [{ "symbol": "handle_login", "depth": 1, "reference_kind": "call", "file_path": "src/api/auth.rs", "line": 42 }]
   ],
-  "caller_count": 2,
-  "callees": [
-    { "symbol": "hash_password", "reference_kind": "call", "file_path": "src/crypto/hash.rs", "line": 10 }
+  "total_callers": 2,
+  "max_caller_depth": 2,
+  "callees_by_depth": [
+    [{ "symbol": "hash_password", "depth": 1, "reference_kind": "call", "file_path": "src/crypto/hash.rs", "line": 10 }]
   ],
-  "callee_count": 3
+  "total_callees": 3,
+  "max_callee_depth": 1
 }
 ```
 

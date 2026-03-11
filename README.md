@@ -152,17 +152,17 @@ CodeSearch builds a call graph during indexing and exposes two commands to query
 Shows every symbol that would be affected (transitively) if a given symbol changes. Uses BFS over the call graph up to a configurable depth.
 
 ```bash
-# Show what breaks if `authenticate` changes (default depth: 5)
+# Show what breaks if `authenticate` changes
 codesearch impact authenticate
-
-# Limit hop depth
-codesearch impact authenticate --depth 3
 
 # Restrict to a specific repository
 codesearch impact authenticate --repository my-api
 
 # JSON output (for scripts)
 codesearch impact authenticate --format json
+
+# Vimgrep output for Neovim quickfix
+codesearch impact authenticate --format vimgrep
 ```
 
 **Example output:**
@@ -186,38 +186,33 @@ Shows the 360-degree dependency view for a symbol: who calls it (callers) and wh
 # Show callers and callees of `authenticate`
 codesearch context authenticate
 
-# Limit the number of results per direction
-codesearch context authenticate --limit 10
-
 # Restrict to a specific repository
 codesearch context authenticate --repository my-api
 
 # JSON output
 codesearch context authenticate --format json
+
+# Vimgrep output for Neovim quickfix
+codesearch context authenticate --format vimgrep
 ```
 
-**Example output:**
+**Example output** (caller chains as trees, callees hanging off the queried symbol):
 ```
 Context for 'authenticate'
 ─────────────────────────────────────────
-Callers (2 total) — who uses this symbol:
-  ← handle_login [call]  src/api/auth.rs:42
-  ← verify_session [call]  src/middleware/session.rs:18
-
-Callees (3 total) — what this symbol uses:
-  → hash_password [call]  src/crypto/hash.rs:10
-  → lookup_user [call]  src/db/users.rs:55
-  → generate_token [call]  src/crypto/token.rs:7
+process_request [call]  src/router.rs:10
+└── handle_login [call]  src/api/auth.rs:42
+    └── authenticate
+        ├── hash_password [call]  src/crypto/hash.rs:10
+        └── lookup_user [call]  src/db/users.rs:55
 ```
 
 ### Call Graph Options
 
 | Flag | Command | Default | Description |
 |------|---------|---------|-------------|
-| `--depth` | `impact` | `5` | Maximum BFS hop depth |
-| `-l, --limit` | `context` | (none) | Max callers/callees per direction |
 | `-r, --repository` | both | (none) | Restrict to a specific repository |
-| `-F, --format` | both | `text` | Output format: `text` or `json` |
+| `-F, --format` | both | `text` | Output format: `text`, `json`, or `vimgrep` |
 
 > **Note:** Call graph data is populated during `codesearch index`. Re-index after code changes to keep the graph up to date.
 
