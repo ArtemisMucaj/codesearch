@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::application::ImpactAnalysis;
+use crate::application::SymbolContext;
 use crate::domain::{CodeChunk, SearchResult};
 
 /// Lookup key for a snippet: `(repository_id, file_path, line)`.
@@ -17,6 +18,7 @@ pub type SnippetKey = (String, String, u32);
 pub struct TuiCache {
     pub searches: HashMap<String, Vec<SearchResult>>,
     pub impacts: HashMap<String, ImpactAnalysis>,
+    pub contexts: HashMap<String, SymbolContext>,
     pub snippets: HashMap<SnippetKey, Option<CodeChunk>>,
 }
 
@@ -29,6 +31,12 @@ impl TuiCache {
 
     /// Build the cache key for an impact analysis.
     pub fn impact_key(symbol: &str, repository: Option<&str>) -> String {
+        serde_json::to_string(&(symbol, repository.unwrap_or("")))
+            .expect("serde_json serialisation of (&str, &str) is infallible")
+    }
+
+    /// Build the cache key for a context lookup.
+    pub fn context_key(symbol: &str, repository: Option<&str>) -> String {
         serde_json::to_string(&(symbol, repository.unwrap_or("")))
             .expect("serde_json serialisation of (&str, &str) is infallible")
     }

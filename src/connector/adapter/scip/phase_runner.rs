@@ -40,8 +40,10 @@ impl Scip for ScipRunner {
             match ScipImporter::import(&scip_path, repo_id).await {
                 Ok(by_file) => {
                     let file_count = by_file.len();
-                    let ref_count: usize =
-                        by_file.values().map(|v: &Vec<SymbolReference>| v.len()).sum();
+                    let ref_count: usize = by_file
+                        .values()
+                        .map(|v: &Vec<SymbolReference>| v.len())
+                        .sum();
                     info!(
                         "SCIP import: {} files, {} references from {:?}",
                         file_count, ref_count, scip_path

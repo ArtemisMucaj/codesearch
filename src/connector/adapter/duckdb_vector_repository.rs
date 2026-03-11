@@ -252,7 +252,11 @@ impl DuckdbVectorRepository {
             CREATE INDEX IF NOT EXISTS embedding_hnsw_idx
                 ON "{}".embeddings USING HNSW (vector) WITH (metric = 'cosine');
             "#,
-            schema_name, schema_name, schema_name, schema_name, dims = dims
+            schema_name,
+            schema_name,
+            schema_name,
+            schema_name,
+            dims = dims
         );
 
         conn.execute_batch(&schema_sql).map_err(|e| {
@@ -959,5 +963,81 @@ impl VectorRepository for DuckdbVectorRepository {
             chunks.push(chunk);
         }
         Ok(chunks)
+    }
+
+    async fn find_chunk_by_symbol(
+        &self,
+        repository_id: &str,
+        symbol: &str,
+        class_hint: Option<&str>,
+    ) -> Result<Option<CodeChunk>, DomainError> {
+        let conn = self.conn.lock().await;
+
+        // When a class hint is available (e.g. "GenericUtils" from "GenericUtils#getIp"),
+        // rank chunks whose file_path contains that hint higher so that ambiguous short
+        // names (same method name in multiple classes) resolve to the right definition.
+        // Fall back to the smallest chunk (tightest scope) as the tiebreaker.
+        let file_rank_expr = if class_hint.is_some() {
+            "CASE WHEN file_path LIKE ? THEN 0 ELSE 1 END"
+        } else {
+            "0"
+        };
+
+        let (sql, use_repo_filter) = if repository_id.is_empty() {
+            (
+                format!(
+                    "SELECT id, file_path, content, start_line, end_line, language, node_type, \
+                     symbol_name, parent_symbol, repository_id \
+                     FROM \"{}\".chunks \
+                     WHERE symbol_name = ? \
+                     ORDER BY {file_rank_expr}, (end_line - start_line) ASC \
+                     LIMIT 1",
+                    self.namespace
+                ),
+                false,
+            )
+        } else {
+            (
+                format!(
+                    "SELECT id, file_path, content, start_line, end_line, language, node_type, \
+                     symbol_name, parent_symbol, repository_id \
+                     FROM \"{}\".chunks \
+                     WHERE symbol_name = ? AND repository_id = ? \
+                     ORDER BY {file_rank_expr}, (end_line - start_line) ASC \
+                     LIMIT 1",
+                    self.namespace
+                ),
+                true,
+            )
+        };
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| DomainError::storage(format!("Failed to prepare symbol lookup: {e}")))?;
+
+        // Build the parameter list dynamically based on which optional values are present.
+        // Order: symbol, [repository_id], [file_hint_pattern]
+        // The file_rank_expr `?` appears in ORDER BY which DuckDB evaluates after WHERE,
+        // so the hint parameter comes last.
+        let file_hint_pattern = class_hint.map(|h| format!("%{}%", h));
+
+        let mut rows = match (use_repo_filter, file_hint_pattern.as_deref()) {
+            (false, None) => stmt.query(params![symbol]),
+            (false, Some(hint)) => stmt.query(params![symbol, hint]),
+            (true, None) => stmt.query(params![symbol, repository_id]),
+            (true, Some(hint)) => stmt.query(params![symbol, repository_id, hint]),
+        }
+        .map_err(|e| DomainError::storage(format!("Failed to run symbol lookup: {e}")))?;
+
+        let chunk = rows
+            .next()
+            .map_err(|e| DomainError::storage(format!("Failed to read symbol lookup row: {e}")))?
+            .map(|row| Self::row_to_chunk(row))
+            .transpose()
+            .map_err(|e| {
+                DomainError::storage(format!("Failed to parse symbol lookup chunk: {e}"))
+            })?;
+
+        Ok(chunk)
     }
 }

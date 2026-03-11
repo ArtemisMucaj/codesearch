@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+use std::collections::HashSet;
+
 use anyhow::Result;
 
 use crate::cli::OutputFormat;
-use crate::SymbolContext;
+use crate::{ContextNode, SymbolContext};
 
 use super::super::Container;
 
@@ -18,85 +21,230 @@ impl<'a> SymbolContextController<'a> {
         &self,
         symbol: String,
         repository: Option<String>,
-        limit: Option<u32>,
         format: OutputFormat,
         is_regex: bool,
     ) -> Result<String> {
         let use_case = self.container.context_use_case();
         let ctx = use_case
-            .get_context(&symbol, repository.as_deref(), limit, is_regex)
+            .get_context(&symbol, repository.as_deref(), is_regex)
             .await?;
 
         Ok(match format {
             OutputFormat::Json => serde_json::to_string_pretty(&ctx)?,
-            OutputFormat::Vimgrep => Self::format_context_vimgrep(&ctx),
-            OutputFormat::Text => self.format_context(&ctx),
+            OutputFormat::Vimgrep => Self::format_vimgrep(&ctx),
+            OutputFormat::Text => Self::format_text(&ctx),
         })
     }
 
-    fn format_context_vimgrep(ctx: &SymbolContext) -> String {
-        let callers = ctx.callers.iter().map(|e| {
+    fn format_vimgrep(ctx: &SymbolContext) -> String {
+        let callers = ctx.callers_by_depth.iter().flatten().map(|n| {
             format!(
                 "{}:{}:1:← {} [{}]",
-                e.file_path, e.line, e.symbol, e.reference_kind
+                n.file_path, n.line, n.symbol, n.reference_kind
             )
         });
-        let callees = ctx.callees.iter().map(|e| {
+        let callees = ctx.callees_by_depth.iter().flatten().map(|n| {
             format!(
                 "{}:{}:1:→ {} [{}]",
-                e.file_path, e.line, e.symbol, e.reference_kind
+                n.file_path, n.line, n.symbol, n.reference_kind
             )
         });
         callers.chain(callees).collect::<Vec<_>>().join("\n")
     }
 
-    fn format_context(&self, ctx: &SymbolContext) -> String {
+    fn format_text(ctx: &SymbolContext) -> String {
         let mut out = format!(
             "Context for '{}'\n\
              ─────────────────────────────────────────\n",
             ctx.symbol
         );
 
-        out.push_str(&format!(
-            "Callers ({} total) — who uses this symbol:\n",
-            ctx.caller_count
-        ));
-        if ctx.callers.is_empty() {
-            out.push_str("  (none found)\n");
-        } else {
-            for edge in &ctx.callers {
-                let alias_suffix = edge
-                    .import_alias
-                    .as_ref()
-                    .map(|a| format!(", as {}", a))
-                    .unwrap_or_default();
-                out.push_str(&format!(
-                    "  ← {} [{}{}]  {}:{}\n",
-                    edge.symbol, edge.reference_kind, alias_suffix, edge.file_path, edge.line
-                ));
-            }
+        let has_callers = ctx.total_callers > 0;
+        let has_callees = ctx.total_callees > 0;
+
+        // Build callee children map once, reused per caller chain.
+        let callee_children = Self::build_callee_children_map(ctx);
+
+        if !has_callers && !has_callees {
+            out.push_str("No callers or callees found for this symbol.\n");
+            return out;
         }
 
-        out.push_str(&format!(
-            "\nCallees ({} total) — what this symbol uses:\n",
-            ctx.callee_count
-        ));
-        if ctx.callees.is_empty() {
-            out.push_str("  (none found)\n");
-        } else {
-            for edge in &ctx.callees {
-                let alias_suffix = edge
-                    .import_alias
-                    .as_ref()
-                    .map(|a| format!(", as {}", a))
-                    .unwrap_or_default();
-                out.push_str(&format!(
-                    "  → {} [{}{}]  {}:{}\n",
-                    edge.symbol, edge.reference_kind, alias_suffix, edge.file_path, edge.line
-                ));
+        if has_callers {
+            let all_callers: Vec<&ContextNode> = ctx.callers_by_depth.iter().flatten().collect();
+
+            // Build caller children map: via_symbol → [nodes that list it as via_symbol].
+            let mut caller_children: HashMap<&str, Vec<&ContextNode>> = HashMap::new();
+            for node in &all_callers {
+                if let Some(via) = node.via_symbol.as_deref() {
+                    caller_children.entry(via).or_default().push(node);
+                }
             }
+
+            // Leaf = top-most entry-point: no other node lists this symbol as its via_symbol.
+            let leaf_nodes: Vec<&ContextNode> = all_callers
+                .iter()
+                .copied()
+                .filter(|n| !caller_children.contains_key(n.symbol.as_str()))
+                .collect();
+
+            // Lookup by (depth, symbol) for unambiguous path tracing.
+            let mut node_by_depth_sym: HashMap<(usize, &str), &ContextNode> = HashMap::new();
+            for node in &all_callers {
+                node_by_depth_sym
+                    .entry((node.depth, node.symbol.as_str()))
+                    .or_insert(node);
+            }
+
+            for (idx, &leaf) in leaf_nodes.iter().enumerate() {
+                // Trace from leaf back toward the queried symbol via via_symbol links.
+                let mut path: Vec<&ContextNode> = vec![leaf];
+                let mut current = leaf;
+                while let Some(via) = current.via_symbol.as_deref() {
+                    let parent_depth = current.depth.saturating_sub(1);
+                    if let Some(&parent) = node_by_depth_sym.get(&(parent_depth, via)) {
+                        path.push(parent);
+                        current = parent;
+                    } else {
+                        break;
+                    }
+                }
+                // path[0] = leaf (top-most caller), path[last] = direct caller of queried symbol.
+                Self::render_chain(&path, &ctx.symbol, &callee_children, &mut out);
+                if idx < leaf_nodes.len() - 1 {
+                    out.push('\n');
+                }
+            }
+        } else {
+            // No callers: render callees subtree rooted at the symbol directly.
+            out.push_str(&format!("{}\n", ctx.symbol));
+            let mut visited = HashSet::new();
+            Self::render_callees_subtree(&ctx.symbol, &callee_children, "", &mut out, &mut visited);
         }
 
         out
+    }
+
+    /// Build a map from parent_symbol → direct callee nodes (keyed by via_symbol).
+    fn build_callee_children_map<'b>(
+        ctx: &'b SymbolContext,
+    ) -> HashMap<String, Vec<&'b ContextNode>> {
+        let mut map: HashMap<String, Vec<&'b ContextNode>> = HashMap::new();
+        for node in ctx.callees_by_depth.iter().flatten() {
+            let key = node.via_symbol.as_deref().unwrap_or(&ctx.symbol).to_owned();
+            map.entry(key).or_default().push(node);
+        }
+        // For multi-root-symbol queries, `ctx.symbol` is a display label like
+        // "authenticate (3 symbols)".  Depth-1 callee nodes have `via_symbol`
+        // pointing to the real FQN (e.g., "MyModule::authenticate"), not to
+        // the display label.  Create a synthetic entry under the display label
+        // that aggregates all depth-1 nodes so that `render_callees_subtree`
+        // can always start from `ctx.symbol`.
+        let root_sym_set: std::collections::HashSet<&str> =
+            ctx.root_symbols.iter().map(String::as_str).collect();
+        let depth1_nodes: Vec<&ContextNode> = ctx
+            .callees_by_depth
+            .first()
+            .map(|d| d.iter().collect())
+            .unwrap_or_default();
+        // Only add the synthetic entry when the display label differs from
+        // all real root symbols (i.e., it's a multi-root aggregation label).
+        if !root_sym_set.contains(ctx.symbol.as_str()) && !depth1_nodes.is_empty() {
+            map.insert(ctx.symbol.clone(), depth1_nodes);
+        }
+        map
+    }
+
+    /// Render one caller chain (top-most entry → direct caller) then the queried symbol
+    /// with its callees subtree hanging off it.
+    fn render_chain(
+        path: &[&ContextNode],
+        root_symbol: &str,
+        callee_children: &HashMap<String, Vec<&ContextNode>>,
+        out: &mut String,
+    ) {
+        if path.is_empty() {
+            return;
+        }
+        // path[0] is the leaf (top-most caller), rendered at indent 0.
+        for (depth, node) in path.iter().enumerate() {
+            let alias = node
+                .import_alias
+                .as_ref()
+                .map(|a| format!(", as {}", a))
+                .unwrap_or_default();
+            if depth == 0 {
+                out.push_str(&format!(
+                    "{} [{}{}]  {}:{}\n",
+                    node.symbol, node.reference_kind, alias, node.file_path, node.line,
+                ));
+            } else {
+                let indent = "    ".repeat(depth - 1);
+                out.push_str(&format!(
+                    "{}└── {} [{}{}]  {}:{}\n",
+                    indent, node.symbol, node.reference_kind, alias, node.file_path, node.line,
+                ));
+            }
+        }
+        // Queried symbol is the terminal node of the caller chain.
+        let caller_indent = "    ".repeat(path.len() - 1);
+        out.push_str(&format!("{}└── {}\n", caller_indent, root_symbol));
+
+        // Hang callees subtree off the queried symbol.
+        let callee_prefix = "    ".repeat(path.len());
+        let mut visited = HashSet::new();
+        Self::render_callees_subtree(
+            root_symbol,
+            callee_children,
+            &callee_prefix,
+            out,
+            &mut visited,
+        );
+    }
+
+    /// Recursively render the callees subtree rooted at `parent_symbol`.
+    fn render_callees_subtree(
+        parent_symbol: &str,
+        callee_children: &HashMap<String, Vec<&ContextNode>>,
+        prefix: &str,
+        out: &mut String,
+        visited: &mut HashSet<String>,
+    ) {
+        let children = match callee_children.get(parent_symbol) {
+            Some(c) => c,
+            None => return,
+        };
+        let count = children.len();
+        for (i, node) in children.iter().enumerate() {
+            if !visited.insert(node.symbol.clone()) {
+                continue; // cycle guard
+            }
+            let alias = node
+                .import_alias
+                .as_ref()
+                .map(|a| format!(", as {}", a))
+                .unwrap_or_default();
+            let is_last = i == count - 1;
+            let branch = if is_last { "└──" } else { "├──" };
+            out.push_str(&format!(
+                "{}{} {} [{}{}]  {}:{}\n",
+                prefix, branch, node.symbol, node.reference_kind, alias, node.file_path, node.line,
+            ));
+            // Continuation prefix for this node's children:
+            // - non-last: "│   " keeps the vertical bar connected
+            // - last:     "    " (no bar)
+            let child_prefix = if is_last {
+                format!("{}    ", prefix)
+            } else {
+                format!("{}│   ", prefix)
+            };
+            Self::render_callees_subtree(
+                &node.symbol,
+                callee_children,
+                &child_prefix,
+                out,
+                visited,
+            );
+        }
     }
 }

@@ -5,7 +5,7 @@ pub mod domain;
 pub mod tui;
 
 pub use application::{
-    CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase, ChatClient, ContextEdge,
+    CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase, ChatClient, ContextNode,
     DeleteRepositoryUseCase, EmbeddingService, ExplainResult, ExplainUseCase, FileHashRepository,
     ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode, IndexRepositoryUseCase,
     ListRepositoriesUseCase, MetadataRepository, ParserService, QueryExpander, RerankingService,
@@ -16,10 +16,10 @@ pub use application::{
 pub use cli::{Commands, EmbeddingTarget, LlmTarget, OutputFormat, RerankingTarget, TuiMode};
 
 pub use connector::{
-    AnthropicClient, AnthropicReranking, DuckdbCallGraphRepository,
-    DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository,
-    InMemoryVectorRepository, LlmQueryExpander, MockEmbedding, MockReranking, NamespaceEmbeddingConfig,
-    OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterParser,
+    AnthropicClient, AnthropicReranking, DuckdbCallGraphRepository, DuckdbFileHashRepository,
+    DuckdbMetadataRepository, DuckdbVectorRepository, InMemoryVectorRepository, LlmQueryExpander,
+    MockEmbedding, MockReranking, NamespaceEmbeddingConfig, OpenAiChatClient, OpenAiEmbedding,
+    OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterParser,
 };
 
 pub use domain::{

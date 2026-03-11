@@ -20,6 +20,8 @@ pub enum TuiMode {
     Search,
     /// Open in impact analysis mode.
     Impact,
+    /// Open in context mode.
+    Context,
 }
 
 /// Embedding backend to use for indexing and search.
@@ -131,7 +133,9 @@ pub enum Commands {
         regex: bool,
     },
 
-    /// Show 360-degree context for a symbol: its callers and callees.
+    /// Show full end-to-end call chain tree for a symbol: callers BFS (top-most
+    /// entry points → symbol) and callees BFS (symbol → deepest callees), merged
+    /// into one contiguous indented tree per caller chain.
     Context {
         /// Symbol name to look up (e.g. "authenticate" or "MyStruct::new").
         /// When --regex is set, treated as a POSIX regular expression matched
@@ -142,11 +146,7 @@ pub enum Commands {
         #[arg(short, long)]
         repository: Option<String>,
 
-        /// Maximum number of callers/callees to return per direction
-        #[arg(short, long)]
-        limit: Option<u32>,
-
-        /// Output format: text or json
+        /// Output format: text, json, or vimgrep
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormat,
 
@@ -211,7 +211,7 @@ pub enum Commands {
         #[arg(long)]
         query: Option<String>,
 
-        /// Which mode to open the TUI in: 'search' (default) or 'impact'.
+        /// Which mode to open the TUI in: 'search' (default), 'impact', or 'context'.
         #[arg(long, value_enum, default_value = "search")]
         mode: TuiMode,
     },

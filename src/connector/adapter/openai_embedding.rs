@@ -50,8 +50,8 @@ impl OpenAiEmbedding {
     /// value stored in `namespace_config` for the target namespace (enforced by
     /// the vector repository on open).
     pub fn new(model: impl Into<String>, dimensions: usize) -> Self {
-        let base = std::env::var("OPENAI_BASE_URL")
-            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        let base =
+            std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         let url = format!("{}{}", base.trim_end_matches('/'), EMBEDDINGS_PATH);
         let model = model.into();
 
@@ -87,9 +87,7 @@ impl OpenAiEmbedding {
             .json(&request)
             .send()
             .await
-            .map_err(|e| {
-                DomainError::internal(format!("OpenAI embedding request failed: {e}"))
-            })?;
+            .map_err(|e| DomainError::internal(format!("OpenAI embedding request failed: {e}")))?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -100,9 +98,7 @@ impl OpenAiEmbedding {
         }
 
         let api_response: EmbeddingResponse = response.json().await.map_err(|e| {
-            DomainError::internal(format!(
-                "Failed to parse OpenAI embedding response: {e}"
-            ))
+            DomainError::internal(format!("Failed to parse OpenAI embedding response: {e}"))
         })?;
 
         // The OpenAI spec doesn't guarantee ordering; sort by index.

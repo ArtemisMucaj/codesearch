@@ -52,11 +52,7 @@ impl ScipImporter {
 
                 let refs = process_document(doc, &repo_id, language);
                 if !refs.is_empty() {
-                    debug!(
-                        "SCIP: {} references from {}",
-                        refs.len(),
-                        doc.relative_path
-                    );
+                    debug!("SCIP: {} references from {}", refs.len(), doc.relative_path);
                     by_file
                         .entry(doc.relative_path.clone())
                         .or_default()
@@ -194,11 +190,7 @@ struct ScopeDef {
 /// function.  Fixing this would require end-line information, which SCIP does
 /// not provide for definition occurrences.
 fn find_enclosing_scope(scope_defs: &[ScopeDef], line: u32) -> Option<ScopeDef> {
-    scope_defs
-        .iter()
-        .filter(|s| s.line <= line)
-        .last()
-        .cloned()
+    scope_defs.iter().filter(|s| s.line <= line).last().cloned()
 }
 
 // ---------------------------------------------------------------------------
@@ -317,9 +309,8 @@ fn strip_file_path_prefix(descriptor: &str) -> String {
 /// Used to detect when a normalised SCIP scope/descriptor is actually just
 /// a file-path namespace rather than a meaningful class or module scope.
 fn is_file_path(s: &str) -> bool {
-    const FILE_EXTENSIONS: &[&str] = &[
-        ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".mts", ".cts",
-    ];
+    const FILE_EXTENSIONS: &[&str] =
+        &[".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".mts", ".cts"];
     FILE_EXTENSIONS.iter().any(|ext| s.ends_with(ext))
 }
 

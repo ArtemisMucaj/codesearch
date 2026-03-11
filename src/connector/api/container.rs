@@ -5,9 +5,11 @@ use std::time::Duration;
 use anyhow::Result;
 use tracing::{debug, warn};
 
-use crate::application::{CallGraphRepository, CallGraphUseCase, FileHashRepository, QueryExpander};
-use crate::connector::adapter::scip::ScipRunner;
+use crate::application::{
+    CallGraphRepository, CallGraphUseCase, FileHashRepository, QueryExpander,
+};
 use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
+use crate::connector::adapter::scip::ScipRunner;
 use crate::connector::adapter::NamespaceEmbeddingConfig;
 use crate::{
     AnthropicClient, AnthropicReranking, DeleteRepositoryUseCase, DuckdbCallGraphRepository,
@@ -15,7 +17,8 @@ use crate::{
     ExplainUseCase, ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
     ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding, MockReranking, OpenAiChatClient,
     OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, RerankingService, Scip,
-    SearchCodeUseCase, SnippetLookupUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
+    SearchCodeUseCase, SnippetLookupUseCase, SymbolContextUseCase, TreeSitterParser,
+    VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -177,9 +180,7 @@ async fn open_read_only_with_retry(
             Ok(repo) => return Ok(repo),
             Err(e) if attempt < READ_ONLY_LOCK_RETRIES && is_lock_conflict(&e.to_string()) => {
                 if attempt == 0 {
-                    warn!(
-                        "DuckDB is locked by another process; waiting for it to finish…",
-                    );
+                    warn!("DuckDB is locked by another process; waiting for it to finish…",);
                 }
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 delay_ms *= 2;
@@ -406,25 +407,24 @@ impl Container {
         // Initialise the query expander when --expand-query is requested.
         // Falls back gracefully to the original query when the server is unreachable.
         let query_expander: Option<Arc<dyn QueryExpander>> = if config.expand_query {
-            let client: Arc<dyn crate::connector::adapter::ChatClient> =
-                match config.llm_target {
-                    LlmTarget::Anthropic => {
-                        let c = AnthropicClient::from_env();
-                        debug!(
-                            "Using Anthropic query expander (url={})",
-                            c.configured_base_url()
-                        );
-                        Arc::new(c)
-                    }
-                    LlmTarget::OpenAi => {
-                        let c = OpenAiChatClient::from_env()?;
-                        debug!(
-                            "Using OpenAI query expander (url={})",
-                            c.configured_base_url()
-                        );
-                        Arc::new(c)
-                    }
-                };
+            let client: Arc<dyn crate::connector::adapter::ChatClient> = match config.llm_target {
+                LlmTarget::Anthropic => {
+                    let c = AnthropicClient::from_env();
+                    debug!(
+                        "Using Anthropic query expander (url={})",
+                        c.configured_base_url()
+                    );
+                    Arc::new(c)
+                }
+                LlmTarget::OpenAi => {
+                    let c = OpenAiChatClient::from_env()?;
+                    debug!(
+                        "Using OpenAI query expander (url={})",
+                        c.configured_base_url()
+                    );
+                    Arc::new(c)
+                }
+            };
             Some(Arc::new(LlmQueryExpander::new(client)))
         } else {
             None
@@ -504,8 +504,7 @@ impl Container {
 
     pub fn explain_use_case(&self) -> ExplainUseCase {
         ExplainUseCase::new(
-            self.impact_use_case(),
-            self.call_graph_use_case.clone(),
+            Arc::new(self.context_use_case()),
             self.snippet_lookup_use_case(),
         )
     }

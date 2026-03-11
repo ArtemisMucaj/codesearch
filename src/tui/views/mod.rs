@@ -1,3 +1,4 @@
+pub(crate) mod context;
 mod format;
 mod impact;
 mod search;
@@ -7,7 +8,7 @@ use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
-use crate::tui::state::{ActiveMode, AppState, ImpactPane, SearchPane};
+use crate::tui::state::{ActiveMode, AppState, ContextPane, ImpactPane, SearchPane};
 use crate::tui::widgets::input_bar;
 
 /// Entry point called on every terminal draw cycle.
@@ -24,6 +25,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     match state.mode {
         ActiveMode::Search => search::render(frame, areas[1], state),
         ActiveMode::Impact => impact::render(frame, areas[1], state),
+        ActiveMode::Context => context::render(frame, areas[1], state),
     }
 
     render_status(frame, areas[2], state);
@@ -44,7 +46,7 @@ fn render_status(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppStat
     let hints: &str = match state.mode {
         ActiveMode::Search => match state.search.focused_pane {
             SearchPane::List => {
-                " Enter: search  ↑↓: navigate  ←→: cursor  Ctrl+→: focus code  Ctrl+↑: impact  Tab: switch  q: quit"
+                " Enter: search  ↑↓: navigate  ←→: cursor  Ctrl+→: code  Ctrl+↑: impact  Ctrl+↓: context  Tab: switch  q: quit"
             }
             SearchPane::Code => {
                 " Ctrl+←: focus list  ↑↓/PgUp/Dn: scroll  ←→: cursor  Tab: switch  q: quit"
@@ -59,6 +61,18 @@ fn render_status(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppStat
                     " ↑↓/PgUp/Dn: scroll  Esc: back to chain  q: quit"
                 } else {
                     " ↑↓: select node  Enter: view code  Ctrl+←: focus list  Tab: switch  q: quit"
+                }
+            }
+        },
+        ActiveMode::Context => match state.context.focused_pane {
+            ContextPane::EntryPoints => {
+                " Enter: analyse  ↑↓: navigate  ←→: cursor  Ctrl+→: focus tree  Tab: switch  q: quit"
+            }
+            ContextPane::Tree => {
+                if state.context.chain_snippet.is_some() {
+                    " ↑↓/PgUp/Dn: scroll  Esc: back to tree  q: quit"
+                } else {
+                    " ↑↓: navigate nodes  Enter: view code  PgUp/Dn: scroll fast  Ctrl+←: focus list  Tab: switch  q: quit"
                 }
             }
         },

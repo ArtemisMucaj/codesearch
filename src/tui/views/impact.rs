@@ -52,8 +52,8 @@ fn render_entry_points(frame: &mut Frame, area: Rect, state: &AppState) {
             .collect(),
     };
 
-    let title = format!("Entrypoints ({})", entries.len());
-    result_list::render(frame, area, &title, &entries, s.selected);
+    let title = "Entrypoints";
+    result_list::render(frame, area, title, &entries, s.selected);
 }
 
 // ── Right pane: call chain or code view ───────────────────────────────────────

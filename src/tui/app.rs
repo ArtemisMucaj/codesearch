@@ -6,14 +6,17 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-use crate::application::{ImpactAnalysisUseCase, SearchCodeUseCase, SnippetLookupUseCase};
+use crate::application::{
+    ImpactAnalysisUseCase, SearchCodeUseCase, SnippetLookupUseCase, SymbolContextUseCase,
+};
 use crate::domain::SearchQuery;
 
 use super::cache::TuiCache;
 use super::event::TuiEvent;
-use super::state::{ActiveMode, AppState, ImpactPane, SearchPane};
-use crate::cli::TuiMode;
+use super::state::{ActiveMode, AppState, ContextPane, ImpactPane, SearchPane};
 use super::views;
+use super::views::context::{build_flat_tree_for_selected, leaf_caller_nodes};
+use crate::cli::TuiMode;
 
 const SEARCH_LIMIT: usize = 20;
 const SCROLL_STEP: u16 = 5;
@@ -27,9 +30,12 @@ pub struct TuiApp {
     impact_uc: Option<Arc<ImpactAnalysisUseCase>>,
     /// `None` while the background container task is still running.
     snippet_uc: Option<Arc<SnippetLookupUseCase>>,
+    /// `None` while the background container task is still running.
+    context_uc: Option<Arc<SymbolContextUseCase>>,
     event_tx: mpsc::UnboundedSender<TuiEvent>,
     event_rx: mpsc::UnboundedReceiver<TuiEvent>,
     impact_task: Option<tokio::task::JoinHandle<()>>,
+    context_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl TuiApp {
@@ -47,6 +53,7 @@ impl TuiApp {
         let initial_mode = match mode {
             TuiMode::Search => ActiveMode::Search,
             TuiMode::Impact => ActiveMode::Impact,
+            TuiMode::Context => ActiveMode::Context,
         };
         Self {
             state: AppState::new(repository, initial_mode, query, false),
@@ -54,9 +61,11 @@ impl TuiApp {
             search_uc: None,
             impact_uc: None,
             snippet_uc: None,
+            context_uc: None,
             event_tx,
             event_rx,
             impact_task: None,
+            context_task: None,
         }
     }
 
@@ -73,6 +82,7 @@ impl TuiApp {
         let initial_mode = match mode {
             TuiMode::Search => ActiveMode::Search,
             TuiMode::Impact => ActiveMode::Impact,
+            TuiMode::Context => ActiveMode::Context,
         };
         Self {
             state: AppState::new(repository, initial_mode, query, true),
@@ -80,9 +90,11 @@ impl TuiApp {
             search_uc: Some(search_uc),
             impact_uc: Some(impact_uc),
             snippet_uc: Some(snippet_uc),
+            context_uc: None,
             event_tx: tx,
             event_rx: rx,
             impact_task: None,
+            context_task: None,
         }
     }
 
@@ -112,6 +124,9 @@ impl TuiApp {
                 }
                 ActiveMode::Impact if !self.state.impact.input.is_empty() => {
                     self.dispatch_impact();
+                }
+                ActiveMode::Context if !self.state.context.input.is_empty() => {
+                    self.dispatch_context();
                 }
                 _ => {}
             }
@@ -165,12 +180,16 @@ impl TuiApp {
             KeyCode::Tab => {
                 self.state.mode = match self.state.mode {
                     ActiveMode::Search => ActiveMode::Impact,
-                    ActiveMode::Impact => ActiveMode::Search,
+                    ActiveMode::Impact => ActiveMode::Context,
+                    ActiveMode::Context => ActiveMode::Search,
                 };
             }
             KeyCode::Enter => self.dispatch_current(),
             KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.jump_to_impact();
+            }
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.jump_to_context();
             }
             KeyCode::Up if key.modifiers == KeyModifiers::NONE => self.navigate(-1),
             KeyCode::Down if key.modifiers == KeyModifiers::NONE => self.navigate(1),
@@ -219,8 +238,7 @@ impl TuiApp {
                 }
             }
             KeyCode::Char(c)
-                if key.modifiers == KeyModifiers::NONE
-                    || key.modifiers == KeyModifiers::SHIFT =>
+                if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
             {
                 let cursor = self.state.active_cursor();
                 {
@@ -246,6 +264,16 @@ impl TuiApp {
                     self.state.impact.chain_snippet_pending_key = None;
                     self.state.impact.chain_snippet_scroll = 0;
                 }
+                // Same for Context mode.
+                if self.state.mode == ActiveMode::Context
+                    && self.state.context.focused_pane == ContextPane::Tree
+                {
+                    self.state.context.focused_pane = ContextPane::EntryPoints;
+                    self.state.context.chain_snippet = None;
+                    self.state.context.chain_snippet_loading = false;
+                    self.state.context.chain_snippet_pending_key = None;
+                    self.state.context.chain_snippet_scroll = 0;
+                }
             }
             _ => {}
         }
@@ -261,6 +289,9 @@ impl TuiApp {
             ActiveMode::Impact => {
                 self.state.impact.focused_pane = ImpactPane::EntryPoints;
             }
+            ActiveMode::Context => {
+                self.state.context.focused_pane = ContextPane::EntryPoints;
+            }
         }
     }
 
@@ -274,20 +305,29 @@ impl TuiApp {
                 // Reset chain selection whenever we enter the pane.
                 self.state.impact.chain_selected = 0;
             }
+            ActiveMode::Context => {
+                self.state.context.focused_pane = ContextPane::Tree;
+                self.state.context.chain_selected = 0;
+            }
         }
     }
 
     // ── Esc ───────────────────────────────────────────────────────────────────
 
     fn handle_esc(&mut self) {
-        if self.state.mode == ActiveMode::Impact
-            && self.state.impact.chain_snippet.is_some()
-        {
+        if self.state.mode == ActiveMode::Impact && self.state.impact.chain_snippet.is_some() {
             // Return from chain code view to chain navigation.
             self.state.impact.chain_snippet = None;
             self.state.impact.chain_snippet_loading = false;
             self.state.impact.chain_snippet_pending_key = None;
             self.state.impact.chain_snippet_scroll = 0;
+        }
+        if self.state.mode == ActiveMode::Context && self.state.context.chain_snippet.is_some() {
+            // Return from context code view to tree navigation.
+            self.state.context.chain_snippet = None;
+            self.state.context.chain_snippet_loading = false;
+            self.state.context.chain_snippet_pending_key = None;
+            self.state.context.chain_snippet_scroll = 0;
         }
     }
 
@@ -298,16 +338,17 @@ impl TuiApp {
             ActiveMode::Search => {
                 // Right pane focused → scroll the code panel.
                 if self.state.search.focused_pane == SearchPane::Code {
-                    self.state.search.snippet_scroll =
-                        bounded_scroll(self.state.search.snippet_scroll, delta * SCROLL_STEP as i32);
+                    self.state.search.snippet_scroll = bounded_scroll(
+                        self.state.search.snippet_scroll,
+                        delta * SCROLL_STEP as i32,
+                    );
                     return;
                 }
                 let len = self.state.search.results.len();
                 if len == 0 {
                     return;
                 }
-                self.state.search.selected =
-                    bounded_add(self.state.search.selected, delta, len);
+                self.state.search.selected = bounded_add(self.state.search.selected, delta, len);
                 self.state.search.snippet_scroll = 0;
             }
             ActiveMode::Impact => {
@@ -344,6 +385,68 @@ impl TuiApp {
                     self.state.impact.chain_snippet_loading = false;
                     self.state.impact.chain_snippet_pending_key = None;
                     self.state.impact.chain_snippet_scroll = 0;
+                }
+            }
+            ActiveMode::Context => {
+                if self.state.context.focused_pane == ContextPane::Tree {
+                    if self.state.context.chain_snippet.is_some() {
+                        self.state.context.chain_snippet_scroll = bounded_scroll(
+                            self.state.context.chain_snippet_scroll,
+                            delta * SCROLL_STEP as i32,
+                        );
+                    } else {
+                        // Navigate through the full flat tree (callers + callees).
+                        let flat = self
+                            .state
+                            .context
+                            .context
+                            .as_ref()
+                            .map(|ctx| {
+                                build_flat_tree_for_selected(ctx, self.state.context.selected)
+                            })
+                            .unwrap_or_default();
+                        let len = flat.len();
+                        if len > 0 {
+                            self.state.context.chain_selected =
+                                bounded_add(self.state.context.chain_selected, delta, len);
+                            // Auto-scroll to keep the cursor visible.
+                            let lines_idx = flat[self.state.context.chain_selected].lines_index;
+                            let height = self.state.context.tree_pane_height.get() as usize;
+                            let scroll = self.state.context.tree_scroll as usize;
+                            if lines_idx < scroll {
+                                self.state.context.tree_scroll = lines_idx as u16;
+                            } else if height > 0 && lines_idx >= scroll + height {
+                                self.state.context.tree_scroll =
+                                    (lines_idx + 1).saturating_sub(height) as u16;
+                            }
+                        }
+                    }
+                    return;
+                }
+                // Left pane (entry points).
+                let len = self
+                    .state
+                    .context
+                    .context
+                    .as_ref()
+                    .map(|ctx| {
+                        let leaf_count = leaf_caller_nodes(ctx).len();
+                        // When there are no callers we show a single synthetic
+                        // "callees only" entry so the right pane can render.
+                        leaf_count.max(if ctx.total_callers == 0 { 1 } else { 0 })
+                    })
+                    .unwrap_or(0);
+                if len == 0 {
+                    return;
+                }
+                let old = self.state.context.selected;
+                self.state.context.selected = bounded_add(old, delta, len);
+                if self.state.context.selected != old {
+                    self.state.context.chain_selected = 0;
+                    self.state.context.chain_snippet = None;
+                    self.state.context.chain_snippet_loading = false;
+                    self.state.context.chain_snippet_pending_key = None;
+                    self.state.context.chain_snippet_scroll = 0;
                 }
             }
         }
@@ -383,6 +486,15 @@ impl TuiApp {
                         bounded_scroll(self.state.impact.flame_scroll, delta);
                 }
             }
+            ActiveMode::Context => {
+                if self.state.context.chain_snippet.is_some() {
+                    self.state.context.chain_snippet_scroll =
+                        bounded_scroll(self.state.context.chain_snippet_scroll, delta);
+                } else {
+                    self.state.context.tree_scroll =
+                        bounded_scroll(self.state.context.tree_scroll, delta);
+                }
+            }
         }
     }
 
@@ -420,6 +532,45 @@ impl TuiApp {
         }
     }
 
+    // ── Jump search → context ─────────────────────────────────────────────────
+
+    fn jump_to_context(&mut self) {
+        if self.state.mode != ActiveMode::Search {
+            return;
+        }
+        let (symbol, result_repo) = {
+            let result = self.state.search.results.get(self.state.search.selected);
+            let sym = result.and_then(|r| {
+                r.chunk()
+                    .qualified_name()
+                    .or_else(|| r.chunk().symbol_name().map(str::to_string))
+            });
+            let repo = result.map(|r| r.chunk().repository_id().to_owned());
+            (sym, repo)
+        };
+
+        if let Some(sym) = symbol {
+            self.state.context.cursor = sym.chars().count();
+            self.state.context.input = sym;
+            self.state.context.context = None;
+            self.state.context.selected = 0;
+            self.state.context.tree_scroll = 0;
+            self.state.context.chain_selected = 0;
+            self.state.context.chain_snippet = None;
+            self.state.context.chain_snippet_loading = false;
+            self.state.context.chain_snippet_pending_key = None;
+            self.state.context.chain_snippet_scroll = 0;
+            self.state.context.focused_pane = ContextPane::EntryPoints;
+            // Only seed the context repository from the result when no explicit
+            // search-level repository filter is active; avoid overwriting it.
+            if self.state.search.repository.is_none() {
+                self.state.context.repository = result_repo;
+            }
+            self.state.mode = ActiveMode::Context;
+            self.dispatch_context();
+        }
+    }
+
     // ── Dispatch (cache-first) ────────────────────────────────────────────────
 
     fn dispatch_current(&mut self) {
@@ -442,6 +593,16 @@ impl TuiApp {
                     }
                 }
             }
+            ActiveMode::Context => match self.state.context.focused_pane {
+                ContextPane::EntryPoints => self.dispatch_context(),
+                ContextPane::Tree => {
+                    if self.state.context.chain_snippet.is_none()
+                        && !self.state.context.chain_snippet_loading
+                    {
+                        self.dispatch_context_snippet();
+                    }
+                }
+            },
         }
     }
 
@@ -583,7 +744,11 @@ impl TuiApp {
                 Some(n) => *n,
                 None => return,
             };
-            (node.repository_id.clone(), node.file_path.clone(), node.line)
+            (
+                node.repository_id.clone(),
+                node.file_path.clone(),
+                node.line,
+            )
         };
 
         let key = TuiCache::snippet_key(&node_coords.0, &node_coords.1, node_coords.2);
@@ -614,6 +779,136 @@ impl TuiApp {
         });
     }
 
+    fn dispatch_context(&mut self) {
+        let uc = match &self.context_uc {
+            Some(uc) => Arc::clone(uc),
+            None => return, // models not yet ready
+        };
+
+        let symbol = self.state.context.input.trim().to_string();
+        if symbol.is_empty() {
+            return;
+        }
+
+        let key = TuiCache::context_key(&symbol, self.state.context.repository.as_deref());
+
+        if let Some(cached) = self.cache.contexts.get(&key).cloned() {
+            self.state.context.context = Some(cached);
+            self.state.context.selected = 0;
+            self.state.context.tree_scroll = 0;
+            self.state.context.error = None;
+            self.state.context.loading = false;
+            self.state.context.pending_key = None;
+            return;
+        }
+
+        if self.state.context.pending_key.as_deref() == Some(&key) {
+            return;
+        }
+
+        if self.state.context.errored_key.as_deref() == Some(&key) {
+            return;
+        }
+
+        self.state.context.loading = true;
+        self.state.context.error = None;
+        self.state.context.context = None;
+        self.state.context.selected = 0;
+        self.state.context.tree_scroll = 0;
+        self.state.context.chain_selected = 0;
+        self.state.context.chain_snippet = None;
+        self.state.context.chain_snippet_loading = false;
+        self.state.context.chain_snippet_pending_key = None;
+        self.state.context.chain_snippet_scroll = 0;
+        self.state.context.pending_key = Some(key.clone());
+        self.state.context.errored_key = None;
+
+        let tx = self.event_tx.clone();
+        let repository = self.state.context.repository.clone();
+
+        if let Some(handle) = self.context_task.take() {
+            handle.abort();
+        }
+        self.context_task = Some(tokio::spawn(async move {
+            let result = uc
+                .get_context(&symbol, repository.as_deref(), false)
+                .await
+                .map_err(|e| e.to_string());
+            if let Err(e) = tx.send(TuiEvent::ContextDone { key, result }) {
+                debug!("ContextDone send failed (app already exited): {}", e);
+            }
+        }));
+    }
+
+    fn dispatch_context_snippet(&mut self) {
+        let uc = match &self.snippet_uc {
+            Some(uc) => Arc::clone(uc),
+            None => return,
+        };
+
+        let node_info = {
+            let ctx = match &self.state.context.context {
+                Some(c) => c,
+                None => return,
+            };
+
+            // Use the flat tree to resolve the selected node (covers both callers
+            // and callees by flat index).
+            let flat = build_flat_tree_for_selected(ctx, self.state.context.selected);
+            let node = match flat.get(self.state.context.chain_selected) {
+                Some(n) => n,
+                None => return,
+            };
+
+            (
+                node.symbol.clone(),
+                node.repository_id.clone(),
+                node.file_path.clone(),
+                node.line,
+                node.is_callee,
+            )
+        };
+
+        let (symbol, repo_id, file_path, line, is_callee) = node_info;
+
+        // Callee nodes: look up the callee's own definition by symbol name.
+        // Caller nodes: look up the call-site chunk (file_path + line).
+        let key = if is_callee {
+            TuiCache::snippet_key(&repo_id, &symbol, 0)
+        } else {
+            TuiCache::snippet_key(&repo_id, &file_path, line)
+        };
+
+        if let Some(cached) = self.cache.snippets.get(&key).cloned() {
+            self.state.context.chain_snippet = cached;
+            self.state.context.chain_snippet_loading = false;
+            self.state.context.chain_snippet_pending_key = None;
+            self.state.context.chain_snippet_scroll = 0;
+            return;
+        }
+
+        self.state.context.chain_snippet_loading = true;
+        self.state.context.chain_snippet_pending_key = Some(key.clone());
+        self.state.context.chain_snippet_scroll = 0;
+
+        let tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            let result = if is_callee {
+                uc.get_snippet_for_symbol(&repo_id, &symbol)
+                    .await
+                    .map_err(|e| e.to_string())
+            } else {
+                uc.get_snippet(&repo_id, &file_path, line)
+                    .await
+                    .map_err(|e| e.to_string())
+            };
+            if let Err(e) = tx.send(TuiEvent::ContextSnippetDone { key, result }) {
+                debug!("ContextSnippetDone send failed (app already exited): {}", e);
+            }
+        });
+    }
+
     // ── Handle results ────────────────────────────────────────────────────────
 
     fn handle_app_event(&mut self, event: TuiEvent) {
@@ -624,6 +919,7 @@ impl TuiApp {
                         self.search_uc = Some(Arc::new(container.search_use_case()));
                         self.impact_uc = Some(Arc::new(container.impact_use_case()));
                         self.snippet_uc = Some(Arc::new(container.snippet_lookup_use_case()));
+                        self.context_uc = Some(Arc::new(container.context_use_case()));
                         self.state.models_ready = true;
                         // If the user had pre-typed a query (via --query CLI arg),
                         // auto-dispatch it now that models are ready.
@@ -633,6 +929,9 @@ impl TuiApp {
                             }
                             ActiveMode::Impact if !self.state.impact.input.is_empty() => {
                                 self.dispatch_impact();
+                            }
+                            ActiveMode::Context if !self.state.context.input.is_empty() => {
+                                self.dispatch_context();
                             }
                             _ => {}
                         }
@@ -646,6 +945,9 @@ impl TuiApp {
                             }
                             ActiveMode::Impact => {
                                 self.state.impact.error = Some(format!("Model load error: {e}"));
+                            }
+                            ActiveMode::Context => {
+                                self.state.context.error = Some(format!("Model load error: {e}"));
                             }
                         }
                     }
@@ -703,6 +1005,42 @@ impl TuiApp {
                     }
                     Err(e) => {
                         warn!("chain snippet lookup failed: {}", e);
+                    }
+                }
+            }
+            TuiEvent::ContextDone { key, result } => {
+                if self.state.context.pending_key.as_deref() != Some(&key) {
+                    return;
+                }
+                self.state.context.pending_key = None;
+                self.state.context.loading = false;
+                match result {
+                    Ok(ctx) => {
+                        self.cache.contexts.insert(key, ctx.clone());
+                        self.state.context.context = Some(ctx);
+                        self.state.context.selected = 0;
+                        self.state.context.tree_scroll = 0;
+                    }
+                    Err(e) => {
+                        self.state.context.errored_key = Some(key);
+                        self.state.context.error = Some(e);
+                    }
+                }
+            }
+            TuiEvent::ContextSnippetDone { key, result } => {
+                if self.state.context.chain_snippet_pending_key.as_ref() != Some(&key) {
+                    return;
+                }
+                self.state.context.chain_snippet_pending_key = None;
+                self.state.context.chain_snippet_loading = false;
+                match result {
+                    Ok(chunk) => {
+                        self.cache.snippets.insert(key, chunk.clone());
+                        self.state.context.chain_snippet = chunk;
+                        self.state.context.chain_snippet_scroll = 0;
+                    }
+                    Err(e) => {
+                        warn!("context snippet lookup failed: {}", e);
                     }
                 }
             }

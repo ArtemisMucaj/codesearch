@@ -25,7 +25,6 @@ fn default_limit() -> usize {
     10
 }
 
-
 fn default_text_search() -> bool {
     true
 }
@@ -85,9 +84,6 @@ pub struct ContextToolInput {
 
     /// Restrict context to a specific repository ID
     pub repository_id: Option<String>,
-
-    /// Maximum number of callers/callees to return per direction
-    pub limit: Option<u32>,
 
     /// When true, `symbol` is treated as a POSIX regular expression.
     /// All matching symbols are resolved and their edges aggregated.
@@ -209,7 +205,7 @@ impl CodesearchMcpServer {
 
         let use_case = self.container.context_use_case();
         let ctx = use_case
-            .get_context(&input.symbol, input.repository_id.as_deref(), input.limit, input.regex)
+            .get_context(&input.symbol, input.repository_id.as_deref(), input.regex)
             .await
             .map_err(|e| McpError::internal_error(format!("Context lookup failed: {}", e), None))?;
 

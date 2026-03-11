@@ -50,6 +50,24 @@ pub trait VectorRepository: Send + Sync {
         Ok(vec![])
     }
 
+    /// Return the chunk whose `symbol_name` best matches `symbol` within a repository.
+    ///
+    /// `class_hint` is an optional class/file name extracted from the FQN (e.g. `"GenericUtils"`
+    /// from `"GenericUtils#getIp"`). When provided, chunks whose `file_path` contains the hint
+    /// are ranked higher, disambiguating methods that share the same short name across classes.
+    ///
+    /// The default no-op preserves backwards compatibility for adapters that do not need this
+    /// capability.
+    async fn find_chunk_by_symbol(
+        &self,
+        repository_id: &str,
+        symbol: &str,
+        class_hint: Option<&str>,
+    ) -> Result<Option<CodeChunk>, DomainError> {
+        let _ = (repository_id, symbol, class_hint);
+        Ok(None)
+    }
+
     /// Called once after a batch of writes to finalise any deferred work
     /// (e.g. rebuilding a full-text search index). The default implementation
     /// is a no-op; backends that maintain auxiliary indexes should override it.

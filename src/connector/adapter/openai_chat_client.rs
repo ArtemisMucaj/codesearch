@@ -56,11 +56,10 @@ pub struct OpenAiChatClient {
 
 impl OpenAiChatClient {
     pub fn from_env() -> Result<Self, reqwest::Error> {
-        let base = std::env::var("OPENAI_BASE_URL")
-            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+        let base =
+            std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         let url = format!("{}{}", base.trim_end_matches('/'), CHAT_PATH);
-        let model = std::env::var("OPENAI_MODEL")
-            .unwrap_or_else(|_| "openai-chat".to_string());
+        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "openai-chat".to_string());
 
         debug!("OpenAiChatClient: endpoint={}, model={}", url, model);
 
@@ -92,9 +91,7 @@ impl OpenAiChatClient {
 
     /// The base URL this client is configured to use — useful for log messages.
     pub fn configured_base_url(&self) -> String {
-        self.url
-            .trim_end_matches(CHAT_PATH)
-            .to_string()
+        self.url.trim_end_matches(CHAT_PATH).to_string()
     }
 }
 
@@ -107,7 +104,7 @@ fn mask_key(key: &str) -> String {
     }
     let prefix: String = chars[..4].iter().collect();
     let suffix: String = chars[chars.len() - 4..].iter().collect();
-    format!("{}{}{}",  prefix, "*".repeat(chars.len() - 8), suffix)
+    format!("{}{}{}", prefix, "*".repeat(chars.len() - 8), suffix)
 }
 
 #[async_trait]

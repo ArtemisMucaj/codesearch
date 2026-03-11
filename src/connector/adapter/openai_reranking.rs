@@ -46,8 +46,8 @@ pub struct OpenAiReranking {
 
 impl OpenAiReranking {
     pub fn new(client: Arc<dyn ChatClient>) -> Self {
-        let model_name = std::env::var("OPENAI_MODEL")
-            .unwrap_or_else(|_| "openai-chat".to_string());
+        let model_name =
+            std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "openai-chat".to_string());
         Self { client, model_name }
     }
 

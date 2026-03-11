@@ -36,7 +36,12 @@ impl<'a> ExplainController<'a> {
         let result: crate::application::ExplainResult = self
             .container
             .explain_use_case()
-            .execute(&symbol, repository.as_deref(), chat_client.as_ref(), is_regex)
+            .execute(
+                &symbol,
+                repository.as_deref(),
+                chat_client.as_ref(),
+                is_regex,
+            )
             .await
             .context("Explain use case failed")?;
 
@@ -55,9 +60,7 @@ impl<'a> ExplainController<'a> {
                      e.g. use `^pattern` or `pattern$`.\n",
                 );
             } else {
-                output.push_str(
-                    "\nRun with the full symbol name to explain a specific one.\n",
-                );
+                output.push_str("\nRun with the full symbol name to explain a specific one.\n");
             }
             return Ok(output);
         }
