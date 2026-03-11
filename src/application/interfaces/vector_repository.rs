@@ -52,15 +52,19 @@ pub trait VectorRepository: Send + Sync {
 
     /// Return the chunk whose `symbol_name` best matches `symbol` within a repository.
     ///
-    /// Used by the TUI to show the definition of a callee symbol when only the symbol
-    /// name is known (not its definition file/line).  The default no-op preserves
-    /// backwards compatibility for adapters that do not need this capability.
+    /// `class_hint` is an optional class/file name extracted from the FQN (e.g. `"GenericUtils"`
+    /// from `"GenericUtils#getIp"`). When provided, chunks whose `file_path` contains the hint
+    /// are ranked higher, disambiguating methods that share the same short name across classes.
+    ///
+    /// The default no-op preserves backwards compatibility for adapters that do not need this
+    /// capability.
     async fn find_chunk_by_symbol(
         &self,
         repository_id: &str,
         symbol: &str,
+        class_hint: Option<&str>,
     ) -> Result<Option<CodeChunk>, DomainError> {
-        let _ = (repository_id, symbol);
+        let _ = (repository_id, symbol, class_hint);
         Ok(None)
     }
 

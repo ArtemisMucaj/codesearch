@@ -29,6 +29,34 @@ fn short_symbol_name(symbol: &str) -> &str {
     symbol
 }
 
+/// Extract a class/file hint from a fully-qualified symbol for disambiguation.
+///
+/// For `Namespace\Class#method` the class name is `Class`; chunks are typically
+/// stored in a file whose name contains `Class`, so this hint lets the query
+/// prefer the right file when the short method name is ambiguous.
+///
+/// Returns `None` when no useful class hint can be derived (e.g. bare symbol).
+fn class_hint_from_symbol(symbol: &str) -> Option<&str> {
+    // Only meaningful when there is a `#` — the class name is the segment
+    // immediately before the `#`, after the last namespace separator.
+    let class_and_method = symbol.rfind('#')?;
+    let class_part = &symbol[..class_and_method];
+    // Strip any namespace prefix (backslash, double-colon, or dot).
+    let start = class_part
+        .rfind('\\')
+        .or_else(|| class_part.rfind("::").map(|p| p + 1))
+        .or_else(|| class_part.rfind('.'))
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let hint = &class_part[start..];
+    if hint.is_empty() {
+        None
+    } else {
+        Some(hint)
+    }
+}
+
+/// Retrieves an indexed [`CodeChunk`] for a reference location shown in the TUI.
 ///
 /// Given a file path and a line number (as returned by [`ContextNode`] or
 /// [`ImpactNode`]), this use case queries the vector store for the chunks that
@@ -74,27 +102,61 @@ impl SnippetLookupUseCase {
         Ok(best.cloned())
     }
 
-    /// Return the definition chunk for a symbol given only its name.
+    /// Return the definition chunk for a callee symbol given its fully-qualified name.
     ///
-    /// Used for callee nodes in the Context tree view where only the callee symbol
-    /// name is known — the stored `file_path`/`line` on a callee `ContextNode`
-    /// point to the call-site (inside the root symbol), not the callee's definition.
+    /// Used for callee nodes in the Context tree view where only the callee FQN is
+    /// known — the stored `file_path`/`line` on a callee `ContextNode` point to the
+    /// call-site inside the root symbol, not the callee's own definition.
+    ///
+    /// Resolution strategy:
+    /// 1. Extract the short name (`Class#method` → `method`).
+    /// 2. Extract a class hint (`Namespace\Class#method` → `Class`) for
+    ///    disambiguation when multiple symbols share the same short name.
+    /// 3. Query chunks by short name; rank matches whose file path contains the
+    ///    class hint higher, then prefer the smallest (tightest) chunk.
     pub async fn get_snippet_for_symbol(
         &self,
         repository_id: &str,
         symbol: &str,
     ) -> Result<Option<CodeChunk>, DomainError> {
-        // Chunks store only the short (unqualified) name. Strip any FQN prefix
-        // before querying so `Namespace\Class#method` looks up as `method`.
         let short = short_symbol_name(symbol);
+        let class_hint = class_hint_from_symbol(symbol);
         self.vector_repo
-            .find_chunk_by_symbol(repository_id, short)
+            .find_chunk_by_symbol(repository_id, short, class_hint)
             .await
             .map_err(|e| {
                 DomainError::storage(format!(
-                    "symbol snippet lookup for '{symbol}' (short: '{short}') \
-                     in repository '{repository_id}': {e}"
+                    "symbol snippet lookup for '{symbol}' (short: '{short}', \
+                     class hint: {class_hint:?}) in repository '{repository_id}': {e}"
                 ))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_short_symbol_name() {
+        assert_eq!(short_symbol_name("Namespace\\Class#method"), "method");
+        assert_eq!(short_symbol_name("Namespace\\Class"), "Class");
+        assert_eq!(short_symbol_name("crate::module::func"), "func");
+        assert_eq!(short_symbol_name("com.example.Foo"), "Foo");
+        assert_eq!(short_symbol_name("bare"), "bare");
+    }
+
+    #[test]
+    fn test_class_hint_from_symbol() {
+        assert_eq!(
+            class_hint_from_symbol("Namespace\\Class#method"),
+            Some("Class")
+        );
+        assert_eq!(
+            class_hint_from_symbol("GenericUtils#getIp"),
+            Some("GenericUtils")
+        );
+        assert_eq!(class_hint_from_symbol("bare_function"), None);
+        assert_eq!(class_hint_from_symbol("Namespace\\Class"), None);
     }
 }
