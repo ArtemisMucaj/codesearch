@@ -180,7 +180,7 @@ async fn main() -> Result<()> {
         embedding_dimensions: cli.embedding_dimensions,
         reranking_target: cli.reranking_target,
         llm_target: cli.llm_target,
-        embed_concurrency: cli.embedding_requests,
+        parse_concurrency: cli.embedding_requests,
         read_only,
     };
 

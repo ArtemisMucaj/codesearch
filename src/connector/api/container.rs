@@ -94,7 +94,7 @@ pub struct ContainerConfig {
     /// improving speed.
     ///
     /// Default: 4.
-    pub embed_concurrency: usize,
+    pub parse_concurrency: usize,
 }
 
 pub struct Container {
@@ -454,7 +454,7 @@ impl Container {
             self.embedding_service.clone(),
         )
         .with_scip(scip)
-        .with_embed_concurrency(self.config.embed_concurrency)
+        .with_parse_concurrency(self.config.parse_concurrency)
     }
 
     pub fn search_use_case(&self) -> SearchCodeUseCase {

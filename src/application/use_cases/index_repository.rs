@@ -17,8 +17,13 @@ use crate::domain::{
     SymbolReference, VectorStore,
 };
 
-/// Default number of concurrent `embed_chunks` calls during indexing.
-const DEFAULT_EMBED_CONCURRENCY: usize = 4;
+/// Default number of concurrent `parse_only` calls during the parse phase.
+const DEFAULT_PARSE_CONCURRENCY: usize = 4;
+
+/// Number of chunks accumulated across files before a single `embed_chunks`
+/// call is issued.  Larger values amortise per-call overhead and produce
+/// better-utilised inference batches.
+const CROSS_FILE_EMBED_BATCH: usize = 256;
 
 /// Port trait for the SCIP indexing phase.
 ///
@@ -56,8 +61,8 @@ pub struct IndexRepositoryUseCase {
     /// Optional SCIP indexer.  When present, JS/TS/PHP files use SCIP-derived
     /// symbol references instead of (or as a fallback from) tree-sitter.
     scip: Option<Arc<dyn Scip>>,
-    /// Maximum number of concurrent `embed_chunks` calls.
-    embed_concurrency: usize,
+    /// Maximum number of concurrent `parse_only` calls.
+    parse_concurrency: usize,
 }
 
 impl IndexRepositoryUseCase {
@@ -77,7 +82,7 @@ impl IndexRepositoryUseCase {
             parser_service,
             embedding_service,
             scip: None,
-            embed_concurrency: DEFAULT_EMBED_CONCURRENCY,
+            parse_concurrency: DEFAULT_PARSE_CONCURRENCY,
         }
     }
 
@@ -87,9 +92,9 @@ impl IndexRepositoryUseCase {
         self
     }
 
-    /// Set the maximum number of concurrent `embed_chunks` calls.
-    pub fn with_embed_concurrency(mut self, n: usize) -> Self {
-        self.embed_concurrency = n.max(1);
+    /// Set the maximum number of concurrent parse tasks.
+    pub fn with_parse_concurrency(mut self, n: usize) -> Self {
+        self.parse_concurrency = n.max(1);
         self
     }
 
@@ -163,6 +168,168 @@ impl IndexRepositoryUseCase {
         }
     }
 
+    /// Embed and write one accumulated batch of pre-parsed files.
+    ///
+    /// All chunks across every file in `batch` are sent to the embedding
+    /// service in a single call so that the model can process a large,
+    /// efficient batch.  Returns `(file_count, chunk_count, reference_count)`.
+    ///
+    /// On success `batch` is cleared.  On embedding failure the batch is also
+    /// cleared (files are skipped with a warning) so that the caller can
+    /// continue with the next batch.
+    async fn flush_embed_batch(
+        &self,
+        batch: &mut Vec<ParseOnlyResult>,
+        repository: &Repository,
+        scip_refs: &HashMap<String, Vec<SymbolReference>>,
+        language_stats: &mut HashMap<String, LanguageStats>,
+    ) -> Result<(u64, u64, u64), DomainError> {
+        if batch.is_empty() {
+            return Ok((0, 0, 0));
+        }
+
+        // Drain chunks out of each file result into a flat Vec for a single
+        // embed_chunks call, recording how many chunks each file contributed.
+        let mut flat_chunks: Vec<crate::domain::CodeChunk> = Vec::new();
+        let mut per_file_chunk_count: Vec<usize> = Vec::with_capacity(batch.len());
+
+        for result in batch.iter_mut() {
+            per_file_chunk_count.push(result.chunks.len());
+            flat_chunks.append(&mut result.chunks);
+        }
+
+        // Embed all chunks in one call; on failure fall back to per-file calls
+        // so that a single bad file cannot discard the whole batch.
+        // Each entry is Some(embeddings) on success, None when a per-file
+        // retry also failed (that file is skipped in the distribution loop).
+        let per_file_embeddings: Vec<Option<Vec<Embedding>>> = if flat_chunks.is_empty() {
+            per_file_chunk_count.iter().map(|_| Some(vec![])).collect()
+        } else {
+            match self.embedding_service.embed_chunks(&flat_chunks).await {
+                Ok(all) => {
+                    // Split the flat result back into per-file groups without
+                    // cloning by consuming the Vec via an iterator.
+                    let mut drain = all.into_iter();
+                    per_file_chunk_count
+                        .iter()
+                        .map(|&n| Some(drain.by_ref().take(n).collect::<Vec<_>>()))
+                        .collect()
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to embed batch of {} chunks across {} files, \
+                         retrying per-file: {}",
+                        flat_chunks.len(),
+                        batch.len(),
+                        e
+                    );
+                    let mut offset = 0;
+                    let mut results = Vec::with_capacity(batch.len());
+                    for (i, &n) in per_file_chunk_count.iter().enumerate() {
+                        let file_chunks = &flat_chunks[offset..offset + n];
+                        offset += n;
+                        if file_chunks.is_empty() {
+                            results.push(Some(vec![]));
+                            continue;
+                        }
+                        match self.embedding_service.embed_chunks(file_chunks).await {
+                            Ok(embeds) => results.push(Some(embeds)),
+                            Err(file_err) => {
+                                warn!(
+                                    "Per-file embedding failed for {}: {}",
+                                    batch[i].relative_path, file_err
+                                );
+                                results.push(None);
+                            }
+                        }
+                    }
+                    results
+                }
+            }
+        };
+
+        // Distribute embeddings back to their originating files and write to
+        // the vector store, skipping any file whose embedding failed.
+        let mut chunk_offset = 0usize;
+        let mut file_count = 0u64;
+        let mut chunk_count = 0u64;
+        let mut ref_count = 0u64;
+
+        for (i, result) in batch.iter().enumerate() {
+            let n = per_file_chunk_count[i];
+            let file_chunks = &flat_chunks[chunk_offset..chunk_offset + n];
+            chunk_offset += n;
+
+            let file_embeddings = match per_file_embeddings[i].as_deref() {
+                Some(e) => e,
+                None => {
+                    // Per-file embedding failed; skip writing this file.
+                    continue;
+                }
+            };
+
+            // Delete any pre-existing chunks for this file before inserting
+            // new ones.  On a clean first-time index this is a no-op; on a
+            // crash-resume it removes stale chunks from an interrupted run.
+            self.vector_repo
+                .delete_by_file_path(repository.id(), &result.relative_path)
+                .await?;
+
+            if !file_chunks.is_empty() {
+                self.vector_repo
+                    .save_batch(file_chunks, file_embeddings)
+                    .await?;
+            }
+
+            let refs_count =
+                if let Some(scip_file_refs) = scip_refs.get(&result.relative_path) {
+                    debug!(
+                        "Using {} SCIP references for {}",
+                        scip_file_refs.len(),
+                        result.relative_path
+                    );
+                    // Delete stale call-graph rows before inserting new ones.
+                    self.call_graph_use_case
+                        .delete_by_file(repository.id(), &result.relative_path)
+                        .await?;
+                    self.call_graph_use_case
+                        .save_references(scip_file_refs)
+                        .await
+                        .map_err(|e| DomainError::internal(format!("{:#}", e)))?
+                } else {
+                    0
+                };
+            ref_count += refs_count;
+
+            // Write the file hash immediately after its chunks so that a crash
+            // between two files never leaves the DB in a state where chunks
+            // exist without a corresponding hash record.
+            self.file_hash_repo
+                .save_batch(&[FileHash::new(
+                    result.relative_path.clone(),
+                    result.content_hash.clone(),
+                    repository.id().to_string(),
+                )])
+                .await?;
+
+            file_count += 1;
+            chunk_count += n as u64;
+
+            let lang_key = result.language.as_str().to_string();
+            let stats = language_stats.entry(lang_key).or_default();
+            stats.file_count += 1;
+            stats.chunk_count += n as u64;
+
+            debug!(
+                "Indexed {} chunks, {} references from {}",
+                n, refs_count, result.relative_path
+            );
+        }
+
+        batch.clear();
+        Ok((file_count, chunk_count, ref_count))
+    }
+
     async fn index(
         &self,
         absolute_path: &Path,
@@ -232,104 +399,69 @@ impl IndexRepositoryUseCase {
         let mut reference_count = 0u64;
         let mut language_stats: HashMap<String, LanguageStats> = HashMap::new();
 
-        // Phase 1 (concurrent): read → parse → embed
-        // Phase 2 (sequential): write to DuckDB + update stats
+        // Phase 1 (concurrent): read → parse
+        // Phase 2 (batched):    embed across multiple files in a single call
+        // Phase 3 (sequential): write to DuckDB + update stats
+        //
+        // Parsing concurrency is set higher than the legacy embed_concurrency
+        // because the parse phase is cheaper (I/O + tree-sitter) than
+        // embedding.  4× gives a good parse pipeline depth; minimum 8 ensures
+        // responsiveness on small repos.
+        let parse_concurrency = (self.parse_concurrency * 4).max(8);
+
         let repo_id = repository.id().to_string();
         let abs_path = absolute_path.to_path_buf();
-        let embedding_service = self.embedding_service.clone();
         let parser_service = self.parser_service.clone();
-        let concurrency = self.embed_concurrency;
 
         let mut stream = futures_util::stream::iter(files_to_process)
             .map(move |entry_path| {
-                let embedding_service = embedding_service.clone();
                 let parser_service = parser_service.clone();
                 let abs_path = abs_path.clone();
                 let repo_id = repo_id.clone();
-                async move {
-                    parse_and_embed(
-                        entry_path,
-                        &abs_path,
-                        &repo_id,
-                        &*parser_service,
-                        &*embedding_service,
-                    )
-                    .await
-                }
+                async move { parse_only(entry_path, &abs_path, &repo_id, &*parser_service).await }
             })
-            .buffer_unordered(concurrency);
+            .buffer_unordered(parse_concurrency);
+
+        let mut pending: Vec<ParseOnlyResult> = Vec::new();
+        let mut pending_chunk_count = 0usize;
 
         while let Some(maybe_result) = stream.next().await {
             progress_bar.inc(1);
-            let result = match maybe_result {
-                Some(r) => r,
-                None => continue,
-            };
+            if let Some(result) = maybe_result {
+                progress_bar.set_message(result.relative_path.clone());
+                pending_chunk_count += result.chunks.len();
+                pending.push(result);
 
-            progress_bar.set_message(result.relative_path.clone());
-
-            // Delete any pre-existing chunks for this file before inserting new
-            // ones.  On a clean first-time index this is a no-op; on a
-            // crash-resume it removes stale chunks that were written in the
-            // interrupted run, preventing UUID-keyed duplicates.
-            self.vector_repo
-                .delete_by_file_path(repository.id(), &result.relative_path)
-                .await?;
-
-            if !result.chunks.is_empty() {
-                self.vector_repo
-                    .save_batch(&result.chunks, &result.embeddings)
-                    .await?;
+                if pending_chunk_count >= CROSS_FILE_EMBED_BATCH {
+                    let (fc, cc, rc) = self
+                        .flush_embed_batch(
+                            &mut pending,
+                            &repository,
+                            &scip_refs,
+                            &mut language_stats,
+                        )
+                        .await?;
+                    file_count += fc;
+                    chunk_count += cc;
+                    reference_count += rc;
+                    pending_chunk_count = 0;
+                }
             }
+        }
 
-            let refs_count = if let Some(scip_file_refs) = scip_refs.get(&result.relative_path) {
-                debug!(
-                    "Using {} SCIP references for {}",
-                    scip_file_refs.len(),
-                    result.relative_path
-                );
-                // Delete stale call-graph rows before inserting new ones.  On a
-                // clean first-time index this is a no-op; on a crash-resume it
-                // removes any references written in the interrupted run.
-                self.call_graph_use_case
-                    .delete_by_file(repository.id(), &result.relative_path)
-                    .await?;
-                self.call_graph_use_case
-                    .save_references(scip_file_refs)
-                    .await
-                    .map_err(|e| DomainError::internal(format!("{:#}", e)))?
-            } else {
-                0
-            };
-            reference_count += refs_count;
-
-            // Write the file hash immediately after its chunks so that a crash
-            // between two files never leaves the DB in a state where chunks
-            // exist without a corresponding hash record.  A subsequent index run
-            // will then correctly treat any hash-less file as new (and will
-            // delete+rewrite it via the delete_by_file_path call above).
-            self.file_hash_repo
-                .save_batch(&[FileHash::new(
-                    result.relative_path.clone(),
-                    result.content_hash,
-                    repository.id().to_string(),
-                )])
+        // Flush any remaining files that didn't fill a full batch.
+        if !pending.is_empty() {
+            let (fc, cc, rc) = self
+                .flush_embed_batch(
+                    &mut pending,
+                    &repository,
+                    &scip_refs,
+                    &mut language_stats,
+                )
                 .await?;
-
-            file_count += 1;
-            chunk_count += result.chunks.len() as u64;
-
-            let lang_key = result.language.as_str().to_string();
-            let stats = language_stats.entry(lang_key).or_default();
-            stats.file_count += 1;
-            stats.chunk_count += result.chunks.len() as u64;
-
-            debug!(
-                "Indexed {} chunks, {} references from {}",
-                result.chunks.len(),
-                refs_count,
-                result.relative_path
-            );
+            file_count += fc;
+            chunk_count += cc;
+            reference_count += rc;
         }
 
         progress_bar.finish_and_clear();
@@ -513,107 +645,76 @@ impl IndexRepositoryUseCase {
         // just for the hash in the sequential phase.
         let current_files_snapshot = current_files.clone();
 
+        let parse_concurrency = (self.parse_concurrency * 4).max(8);
+
         let repo_id = repository.id().to_string();
         let abs_path = absolute_path.to_path_buf();
-        let embedding_service = self.embedding_service.clone();
         let parser_service = self.parser_service.clone();
-        let concurrency = self.embed_concurrency;
 
         let mut stream = futures_util::stream::iter(files_to_process)
             .map(move |entry_path| {
-                let embedding_service = embedding_service.clone();
                 let parser_service = parser_service.clone();
                 let abs_path = abs_path.clone();
                 let repo_id = repo_id.clone();
-                async move {
-                    parse_and_embed(
-                        entry_path,
-                        &abs_path,
-                        &repo_id,
-                        &*parser_service,
-                        &*embedding_service,
-                    )
-                    .await
-                }
+                async move { parse_only(entry_path, &abs_path, &repo_id, &*parser_service).await }
             })
-            .buffer_unordered(concurrency);
+            .buffer_unordered(parse_concurrency);
+
+        let mut pending: Vec<ParseOnlyResult> = Vec::new();
+        let mut pending_chunk_count = 0usize;
 
         while let Some(maybe_result) = stream.next().await {
             progress_bar.inc(1);
-            let result = match maybe_result {
-                Some(r) => r,
-                None => continue,
-            };
+            if let Some(mut result) = maybe_result {
+                progress_bar.set_message(result.relative_path.clone());
 
-            progress_bar.set_message(result.relative_path.clone());
+                // Only fall back to the walk hash when parse_only did not
+                // produce one (empty); the parse_only hash is derived from
+                // the content that was actually read and parsed, so it is
+                // more accurate and should be preferred.
+                if result.content_hash.is_empty() {
+                    if let Some(walk_hash) = current_files_snapshot.get(&result.relative_path) {
+                        result.content_hash = walk_hash.clone();
+                    }
+                }
 
-            // Delete any pre-existing chunks for this file before inserting.
-            // For modified files the outer loop already deleted the old chunks,
-            // but this also covers the case where an added file's chunks were
-            // written in an interrupted prior run (hash not yet saved → the file
-            // still looks "added" on restart and must not accumulate duplicates).
-            self.vector_repo
-                .delete_by_file_path(repository.id(), &result.relative_path)
-                .await?;
+                pending_chunk_count += result.chunks.len();
+                // Record the path as changed at the moment we decide to
+                // process it so it is present in new_processed_paths even
+                // if the subsequent flush fails non-fatally or is deferred.
+                new_processed_paths.insert(result.relative_path.clone());
+                pending.push(result);
 
-            if !result.chunks.is_empty() {
-                self.vector_repo
-                    .save_batch(&result.chunks, &result.embeddings)
-                    .await?;
+                if pending_chunk_count >= CROSS_FILE_EMBED_BATCH {
+                    let (fc, cc, rc) = self
+                        .flush_embed_batch(
+                            &mut pending,
+                            repository,
+                            &scip_refs,
+                            &mut language_stats,
+                        )
+                        .await?;
+                    new_chunk_count += cc;
+                    new_reference_count += rc;
+                    processed_count += fc;
+                    pending_chunk_count = 0;
+                }
             }
+        }
 
-            let refs_count = if let Some(scip_file_refs) = scip_refs.get(&result.relative_path) {
-                debug!(
-                    "Using {} SCIP references for {}",
-                    scip_file_refs.len(),
-                    result.relative_path
-                );
-                // For modified files the outer loop already deleted old call-graph
-                // rows, but this also covers added files whose references were
-                // written in an interrupted prior run (hash not yet saved → the
-                // file still looks "added" on restart).
-                self.call_graph_use_case
-                    .delete_by_file(repository.id(), &result.relative_path)
-                    .await?;
-                self.call_graph_use_case
-                    .save_references(scip_file_refs)
-                    .await
-                    .map_err(|e| DomainError::internal(format!("{:#}", e)))?
-            } else {
-                0
-            };
-            new_reference_count += refs_count;
-
-            let content_hash = current_files_snapshot
-                .get(&result.relative_path)
-                .cloned()
-                .unwrap_or(result.content_hash);
-
-            // Persist the hash immediately after the chunks so that a crash
-            // between files never leaves chunks without a hash record.
-            self.file_hash_repo
-                .save_batch(&[FileHash::new(
-                    result.relative_path.clone(),
-                    content_hash,
-                    repository.id().to_string(),
-                )])
+        // Flush remaining
+        if !pending.is_empty() {
+            let (fc, cc, rc) = self
+                .flush_embed_batch(
+                    &mut pending,
+                    repository,
+                    &scip_refs,
+                    &mut language_stats,
+                )
                 .await?;
-
-            new_processed_paths.insert(result.relative_path.clone());
-            processed_count += 1;
-            new_chunk_count += result.chunks.len() as u64;
-
-            let lang_key = result.language.as_str().to_string();
-            let stats = language_stats.entry(lang_key).or_default();
-            stats.file_count += 1;
-            stats.chunk_count += result.chunks.len() as u64;
-
-            debug!(
-                "Indexed {} chunks, {} references from {}",
-                result.chunks.len(),
-                refs_count,
-                result.relative_path
-            );
+            new_chunk_count += cc;
+            new_reference_count += rc;
+            processed_count += fc;
         }
 
         progress_bar.finish_and_clear();
@@ -676,24 +777,24 @@ impl IndexRepositoryUseCase {
     }
 }
 
-/// Intermediate result of the concurrent parse+embed phase.
-struct FileParseResult {
+/// Result of parsing a single file, before embedding.
+struct ParseOnlyResult {
     relative_path: String,
     content_hash: String,
     language: Language,
     chunks: Vec<crate::domain::CodeChunk>,
-    embeddings: Vec<Embedding>,
 }
 
-/// Read, parse and embed a single file.  Returns `None` when the file should
-/// be skipped (read/parse/embed failure); warnings are emitted in that case.
-async fn parse_and_embed(
+/// Read and parse a single file without generating embeddings.
+///
+/// Returns `None` when the file should be skipped (read/parse failure);
+/// warnings are emitted in that case.
+async fn parse_only(
     entry_path: PathBuf,
     absolute_path: &Path,
     repo_id: &str,
     parser_service: &dyn ParserService,
-    embedding_service: &dyn EmbeddingService,
-) -> Option<FileParseResult> {
+) -> Option<ParseOnlyResult> {
     let language = Language::from_path(&entry_path);
     let relative_path = entry_path
         .strip_prefix(absolute_path)
@@ -722,26 +823,10 @@ async fn parse_and_embed(
         }
     };
 
-    let embeddings = if chunks.is_empty() {
-        vec![]
-    } else {
-        match embedding_service.embed_chunks(&chunks).await {
-            Ok(e) => e,
-            Err(e) => {
-                warn!(
-                    "Failed to generate embeddings for {}: {}",
-                    relative_path, e
-                );
-                return None;
-            }
-        }
-    };
-
-    Some(FileParseResult {
+    Some(ParseOnlyResult {
         relative_path,
         content_hash,
         language,
         chunks,
-        embeddings,
     })
 }
