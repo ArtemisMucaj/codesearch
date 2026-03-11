@@ -348,12 +348,9 @@ fn reconstruct_caller_paths(callers_by_depth: &[Vec<ContextNode>]) -> Vec<Vec<&C
     paths
 }
 
-/// Collect direct callees (depth == 1) for the root symbol.
-fn direct_callees(callees_by_depth: &[Vec<ContextNode>]) -> Vec<&ContextNode> {
-    callees_by_depth
-        .first()
-        .map(|v| v.iter().collect())
-        .unwrap_or_default()
+/// Collect all callees across every BFS depth.
+fn all_callees(callees_by_depth: &[Vec<ContextNode>]) -> Vec<&ContextNode> {
+    callees_by_depth.iter().flatten().collect()
 }
 
 /// Construct the structured user prompt from the full symbol context.
@@ -411,7 +408,7 @@ async fn build_prompt(
     }
 
     let caller_paths = reconstruct_caller_paths(&ctx.callers_by_depth);
-    let callees = direct_callees(&ctx.callees_by_depth);
+    let callees = all_callees(&ctx.callees_by_depth);
 
     // ── Collect unique nodes to fetch source for ──────────────────────────────
     let mut seen: HashSet<(&str, &str)> = HashSet::new();
@@ -501,7 +498,7 @@ async fn build_prompt(
         // ── Callees section ───────────────────────────────────────────────────
         if !callees.is_empty() {
             prompt.push_str(&format!(
-                "## Direct callees of `{root_symbol}` ({} total)\n\n",
+                "## Callees of `{root_symbol}` ({} total)\n\n",
                 callees.len()
             ));
             for node in &callees {
@@ -529,7 +526,7 @@ async fn build_prompt(
     } else if !callees.is_empty() {
         // No callers, only callees.
         prompt.push_str(&format!(
-            "## Direct callees of `{root_symbol}` ({} total)\n\n",
+            "## Callees of `{root_symbol}` ({} total)\n\n",
             callees.len()
         ));
         let mut all_symbols: Vec<String> = vec![root_symbol.clone()];
