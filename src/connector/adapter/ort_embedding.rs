@@ -17,10 +17,11 @@ const DEFAULT_DIMENSIONS: usize = 384;
 const DEFAULT_MAX_SEQ_LENGTH: usize = 512;
 /// Number of chunks processed per ONNX inference call.
 ///
-/// Larger batches amortise the per-call overhead and improve GPU/CPU
-/// utilisation. 64 works well for the default all-MiniLM-L6-v2 model
-/// (22M params, 384-dim) on a typical development machine.
-const BATCH_SIZE: usize = 64;
+/// Larger batches amortise per-call overhead and improve CPU utilisation
+/// via wider SIMD/matrix operations.  128 is a good default for the small
+/// all-MiniLM-L6-v2 model (22M params, 384-dim) without risking OOM even
+/// on machines with modest RAM.
+const BATCH_SIZE: usize = 128;
 
 pub struct OrtEmbedding {
     session: Arc<Mutex<Session>>,

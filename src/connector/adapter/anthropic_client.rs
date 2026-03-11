@@ -12,7 +12,7 @@ pub const DEFAULT_BASE_URL: &str = "http://localhost:1234";
 const MESSAGES_PATH: &str = "/v1/messages";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 /// Default model matches the LM Studio local-first default.
-const DEFAULT_MODEL: &str = "qwen/qwen3.5-4b";
+const DEFAULT_MODEL: &str = "qwen3.5-4b";
 const MAX_TOKENS: u32 = 4096;
 
 #[derive(Serialize)]
