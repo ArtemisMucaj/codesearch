@@ -15,7 +15,7 @@ use super::cache::TuiCache;
 use super::event::TuiEvent;
 use super::state::{ActiveMode, AppState, ContextPane, ImpactPane, SearchPane};
 use super::views;
-use super::views::context::build_flat_tree_for_selected;
+use super::views::context::{build_flat_tree_for_selected, leaf_caller_nodes};
 use crate::cli::TuiMode;
 
 const SEARCH_LIMIT: usize = 20;
@@ -430,15 +430,7 @@ impl TuiApp {
                     .context
                     .as_ref()
                     .map(|ctx| {
-                        let all_callers: Vec<_> = ctx.callers_by_depth.iter().flatten().collect();
-                        let leaf_count = all_callers
-                            .iter()
-                            .filter(|n| {
-                                !all_callers
-                                    .iter()
-                                    .any(|m| m.via_symbol.as_deref() == Some(n.symbol.as_str()))
-                            })
-                            .count();
+                        let leaf_count = leaf_caller_nodes(ctx).len();
                         // When there are no callers we show a single synthetic
                         // "callees only" entry so the right pane can render.
                         leaf_count.max(if ctx.total_callers == 0 { 1 } else { 0 })
@@ -546,16 +538,16 @@ impl TuiApp {
         if self.state.mode != ActiveMode::Search {
             return;
         }
-        let symbol = self
-            .state
-            .search
-            .results
-            .get(self.state.search.selected)
-            .and_then(|r| {
+        let (symbol, result_repo) = {
+            let result = self.state.search.results.get(self.state.search.selected);
+            let sym = result.and_then(|r| {
                 r.chunk()
                     .qualified_name()
                     .or_else(|| r.chunk().symbol_name().map(str::to_string))
             });
+            let repo = result.map(|r| r.chunk().repository_id().to_owned());
+            (sym, repo)
+        };
 
         if let Some(sym) = symbol {
             self.state.context.cursor = sym.chars().count();
@@ -569,6 +561,11 @@ impl TuiApp {
             self.state.context.chain_snippet_pending_key = None;
             self.state.context.chain_snippet_scroll = 0;
             self.state.context.focused_pane = ContextPane::EntryPoints;
+            // Only seed the context repository from the result when no explicit
+            // search-level repository filter is active; avoid overwriting it.
+            if self.state.search.repository.is_none() {
+                self.state.context.repository = result_repo;
+            }
             self.state.mode = ActiveMode::Context;
             self.dispatch_context();
         }

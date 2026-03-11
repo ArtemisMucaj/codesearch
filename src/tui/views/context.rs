@@ -226,14 +226,15 @@ pub fn build_flat_tree_for_selected(ctx: &SymbolContext, selected_entry: usize) 
 /// `via_symbol`.
 pub fn leaf_caller_nodes(ctx: &SymbolContext) -> Vec<&ContextNode> {
     let all_callers: Vec<&ContextNode> = ctx.callers_by_depth.iter().flatten().collect();
-    all_callers
+    // Build a set of symbols that appear as via_symbol (i.e. are intermediate
+    // nodes, not entry-points).  Checking membership is then O(1) per node.
+    let via_set: HashSet<&str> = all_callers
         .iter()
-        .copied()
-        .filter(|n| {
-            !all_callers
-                .iter()
-                .any(|m| m.via_symbol.as_deref() == Some(n.symbol.as_str()))
-        })
+        .filter_map(|n| n.via_symbol.as_deref())
+        .collect();
+    all_callers
+        .into_iter()
+        .filter(|n| !via_set.contains(n.symbol.as_str()))
         .collect()
 }
 
@@ -270,6 +271,20 @@ fn build_callee_children_map<'a>(ctx: &'a SymbolContext) -> HashMap<String, Vec<
     for node in ctx.callees_by_depth.iter().flatten() {
         let key = node.via_symbol.as_deref().unwrap_or(&ctx.symbol).to_owned();
         map.entry(key).or_default().push(node);
+    }
+    // For multi-root-symbol queries, `ctx.symbol` is a display label like
+    // "authenticate (3 symbols)".  Depth-1 callee nodes have `via_symbol`
+    // pointing to the real FQN (e.g., "MyModule::authenticate"), not the
+    // display label.  Create a synthetic entry under the display label so the
+    // renderer can always start from `ctx.symbol`.
+    let root_sym_set: HashSet<&str> = ctx.root_symbols.iter().map(String::as_str).collect();
+    let depth1_nodes: Vec<&ContextNode> = ctx
+        .callees_by_depth
+        .first()
+        .map(|d| d.iter().collect())
+        .unwrap_or_default();
+    if !root_sym_set.contains(ctx.symbol.as_str()) && !depth1_nodes.is_empty() {
+        map.insert(ctx.symbol.clone(), depth1_nodes);
     }
     map
 }
