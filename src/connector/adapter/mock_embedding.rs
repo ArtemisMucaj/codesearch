@@ -48,7 +48,7 @@ impl MockEmbedding {
     fn prepare_text(chunk: &CodeChunk) -> String {
         let mut text = String::new();
 
-        if let Some(name) = chunk.symbol_name() {
+        if let Some(name) = chunk.qualified_name() {
             text.push_str(&format!("{} ", name));
         }
 
