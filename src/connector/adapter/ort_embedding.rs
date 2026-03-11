@@ -304,6 +304,15 @@ impl EmbeddingService for OrtEmbedding {
             .await
             .map_err(|e| DomainError::internal(format!("Embedding task panicked: {e}")))??;
 
+            if vectors.len() != batch.len() {
+                return Err(DomainError::internal(format!(
+                    "embed_texts_impl returned {} vectors for {} chunks (model: {})",
+                    vectors.len(),
+                    batch.len(),
+                    model_name,
+                )));
+            }
+
             for (chunk, vector) in batch.iter().zip(vectors) {
                 all_embeddings.push(Embedding::new(
                     chunk.id().to_string(),

@@ -198,29 +198,59 @@ impl IndexRepositoryUseCase {
             flat_chunks.append(&mut result.chunks);
         }
 
-        // Single embedding call for the entire batch.
-        let all_embeddings: Vec<Embedding> = if flat_chunks.is_empty() {
-            vec![]
+        // Embed all chunks in one call; on failure fall back to per-file calls
+        // so that a single bad file cannot discard the whole batch.
+        // Each entry is Some(embeddings) on success, None when a per-file
+        // retry also failed (that file is skipped in the distribution loop).
+        let per_file_embeddings: Vec<Option<Vec<Embedding>>> = if flat_chunks.is_empty() {
+            per_file_chunk_count.iter().map(|_| Some(vec![])).collect()
         } else {
             match self.embedding_service.embed_chunks(&flat_chunks).await {
-                Ok(e) => e,
+                Ok(all) => {
+                    // Split the flat result back into per-file groups without
+                    // cloning by consuming the Vec via an iterator.
+                    let mut drain = all.into_iter();
+                    per_file_chunk_count
+                        .iter()
+                        .map(|&n| Some(drain.by_ref().take(n).collect::<Vec<_>>()))
+                        .collect()
+                }
                 Err(e) => {
                     warn!(
-                        "Failed to embed batch of {} chunks across {} files: {}",
+                        "Failed to embed batch of {} chunks across {} files, \
+                         retrying per-file: {}",
                         flat_chunks.len(),
                         batch.len(),
                         e
                     );
-                    batch.clear();
-                    return Ok((0, 0, 0));
+                    let mut offset = 0;
+                    let mut results = Vec::with_capacity(batch.len());
+                    for (i, &n) in per_file_chunk_count.iter().enumerate() {
+                        let file_chunks = &flat_chunks[offset..offset + n];
+                        offset += n;
+                        if file_chunks.is_empty() {
+                            results.push(Some(vec![]));
+                            continue;
+                        }
+                        match self.embedding_service.embed_chunks(file_chunks).await {
+                            Ok(embeds) => results.push(Some(embeds)),
+                            Err(file_err) => {
+                                warn!(
+                                    "Per-file embedding failed for {}: {}",
+                                    batch[i].relative_path, file_err
+                                );
+                                results.push(None);
+                            }
+                        }
+                    }
+                    results
                 }
             }
         };
 
-        // Distribute the flat embeddings back to their originating files and
-        // write each file's chunks + embeddings to the vector store.
+        // Distribute embeddings back to their originating files and write to
+        // the vector store, skipping any file whose embedding failed.
         let mut chunk_offset = 0usize;
-        let mut emb_offset = 0usize;
         let mut file_count = 0u64;
         let mut chunk_count = 0u64;
         let mut ref_count = 0u64;
@@ -228,9 +258,15 @@ impl IndexRepositoryUseCase {
         for (i, result) in batch.iter().enumerate() {
             let n = per_file_chunk_count[i];
             let file_chunks = &flat_chunks[chunk_offset..chunk_offset + n];
-            let file_embeddings = &all_embeddings[emb_offset..emb_offset + n];
             chunk_offset += n;
-            emb_offset += n;
+
+            let file_embeddings = match per_file_embeddings[i].as_deref() {
+                Some(e) => e,
+                None => {
+                    // Per-file embedding failed; skip writing this file.
+                    continue;
+                }
+            };
 
             // Delete any pre-existing chunks for this file before inserting
             // new ones.  On a clean first-time index this is a no-op; on a
@@ -632,19 +668,24 @@ impl IndexRepositoryUseCase {
             if let Some(mut result) = maybe_result {
                 progress_bar.set_message(result.relative_path.clone());
 
-                // Prefer the hash computed during the directory walk (already
-                // in memory) to avoid a potential TOCTOU difference.
-                if let Some(walk_hash) = current_files_snapshot.get(&result.relative_path) {
-                    result.content_hash = walk_hash.clone();
+                // Only fall back to the walk hash when parse_only did not
+                // produce one (empty); the parse_only hash is derived from
+                // the content that was actually read and parsed, so it is
+                // more accurate and should be preferred.
+                if result.content_hash.is_empty() {
+                    if let Some(walk_hash) = current_files_snapshot.get(&result.relative_path) {
+                        result.content_hash = walk_hash.clone();
+                    }
                 }
 
                 pending_chunk_count += result.chunks.len();
+                // Record the path as changed at the moment we decide to
+                // process it so it is present in new_processed_paths even
+                // if the subsequent flush fails non-fatally or is deferred.
+                new_processed_paths.insert(result.relative_path.clone());
                 pending.push(result);
 
                 if pending_chunk_count >= CROSS_FILE_EMBED_BATCH {
-                    // Capture paths before flush_embed_batch clears the batch.
-                    let paths: Vec<String> =
-                        pending.iter().map(|r| r.relative_path.clone()).collect();
                     let (fc, cc, rc) = self
                         .flush_embed_batch(
                             &mut pending,
@@ -653,7 +694,6 @@ impl IndexRepositoryUseCase {
                             &mut language_stats,
                         )
                         .await?;
-                    new_processed_paths.extend(paths);
                     new_chunk_count += cc;
                     new_reference_count += rc;
                     processed_count += fc;
@@ -664,7 +704,6 @@ impl IndexRepositoryUseCase {
 
         // Flush remaining
         if !pending.is_empty() {
-            let paths: Vec<String> = pending.iter().map(|r| r.relative_path.clone()).collect();
             let (fc, cc, rc) = self
                 .flush_embed_batch(
                     &mut pending,
@@ -673,7 +712,6 @@ impl IndexRepositoryUseCase {
                     &mut language_stats,
                 )
                 .await?;
-            new_processed_paths.extend(paths);
             new_chunk_count += cc;
             new_reference_count += rc;
             processed_count += fc;
