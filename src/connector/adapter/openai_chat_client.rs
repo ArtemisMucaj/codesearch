@@ -9,12 +9,14 @@ use crate::domain::DomainError;
 
 const DEFAULT_BASE_URL: &str = "http://localhost:1234";
 const CHAT_PATH: &str = "/v1/chat/completions";
+const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
 #[derive(Serialize)]
 struct ChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
     temperature: f32,
+    stream: bool,
 }
 
 #[derive(Serialize)]
@@ -81,8 +83,13 @@ impl OpenAiChatClient {
             }
         }
 
+        let timeout_secs = std::env::var("OPENAI_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_TIMEOUT_SECS);
+
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(timeout_secs))
             .default_headers(headers)
             .build()?;
 
@@ -123,6 +130,7 @@ impl ChatClient for OpenAiChatClient {
                 },
             ],
             temperature: 0.0,
+            stream: false,
         };
 
         let resp = self

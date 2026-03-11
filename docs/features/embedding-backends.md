@@ -61,7 +61,7 @@ All API-target traffic shares the same environment variables used by query expan
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `ANTHROPIC_BASE_URL` | `http://localhost:1234` | Base URL for embeddings (`/v1/embeddings`) and reranking (`/v1/messages`) |
-| `ANTHROPIC_MODEL` | `qwen/qwen3.5-4b` | Chat model used for reranking |
+| `ANTHROPIC_MODEL` | `mistralai/ministral-3-3b` | Chat model used for reranking |
 | `ANTHROPIC_API_KEY` | `""` | API key — not required for local servers |
 
 > LM Studio exposes both `/v1/embeddings` (OpenAI-compatible) and `/v1/messages` (Anthropic-compatible) on the same port, so one `ANTHROPIC_BASE_URL` covers everything.
