@@ -1,3 +1,4 @@
+use std::io::Write as _;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -33,16 +34,38 @@ impl<'a> ExplainController<'a> {
             ),
         };
 
-        let result: crate::application::ExplainResult = self
-            .container
-            .explain_use_case()
-            .execute(
-                &symbol,
-                repository.as_deref(),
-                chat_client.as_ref(),
-                is_regex,
-            )
+        let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        // Run the use case in a separate task so we can concurrently drain the
+        // token channel and print tokens to stdout as they arrive.
+        let use_case = self.container.explain_use_case();
+        let symbol_c = symbol.clone();
+        let repo_c = repository.clone();
+        let client_c = chat_client.clone();
+
+        let use_case_handle = tokio::spawn(async move {
+            use_case
+                .execute_streaming(
+                    &symbol_c,
+                    repo_c.as_deref(),
+                    client_c.as_ref(),
+                    is_regex,
+                    token_tx,
+                )
+                .await
+        });
+
+        // Stream tokens to stdout as they arrive.  The channel is closed
+        // (recv returns None) when the use case task drops its sender, which
+        // happens naturally once complete_stream returns.
+        while let Some(token) = token_rx.recv().await {
+            print!("{token}");
+            std::io::stdout().flush().ok();
+        }
+
+        let result: crate::application::ExplainResult = use_case_handle
             .await
+            .context("explain task panicked")?
             .context("Explain use case failed")?;
 
         if !result.ambiguous_candidates.is_empty() {
@@ -65,11 +88,10 @@ impl<'a> ExplainController<'a> {
             return Ok(output);
         }
 
-        let mut output = format!(
-            "Explanation for `{}`\n{}\n\n{}\n\n---\nAnalysed {} symbols across {} call levels.\n\n",
-            result.root_symbol,
-            "═".repeat(60),
-            result.explanation,
+        // The LLM tokens have already been printed to stdout by the loop above.
+        // Build the trailing section: stats + optional source dump + file list.
+        let mut trailing = format!(
+            "\n\n---\nAnalysed {} symbols across {} call levels.\n\n",
             result.total_affected,
             result.max_depth_reached,
         );
@@ -77,11 +99,11 @@ impl<'a> ExplainController<'a> {
         if dump_symbols {
             for (symbol, repository, file_path, line, src) in &result.symbol_sources {
                 match src {
-                    Some(s) => output.push_str(&format!(
+                    Some(s) => trailing.push_str(&format!(
                         "`{}` (`{}`) — `{}:{}`\n```\n{}\n```\n\n",
                         symbol, repository, file_path, line, s
                     )),
-                    None => output.push_str(&format!(
+                    None => trailing.push_str(&format!(
                         "`{}` (`{}`) — `{}:{}` _(source not available)_\n\n",
                         symbol, repository, file_path, line
                     )),
@@ -90,16 +112,16 @@ impl<'a> ExplainController<'a> {
         }
 
         if !result.symbol_sources.is_empty() {
-            output.push_str("## Referenced files\n\n");
+            trailing.push_str("## Referenced files\n\n");
             for (symbol, repository, file_path, line, _src) in &result.symbol_sources {
-                output.push_str(&format!(
+                trailing.push_str(&format!(
                     "- `{}` `{}:{}` — `{}`\n",
                     repository, file_path, line, symbol
                 ));
             }
-            output.push('\n');
+            trailing.push('\n');
         }
 
-        Ok(output)
+        Ok(trailing)
     }
 }
