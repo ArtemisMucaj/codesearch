@@ -69,7 +69,11 @@ impl TreeSitterParser {
                 r#"
                 (function_declaration name: (identifier) @name) @function
                 (class_declaration name: (identifier) @name) @class
-                (method_definition name: (property_identifier) @name) @function
+                (class_declaration
+                  name: (identifier) @class.name
+                  body: (class_body
+                    (method_definition
+                      name: (property_identifier) @name) @function))
                 (arrow_function) @function
                 "#
             }
@@ -77,7 +81,11 @@ impl TreeSitterParser {
                 r#"
                 (function_declaration name: (identifier) @name) @function
                 (class_declaration name: (type_identifier) @name) @class
-                (method_definition name: (property_identifier) @name) @function
+                (class_declaration
+                  name: (type_identifier) @class.name
+                  body: (class_body
+                    (method_definition
+                      name: (property_identifier) @name) @function))
                 (arrow_function) @function
                 (interface_declaration name: (type_identifier) @name) @interface
                 (type_alias_declaration name: (type_identifier) @name) @typedef
@@ -101,10 +109,24 @@ impl TreeSitterParser {
             Language::Php => {
                 r#"
                 (function_definition name: (name) @name) @function
-                (method_declaration name: (name) @name) @function
                 (class_declaration name: (name) @name) @class
+                (class_declaration
+                  name: (name) @class.name
+                  body: (declaration_list
+                    (method_declaration
+                      name: (name) @name) @function))
                 (interface_declaration name: (name) @name) @interface
+                (interface_declaration
+                  name: (name) @class.name
+                  body: (declaration_list
+                    (method_declaration
+                      name: (name) @name) @function))
                 (trait_declaration name: (name) @name) @trait
+                (trait_declaration
+                  name: (name) @class.name
+                  body: (declaration_list
+                    (method_declaration
+                      name: (name) @name) @function))
                 (namespace_definition name: (namespace_name) @name) @module
                 (enum_declaration name: (name) @name) @enum
                 "#
