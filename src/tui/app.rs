@@ -849,7 +849,7 @@ impl TuiApp {
             None => return,
         };
 
-        let node_coords = {
+        let node_info = {
             let ctx = match &self.state.context.context {
                 Some(c) => c,
                 None => return,
@@ -864,13 +864,23 @@ impl TuiApp {
             };
 
             (
+                node.symbol.clone(),
                 node.repository_id.clone(),
                 node.file_path.clone(),
                 node.line,
+                node.is_callee,
             )
         };
 
-        let key = TuiCache::snippet_key(&node_coords.0, &node_coords.1, node_coords.2);
+        let (symbol, repo_id, file_path, line, is_callee) = node_info;
+
+        // Callee nodes: look up the callee's own definition by symbol name.
+        // Caller nodes: look up the call-site chunk (file_path + line).
+        let key = if is_callee {
+            TuiCache::snippet_key(&repo_id, &symbol, 0)
+        } else {
+            TuiCache::snippet_key(&repo_id, &file_path, line)
+        };
 
         if let Some(cached) = self.cache.snippets.get(&key).cloned() {
             self.state.context.chain_snippet = cached;
@@ -885,13 +895,17 @@ impl TuiApp {
         self.state.context.chain_snippet_scroll = 0;
 
         let tx = self.event_tx.clone();
-        let (repo_id, file_path, line) = node_coords;
 
         tokio::spawn(async move {
-            let result = uc
-                .get_snippet(&repo_id, &file_path, line)
-                .await
-                .map_err(|e| e.to_string());
+            let result = if is_callee {
+                uc.get_snippet_for_symbol(&repo_id, &symbol)
+                    .await
+                    .map_err(|e| e.to_string())
+            } else {
+                uc.get_snippet(&repo_id, &file_path, line)
+                    .await
+                    .map_err(|e| e.to_string())
+            };
             if let Err(e) = tx.send(TuiEvent::ContextSnippetDone { key, result }) {
                 debug!("ContextSnippetDone send failed (app already exited): {}", e);
             }

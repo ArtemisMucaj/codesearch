@@ -48,4 +48,24 @@ impl SnippetLookupUseCase {
 
         Ok(best.cloned())
     }
+
+    /// Return the definition chunk for a symbol given only its name.
+    ///
+    /// Used for callee nodes in the Context tree view where only the callee symbol
+    /// name is known — the stored `file_path`/`line` on a callee `ContextNode`
+    /// point to the call-site (inside the root symbol), not the callee's definition.
+    pub async fn get_snippet_for_symbol(
+        &self,
+        repository_id: &str,
+        symbol: &str,
+    ) -> Result<Option<CodeChunk>, DomainError> {
+        self.vector_repo
+            .find_chunk_by_symbol(repository_id, symbol)
+            .await
+            .map_err(|e| {
+                DomainError::storage(format!(
+                    "symbol snippet lookup for '{symbol}' in repository '{repository_id}': {e}"
+                ))
+            })
+    }
 }

@@ -277,11 +277,15 @@ fn build_callee_children_map<'a>(ctx: &'a SymbolContext) -> HashMap<String, Vec<
 /// A selectable node in the flattened tree.
 #[derive(Debug, Clone)]
 pub struct FlatNode {
+    pub symbol: String,
     pub repository_id: String,
     pub file_path: String,
     pub line: u32,
     /// The `lines` index this node occupies in the rendered tree (for auto-scroll).
     pub lines_index: usize,
+    /// `true` when this node is a callee of the root symbol (i.e. below ◉).
+    /// Callee snippets are looked up by symbol name rather than call-site location.
+    pub is_callee: bool,
 }
 
 /// Flatten the full context tree into a single ordered list of selectable nodes.
@@ -310,10 +314,12 @@ pub fn flat_tree_nodes(
         for (i, node) in path.iter().enumerate() {
             let lines_index = if i == 0 { 0 } else { i * 2 };
             result.push(FlatNode {
+                symbol: node.symbol.clone(),
                 repository_id: node.repository_id.clone(),
                 file_path: node.file_path.clone(),
                 line: node.line,
                 lines_index,
+                is_callee: false,
             });
         }
 
@@ -366,10 +372,12 @@ fn collect_flat_callees(
             continue;
         }
         result.push(FlatNode {
+            symbol: node.symbol.clone(),
             repository_id: node.repository_id.clone(),
             file_path: node.file_path.clone(),
             line: node.line,
             lines_index: base_lines_index + *offset,
+            is_callee: true,
         });
         *offset += 1;
         collect_flat_callees(

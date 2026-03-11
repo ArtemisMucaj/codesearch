@@ -964,4 +964,71 @@ impl VectorRepository for DuckdbVectorRepository {
         }
         Ok(chunks)
     }
+
+    async fn find_chunk_by_symbol(
+        &self,
+        repository_id: &str,
+        symbol: &str,
+    ) -> Result<Option<CodeChunk>, DomainError> {
+        let conn = self.conn.lock().await;
+
+        // Match symbol_name exactly first; fall back to a suffix match (the
+        // symbol may be stored as a fully-qualified name while callers only
+        // know the short name, or vice-versa).
+        let (sql, use_repo_filter) = if repository_id.is_empty() {
+            (
+                format!(
+                    "SELECT id, file_path, content, start_line, end_line, language, node_type, \
+                     symbol_name, parent_symbol, repository_id \
+                     FROM \"{}\".chunks \
+                     WHERE symbol_name = ? OR symbol_name LIKE ? \
+                     ORDER BY \
+                       CASE WHEN symbol_name = ? THEN 0 ELSE 1 END, \
+                       (end_line - start_line) ASC \
+                     LIMIT 1",
+                    self.namespace
+                ),
+                false,
+            )
+        } else {
+            (
+                format!(
+                    "SELECT id, file_path, content, start_line, end_line, language, node_type, \
+                     symbol_name, parent_symbol, repository_id \
+                     FROM \"{}\".chunks \
+                     WHERE (symbol_name = ? OR symbol_name LIKE ?) AND repository_id = ? \
+                     ORDER BY \
+                       CASE WHEN symbol_name = ? THEN 0 ELSE 1 END, \
+                       (end_line - start_line) ASC \
+                     LIMIT 1",
+                    self.namespace
+                ),
+                true,
+            )
+        };
+
+        let suffix_pattern = format!("%{}", symbol);
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| DomainError::storage(format!("Failed to prepare symbol lookup: {e}")))?;
+
+        let mut rows = if use_repo_filter {
+            stmt.query(params![symbol, suffix_pattern, repository_id, symbol])
+        } else {
+            stmt.query(params![symbol, suffix_pattern, symbol])
+        }
+        .map_err(|e| DomainError::storage(format!("Failed to run symbol lookup: {e}")))?;
+
+        let chunk = rows
+            .next()
+            .map_err(|e| DomainError::storage(format!("Failed to read symbol lookup row: {e}")))?
+            .map(|row| Self::row_to_chunk(row))
+            .transpose()
+            .map_err(|e| {
+                DomainError::storage(format!("Failed to parse symbol lookup chunk: {e}"))
+            })?;
+
+        Ok(chunk)
+    }
 }

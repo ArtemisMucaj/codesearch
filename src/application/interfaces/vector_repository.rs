@@ -50,6 +50,20 @@ pub trait VectorRepository: Send + Sync {
         Ok(vec![])
     }
 
+    /// Return the chunk whose `symbol_name` best matches `symbol` within a repository.
+    ///
+    /// Used by the TUI to show the definition of a callee symbol when only the symbol
+    /// name is known (not its definition file/line).  The default no-op preserves
+    /// backwards compatibility for adapters that do not need this capability.
+    async fn find_chunk_by_symbol(
+        &self,
+        repository_id: &str,
+        symbol: &str,
+    ) -> Result<Option<CodeChunk>, DomainError> {
+        let _ = (repository_id, symbol);
+        Ok(None)
+    }
+
     /// Called once after a batch of writes to finalise any deferred work
     /// (e.g. rebuilding a full-text search index). The default implementation
     /// is a no-op; backends that maintain auxiliary indexes should override it.
