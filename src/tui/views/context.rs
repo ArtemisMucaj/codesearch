@@ -30,7 +30,7 @@ fn render_entry_points(frame: &mut Frame, area: Rect, state: &AppState) {
 
     if let Some(err) = &s.error {
         let block = Block::default()
-            .title(" Entry-points ")
+            .title(" Entrypoints ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Red));
         frame.render_widget(
@@ -66,8 +66,8 @@ fn render_entry_points(frame: &mut Frame, area: Rect, state: &AppState) {
         }
     };
 
-    let title = format!("Entry-points ({})", entries.len());
-    result_list::render(frame, area, &title, &entries, s.selected);
+    let title = "Entrypoints";
+    result_list::render(frame, area, title, &entries, s.selected);
 }
 
 // ── Right pane: call context tree or code view ────────────────────────────────
