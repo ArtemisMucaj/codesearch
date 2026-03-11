@@ -177,9 +177,8 @@ fn embed_texts_impl(
     .map_err(|e| DomainError::internal(format!("Inference failed: {}", e)))?;
 
     let output_value = outputs
-        .iter()
+        .values()
         .next()
-        .map(|(_, v)| v)
         .ok_or_else(|| DomainError::internal("No output tensor found"))?;
 
     let (shape, data) = output_value.try_extract_tensor::<f32>().map_err(|e| {

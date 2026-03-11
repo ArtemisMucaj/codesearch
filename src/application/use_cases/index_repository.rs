@@ -62,7 +62,7 @@ pub struct IndexRepositoryUseCase {
     /// symbol references instead of (or as a fallback from) tree-sitter.
     scip: Option<Arc<dyn Scip>>,
     /// Maximum number of concurrent `parse_only` calls.
-    embed_concurrency: usize,
+    parse_concurrency: usize,
 }
 
 impl IndexRepositoryUseCase {
@@ -82,7 +82,7 @@ impl IndexRepositoryUseCase {
             parser_service,
             embedding_service,
             scip: None,
-            embed_concurrency: DEFAULT_PARSE_CONCURRENCY,
+            parse_concurrency: DEFAULT_PARSE_CONCURRENCY,
         }
     }
 
@@ -93,8 +93,8 @@ impl IndexRepositoryUseCase {
     }
 
     /// Set the maximum number of concurrent parse tasks.
-    pub fn with_embed_concurrency(mut self, n: usize) -> Self {
-        self.embed_concurrency = n.max(1);
+    pub fn with_parse_concurrency(mut self, n: usize) -> Self {
+        self.parse_concurrency = n.max(1);
         self
     }
 
@@ -407,7 +407,7 @@ impl IndexRepositoryUseCase {
         // because the parse phase is cheaper (I/O + tree-sitter) than
         // embedding.  4× gives a good parse pipeline depth; minimum 8 ensures
         // responsiveness on small repos.
-        let parse_concurrency = (self.embed_concurrency * 4).max(8);
+        let parse_concurrency = (self.parse_concurrency * 4).max(8);
 
         let repo_id = repository.id().to_string();
         let abs_path = absolute_path.to_path_buf();
@@ -645,7 +645,7 @@ impl IndexRepositoryUseCase {
         // just for the hash in the sequential phase.
         let current_files_snapshot = current_files.clone();
 
-        let parse_concurrency = (self.embed_concurrency * 4).max(8);
+        let parse_concurrency = (self.parse_concurrency * 4).max(8);
 
         let repo_id = repository.id().to_string();
         let abs_path = absolute_path.to_path_buf();
