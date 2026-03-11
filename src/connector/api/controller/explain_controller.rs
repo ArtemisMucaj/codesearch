@@ -1,5 +1,6 @@
-use std::io::Write as _;
 use std::sync::Arc;
+
+use tokio::io::AsyncWriteExt as _;
 
 use anyhow::{Context, Result};
 
@@ -55,12 +56,18 @@ impl<'a> ExplainController<'a> {
                 .await
         });
 
-        // Stream tokens to stdout as they arrive.  The channel is closed
-        // (recv returns None) when the use case task drops its sender, which
-        // happens naturally once complete_stream returns.
+        // Stream tokens to stdout as they arrive and collect them for the
+        // return value.  The channel is closed (recv returns None) when the
+        // use case task drops its sender, which happens naturally once
+        // complete_stream returns.
+        let mut collected = String::new();
+        let mut out = tokio::io::stdout();
         while let Some(token) = token_rx.recv().await {
-            print!("{token}");
-            std::io::stdout().flush().ok();
+            collected.push_str(&token);
+            out.write_all(token.as_bytes())
+                .await
+                .context("failed to write token to stdout")?;
+            out.flush().await.context("failed to flush stdout")?;
         }
 
         let result: crate::application::ExplainResult = use_case_handle
@@ -88,7 +95,15 @@ impl<'a> ExplainController<'a> {
             return Ok(output);
         }
 
-        // The LLM tokens have already been printed to stdout by the loop above.
+        // The LLM tokens have already been streamed to stdout by the loop above
+        // and collected into `collected`.  Use `result.explanation` as a fallback
+        // if no tokens were received (e.g. when called from a non-streaming path).
+        let explanation = if collected.is_empty() {
+            result.explanation.clone()
+        } else {
+            collected
+        };
+
         // Build the trailing section: stats + optional source dump + file list.
         let mut trailing = format!(
             "\n\n---\nAnalysed {} symbols across {} call levels.\n\n",
@@ -122,6 +137,6 @@ impl<'a> ExplainController<'a> {
             trailing.push('\n');
         }
 
-        Ok(trailing)
+        Ok(explanation + &trailing)
     }
 }

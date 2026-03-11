@@ -232,7 +232,7 @@ impl ChatClient for OpenAiChatClient {
         // Accumulate bytes until we have a complete SSE line.
         let mut buffer = String::new();
 
-        while let Some(chunk) = byte_stream.next().await {
+        'outer: while let Some(chunk) = byte_stream.next().await {
             let bytes = chunk.map_err(|e| {
                 DomainError::internal(format!("OpenAI stream read error: {e}"))
             })?;
@@ -247,7 +247,7 @@ impl ChatClient for OpenAiChatClient {
                     continue;
                 };
                 if data.trim() == "[DONE]" {
-                    break;
+                    break 'outer;
                 }
                 let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) else {
                     continue;

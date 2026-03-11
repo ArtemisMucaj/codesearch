@@ -320,9 +320,20 @@ impl ChatClient for AnthropicClient {
             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
             // Process all complete SSE events in the buffer.
-            while let Some(boundary) = buffer.find("\n\n") {
+            // Detect both LF-only ("\n\n") and CRLF ("\r\n\r\n") delimiters
+            // and choose the one that appears earliest in the buffer.
+            while let Some((boundary, delim_len)) = {
+                let lf = buffer.find("\n\n").map(|i| (i, 2usize));
+                let crlf = buffer.find("\r\n\r\n").map(|i| (i, 4usize));
+                match (lf, crlf) {
+                    (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                }
+            } {
                 let event_str = buffer[..boundary].to_string();
-                buffer = buffer[boundary + 2..].to_string();
+                buffer = buffer[boundary + delim_len..].to_string();
                 for line in event_str.lines() {
                     let Some(data) = line.strip_prefix("data: ") else {
                         continue;
