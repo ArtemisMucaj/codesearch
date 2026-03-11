@@ -23,6 +23,23 @@ pub trait VectorRepository: Send + Sync {
         file_path: &str,
     ) -> Result<u64, DomainError>;
 
+    /// Delete all chunks for a batch of file paths within a repository in a
+    /// single operation.  Returns the total number of chunks deleted.
+    ///
+    /// The default implementation calls [`delete_by_file_path`] for each path.
+    /// Adapters should override this with a single-transaction batch delete.
+    async fn delete_by_file_paths(
+        &self,
+        repository_id: &str,
+        file_paths: &[&str],
+    ) -> Result<u64, DomainError> {
+        let mut total = 0u64;
+        for path in file_paths {
+            total += self.delete_by_file_path(repository_id, path).await?;
+        }
+        Ok(total)
+    }
+
     /// Similarity search. When `query.is_text_search()` is true, implementations should
     /// additionally run keyword (BM25-style) matching and fuse both result lists via
     /// Reciprocal Rank Fusion before returning. Backends that cannot perform text

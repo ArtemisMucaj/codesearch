@@ -805,6 +805,69 @@ impl VectorRepository for DuckdbVectorRepository {
         Ok(deleted_count as u64)
     }
 
+    async fn delete_by_file_paths(
+        &self,
+        repository_id: &str,
+        file_paths: &[&str],
+    ) -> Result<u64, DomainError> {
+        if file_paths.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = self.conn.lock().await;
+        let tx = conn
+            .transaction()
+            .map_err(|e| DomainError::storage(format!("Failed to begin transaction: {}", e)))?;
+
+        let mut del_emb = tx
+            .prepare(&format!(
+                "DELETE FROM \"{ns}\".embeddings WHERE chunk_id IN \
+                 (SELECT id FROM \"{ns}\".chunks \
+                  WHERE repository_id = ? AND file_path = ?)",
+                ns = self.namespace
+            ))
+            .map_err(|e| {
+                DomainError::storage(format!("Failed to prepare batch emb delete: {}", e))
+            })?;
+        let mut del_chunk = tx
+            .prepare(&format!(
+                "DELETE FROM \"{ns}\".chunks \
+                 WHERE repository_id = ? AND file_path = ?",
+                ns = self.namespace
+            ))
+            .map_err(|e| {
+                DomainError::storage(format!("Failed to prepare batch chunk delete: {}", e))
+            })?;
+
+        let mut total = 0u64;
+        for path in file_paths {
+            del_emb
+                .execute(params![repository_id, path])
+                .map_err(|e| {
+                    DomainError::storage(format!("Failed to delete embeddings: {}", e))
+                })?;
+            total += del_chunk
+                .execute(params![repository_id, path])
+                .map_err(|e| {
+                    DomainError::storage(format!("Failed to delete chunks: {}", e))
+                })? as u64;
+        }
+
+        drop(del_emb);
+        drop(del_chunk);
+        tx.commit()
+            .map_err(|e| DomainError::storage(format!("Failed to commit: {}", e)))?;
+        self.fts_dirty.store(true, Ordering::Release);
+
+        debug!(
+            "Batch-deleted {} chunks for {} files in repository {}",
+            total,
+            file_paths.len(),
+            repository_id
+        );
+        Ok(total)
+    }
+
     async fn search(
         &self,
         query_embedding: &[f32],
