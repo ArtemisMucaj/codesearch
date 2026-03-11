@@ -504,8 +504,7 @@ impl Container {
 
     pub fn explain_use_case(&self) -> ExplainUseCase {
         ExplainUseCase::new(
-            self.impact_use_case(),
-            self.call_graph_use_case.clone(),
+            Arc::new(self.context_use_case()),
             self.snippet_lookup_use_case(),
         )
     }

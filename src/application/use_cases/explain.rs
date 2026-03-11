@@ -1,21 +1,22 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use tracing::{debug, warn};
-
-use crate::application::{CallGraphQuery, CallGraphUseCase, ChatClient};
+use crate::application::ChatClient;
 use crate::domain::DomainError;
 
-use super::impact_analysis::{ImpactAnalysisUseCase, ImpactNode};
 use super::snippet_lookup::SnippetLookupUseCase;
+use super::symbol_context::{ContextNode, SymbolContext, SymbolContextUseCase};
 
 const SYSTEM_PROMPT: &str = "\
 You are a senior software engineer performing call-flow analysis. \
-You will receive a root symbol and one or more call paths. \
-Each path lists every caller in the chain from the outermost entry point down to the root symbol, \
-with source code for each hop.
+You will receive a root symbol together with its full bidirectional call context: \
+the callers (who calls the root symbol and from where) and the callees \
+(what the root symbol itself calls). \
+Each caller path lists every symbol in the chain from the outermost entry point \
+down to the root symbol, with source code for each hop.
 
-You MUST analyse every symbol and every hop present in the provided call paths. \
+You MUST analyse every symbol and every hop present in the provided paths \
+as well as every callee listed. \
 Do not summarise or skip any symbol. \
 If multiple paths share a symbol, mention it once but note which paths it appears in.
 
@@ -26,7 +27,7 @@ Replace the example content with your actual analysis.
 
 <purpose>
 [One paragraph. State what the root symbol does and why it exists, \
-grounded in what the full call chain reveals about its role.
+grounded in what both the full caller chain and the callees reveal about its role.
 
 Example: compute_checksum validates the integrity of an incoming payload by \
 hashing its bytes with SHA-256. The call chain shows it is invoked only after \
@@ -35,8 +36,9 @@ before the record is persisted.]
 </purpose>
 
 <data_and_control_flow>
-[One entry per hop across ALL call paths, outermost caller first, root symbol last. \
-Every symbol in the provided paths must appear in at least one entry. \
+[One entry per hop across ALL caller paths (outermost caller first, root symbol last), \
+followed by one entry per direct callee of the root symbol. \
+Every symbol in the provided paths and every callee must appear here. \
 Use this format for each entry:
 
 • `<caller>` → `<callee>`
@@ -53,7 +55,9 @@ Example:
     and rejects malformed input.
 • `validate_record` → `compute_checksum`
   - Passes the validated Record to `compute_checksum(record)`, which hashes the \
-    payload bytes and compares the digest to the expected value.]
+    payload bytes and compares the digest to the expected value.
+• `compute_checksum` → `sha256_digest`  ← callee of root
+  - compute_checksum calls sha256_digest to produce the hash bytes.]
 </data_and_control_flow>
 
 <business_feature>
@@ -102,24 +106,18 @@ pub struct ExplainResult {
     pub is_regex: bool,
 }
 
-/// Orchestrates impact analysis, call-graph traversal, snippet retrieval,
+/// Orchestrates context analysis, call-graph traversal, snippet retrieval,
 /// prompt construction, and LLM invocation to produce a natural-language
-/// explanation of a symbol's call flow.
+/// explanation of a symbol's full call context (callers + callees).
 pub struct ExplainUseCase {
-    impact: ImpactAnalysisUseCase,
-    call_graph: Arc<CallGraphUseCase>,
+    context: Arc<SymbolContextUseCase>,
     snippet_lookup: SnippetLookupUseCase,
 }
 
 impl ExplainUseCase {
-    pub fn new(
-        impact: ImpactAnalysisUseCase,
-        call_graph: Arc<CallGraphUseCase>,
-        snippet_lookup: SnippetLookupUseCase,
-    ) -> Self {
+    pub fn new(context: Arc<SymbolContextUseCase>, snippet_lookup: SnippetLookupUseCase) -> Self {
         Self {
-            impact,
-            call_graph,
+            context,
             snippet_lookup,
         }
     }
@@ -128,8 +126,7 @@ impl ExplainUseCase {
     ///
     /// `chat_client` is provided by the caller so the choice of LLM backend
     /// (Anthropic, OpenAI, …) remains a connector-layer concern.
-    /// `is_regex` is forwarded to the underlying impact analysis; see
-    /// [`ImpactAnalysisUseCase::analyze`] for semantics.
+    /// `is_regex` is forwarded to the underlying context use case.
     pub async fn execute(
         &self,
         symbol: &str,
@@ -137,30 +134,31 @@ impl ExplainUseCase {
         chat_client: &dyn ChatClient,
         is_regex: bool,
     ) -> Result<ExplainResult, DomainError> {
-        let analysis = self.impact.analyze(symbol, repository, is_regex).await?;
+        let ctx = self
+            .context
+            .get_context(symbol, repository, is_regex)
+            .await?;
 
         // When the input matches multiple FQNs, ask the user to pick one before
-        // running the expensive LLM call.  There is no meaningful "explain all"
-        // mode: the root-source lookup only covers one symbol anyway, and merging
-        // callers from multiple unrelated FQNs produces a confusing result.
-        if analysis.root_symbols.len() > 1 {
+        // running the expensive LLM call.
+        if ctx.root_symbols.len() > 1 {
             return Ok(ExplainResult {
                 root_symbol: symbol.to_string(),
                 explanation: String::new(),
                 total_affected: 0,
                 max_depth_reached: 0,
                 symbol_sources: Vec::new(),
-                ambiguous_candidates: analysis.root_symbols,
+                ambiguous_candidates: ctx.root_symbols,
                 is_regex,
             });
         }
 
-        if analysis.total_affected == 0 {
+        if ctx.total_callers == 0 && ctx.total_callees == 0 {
             return Ok(ExplainResult {
                 root_symbol: symbol.to_string(),
                 explanation: format!(
-                    "No callers found for '{}'. \
-                     The symbol may be a root entry point or has not been indexed yet.",
+                    "No callers or callees found for '{}'. \
+                     The symbol may be isolated or has not been indexed yet.",
                     symbol
                 ),
                 total_affected: 0,
@@ -171,54 +169,10 @@ impl ExplainUseCase {
             });
         }
 
-        // Locate the root symbol's definition via its callees (what it calls).
-        let cg_query = match repository {
-            Some(repo_id) => CallGraphQuery::new().with_repository(repo_id),
-            None => CallGraphQuery::new(),
-        };
+        let total_affected = ctx.total_callers + ctx.total_callees;
+        let max_depth_reached = ctx.max_caller_depth.max(ctx.max_callee_depth);
 
-        let root_source = {
-            let callees = match self
-                .call_graph
-                .find_callees(&analysis.root_symbol, &cg_query)
-                .await
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        symbol = %analysis.root_symbol,
-                        "Failed to find callees for root symbol; root source will be unavailable"
-                    );
-                    Vec::new()
-                }
-            };
-            match callees.first() {
-                Some(ref_) => {
-                    let src = self
-                        .snippet_lookup
-                        .get_snippet(
-                            ref_.repository_id(),
-                            ref_.caller_file_path(),
-                            ref_.reference_line(),
-                        )
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|chunk| chunk.content().to_string());
-                    src.map(|s| (ref_.caller_file_path().to_string(), s))
-                }
-                None => None,
-            }
-        };
-
-        let (prompt, symbol_sources) = build_prompt(
-            &analysis.root_symbol,
-            root_source,
-            &analysis.by_depth,
-            &self.snippet_lookup,
-        )
-        .await;
+        let (prompt, symbol_sources) = build_prompt(&ctx, &self.snippet_lookup).await;
 
         let explanation = chat_client
             .complete(SYSTEM_PROMPT, &prompt)
@@ -226,10 +180,10 @@ impl ExplainUseCase {
             .map_err(|e| DomainError::internal(format!("LLM call failed during explain: {e}")))?;
 
         Ok(ExplainResult {
-            root_symbol: analysis.root_symbol,
+            root_symbol: ctx.symbol,
             explanation: xml_to_markdown(&explanation),
-            total_affected: analysis.total_affected,
-            max_depth_reached: analysis.max_depth_reached,
+            total_affected,
+            max_depth_reached,
             symbol_sources,
             ambiguous_candidates: Vec::new(),
             is_regex,
@@ -242,10 +196,6 @@ impl ExplainUseCase {
 // ---------------------------------------------------------------------------
 
 /// Convert an XML-tagged LLM response into Markdown sections.
-///
-/// Extracts the four expected tags and renders them under `##` headings.
-/// Falls back to returning the raw response if no recognised tags are found,
-/// so older/non-conforming model output still passes through.
 fn xml_to_markdown(s: &str) -> String {
     const SECTIONS: &[(&str, &str)] = &[
         ("purpose", "## Purpose"),
@@ -268,7 +218,6 @@ fn xml_to_markdown(s: &str) -> String {
     }
 
     if out.is_empty() {
-        // No XML tags found — fall back to stripping emphasis on the raw response.
         strip_markdown_emphasis(s)
     } else {
         out.trim_end().to_string()
@@ -284,11 +233,7 @@ fn extract_xml_tag<'a>(s: &'a str, tag: &str) -> Option<&'a str> {
     Some(&s[start..end])
 }
 
-/// Strip Markdown bold (`**text**`, `__text__`) and italic (`*text*`, `_text_`)
-/// markers from `s`, leaving the inner text intact.
-///
-/// Operates line-by-line so that fenced code blocks (` ``` `) are left
-/// untouched: lines inside a code fence are passed through verbatim.
+/// Strip Markdown bold/italic markers, leaving code spans intact.
 fn strip_markdown_emphasis(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_code_fence = false;
@@ -310,32 +255,26 @@ fn strip_markdown_emphasis(s: &str) -> String {
         out.push('\n');
     }
 
-    // Preserve the original trailing-newline behaviour.
     if !s.ends_with('\n') && out.ends_with('\n') {
         out.pop();
     }
     out
 }
 
-/// Remove paired `**` delimiters from a single line, leaving `_`, `__`, and `*` intact
-/// (underscores and single asterisks can be significant in code tokens).
 fn strip_emphasis_in_line(line: &str) -> String {
     remove_paired(line, "**")
 }
 
-/// Remove all paired occurrences of `delim` from `s`, keeping the inner text.
 fn remove_paired(s: &str, delim: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(start) = rest.find(delim) {
         out.push_str(&rest[..start]);
         rest = &rest[start + delim.len()..];
-        // Look for the closing delimiter on the same line.
         if let Some(end) = rest.find(delim) {
             out.push_str(&rest[..end]);
             rest = &rest[end + delim.len()..];
         } else {
-            // No closing delimiter — emit the opening one verbatim and stop.
             out.push_str(delim);
             break;
         }
@@ -344,32 +283,30 @@ fn remove_paired(s: &str, delim: &str) -> String {
     out
 }
 
-/// Reconstruct all call paths from the BFS result.
+/// Reconstruct all caller paths from the BFS callers result.
 ///
-/// Each path is ordered outermost-caller-first: `path[0]` is the most
-/// distant symbol from the root (the entry point), `path[last]` is the
-/// direct caller of the root symbol. The root itself is not included —
-/// it is appended by the caller when rendering the chain header.
-fn reconstruct_paths<'a>(by_depth: &'a [Vec<ImpactNode>]) -> Vec<Vec<&'a ImpactNode>> {
-    let all_nodes: Vec<&ImpactNode> = by_depth.iter().flatten().collect();
+/// Each path is ordered outermost-caller-first down to the direct caller
+/// of the root symbol. The root itself is not included in the path — it is
+/// rendered separately as the "root symbol" header.
+fn reconstruct_caller_paths(callers_by_depth: &[Vec<ContextNode>]) -> Vec<Vec<&ContextNode>> {
+    let all_nodes: Vec<&ContextNode> = callers_by_depth.iter().flatten().collect();
 
-    // children_map[sym] = nodes that list sym as their via_symbol (callers of sym).
-    let mut children_map: HashMap<&str, Vec<&ImpactNode>> = HashMap::new();
+    // children_map[sym] = nodes that list sym as their via_symbol.
+    let mut children_map: HashMap<&str, Vec<&ContextNode>> = HashMap::new();
     for node in &all_nodes {
         if let Some(via) = node.via_symbol.as_deref() {
             children_map.entry(via).or_default().push(node);
         }
     }
 
-    // Leaf nodes: no other node calls through them (outermost callers).
-    let leaf_nodes: Vec<&ImpactNode> = all_nodes
+    // Leaf nodes: outermost callers — not called by any other node in the set.
+    let leaf_nodes: Vec<&ContextNode> = all_nodes
         .iter()
         .copied()
         .filter(|n| !children_map.contains_key(n.symbol.as_str()))
         .collect();
 
-    // Lookup: (depth, symbol) → all matching nodes across all repos.
-    let mut node_by_depth_symbol: HashMap<(usize, &str), Vec<&ImpactNode>> = HashMap::new();
+    let mut node_by_depth_symbol: HashMap<(usize, &str), Vec<&ContextNode>> = HashMap::new();
     for node in &all_nodes {
         node_by_depth_symbol
             .entry((node.depth, node.symbol.as_str()))
@@ -379,9 +316,7 @@ fn reconstruct_paths<'a>(by_depth: &'a [Vec<ImpactNode>]) -> Vec<Vec<&'a ImpactN
 
     let mut paths = Vec::new();
     for leaf in leaf_nodes {
-        // Use an explicit stack so we can branch when multiple parents match.
-        // Each entry is a partial path accumulated so far plus the node to extend from.
-        let mut stack: Vec<(Vec<&ImpactNode>, &ImpactNode)> = vec![(vec![leaf], leaf)];
+        let mut stack: Vec<(Vec<&ContextNode>, &ContextNode)> = vec![(vec![leaf], leaf)];
 
         while let Some((path, current)) = stack.pop() {
             match current.via_symbol.as_deref() {
@@ -391,11 +326,8 @@ fn reconstruct_paths<'a>(by_depth: &'a [Vec<ImpactNode>]) -> Vec<Vec<&'a ImpactN
                 Some(via) => {
                     let parent_depth = current.depth.saturating_sub(1);
                     if let Some(candidates) = node_by_depth_symbol.get(&(parent_depth, via)) {
-                        // Branch for every candidate so each matching symbol
-                        // (across repos/classes) produces its own path.
                         let mut branched = false;
                         for &parent in candidates {
-                            // Cycle guard: skip if this node is already in the path.
                             if !path.iter().any(|n| std::ptr::eq(*n, parent)) {
                                 let mut new_path = path.clone();
                                 new_path.push(parent);
@@ -407,7 +339,6 @@ fn reconstruct_paths<'a>(by_depth: &'a [Vec<ImpactNode>]) -> Vec<Vec<&'a ImpactN
                             paths.push(path);
                         }
                     } else {
-                        // No parent found — save the truncated path as-is.
                         paths.push(path);
                     }
                 }
@@ -417,20 +348,54 @@ fn reconstruct_paths<'a>(by_depth: &'a [Vec<ImpactNode>]) -> Vec<Vec<&'a ImpactN
     paths
 }
 
-/// Construct the structured user prompt from the impact graph.
+/// Collect direct callees (depth == 1) for the root symbol.
+fn direct_callees(callees_by_depth: &[Vec<ContextNode>]) -> Vec<&ContextNode> {
+    callees_by_depth
+        .first()
+        .map(|v| v.iter().collect())
+        .unwrap_or_default()
+}
+
+/// Construct the structured user prompt from the full symbol context.
 ///
-/// Returns the prompt string and the list of unique symbol sources that were
-/// included — each entry is `(symbol, file_path, line, source)`.
+/// Returns the prompt string and the list of unique symbol sources included —
+/// each entry is `(symbol, file_path, line, source)`.
 async fn build_prompt(
-    root_symbol: &str,
-    root_source: Option<(String, String)>,
-    by_depth: &[Vec<ImpactNode>],
+    ctx: &SymbolContext,
     snippet_lookup: &SnippetLookupUseCase,
 ) -> (String, Vec<(String, String, u32, Option<String>)>) {
+    let root_symbol = &ctx.symbol;
     let mut prompt = format!("# Call-flow explanation request: `{root_symbol}`\n\n");
 
+    // ── Root symbol source ────────────────────────────────────────────────────
+    // Look it up via its first callee's caller_file_path if available,
+    // otherwise via its first caller's reference.
+    let root_source: Option<(String, String)> = {
+        // Prefer the caller side: first caller node stores (file_path, line)
+        // as the call-site inside the calling function — but the caller's
+        // via_symbol points back to the root, so the root's file is
+        // caller.file_path for depth-1 callers.
+        // Actually the cleanest source: look at depth-1 callee nodes —
+        // their file_path is the root's file (they are called from there).
+        // But that's the root's file at the call-site, not the definition.
+        //
+        // Best approach: use the snippet_lookup with the root symbol name directly.
+        let repo = ctx
+            .callers_by_depth
+            .first()
+            .and_then(|d| d.first())
+            .map(|n| n.repository_id.as_str())
+            .unwrap_or("");
+        snippet_lookup
+            .get_snippet_for_symbol(repo, root_symbol)
+            .await
+            .ok()
+            .flatten()
+            .map(|chunk| (chunk.file_path().to_string(), chunk.content().to_string()))
+    };
+
     match root_source {
-        Some((file_path, src)) => {
+        Some((file_path, ref src)) => {
             prompt.push_str(&format!(
                 "## Root symbol — `{root_symbol}`\n\
                  Source from `{file_path}`:\n\
@@ -440,72 +405,137 @@ async fn build_prompt(
         None => {
             prompt.push_str(&format!(
                 "## Root symbol — `{root_symbol}`\n\
-                 _(source not available — symbol may not call any other indexed symbol)_\n\n"
+                 _(source not available)_\n\n"
             ));
         }
     }
 
-    if by_depth.is_empty() {
-        return (prompt, Vec::new());
-    }
+    let caller_paths = reconstruct_caller_paths(&ctx.callers_by_depth);
+    let callees = direct_callees(&ctx.callees_by_depth);
 
-    let paths = reconstruct_paths(by_depth);
-    let total_paths = paths.len();
-
-    // Collect unique nodes to fetch source for (dedup by (symbol, file_path)).
+    // ── Collect unique nodes to fetch source for ──────────────────────────────
     let mut seen: HashSet<(&str, &str)> = HashSet::new();
-    let mut nodes_to_fetch: Vec<&ImpactNode> = Vec::new();
-    for path in &paths {
+    let mut nodes_to_fetch: Vec<(&str, &str, u32, &str, bool)> = Vec::new(); // (symbol, file, line, repo, is_callee)
+
+    for path in &caller_paths {
         for node in path {
             if seen.insert((node.symbol.as_str(), node.file_path.as_str())) {
-                nodes_to_fetch.push(node);
+                nodes_to_fetch.push((
+                    &node.symbol,
+                    &node.file_path,
+                    node.line,
+                    &node.repository_id,
+                    false,
+                ));
             }
         }
     }
-
-    // Fetch sources from the indexed store sequentially (cannot await inside a closure).
-    let mut source_cache: HashMap<(&str, &str), Option<String>> = HashMap::new();
-    for node in nodes_to_fetch {
-        match snippet_lookup
-            .get_snippet(&node.repository_id, &node.file_path, node.line)
-            .await
-        {
-            Ok(chunk) => {
-                let src = chunk.map(|c| c.content().to_string());
-                source_cache.insert((node.symbol.as_str(), node.file_path.as_str()), src);
-            }
-            Err(e) => {
-                debug!(
-                    error = %e,
-                    repository_id = %node.repository_id,
-                    file_path = %node.file_path,
-                    line = %node.line,
-                    symbol = %node.symbol,
-                    "snippet lookup failed; source will be unavailable"
-                );
-                source_cache.insert((node.symbol.as_str(), node.file_path.as_str()), None);
-            }
+    for node in &callees {
+        if seen.insert((node.symbol.as_str(), node.file_path.as_str())) {
+            nodes_to_fetch.push((
+                &node.symbol,
+                &node.file_path,
+                node.line,
+                &node.repository_id,
+                true,
+            ));
         }
     }
 
-    prompt.push_str(&format!("## Call paths ({total_paths} total)\n\n"));
+    // ── Fetch sources ─────────────────────────────────────────────────────────
+    // key: (symbol, file_path)
+    let mut source_cache: HashMap<(String, String), Option<String>> = HashMap::new();
+    for (symbol, file_path, line, repo, is_callee) in &nodes_to_fetch {
+        let key = (symbol.to_string(), file_path.to_string());
+        let result = if *is_callee {
+            snippet_lookup
+                .get_snippet_for_symbol(repo, symbol)
+                .await
+                .ok()
+                .flatten()
+                .map(|c| c.content().to_string())
+        } else {
+            snippet_lookup
+                .get_snippet(repo, file_path, *line)
+                .await
+                .ok()
+                .flatten()
+                .map(|c| c.content().to_string())
+        };
+        source_cache.insert(key, result);
+    }
 
-    // Collect the full symbol roster so the model knows exactly what to cover.
-    let mut all_symbols: Vec<String> = vec![root_symbol.to_string()];
-    let mut seen_symbols: HashSet<String> = HashSet::from([root_symbol.to_string()]);
+    // ── Caller paths section ──────────────────────────────────────────────────
+    if !caller_paths.is_empty() {
+        let total_paths = caller_paths.len();
+        prompt.push_str(&format!("## Caller paths ({total_paths} total)\n\n"));
 
-    for (i, path) in paths.iter().enumerate() {
-        let chain: String = path
-            .iter()
-            .map(|n| n.symbol.as_str())
-            .chain(std::iter::once(root_symbol))
-            .collect::<Vec<_>>()
-            .join(" → ");
-        prompt.push_str(&format!("### Path {} — `{}`\n\n", i + 1, chain));
+        let mut seen_symbols: HashSet<String> = HashSet::from([root_symbol.clone()]);
+        let mut all_symbols: Vec<String> = vec![root_symbol.clone()];
 
-        for node in path {
-            let src_block = match source_cache.get(&(node.symbol.as_str(), node.file_path.as_str()))
-            {
+        for (i, path) in caller_paths.iter().enumerate() {
+            let chain: String = path
+                .iter()
+                .map(|n| n.symbol.as_str())
+                .chain(std::iter::once(root_symbol.as_str()))
+                .collect::<Vec<_>>()
+                .join(" → ");
+            prompt.push_str(&format!("### Path {} — `{}`\n\n", i + 1, chain));
+
+            for node in path {
+                let key = (node.symbol.clone(), node.file_path.clone());
+                let src_block = match source_cache.get(&key) {
+                    Some(Some(src)) => format!("```\n{src}\n```"),
+                    _ => "_(source not available)_".to_string(),
+                };
+                prompt.push_str(&format!(
+                    "#### `{}` — `{}:{}`\n{}\n\n",
+                    node.symbol, node.file_path, node.line, src_block
+                ));
+                if seen_symbols.insert(node.symbol.clone()) {
+                    all_symbols.push(node.symbol.clone());
+                }
+            }
+        }
+
+        // ── Callees section ───────────────────────────────────────────────────
+        if !callees.is_empty() {
+            prompt.push_str(&format!(
+                "## Direct callees of `{root_symbol}` ({} total)\n\n",
+                callees.len()
+            ));
+            for node in &callees {
+                let key = (node.symbol.clone(), node.file_path.clone());
+                let src_block = match source_cache.get(&key) {
+                    Some(Some(src)) => format!("```\n{src}\n```"),
+                    _ => "_(source not available)_".to_string(),
+                };
+                prompt.push_str(&format!(
+                    "#### `{}` — `{}:{}`\n{}\n\n",
+                    node.symbol, node.file_path, node.line, src_block
+                ));
+                if seen_symbols.insert(node.symbol.clone()) {
+                    all_symbols.push(node.symbol.clone());
+                }
+            }
+        }
+
+        // Explicit checklist.
+        prompt.push_str("## Symbols you MUST cover in your response\n\n");
+        for sym in &all_symbols {
+            prompt.push_str(&format!("- `{sym}`\n"));
+        }
+        prompt.push('\n');
+    } else if !callees.is_empty() {
+        // No callers, only callees.
+        prompt.push_str(&format!(
+            "## Direct callees of `{root_symbol}` ({} total)\n\n",
+            callees.len()
+        ));
+        let mut all_symbols: Vec<String> = vec![root_symbol.clone()];
+        for node in &callees {
+            let key = (node.symbol.clone(), node.file_path.clone());
+            let src_block = match source_cache.get(&key) {
                 Some(Some(src)) => format!("```\n{src}\n```"),
                 _ => "_(source not available)_".to_string(),
             };
@@ -513,31 +543,23 @@ async fn build_prompt(
                 "#### `{}` — `{}:{}`\n{}\n\n",
                 node.symbol, node.file_path, node.line, src_block
             ));
-            if seen_symbols.insert(node.symbol.clone()) {
-                all_symbols.push(node.symbol.clone());
-            }
+            all_symbols.push(node.symbol.clone());
         }
+        prompt.push_str("## Symbols you MUST cover in your response\n\n");
+        for sym in &all_symbols {
+            prompt.push_str(&format!("- `{sym}`\n"));
+        }
+        prompt.push('\n');
     }
 
-    // Explicit checklist so the model cannot skip any symbol.
-    prompt.push_str("## Symbols you MUST cover in your response\n\n");
-    for sym in &all_symbols {
-        prompt.push_str(&format!("- `{sym}`\n"));
-    }
-    prompt.push('\n');
-
-    // Collect symbol sources in stable insertion order.
+    // ── symbol_sources for the ExplainResult ─────────────────────────────────
     let mut symbol_sources: Vec<(String, String, u32, Option<String>)> = Vec::new();
-    let mut seen2: HashSet<(&str, &str)> = HashSet::new();
-    for path in &paths {
-        for node in path {
-            if seen2.insert((node.symbol.as_str(), node.file_path.as_str())) {
-                let src = source_cache
-                    .get(&(node.symbol.as_str(), node.file_path.as_str()))
-                    .cloned()
-                    .flatten();
-                symbol_sources.push((node.symbol.clone(), node.file_path.clone(), node.line, src));
-            }
+    let mut seen3: HashSet<(String, String)> = HashSet::new();
+    for (symbol, file_path, line, _repo, _is_callee) in &nodes_to_fetch {
+        let key = (symbol.to_string(), file_path.to_string());
+        if seen3.insert(key.clone()) {
+            let src = source_cache.get(&key).cloned().flatten();
+            symbol_sources.push((symbol.to_string(), file_path.to_string(), *line, src));
         }
     }
 
