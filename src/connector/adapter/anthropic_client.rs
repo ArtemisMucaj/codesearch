@@ -12,8 +12,11 @@ pub const DEFAULT_BASE_URL: &str = "http://localhost:1234";
 const MESSAGES_PATH: &str = "/v1/messages";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 /// Default model matches the LM Studio local-first default.
-const DEFAULT_MODEL: &str = "qwen3.5-4b";
-const MAX_TOKENS: u32 = 4096;
+const DEFAULT_MODEL: &str = "mistralai/ministral-3-3b";
+/// Budget is set high so that thinking-mode models (e.g. Qwen with extended
+/// thinking) can spend tokens on their `<think>` pass without exhausting the
+/// budget before the actual XML response is written.
+const MAX_TOKENS: u32 = 16_384;
 
 #[derive(Serialize)]
 struct ApiRequest<'a> {
@@ -34,9 +37,26 @@ struct ApiResponse {
     content: Vec<ContentBlock>,
 }
 
+/// A single item in the Anthropic `content` array.
+///
+/// Models running in thinking mode (e.g. Qwen with extended thinking) emit a
+/// `{"type":"thinking","thinking":"..."}` block **before** the real
+/// `{"type":"text","text":"..."}` block.  Serde will fail on the whole array
+/// if it encounters an unknown type, so we enumerate all known variants and
+/// add a catch-all for anything else.
 #[derive(Deserialize)]
-struct ContentBlock {
-    text: String,
+#[serde(tag = "type", rename_all = "lowercase")]
+enum ContentBlock {
+    /// The actual model response we care about.
+    Text { text: String },
+    /// Thinking / scratchpad block emitted by reasoning models — discarded.
+    Thinking {
+        #[allow(dead_code)]
+        thinking: String,
+    },
+    /// Any other block type (e.g. `tool_use`, future variants) — discarded.
+    #[serde(other)]
+    Unknown,
 }
 
 /// HTTP client for the Anthropic Messages API (and compatible endpoints such as
@@ -104,7 +124,7 @@ impl AnthropicClient {
     /// | Variable             | Default                   | Purpose                   |
     /// |----------------------|---------------------------|---------------------------|
     /// | `ANTHROPIC_BASE_URL` | `http://localhost:1234`   | LM Studio / any server    |
-    /// | `ANTHROPIC_MODEL`    | `qwen/qwen3.5-4b`          | Model in LM Studio       |
+    /// | `ANTHROPIC_MODEL`    | `mistralai/ministral-3-3b` | Model in LM Studio       |
     /// | `ANTHROPIC_API_KEY`  | `""` (empty)              | Not required for local    |
     pub fn from_env() -> Self {
         let base =
@@ -198,8 +218,11 @@ impl ChatClient for AnthropicClient {
         Ok(api_response
             .content
             .into_iter()
-            .next()
-            .map(|b| b.text)
-            .unwrap_or_default())
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(""))
     }
 }
