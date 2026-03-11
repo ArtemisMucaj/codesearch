@@ -509,11 +509,7 @@ impl TuiApp {
             .search
             .results
             .get(self.state.search.selected)
-            .and_then(|r| {
-                r.chunk()
-                    .qualified_name()
-                    .or_else(|| r.chunk().symbol_name().map(str::to_string))
-            });
+            .and_then(|r| r.chunk().symbol_name().map(str::to_string));
 
         if let Some(sym) = symbol {
             self.state.impact.cursor = sym.chars().count();
@@ -540,11 +536,7 @@ impl TuiApp {
         }
         let (symbol, result_repo) = {
             let result = self.state.search.results.get(self.state.search.selected);
-            let sym = result.and_then(|r| {
-                r.chunk()
-                    .qualified_name()
-                    .or_else(|| r.chunk().symbol_name().map(str::to_string))
-            });
+            let sym = result.and_then(|r| r.chunk().symbol_name().map(str::to_string));
             let repo = result.map(|r| r.chunk().repository_id().to_owned());
             (sym, repo)
         };
