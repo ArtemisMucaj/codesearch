@@ -972,19 +972,14 @@ impl VectorRepository for DuckdbVectorRepository {
     ) -> Result<Option<CodeChunk>, DomainError> {
         let conn = self.conn.lock().await;
 
-        // Match symbol_name exactly first; fall back to a suffix match (the
-        // symbol may be stored as a fully-qualified name while callers only
-        // know the short name, or vice-versa).
         let (sql, use_repo_filter) = if repository_id.is_empty() {
             (
                 format!(
                     "SELECT id, file_path, content, start_line, end_line, language, node_type, \
                      symbol_name, parent_symbol, repository_id \
                      FROM \"{}\".chunks \
-                     WHERE symbol_name = ? OR symbol_name LIKE ? \
-                     ORDER BY \
-                       CASE WHEN symbol_name = ? THEN 0 ELSE 1 END, \
-                       (end_line - start_line) ASC \
+                     WHERE symbol_name = ? \
+                     ORDER BY (end_line - start_line) ASC \
                      LIMIT 1",
                     self.namespace
                 ),
@@ -996,10 +991,8 @@ impl VectorRepository for DuckdbVectorRepository {
                     "SELECT id, file_path, content, start_line, end_line, language, node_type, \
                      symbol_name, parent_symbol, repository_id \
                      FROM \"{}\".chunks \
-                     WHERE (symbol_name = ? OR symbol_name LIKE ?) AND repository_id = ? \
-                     ORDER BY \
-                       CASE WHEN symbol_name = ? THEN 0 ELSE 1 END, \
-                       (end_line - start_line) ASC \
+                     WHERE symbol_name = ? AND repository_id = ? \
+                     ORDER BY (end_line - start_line) ASC \
                      LIMIT 1",
                     self.namespace
                 ),
@@ -1007,16 +1000,14 @@ impl VectorRepository for DuckdbVectorRepository {
             )
         };
 
-        let suffix_pattern = format!("%{}", symbol);
-
         let mut stmt = conn
             .prepare(&sql)
             .map_err(|e| DomainError::storage(format!("Failed to prepare symbol lookup: {e}")))?;
 
         let mut rows = if use_repo_filter {
-            stmt.query(params![symbol, suffix_pattern, repository_id, symbol])
+            stmt.query(params![symbol, repository_id])
         } else {
-            stmt.query(params![symbol, suffix_pattern, symbol])
+            stmt.query(params![symbol])
         }
         .map_err(|e| DomainError::storage(format!("Failed to run symbol lookup: {e}")))?;
 

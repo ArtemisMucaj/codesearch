@@ -3,7 +3,32 @@ use std::sync::Arc;
 use crate::application::VectorRepository;
 use crate::domain::{CodeChunk, DomainError};
 
-/// Retrieves an indexed [`CodeChunk`] for a reference location shown in the TUI.
+/// Extract the short (unqualified) name from a fully-qualified symbol.
+///
+/// Handles the SCIP/tree-sitter FQN conventions used in the call graph:
+/// - `Namespace\Class#method`  → `method`
+/// - `Namespace\Class`         → `Class`
+/// - `crate::module::fn`       → `fn`
+fn short_symbol_name(symbol: &str) -> &str {
+    // SCIP method notation: take everything after the last `#`
+    if let Some(pos) = symbol.rfind('#') {
+        return &symbol[pos + 1..];
+    }
+    // PHP/namespace backslash separator
+    if let Some(pos) = symbol.rfind('\\') {
+        return &symbol[pos + 1..];
+    }
+    // Rust/Go double-colon separator
+    if let Some(pos) = symbol.rfind("::") {
+        return &symbol[pos + 2..];
+    }
+    // Dot separator (Java, Python, JS)
+    if let Some(pos) = symbol.rfind('.') {
+        return &symbol[pos + 1..];
+    }
+    symbol
+}
+
 ///
 /// Given a file path and a line number (as returned by [`ContextNode`] or
 /// [`ImpactNode`]), this use case queries the vector store for the chunks that
@@ -59,12 +84,16 @@ impl SnippetLookupUseCase {
         repository_id: &str,
         symbol: &str,
     ) -> Result<Option<CodeChunk>, DomainError> {
+        // Chunks store only the short (unqualified) name. Strip any FQN prefix
+        // before querying so `Namespace\Class#method` looks up as `method`.
+        let short = short_symbol_name(symbol);
         self.vector_repo
-            .find_chunk_by_symbol(repository_id, symbol)
+            .find_chunk_by_symbol(repository_id, short)
             .await
             .map_err(|e| {
                 DomainError::storage(format!(
-                    "symbol snippet lookup for '{symbol}' in repository '{repository_id}': {e}"
+                    "symbol snippet lookup for '{symbol}' (short: '{short}') \
+                     in repository '{repository_id}': {e}"
                 ))
             })
     }
