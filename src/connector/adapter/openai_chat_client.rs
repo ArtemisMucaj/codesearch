@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, warn};
 
 use crate::connector::adapter::ChatClient;
@@ -38,6 +40,22 @@ struct ChatChoice {
 #[derive(Deserialize)]
 struct ChatResponseMessage {
     content: String,
+}
+
+/// A single chunk from an OpenAI-compatible streaming response.
+#[derive(Deserialize)]
+struct StreamChunk {
+    choices: Vec<StreamChoice>,
+}
+
+#[derive(Deserialize)]
+struct StreamChoice {
+    delta: StreamDelta,
+}
+
+#[derive(Deserialize)]
+struct StreamDelta {
+    content: Option<String>,
 }
 
 /// [`ChatClient`] implementation targeting the OpenAI-compatible
@@ -164,5 +182,88 @@ impl ChatClient for OpenAiChatClient {
             .next()
             .map(|c| c.message.content)
             .ok_or_else(|| DomainError::internal("OpenAI chat returned no choices"))
+    }
+
+    async fn complete_stream(
+        &self,
+        system: &str,
+        user: &str,
+        token_tx: UnboundedSender<String>,
+    ) -> Result<String, DomainError> {
+        let body = ChatRequest {
+            model: self.model.clone(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: system.to_string(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: user.to_string(),
+                },
+            ],
+            temperature: 0.0,
+            stream: true,
+        };
+
+        let resp = self
+            .client
+            .post(&self.url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                DomainError::internal(format!("OpenAI chat stream request failed: {e}"))
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = match resp.text().await {
+                Ok(t) => t,
+                Err(e) => format!("<failed to read body: {e}>"),
+            };
+            return Err(DomainError::internal(format!(
+                "OpenAI chat API returned {status}: {body}"
+            )));
+        }
+
+        let mut byte_stream = resp.bytes_stream();
+        let mut full_text = String::new();
+        // Accumulate bytes until we have a complete SSE line.
+        let mut buffer = String::new();
+
+        'outer: while let Some(chunk) = byte_stream.next().await {
+            let bytes = chunk.map_err(|e| {
+                DomainError::internal(format!("OpenAI stream read error: {e}"))
+            })?;
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+            // Process all complete lines in the buffer.
+            while let Some(newline) = buffer.find('\n') {
+                let line = buffer[..newline].trim_end_matches('\r').to_string();
+                buffer = buffer[newline + 1..].to_string();
+
+                let Some(data) = line.strip_prefix("data: ") else {
+                    continue;
+                };
+                if data.trim() == "[DONE]" {
+                    break 'outer;
+                }
+                let Ok(chunk) = serde_json::from_str::<StreamChunk>(data) else {
+                    continue;
+                };
+                if let Some(text) = chunk
+                    .choices
+                    .into_iter()
+                    .next()
+                    .and_then(|c| c.delta.content)
+                {
+                    full_text.push_str(&text);
+                    let _ = token_tx.send(text);
+                }
+            }
+        }
+
+        Ok(full_text)
     }
 }

@@ -189,6 +189,75 @@ impl ExplainUseCase {
             is_regex,
         })
     }
+
+    /// Run the full explain pipeline with streaming LLM output.
+    ///
+    /// Identical to [`Self::execute`] except that LLM tokens are forwarded to
+    /// `token_tx` as they arrive.  The returned [`ExplainResult`] contains the
+    /// complete (post-processed) explanation once the stream is exhausted.
+    pub async fn execute_streaming(
+        &self,
+        symbol: &str,
+        repository: Option<&str>,
+        chat_client: &dyn ChatClient,
+        is_regex: bool,
+        token_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<ExplainResult, DomainError> {
+        let ctx = self
+            .context
+            .get_context(symbol, repository, is_regex)
+            .await?;
+
+        if ctx.root_symbols.len() > 1 {
+            return Ok(ExplainResult {
+                root_symbol: symbol.to_string(),
+                explanation: String::new(),
+                total_affected: 0,
+                max_depth_reached: 0,
+                symbol_sources: Vec::new(),
+                ambiguous_candidates: ctx.root_symbols,
+                is_regex,
+            });
+        }
+
+        if ctx.total_callers == 0 && ctx.total_callees == 0 {
+            return Ok(ExplainResult {
+                root_symbol: symbol.to_string(),
+                explanation: format!(
+                    "No callers or callees found for '{}'. \
+                     The symbol may be isolated or has not been indexed yet.",
+                    symbol
+                ),
+                total_affected: 0,
+                max_depth_reached: 0,
+                symbol_sources: Vec::new(),
+                ambiguous_candidates: Vec::new(),
+                is_regex,
+            });
+        }
+
+        let total_affected = ctx.total_callers + ctx.total_callees;
+        let max_depth_reached = ctx.max_caller_depth.max(ctx.max_callee_depth);
+
+        let (prompt, symbol_sources) = build_prompt(&ctx, &self.snippet_lookup).await;
+
+        let raw_explanation = chat_client
+            .complete_stream(SYSTEM_PROMPT, &prompt, token_tx)
+            .await
+            .map_err(|e| {
+                DomainError::internal(format!("LLM stream call failed during explain: {e}"))
+            })?;
+
+        Ok(ExplainResult {
+            root_symbol: ctx.symbol,
+            explanation: xml_to_markdown(&raw_explanation),
+            total_affected,
+            max_depth_reached,
+            symbol_sources,
+            ambiguous_candidates: Vec::new(),
+            is_regex,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

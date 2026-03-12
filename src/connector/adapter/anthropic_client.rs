@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::warn;
 
 use crate::connector::adapter::ChatClient;
@@ -24,6 +26,15 @@ struct ApiRequest<'a> {
     max_tokens: u32,
     system: &'a str,
     messages: Vec<ApiMessage<'a>>,
+}
+
+#[derive(Serialize)]
+struct ApiStreamRequest<'a> {
+    model: &'a str,
+    max_tokens: u32,
+    system: &'a str,
+    messages: Vec<ApiMessage<'a>>,
+    stream: bool,
 }
 
 #[derive(Serialize)]
@@ -57,6 +68,30 @@ enum ContentBlock {
     /// Any other block type (e.g. `tool_use`, future variants) — discarded.
     #[serde(other)]
     Unknown,
+}
+
+/// SSE event emitted by the Anthropic streaming API.
+///
+/// Only `content_block_delta` events with a `text_delta` are meaningful to us;
+/// all other event types are silently discarded.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum StreamEvent {
+    ContentBlockDelta {
+        #[allow(dead_code)]
+        index: u32,
+        delta: StreamDelta,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum StreamDelta {
+    TextDelta { text: String },
+    #[serde(other)]
+    Other,
 }
 
 /// HTTP client for the Anthropic Messages API (and compatible endpoints such as
@@ -138,18 +173,12 @@ impl AnthropicClient {
     pub fn configured_base_url(&self) -> &str {
         self.base_url.trim_end_matches('/')
     }
-}
 
-#[async_trait]
-impl ChatClient for AnthropicClient {
-    async fn complete(&self, system: &str, user: &str) -> Result<String, DomainError> {
-        // Connectivity probe — runs exactly once; result is cached for all
-        // subsequent calls.  On connection-refused / timeout we fail fast
-        // instead of hanging for the full 300-second request timeout.
-        // Any HTTP response (even 4xx/5xx) means the server is up.
+    /// Run the connectivity probe exactly once and return the cached result.
+    async fn probe(&self) -> Result<(), DomainError> {
         let probe_client = &self.probe_client;
         let base_url = &self.base_url;
-        let probe = self
+        let outcome = self
             .reachable
             .get_or_init(|| async move {
                 match probe_client.head(base_url).send().await {
@@ -171,9 +200,17 @@ impl ChatClient for AnthropicClient {
                 }
             })
             .await;
-        if let Err(msg) = probe {
+        if let Err(msg) = outcome {
             return Err(DomainError::StorageError(format!("AnthropicClient: {msg}")));
         }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ChatClient for AnthropicClient {
+    async fn complete(&self, system: &str, user: &str) -> Result<String, DomainError> {
+        self.probe().await?;
 
         let request = ApiRequest {
             model: &self.model,
@@ -224,5 +261,98 @@ impl ChatClient for AnthropicClient {
             })
             .collect::<Vec<_>>()
             .join(""))
+    }
+
+    async fn complete_stream(
+        &self,
+        system: &str,
+        user: &str,
+        token_tx: UnboundedSender<String>,
+    ) -> Result<String, DomainError> {
+        self.probe().await?;
+
+        let request = ApiStreamRequest {
+            model: &self.model,
+            max_tokens: MAX_TOKENS,
+            system,
+            messages: vec![ApiMessage {
+                role: "user",
+                content: user,
+            }],
+            stream: true,
+        };
+
+        let response = self
+            .client
+            .post(&self.url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_API_VERSION)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| {
+                DomainError::StorageError(format!("AnthropicClient: request failed: {e}"))
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            let total = body.len();
+            let snippet = match body.char_indices().nth(1000) {
+                Some((i, _)) => format!("{}...(truncated, total {total} bytes)", &body[..i]),
+                None => body,
+            };
+            warn!("AnthropicClient: API returned {status}: {snippet}");
+            return Err(DomainError::StorageError(format!(
+                "AnthropicClient: API returned {status}"
+            )));
+        }
+
+        let mut byte_stream = response.bytes_stream();
+        let mut full_text = String::new();
+        // Accumulate bytes until we have a complete SSE event (terminated by \n\n).
+        let mut buffer = String::new();
+
+        while let Some(chunk) = byte_stream.next().await {
+            let bytes = chunk.map_err(|e| {
+                DomainError::StorageError(format!("AnthropicClient: stream read error: {e}"))
+            })?;
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+            // Process all complete SSE events in the buffer.
+            // Detect both LF-only ("\n\n") and CRLF ("\r\n\r\n") delimiters
+            // and choose the one that appears earliest in the buffer.
+            while let Some((boundary, delim_len)) = {
+                let lf = buffer.find("\n\n").map(|i| (i, 2usize));
+                let crlf = buffer.find("\r\n\r\n").map(|i| (i, 4usize));
+                match (lf, crlf) {
+                    (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                }
+            } {
+                let event_str = buffer[..boundary].to_string();
+                buffer = buffer[boundary + delim_len..].to_string();
+                for line in event_str.lines() {
+                    let Some(data) = line.strip_prefix("data: ") else {
+                        continue;
+                    };
+                    let Ok(event) = serde_json::from_str::<StreamEvent>(data) else {
+                        continue;
+                    };
+                    if let StreamEvent::ContentBlockDelta {
+                        delta: StreamDelta::TextDelta { text },
+                        ..
+                    } = event
+                    {
+                        full_text.push_str(&text);
+                        let _ = token_tx.send(text);
+                    }
+                }
+            }
+        }
+
+        Ok(full_text)
     }
 }
