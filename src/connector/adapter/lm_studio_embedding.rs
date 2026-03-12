@@ -151,7 +151,11 @@ impl LmStudioEmbedding {
 #[async_trait]
 impl EmbeddingService for LmStudioEmbedding {
     async fn embed_chunk(&self, chunk: &CodeChunk) -> Result<Embedding, DomainError> {
-        let text = format!("{} {}", chunk.symbol_name().unwrap_or(""), chunk.content());
+        let text = format!(
+            "{} {}",
+            chunk.qualified_name().as_deref().unwrap_or(""),
+            chunk.content()
+        );
         let vectors = self.embed_texts(vec![text]).await?;
         Ok(Embedding::new(
             chunk.id().to_string(),
@@ -170,7 +174,13 @@ impl EmbeddingService for LmStudioEmbedding {
         for batch in chunks.chunks(BATCH_SIZE) {
             let texts: Vec<String> = batch
                 .iter()
-                .map(|c| format!("{} {}", c.symbol_name().unwrap_or(""), c.content()))
+                .map(|c| {
+                    format!(
+                        "{} {}",
+                        c.qualified_name().as_deref().unwrap_or(""),
+                        c.content()
+                    )
+                })
                 .collect();
 
             let vectors = self.embed_texts(texts).await?;

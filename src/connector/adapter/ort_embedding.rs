@@ -258,7 +258,11 @@ fn embed_texts_impl(
 #[async_trait]
 impl EmbeddingService for OrtEmbedding {
     async fn embed_chunk(&self, chunk: &CodeChunk) -> Result<Embedding, DomainError> {
-        let text = format!("{} {}", chunk.symbol_name().unwrap_or(""), chunk.content());
+        let text = format!(
+            "{} {}",
+            chunk.qualified_name().as_deref().unwrap_or(""),
+            chunk.content()
+        );
         let session = Arc::clone(&self.session);
         let tokenizer = Arc::clone(&self.tokenizer);
         let max_seq = self.config.max_sequence_length();
@@ -290,7 +294,13 @@ impl EmbeddingService for OrtEmbedding {
         for batch in chunks.chunks(BATCH_SIZE) {
             let texts: Vec<String> = batch
                 .iter()
-                .map(|c| format!("{} {}", c.symbol_name().unwrap_or(""), c.content()))
+                .map(|c| {
+                    format!(
+                        "{} {}",
+                        c.qualified_name().as_deref().unwrap_or(""),
+                        c.content()
+                    )
+                })
                 .collect();
 
             let session = Arc::clone(&self.session);

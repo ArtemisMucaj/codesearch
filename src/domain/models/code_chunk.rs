@@ -162,6 +162,33 @@ impl CodeChunk {
             _ => None,
         }
     }
+
+    /// Returns the symbol name in the format used by the call graph (SCIP-derived).
+    ///
+    /// SCIP uses language-specific separators between class and member:
+    /// - TypeScript / JavaScript / PHP: `ClassName#method`
+    /// - C++ / Rust: `ClassName::method`
+    /// - Python / Go / Kotlin: `ClassName.method`
+    ///
+    /// Falls back to `symbol_name` when no parent is present.  The suffix
+    /// resolver in `resolve_symbols` performs word-boundary matching, so a
+    /// bare `method_name` input still finds `Namespace\ClassName#method_name`
+    /// in the database; passing the full class-qualified form simply keeps
+    /// the resolver on the fast exact-match path without a fuzzy fallback.
+    pub fn call_graph_name(&self) -> Option<String> {
+        match (&self.parent_symbol, &self.symbol_name) {
+            (Some(parent), Some(name)) => {
+                let sep = match self.language {
+                    Language::TypeScript | Language::JavaScript | Language::Php => "#",
+                    Language::Python | Language::Go | Language::Kotlin => ".",
+                    _ => "::",
+                };
+                Some(format!("{}{}{}", parent, sep, name))
+            }
+            (None, Some(name)) => Some(name.clone()),
+            _ => None,
+        }
+    }
 }
 
 /// Represents the type of code construct.
