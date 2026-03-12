@@ -476,6 +476,10 @@ impl Container {
         ListRepositoriesUseCase::new(self.repo_adapter.clone())
     }
 
+    pub fn metadata_repository(&self) -> Arc<dyn crate::application::MetadataRepository> {
+        self.repo_adapter.clone()
+    }
+
     pub fn delete_use_case(&self) -> DeleteRepositoryUseCase {
         DeleteRepositoryUseCase::new(
             self.repo_adapter.clone(),
