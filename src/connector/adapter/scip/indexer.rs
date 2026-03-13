@@ -81,7 +81,10 @@ impl ScipIndexer {
             ));
         }
 
-        let output_path = repo_path.join("index.scip");
+        let output_path = repo_path.join(match kind {
+            IndexerKind::TypeScript => "index-typescript.scip",
+            IndexerKind::Php => "index-php.scip",
+        });
         info!("Running {} in {:?}", kind.display_name(), repo_path);
 
         let result = tokio::process::Command::new(kind.binary())
@@ -109,11 +112,18 @@ impl ScipIndexer {
             }
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let output_msg = match (stdout.trim(), stderr.trim()) {
+                    ("", "") => "(no output)".to_string(),
+                    ("", e) => e.to_string(),
+                    (o, "") => o.to_string(),
+                    (o, e) => format!("stdout: {o}\nstderr: {e}"),
+                };
                 Err(anyhow!(
-                    "{} failed (exit {:?}): {}",
+                    "{} failed (exit {:?}):\n{}",
                     kind.display_name(),
                     output.status.code(),
-                    stderr.trim()
+                    output_msg
                 ))
             }
             Err(e) => Err(anyhow!("failed to spawn {}: {}", kind.binary(), e)),

@@ -704,12 +704,15 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
                 // `#`, `/`, `\` (PHP/JS namespaces), `::` (Rust/C++), `.`
                 // (Python/Java), or be the entire string.  LIMIT is NOT in the
                 // SQL for suffix mode, so we enforce it here after filtering.
+                //
+                // SCIP method descriptors append `().` after the name (e.g.
+                // `Home#canDestroy().`), so we also accept that suffix.
                 if symbol == short_name
-                    || symbol.ends_with(&format!("#{}", short_name))
-                    || symbol.ends_with(&format!("/{}", short_name))
-                    || symbol.ends_with(&format!("\\{}", short_name))
-                    || symbol.ends_with(&format!("::{}", short_name))
-                    || symbol.ends_with(&format!(".{}", short_name))
+                    || scip_boundary_match(&symbol, "#", short_name)
+                    || scip_boundary_match(&symbol, "/", short_name)
+                    || scip_boundary_match(&symbol, "\\", short_name)
+                    || scip_boundary_match(&symbol, "::", short_name)
+                    || scip_boundary_match(&symbol, ".", short_name)
                 {
                     results.push(symbol);
                     if results.len() >= resolve_limit as usize {
@@ -720,6 +723,21 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
         }
 
         Ok(results)
+    }
+}
+
+/// Returns `true` if `symbol` contains `sep + name` at a word boundary,
+/// optionally followed by a SCIP method descriptor suffix (`()`, `().`).
+///
+/// This handles both plain symbols (`Home#canDestroy`) and SCIP-style
+/// method descriptors (`Home#canDestroy().`) uniformly.
+fn scip_boundary_match(symbol: &str, sep: &str, name: &str) -> bool {
+    let needle = format!("{}{}", sep, name);
+    if let Some(pos) = symbol.rfind(&needle) {
+        let after = &symbol[pos + needle.len()..];
+        matches!(after, "" | "()" | "().")
+    } else {
+        false
     }
 }
 
