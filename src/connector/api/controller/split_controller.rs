@@ -13,9 +13,46 @@ impl<'a> SplitController<'a> {
         Self { container }
     }
 
+    /// Resolve a user-supplied string to a repository ID.
+    ///
+    /// Tries an exact match against ID first, then falls back to a
+    /// case-insensitive match against repository name.
+    async fn resolve_repo_id(&self, name_or_id: &str) -> Result<String> {
+        let repos = self
+            .container
+            .metadata_repository()
+            .list()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list repositories: {e}"))?;
+
+        // Exact ID match
+        if let Some(r) = repos.iter().find(|r| r.id().to_string() == name_or_id) {
+            return Ok(r.id().to_string());
+        }
+
+        // Case-insensitive name match
+        let lower = name_or_id.to_lowercase();
+        if let Some(r) = repos.iter().find(|r| r.name().to_lowercase() == lower) {
+            return Ok(r.id().to_string());
+        }
+
+        let available = repos
+            .iter()
+            .map(|r| format!("  {} (id: {})", r.name(), r.id()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Err(anyhow::anyhow!(
+            "Repository '{}' not found.\nAvailable repositories:\n{}",
+            name_or_id,
+            if available.is_empty() { "  (none indexed yet)".to_string() } else { available }
+        ))
+    }
+
     pub async fn split(&self, repository: String, format: GraphFormat) -> Result<String> {
+        // Accept either a repository ID or a repository name.
+        let target_id = self.resolve_repo_id(&repository).await?;
         let use_case = self.container.split_analysis_use_case();
-        let analysis = use_case.analyse(&repository).await?;
+        let analysis = use_case.analyse(&target_id).await?;
 
         match format {
             GraphFormat::Html => Ok(format_html(&analysis)),
