@@ -1,5 +1,17 @@
 use clap::{Subcommand, ValueEnum};
 
+/// Output format for the file relationship graph.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum GraphFormat {
+    /// Graphviz DOT language — pipe to `dot -Tsvg` to render (default).
+    #[default]
+    Dot,
+    /// Mermaid diagram syntax — paste into any Mermaid renderer or GitHub markdown.
+    Mermaid,
+    /// JSON — structured data for programmatic consumption.
+    Json,
+}
+
 /// Output format for search results.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 pub enum OutputFormat {
@@ -188,6 +200,36 @@ pub enum Commands {
         /// you want to control anchoring yourself (e.g. "^MyNs/.*Service#get$").
         #[arg(long)]
         regex: bool,
+    },
+
+    /// Visualise file-level dependency relationships as a graph.
+    ///
+    /// Edges are drawn from a file that makes symbol references to the file that
+    /// defines those symbols.  Repositories are shown as cluster boundaries so
+    /// you can see at a glance which files live together and which cross repo
+    /// lines.
+    ///
+    /// Pipe DOT output through Graphviz to produce an image:
+    ///   codesearch graph | dot -Tsvg -o deps.svg && open deps.svg
+    Graph {
+        /// Restrict the graph to one or more repository IDs (may be repeated).
+        /// When omitted every indexed repository is included.
+        #[arg(short, long)]
+        repository: Option<Vec<String>>,
+
+        /// Output format: dot (Graphviz), mermaid, or json.
+        #[arg(short = 'F', long, value_enum, default_value = "dot")]
+        format: GraphFormat,
+
+        /// Only include edges with at least this many symbol references.
+        /// Raising the threshold reduces noise in dense codebases.
+        #[arg(long, default_value = "1")]
+        min_weight: usize,
+
+        /// Also include edges that cross repository boundaries.
+        /// By default only intra-repository edges are shown.
+        #[arg(long)]
+        cross_repo: bool,
     },
 
     /// Start MCP (Model Context Protocol) server for integration with AI tools

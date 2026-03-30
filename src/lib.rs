@@ -7,13 +7,15 @@ pub mod tui;
 pub use application::{
     CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase, ChatClient, ContextNode,
     DeleteRepositoryUseCase, EmbeddingService, ExplainResult, ExplainUseCase, FileHashRepository,
-    ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode, IndexRepositoryUseCase,
-    ListRepositoriesUseCase, MetadataRepository, ParserService, QueryExpander, RerankingService,
-    Scip, SearchCodeUseCase, SnippetLookupUseCase, SymbolContext, SymbolContextUseCase,
-    VectorRepository,
+    FileRelationshipUseCase, ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode,
+    IndexRepositoryUseCase, ListRepositoriesUseCase, MetadataRepository, ParserService,
+    QueryExpander, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase, SymbolContext,
+    SymbolContextUseCase, VectorRepository,
 };
 
-pub use cli::{Commands, EmbeddingTarget, LlmTarget, OutputFormat, RerankingTarget, TuiMode};
+pub use cli::{
+    Commands, EmbeddingTarget, GraphFormat, LlmTarget, OutputFormat, RerankingTarget, TuiMode,
+};
 
 pub use connector::{
     AnthropicClient, AnthropicReranking, DuckdbCallGraphRepository, DuckdbFileHashRepository,
@@ -23,9 +25,9 @@ pub use connector::{
 };
 
 pub use domain::{
-    compute_file_hash, CodeChunk, DomainError, Embedding, EmbeddingConfig, FileHash,
-    IndexingStatus, Language, NodeType, ReferenceKind, Repository, SearchQuery, SearchResult,
-    SymbolReference, VectorStore,
+    compute_file_hash, CodeChunk, DomainError, Embedding, EmbeddingConfig, FileEdge, FileGraph,
+    FileGraphRepo, FileHash, IndexingStatus, Language, NodeType, ReferenceKind, Repository,
+    SearchQuery, SearchResult, SymbolReference, VectorStore,
 };
 
 pub use connector::api::{Container, ContainerConfig, Router};

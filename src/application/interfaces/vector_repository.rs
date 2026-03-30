@@ -85,6 +85,21 @@ pub trait VectorRepository: Send + Sync {
         Ok(None)
     }
 
+    /// Return `(symbol_name, file_path)` pairs for every chunk in `repository_id`
+    /// that has a non-null `symbol_name`.
+    ///
+    /// Used by the file-relationship graph to map callee symbol names back to the
+    /// source files that define them.  The default no-op returns an empty list so
+    /// adapters that do not support this operation (e.g. the in-memory mock) still
+    /// compile without changes.
+    async fn get_symbol_to_file_map(
+        &self,
+        repository_id: &str,
+    ) -> Result<Vec<(String, String)>, DomainError> {
+        let _ = repository_id;
+        Ok(vec![])
+    }
+
     /// Called once after a batch of writes to finalise any deferred work
     /// (e.g. rebuilding a full-text search index). The default implementation
     /// is a no-op; backends that maintain auxiliary indexes should override it.

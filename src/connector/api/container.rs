@@ -14,11 +14,11 @@ use crate::connector::adapter::NamespaceEmbeddingConfig;
 use crate::{
     AnthropicClient, AnthropicReranking, DeleteRepositoryUseCase, DuckdbCallGraphRepository,
     DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
-    ExplainUseCase, ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
-    ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding, MockReranking, OpenAiChatClient,
-    OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, RerankingService, Scip,
-    SearchCodeUseCase, SnippetLookupUseCase, SymbolContextUseCase, TreeSitterParser,
-    VectorRepository,
+    ExplainUseCase, FileRelationshipUseCase, ImpactAnalysisUseCase, InMemoryVectorRepository,
+    IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding,
+    MockReranking, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking,
+    RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase, SymbolContextUseCase,
+    TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -510,6 +510,14 @@ impl Container {
         ExplainUseCase::new(
             Arc::new(self.context_use_case()),
             self.snippet_lookup_use_case(),
+        )
+    }
+
+    pub fn file_graph_use_case(&self) -> FileRelationshipUseCase {
+        FileRelationshipUseCase::new(
+            self.call_graph_use_case.clone(),
+            self.vector_repo.clone(),
+            self.metadata_repository(),
         )
     }
 
