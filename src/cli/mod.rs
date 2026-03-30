@@ -1,5 +1,18 @@
 use clap::{Subcommand, ValueEnum};
 
+/// Sub-clustering mode for the file relationship graph.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum ClusterMode {
+    /// Files are listed flat inside each repository cluster (default).
+    #[default]
+    None,
+    /// Files are grouped by their parent directory within each repository cluster.
+    Directory,
+    /// Files in each repository are grouped by which other repositories depend on them.
+    /// Useful for spotting which parts of a shared library each consumer actually uses.
+    Consumer,
+}
+
 /// Output format for the file relationship graph.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 pub enum GraphFormat {
@@ -226,6 +239,14 @@ pub enum Commands {
         #[arg(long, default_value = "1")]
         min_weight: usize,
 
+        /// Sub-clustering mode within each repository boundary:
+        ///   none      — files listed flat (default).
+        ///   directory — files grouped by their parent directory.
+        ///   consumer  — files grouped by which repositories depend on them
+        ///               (great for spotting which parts of a shared library
+        ///               each consumer actually uses).
+        #[arg(long, value_enum, default_value = "none")]
+        cluster: ClusterMode,
     },
 
     /// Start MCP (Model Context Protocol) server for integration with AI tools

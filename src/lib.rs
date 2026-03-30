@@ -14,7 +14,8 @@ pub use application::{
 };
 
 pub use cli::{
-    Commands, EmbeddingTarget, GraphFormat, LlmTarget, OutputFormat, RerankingTarget, TuiMode,
+    ClusterMode, Commands, EmbeddingTarget, GraphFormat, LlmTarget, OutputFormat, RerankingTarget,
+    TuiMode,
 };
 
 pub use connector::{
