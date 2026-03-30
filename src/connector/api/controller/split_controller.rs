@@ -253,11 +253,28 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
   <div id="no-data"><h2>No cross-repository dependencies found</h2><p>No external repositories reference this monolith's files.</p></div>
 </div>
 
-<!-- Sigma.js + graphology from CDN -->
+<!-- Sigma.js v2 + graphology from CDN (sigma@3 not yet stable on CDN) -->
 <script src="https://cdn.jsdelivr.net/npm/graphology@0.25.4/dist/graphology.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/sigma@3.0.0/build/sigma.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sigma@2.4.0/build/sigma.min.js"></script>
 
 <script>
+// ── Utilities (declared first so sidebar code can call escHtml) ───────────────
+function basename(path) { return path.split('/').pop() || path; }
+function shortPath(path) { const p = path.split('/'); return p.length > 2 ? '…/' + p.slice(-2).join('/') : path; }
+function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function hexRgb(hex) { return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)]; }
+function hexWithAlpha(hex, alpha) { const [r,g,b] = hexRgb(hex); return `rgba(${r},${g},${b},${alpha})`; }
+function dimColor(color) {
+  if (!color) return '#2d333b';
+  if (color.startsWith('rgba') || color.startsWith('rgb')) return 'rgba(50,60,70,0.25)';
+  try { const [r,g,b] = hexRgb(color); return `rgba(${r},${g},${b},0.15)`; } catch(e) { return '#2d333b'; }
+}
+
+// ── State (declared before any event handler registration) ────────────────────
+var activeGroupId = null;
+var activeConsumerId = null;
+
+// ── Data ──────────────────────────────────────────────────────────────────────
 const DATA = __SPLIT_DATA__;
 
 // ── Populate sidebar ─────────────────────────────────────────────────────────
@@ -273,102 +290,90 @@ if (DATA.stats.groupCount === 0) {
 }
 
 const groupsPanel = document.getElementById('groups-panel');
-DATA.groups.forEach((g, i) => {
+DATA.groups.forEach((g) => {
   const div = document.createElement('div');
   div.className = 'group-item';
   div.dataset.groupId = g.id;
   const totalFiles = g.publicFiles.length + g.supportFiles.length;
-  div.innerHTML = `
-    <div><span class="group-dot" style="background:${g.color}"></span><span class="group-label">${escHtml(g.label)}</span></div>
-    <div class="group-meta">${g.publicFiles.length} public · ${g.supportFiles.length} support · ${totalFiles} total</div>
-    <div class="group-consumers">Used by: ${escHtml(g.consumers.join(', '))}</div>
-  `;
-  div.addEventListener('click', () => selectGroup(g.id));
+  div.innerHTML =
+    '<div><span class="group-dot" style="background:' + g.color + '"></span>' +
+    '<span class="group-label">' + escHtml(g.label) + '</span></div>' +
+    '<div class="group-meta">' + g.publicFiles.length + ' public · ' + g.supportFiles.length + ' support · ' + totalFiles + ' total</div>' +
+    '<div class="group-consumers">Used by: ' + escHtml(g.consumers.join(', ')) + '</div>';
+  div.addEventListener('click', function() { selectGroup(g.id); });
   groupsPanel.appendChild(div);
 });
 
 const consumersList = document.getElementById('consumers-list');
-DATA.consumers.forEach(c => {
+DATA.consumers.forEach(function(c) {
   const div = document.createElement('div');
   div.className = 'consumer-item';
-  div.innerHTML = `<div class="consumer-dot"></div><span class="consumer-name">${escHtml(c.name)}</span><span class="consumer-path" title="${escHtml(c.path)}">${escHtml(shortPath(c.path))}</span>`;
-  div.addEventListener('click', () => selectConsumer(c.id));
+  div.innerHTML = '<div class="consumer-dot"></div><span class="consumer-name">' + escHtml(c.name) +
+    '</span><span class="consumer-path" title="' + escHtml(c.path) + '">' + escHtml(shortPath(c.path)) + '</span>';
+  div.addEventListener('click', function() { selectConsumer(c.id); });
   consumersList.appendChild(div);
 });
 
 // ── Build graph ──────────────────────────────────────────────────────────────
 const graph = new graphology.Graph({ multi: false, type: 'directed' });
 
-// Layout parameters
 const CX = 0, CY = 0;
-const MONOLITH_R = 600;       // radius of the monolith boundary circle
-const GROUP_INNER_R = 100;    // radius of each group's file cluster
-const CONSUMER_R = 950;       // radius of the consumer ring
+const MONOLITH_R = 600;
+const GROUP_INNER_R = 120;
+const CONSUMER_R = 950;
 
-// Place groups evenly on a ring inside the monolith
+// Place group centers on a ring inside the monolith
 const groupCenters = {};
-DATA.groups.forEach((g, i) => {
+DATA.groups.forEach(function(g, i) {
   const angle = (2 * Math.PI * i) / Math.max(DATA.groups.length, 1) - Math.PI / 2;
-  const dist = DATA.groups.length <= 1 ? 0 : MONOLITH_R * 0.55;
+  const dist = DATA.groups.length <= 1 ? 0 : MONOLITH_R * 0.52;
   groupCenters[g.id] = { x: CX + dist * Math.cos(angle), y: CY + dist * Math.sin(angle) };
 });
 
-// Build file → group index map
-const fileGroup = {};
-DATA.groups.forEach((g, i) => {
-  g.publicFiles.forEach(f => { fileGroup[f] = { groupIdx: i, isSupport: false }; });
-  g.supportFiles.forEach(f => { fileGroup[f] = { groupIdx: i, isSupport: true }; });
-});
-
-// Add group centroid nodes (invisible anchors for edges + labels)
-DATA.groups.forEach((g, i) => {
-  const { x, y } = groupCenters[g.id];
-  const totalFiles = g.publicFiles.length + g.supportFiles.length;
-  graph.addNode(`group::${g.id}`, {
-    x, y,
-    size: Math.max(18, 6 + totalFiles * 1.2),
+// Group centroid nodes
+DATA.groups.forEach(function(g, i) {
+  const c = groupCenters[g.id];
+  graph.addNode('group::' + g.id, {
+    x: c.x, y: c.y,
+    size: Math.max(14, 5 + (g.publicFiles.length + g.supportFiles.length) * 0.8),
     color: g.color,
     label: g.label,
     nodeType: 'group',
     groupId: g.id,
     groupColor: g.color,
     groupIdx: i,
-    zIndex: 0,
   });
 });
 
-// Add file nodes
-DATA.groups.forEach((g, i) => {
+// File nodes
+DATA.groups.forEach(function(g) {
   const center = groupCenters[g.id];
-  const allFiles = g.publicFiles.map(f => ({ f, isSupport: false }))
-    .concat(g.supportFiles.map(f => ({ f, isSupport: true })));
-
-  allFiles.forEach(({ f, isSupport }, j) => {
+  const allFiles = g.publicFiles.map(function(f) { return { f: f, isSupport: false }; })
+    .concat(g.supportFiles.map(function(f) { return { f: f, isSupport: true }; }));
+  allFiles.forEach(function(item, j) {
     const angle = (2 * Math.PI * j) / Math.max(allFiles.length, 1);
-    const r = allFiles.length <= 1 ? 0 : GROUP_INNER_R * 0.7;
-    const x = center.x + r * Math.cos(angle);
-    const y = center.y + r * Math.sin(angle);
-    const nodeKey = `file::${f}`;
+    const r = allFiles.length <= 1 ? 0 : GROUP_INNER_R * 0.75;
+    const nodeKey = 'file::' + item.f;
     if (!graph.hasNode(nodeKey)) {
       graph.addNode(nodeKey, {
-        x, y,
-        size: isSupport ? 4 : 6,
-        color: isSupport ? hexWithAlpha(g.color, 0.5) : g.color,
-        label: basename(f),
-        fullPath: f,
-        nodeType: isSupport ? 'support' : 'file',
+        x: center.x + r * Math.cos(angle),
+        y: center.y + r * Math.sin(angle),
+        size: item.isSupport ? 4 : 6,
+        color: item.isSupport ? hexWithAlpha(g.color, 0.5) : g.color,
+        label: basename(item.f),
+        fullPath: item.f,
+        nodeType: item.isSupport ? 'support' : 'file',
         groupId: g.id,
         groupColor: g.color,
-        zIndex: 1,
       });
     }
   });
 });
 
-// Add consumer nodes in an outer ring
-DATA.consumers.forEach((c, i) => {
+// Consumer nodes in outer ring
+DATA.consumers.forEach(function(c, i) {
   const angle = (2 * Math.PI * i) / Math.max(DATA.consumers.length, 1) - Math.PI / 2;
-  graph.addNode(`consumer::${c.id}`, {
+  graph.addNode('consumer::' + c.id, {
     x: CX + CONSUMER_R * Math.cos(angle),
     y: CY + CONSUMER_R * Math.sin(angle),
     size: 16,
@@ -376,295 +381,199 @@ DATA.consumers.forEach((c, i) => {
     label: c.name,
     nodeType: 'consumer',
     consumerId: c.id,
-    zIndex: 0,
   });
 });
 
 // Edges: group centroid → consumer
-DATA.groups.forEach(g => {
-  g.consumers.forEach(cid => {
-    const src = `group::${g.id}`;
-    const tgt = `consumer::${cid}`;
+DATA.groups.forEach(function(g) {
+  g.consumers.forEach(function(cid) {
+    const src = 'group::' + g.id;
+    const tgt = 'consumer::' + cid;
     if (graph.hasNode(src) && graph.hasNode(tgt)) {
-      const ekey = `${src}-->${tgt}`;
+      const ekey = src + '-->' + tgt;
       if (!graph.hasEdge(ekey)) {
-        graph.addEdgeWithKey(ekey, src, tgt, {
-          size: 1.5,
-          color: '#444c56',
-          label: '',
-        });
+        graph.addEdgeWithKey(ekey, src, tgt, { size: 1.5, color: '#444c56' });
       }
     }
   });
 });
 
-// ── Sigma renderer ───────────────────────────────────────────────────────────
-const container = document.getElementById('sigma-container');
+// ── Sigma v2 renderer ─────────────────────────────────────────────────────────
+const sigmaContainer = document.getElementById('sigma-container');
 
-const renderer = new Sigma(graph, container, {
+const renderer = new Sigma(graph, sigmaContainer, {
   renderEdgeLabels: false,
   defaultEdgeColor: '#444c56',
   defaultNodeColor: '#58a6ff',
   labelColor: { color: '#c9d1d9' },
   labelSize: 11,
   labelWeight: 'normal',
-  edgeColor: 'default',
-  minCameraRatio: 0.05,
-  maxCameraRatio: 10,
-  labelRenderedSizeThreshold: 6,
-  // Draw group halos as background circles via a custom node renderer
+  minCameraRatio: 0.04,
+  maxCameraRatio: 12,
+  labelRenderedSizeThreshold: 5,
 });
 
-// ── Custom background halo for groups (drawn before nodes) ───────────────────
-// We use sigma's "beforeDrawing" hook to paint translucent circles for each group.
-renderer.on('beforeDrawingNodes', (ctx) => {
-  // ctx is the CanvasRenderingContext2D for the node layer
-  // We get the camera transform to map graph coords → screen coords
-});
-
-// Use the layered canvas approach: draw halos on the "edges" canvas (beneath nodes).
-const camera = renderer.getCamera();
-
-function drawHalos() {
-  // Access internal canvas layers via the DOM
-  const canvases = container.querySelectorAll('canvas');
-  // sigma creates several layered canvases; we draw on the lowest one we can reach
-  // For simplicity, inject a dedicated SVG overlay instead.
-}
-
-// Inject an SVG overlay for group halos
+// ── SVG overlay for group halos ───────────────────────────────────────────────
 const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
 svg.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1;';
-container.style.position = 'relative';
-container.appendChild(svg);
+sigmaContainer.style.position = 'relative';
+sigmaContainer.appendChild(svg);
 
 function updateHalos() {
   svg.innerHTML = '';
-  const cam = renderer.getCamera();
-  DATA.groups.forEach((g) => {
-    const center = groupCenters[g.id];
-    // project graph coords to viewport coords
-    const vp = renderer.graphToViewport({ x: center.x, y: center.y });
-    // Estimate the halo radius based on camera zoom
-    const ratio = cam.ratio;
-    const haloR = Math.max(30, GROUP_INNER_R / ratio * 0.95);
 
-    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    circle.setAttribute('cx', vp.x);
-    circle.setAttribute('cy', vp.y);
-    circle.setAttribute('r', haloR);
-    circle.setAttribute('fill', hexWithAlphaStr(g.color, 0.08));
-    circle.setAttribute('stroke', g.color);
-    circle.setAttribute('stroke-width', '1.5');
-    circle.setAttribute('stroke-dasharray', '4 3');
-    circle.setAttribute('opacity', '0.7');
-    svg.appendChild(circle);
-  });
+  // Monolith boundary — project two points to get pixel radius
+  const mCenter = renderer.graphToViewport({ x: CX, y: CY });
+  const mEdge   = renderer.graphToViewport({ x: CX + MONOLITH_R, y: CY });
+  const mR = Math.max(40, Math.abs(mEdge.x - mCenter.x));
 
-  // Monolith boundary circle
-  const monolithVp = renderer.graphToViewport({ x: CX, y: CY });
-  const ratio = cam.ratio;
-  const mR = Math.max(50, MONOLITH_R / ratio * 0.98);
   const mc = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-  mc.setAttribute('cx', monolithVp.x);
-  mc.setAttribute('cy', monolithVp.y);
-  mc.setAttribute('r', mR);
-  mc.setAttribute('fill', 'none');
-  mc.setAttribute('stroke', '#388bfd');
-  mc.setAttribute('stroke-width', '2');
-  mc.setAttribute('stroke-dasharray', '8 4');
-  mc.setAttribute('opacity', '0.35');
+  mc.setAttribute('cx', mCenter.x); mc.setAttribute('cy', mCenter.y); mc.setAttribute('r', mR);
+  mc.setAttribute('fill', 'none'); mc.setAttribute('stroke', '#388bfd');
+  mc.setAttribute('stroke-width', '2'); mc.setAttribute('stroke-dasharray', '8 4');
+  mc.setAttribute('opacity', '0.3');
   svg.appendChild(mc);
 
-  // Monolith label
   const mlabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-  mlabel.setAttribute('x', monolithVp.x);
-  mlabel.setAttribute('y', monolithVp.y - mR + 18);
-  mlabel.setAttribute('text-anchor', 'middle');
-  mlabel.setAttribute('fill', '#58a6ff');
-  mlabel.setAttribute('font-size', Math.max(11, 14 / ratio));
-  mlabel.setAttribute('font-family', 'monospace');
-  mlabel.setAttribute('opacity', '0.7');
+  mlabel.setAttribute('x', mCenter.x); mlabel.setAttribute('y', mCenter.y - mR + 16);
+  mlabel.setAttribute('text-anchor', 'middle'); mlabel.setAttribute('fill', '#58a6ff');
+  mlabel.setAttribute('font-size', '13'); mlabel.setAttribute('font-family', 'monospace');
+  mlabel.setAttribute('opacity', '0.65');
   mlabel.textContent = DATA.target.name;
   svg.appendChild(mlabel);
+
+  // Group halos
+  DATA.groups.forEach(function(g) {
+    const center = groupCenters[g.id];
+    const cVp  = renderer.graphToViewport({ x: center.x, y: center.y });
+    const eVp  = renderer.graphToViewport({ x: center.x + GROUP_INNER_R, y: center.y });
+    const haloR = Math.max(20, Math.abs(eVp.x - cVp.x) + 12);
+
+    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    circle.setAttribute('cx', cVp.x); circle.setAttribute('cy', cVp.y); circle.setAttribute('r', haloR);
+    circle.setAttribute('fill', hexWithAlpha(g.color, 0.07));
+    circle.setAttribute('stroke', g.color); circle.setAttribute('stroke-width', '1.5');
+    circle.setAttribute('stroke-dasharray', '4 3'); circle.setAttribute('opacity', '0.75');
+    svg.appendChild(circle);
+  });
 }
 
 renderer.on('afterRender', updateHalos);
 
-// ── Tooltip & hover ──────────────────────────────────────────────────────────
-const tooltip = document.getElementById('tooltip');
-const ttTitle = document.getElementById('tt-title');
-const ttMeta = document.getElementById('tt-meta');
+// ── Tooltip ───────────────────────────────────────────────────────────────────
+const tooltip  = document.getElementById('tooltip');
+const ttTitle  = document.getElementById('tt-title');
+const ttMeta   = document.getElementById('tt-meta');
 
-renderer.on('enterNode', ({ node, event }) => {
-  const attrs = graph.getNodeAttributes(node);
-  ttTitle.textContent = attrs.label || node;
-  let meta = '';
+renderer.on('enterNode', function(e) {
+  const attrs = graph.getNodeAttributes(e.node);
+  ttTitle.textContent = attrs.label || e.node;
+  var meta = '';
   if (attrs.nodeType === 'group') {
     const g = DATA.groups[attrs.groupIdx];
-    meta = `Extraction candidate group<br>${g.publicFiles.length} public files · ${g.supportFiles.length} support files<br>Consumers: ${escHtml(g.consumers.join(', '))}`;
-  } else if (attrs.nodeType === 'file') {
-    meta = `Public interface file<br><span class="tt-tag">group: ${escHtml(attrs.groupId)}</span>`;
-    if (attrs.fullPath) meta += `<br><span style="color:#8b949e;font-size:10px">${escHtml(attrs.fullPath)}</span>`;
-  } else if (attrs.nodeType === 'support') {
-    meta = `Internal support file<br><span class="tt-tag">group: ${escHtml(attrs.groupId)}</span>`;
-    if (attrs.fullPath) meta += `<br><span style="color:#8b949e;font-size:10px">${escHtml(attrs.fullPath)}</span>`;
+    meta = 'Extraction candidate group<br>' + g.publicFiles.length + ' public · ' + g.supportFiles.length + ' support files<br>Consumers: ' + escHtml(g.consumers.join(', '));
+  } else if (attrs.nodeType === 'file' || attrs.nodeType === 'support') {
+    meta = (attrs.nodeType === 'support' ? 'Internal support file' : 'Public interface file') +
+      '<br><span class="tt-tag">group: ' + escHtml(attrs.groupId) + '</span>';
+    if (attrs.fullPath) meta += '<br><span style="color:#8b949e;font-size:10px">' + escHtml(attrs.fullPath) + '</span>';
   } else if (attrs.nodeType === 'consumer') {
-    const c = DATA.consumers.find(x => x.id === attrs.consumerId);
-    meta = `External consumer repository<br>${c ? escHtml(c.path) : ''}`;
+    const c = DATA.consumers.find(function(x) { return x.id === attrs.consumerId; });
+    meta = 'External consumer<br>' + (c ? escHtml(c.path) : '');
   }
   ttMeta.innerHTML = meta;
+  tooltip.style.left = (e.event.x + 16) + 'px';
+  tooltip.style.top  = (e.event.y + 16) + 'px';
   tooltip.style.display = 'block';
-  moveTooltip(event);
 });
 
-renderer.on('leaveNode', () => { tooltip.style.display = 'none'; });
+renderer.on('leaveNode', function() { tooltip.style.display = 'none'; });
 
-renderer.on('moveBody', (event) => { if (tooltip.style.display !== 'none') moveTooltip(event); });
-
-function moveTooltip(event) {
-  const x = event.x || (event.original && event.original.clientX) || 0;
-  const y = event.y || (event.original && event.original.clientY) || 0;
-  const rect = container.getBoundingClientRect();
-  const lx = x - rect.left, ly = y - rect.top;
-  tooltip.style.left = (lx + 16) + 'px';
-  tooltip.style.top = (ly + 16) + 'px';
-}
-
-// ── Selection / highlight ────────────────────────────────────────────────────
-let activeGroupId = null;
-let activeConsumerId = null;
-
+// ── Selection / highlight ─────────────────────────────────────────────────────
 function clearSelection() {
   activeGroupId = null;
   activeConsumerId = null;
-  document.querySelectorAll('.group-item').forEach(el => el.classList.remove('active'));
-  graph.forEachNode((n, attrs) => {
-    graph.setNodeAttribute(n, 'highlighted', false);
-    graph.setNodeAttribute(n, 'color', attrs._origColor || attrs.color);
+  document.querySelectorAll('.group-item').forEach(function(el) { el.classList.remove('active'); });
+  graph.forEachNode(function(n, attrs) {
+    graph.setNodeAttribute(n, 'color', attrs.origColor || attrs.color);
   });
-  graph.forEachEdge((e, attrs) => {
+  graph.forEachEdge(function(e) {
     graph.setEdgeAttribute(e, 'color', '#444c56');
     graph.setEdgeAttribute(e, 'size', 1.5);
   });
 }
 
+// Store original colours once on first use
+function storeOrigColors() {
+  graph.forEachNode(function(n, attrs) {
+    if (!attrs.origColor) graph.setNodeAttribute(n, 'origColor', attrs.color);
+  });
+}
+
 function selectGroup(gid) {
+  storeOrigColors();
   if (activeGroupId === gid) { clearSelection(); return; }
   clearSelection();
   activeGroupId = gid;
-
-  // Highlight sidebar item
-  document.querySelectorAll('.group-item').forEach(el => {
+  document.querySelectorAll('.group-item').forEach(function(el) {
     if (el.dataset.groupId === gid) el.classList.add('active');
   });
-
-  const g = DATA.groups.find(x => x.id === gid);
+  const g = DATA.groups.find(function(x) { return x.id === gid; });
   if (!g) return;
-  const relatedNodes = new Set();
-  relatedNodes.add(`group::${gid}`);
-  g.publicFiles.forEach(f => relatedNodes.add(`file::${f}`));
-  g.supportFiles.forEach(f => relatedNodes.add(`file::${f}`));
-  g.consumers.forEach(c => relatedNodes.add(`consumer::${c}`));
-
-  graph.forEachNode((n, attrs) => {
-    if (!relatedNodes.has(n)) {
-      graph.setNodeAttribute(n, 'color', dimColor(attrs.color || attrs._origColor || '#58a6ff'));
-    }
+  const rel = new Set();
+  rel.add('group::' + gid);
+  g.publicFiles.forEach(function(f) { rel.add('file::' + f); });
+  g.supportFiles.forEach(function(f) { rel.add('file::' + f); });
+  g.consumers.forEach(function(c) { rel.add('consumer::' + c); });
+  graph.forEachNode(function(n, attrs) {
+    if (!rel.has(n)) graph.setNodeAttribute(n, 'color', dimColor(attrs.origColor || attrs.color));
   });
-  graph.forEachEdge((e, attrs, src, tgt) => {
-    if (relatedNodes.has(src) && relatedNodes.has(tgt)) {
-      graph.setEdgeAttribute(e, 'color', g.color);
-      graph.setEdgeAttribute(e, 'size', 2.5);
-    } else {
-      graph.setEdgeAttribute(e, 'color', '#2d333b');
-    }
+  graph.forEachEdge(function(e, attrs, src, tgt) {
+    if (rel.has(src) && rel.has(tgt)) { graph.setEdgeAttribute(e, 'color', g.color); graph.setEdgeAttribute(e, 'size', 2.5); }
+    else graph.setEdgeAttribute(e, 'color', '#2d333b');
   });
 }
 
 function selectConsumer(cid) {
+  storeOrigColors();
   if (activeConsumerId === cid) { clearSelection(); return; }
   clearSelection();
   activeConsumerId = cid;
-
-  const relatedNodes = new Set();
-  relatedNodes.add(`consumer::${cid}`);
-  DATA.groups.forEach(g => {
+  const rel = new Set(['consumer::' + cid]);
+  DATA.groups.forEach(function(g) {
     if (g.consumers.includes(cid)) {
-      relatedNodes.add(`group::${g.id}`);
-      g.publicFiles.forEach(f => relatedNodes.add(`file::${f}`));
+      rel.add('group::' + g.id);
+      g.publicFiles.forEach(function(f) { rel.add('file::' + f); });
     }
   });
-
-  graph.forEachNode((n, attrs) => {
-    if (!relatedNodes.has(n)) {
-      graph.setNodeAttribute(n, 'color', dimColor(attrs.color || '#58a6ff'));
-    }
+  graph.forEachNode(function(n, attrs) {
+    if (!rel.has(n)) graph.setNodeAttribute(n, 'color', dimColor(attrs.origColor || attrs.color));
   });
-  graph.forEachEdge((e, attrs, src, tgt) => {
-    if (relatedNodes.has(src) && relatedNodes.has(tgt)) {
-      graph.setEdgeAttribute(e, 'color', '#e36209');
-      graph.setEdgeAttribute(e, 'size', 2.5);
-    } else {
-      graph.setEdgeAttribute(e, 'color', '#2d333b');
-    }
+  graph.forEachEdge(function(e, attrs, src, tgt) {
+    if (rel.has(src) && rel.has(tgt)) { graph.setEdgeAttribute(e, 'color', '#e36209'); graph.setEdgeAttribute(e, 'size', 2.5); }
+    else graph.setEdgeAttribute(e, 'color', '#2d333b');
   });
 }
 
-// Click on canvas to deselect
 renderer.on('clickStage', clearSelection);
-renderer.on('clickNode', ({ node }) => {
-  const attrs = graph.getNodeAttributes(node);
-  if (attrs.nodeType === 'group') selectGroup(attrs.groupId);
-  else if (attrs.nodeType === 'file' || attrs.nodeType === 'support') selectGroup(attrs.groupId);
+renderer.on('clickNode', function(e) {
+  const attrs = graph.getNodeAttributes(e.node);
+  if (attrs.nodeType === 'group' || attrs.nodeType === 'file' || attrs.nodeType === 'support') selectGroup(attrs.groupId);
   else if (attrs.nodeType === 'consumer') selectConsumer(attrs.consumerId);
 });
 
-// ── Search ───────────────────────────────────────────────────────────────────
-document.getElementById('search-input').addEventListener('input', (e) => {
+// ── Search ─────────────────────────────────────────────────────────────────────
+document.getElementById('search-input').addEventListener('input', function(e) {
   const q = e.target.value.trim().toLowerCase();
   if (!q) { clearSelection(); return; }
+  storeOrigColors();
   const matched = new Set();
-  graph.forEachNode((n, attrs) => {
-    const label = (attrs.label || '').toLowerCase();
-    const path = (attrs.fullPath || '').toLowerCase();
-    if (label.includes(q) || path.includes(q)) matched.add(n);
+  graph.forEachNode(function(n, attrs) {
+    if ((attrs.label || '').toLowerCase().includes(q) || (attrs.fullPath || '').toLowerCase().includes(q)) matched.add(n);
   });
-  graph.forEachNode((n, attrs) => {
-    if (!matched.has(n)) {
-      graph.setNodeAttribute(n, 'color', dimColor(attrs.color || '#58a6ff'));
-    }
+  graph.forEachNode(function(n, attrs) {
+    if (!matched.has(n)) graph.setNodeAttribute(n, 'color', dimColor(attrs.origColor || attrs.color));
   });
 });
-
-// ── Utilities ────────────────────────────────────────────────────────────────
-function basename(path) {
-  return path.split('/').pop() || path;
-}
-function shortPath(path) {
-  const parts = path.split('/');
-  return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : path;
-}
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-function hexWithAlpha(hex, alpha) {
-  return hexWithAlphaStr(hex, alpha);
-}
-function hexWithAlphaStr(hex, alpha) {
-  const r = parseInt(hex.slice(1,3),16);
-  const g = parseInt(hex.slice(3,5),16);
-  const b = parseInt(hex.slice(5,7),16);
-  return `rgba(${r},${g},${b},${alpha})`;
-}
-function dimColor(color) {
-  if (!color) return '#2d333b';
-  if (color.startsWith('rgba')) return 'rgba(50,60,70,0.3)';
-  const r = parseInt(color.slice(1,3),16);
-  const g = parseInt(color.slice(3,5),16);
-  const b = parseInt(color.slice(5,7),16);
-  return `rgba(${r},${g},${b},0.18)`;
-}
 </script>
 </body>
 </html>
