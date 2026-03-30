@@ -330,12 +330,12 @@ DATA.groups.forEach(function(g, i) {
   groupCenters[g.id] = { x: CX + dist * Math.cos(angle), y: CY + dist * Math.sin(angle) };
 });
 
-// Group centroid nodes
+// Group centroid nodes — labeled, sized by file count
 DATA.groups.forEach(function(g, i) {
   const c = groupCenters[g.id];
   graph.addNode('group::' + g.id, {
     x: c.x, y: c.y,
-    size: Math.max(14, 5 + (g.publicFiles.length + g.supportFiles.length) * 0.8),
+    size: Math.max(12, 4 + (g.publicFiles.length + g.supportFiles.length) * 0.6),
     color: g.color,
     label: g.label,
     nodeType: 'group',
@@ -345,7 +345,7 @@ DATA.groups.forEach(function(g, i) {
   });
 });
 
-// File nodes
+// File nodes — dots only, no labels (shown in tooltip on hover)
 DATA.groups.forEach(function(g) {
   const center = groupCenters[g.id];
   const allFiles = g.publicFiles.map(function(f) { return { f: f, isSupport: false }; })
@@ -358,9 +358,9 @@ DATA.groups.forEach(function(g) {
       graph.addNode(nodeKey, {
         x: center.x + r * Math.cos(angle),
         y: center.y + r * Math.sin(angle),
-        size: item.isSupport ? 4 : 6,
-        color: item.isSupport ? hexWithAlpha(g.color, 0.5) : g.color,
-        label: basename(item.f),
+        size: item.isSupport ? 3 : 5,
+        color: item.isSupport ? hexWithAlpha(g.color, 0.45) : g.color,
+        label: '',            // no label — file path shown on hover only
         fullPath: item.f,
         nodeType: item.isSupport ? 'support' : 'file',
         groupId: g.id,
@@ -422,7 +422,7 @@ sigmaContainer.appendChild(svg);
 function updateHalos() {
   svg.innerHTML = '';
 
-  // Monolith boundary — project two points to get pixel radius
+  // Monolith boundary only — group membership is shown by colour, not by circles
   const mCenter = renderer.graphToViewport({ x: CX, y: CY });
   const mEdge   = renderer.graphToViewport({ x: CX + MONOLITH_R, y: CY });
   const mR = Math.max(40, Math.abs(mEdge.x - mCenter.x));
@@ -441,21 +441,6 @@ function updateHalos() {
   mlabel.setAttribute('opacity', '0.65');
   mlabel.textContent = DATA.target.name;
   svg.appendChild(mlabel);
-
-  // Group halos
-  DATA.groups.forEach(function(g) {
-    const center = groupCenters[g.id];
-    const cVp  = renderer.graphToViewport({ x: center.x, y: center.y });
-    const eVp  = renderer.graphToViewport({ x: center.x + GROUP_INNER_R, y: center.y });
-    const haloR = Math.max(20, Math.abs(eVp.x - cVp.x) + 12);
-
-    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-    circle.setAttribute('cx', cVp.x); circle.setAttribute('cy', cVp.y); circle.setAttribute('r', haloR);
-    circle.setAttribute('fill', hexWithAlpha(g.color, 0.07));
-    circle.setAttribute('stroke', g.color); circle.setAttribute('stroke-width', '1.5');
-    circle.setAttribute('stroke-dasharray', '4 3'); circle.setAttribute('opacity', '0.75');
-    svg.appendChild(circle);
-  });
 }
 
 renderer.on('afterRender', updateHalos);

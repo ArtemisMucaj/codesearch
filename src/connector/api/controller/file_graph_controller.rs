@@ -87,151 +87,49 @@ impl<'a> FileGraphController<'a> {
         map
     }
 
-    // ── Interactive HTML renderer (Cytoscape.js) ──────────────────────────
+    // ── Interactive HTML renderer (Sigma.js) ─────────────────────────────
 
-    fn format_html(graph: &FileGraph, cluster: ClusterMode) -> String {
+    fn format_html(graph: &FileGraph, _cluster: ClusterMode) -> String {
         let file_repo = Self::file_to_repo(graph);
-        let consumer_map = Self::consumer_map(graph);
-        let files_by_repo = Self::files_by_repo(graph);
 
-        let mut nodes: Vec<serde_json::Value> = Vec::new();
-        let mut edges_json: Vec<serde_json::Value> = Vec::new();
+        // Flat file list — layout computed client-side
+        let files_json: Vec<String> = {
+            let mut sorted: Vec<&str> = graph.files.iter().map(String::as_str).collect();
+            sorted.sort();
+            sorted
+                .into_iter()
+                .map(|f| {
+                    let repo_id = file_repo.get(f).copied().unwrap_or("");
+                    format!(
+                        r#"{{"id":{},"label":{},"repoId":{}}}"#,
+                        serde_json::to_string(f).unwrap_or_default(),
+                        serde_json::to_string(&short_path(f)).unwrap_or_default(),
+                        serde_json::to_string(repo_id).unwrap_or_default(),
+                    )
+                })
+                .collect()
+        };
 
-        // ── Repo compound nodes ──────────────────────────────────────────
-        for (repo_id, repo) in &graph.repositories {
-            nodes.push(serde_json::json!({
-                "data": {
-                    "id": format!("repo__{repo_id}"),
-                    "label": repo.name,
-                    "type": "repo",
-                    "repoId": repo_id,
-                }
-            }));
-        }
+        let edges_json: Vec<String> = graph
+            .edges
+            .iter()
+            .map(|e| {
+                format!(
+                    r#"{{"source":{},"target":{},"weight":{},"kinds":{}}}"#,
+                    serde_json::to_string(&e.from_file).unwrap_or_default(),
+                    serde_json::to_string(&e.to_file).unwrap_or_default(),
+                    e.weight,
+                    serde_json::to_string(&e.reference_kinds.join(", ")).unwrap_or_default(),
+                )
+            })
+            .collect();
 
-        // ── Optional intermediate sub-cluster nodes ──────────────────────
-        match cluster {
-            ClusterMode::Directory => {
-                let mut seen: HashSet<String> = HashSet::new();
-                for file in &graph.files {
-                    let repo_id = file_repo.get(file.as_str()).copied().unwrap_or("");
-                    let dir = file_dir(file);
-                    if dir.is_empty() {
-                        continue;
-                    }
-                    let id = format!("dir__{repo_id}__{dir}");
-                    if seen.insert(id.clone()) {
-                        nodes.push(serde_json::json!({
-                            "data": {
-                                "id": id,
-                                "label": dir,
-                                "type": "directory",
-                                "parent": format!("repo__{repo_id}"),
-                                "repoId": repo_id,
-                            }
-                        }));
-                    }
-                }
-            }
-            ClusterMode::Consumer => {
-                let mut seen: HashSet<String> = HashSet::new();
-                for (repo_id, files) in &files_by_repo {
-                    for file in files {
-                        let consumers: Vec<&str> = consumer_map
-                            .get(file)
-                            .map(|s| s.iter().copied().collect())
-                            .unwrap_or_default();
-                        let key = consumers.join(",");
-                        let id = format!("cgrp__{repo_id}__{key}");
-                        if seen.insert(id.clone()) {
-                            let label = if consumers.is_empty() {
-                                "internal".to_string()
-                            } else {
-                                let names: Vec<&str> = consumers
-                                    .iter()
-                                    .map(|cid| {
-                                        graph
-                                            .repositories
-                                            .get(*cid)
-                                            .map(|r| r.name.as_str())
-                                            .unwrap_or(cid)
-                                    })
-                                    .collect();
-                                format!("← {}", names.join(", "))
-                            };
-                            nodes.push(serde_json::json!({
-                                "data": {
-                                    "id": id,
-                                    "label": label,
-                                    "type": "consumer_group",
-                                    "parent": format!("repo__{repo_id}"),
-                                    "repoId": repo_id,
-                                }
-                            }));
-                        }
-                    }
-                }
-            }
-            ClusterMode::None => {}
-        }
-
-        // ── File/directory leaf nodes ─────────────────────────────────────
-        let mut sorted_files: Vec<&str> = graph.files.iter().map(String::as_str).collect();
-        sorted_files.sort();
-
-        for file in sorted_files {
-            let repo_id = file_repo.get(file).copied().unwrap_or("");
-            let parent = match cluster {
-                ClusterMode::None => format!("repo__{repo_id}"),
-                ClusterMode::Directory => {
-                    let dir = file_dir(file);
-                    if dir.is_empty() {
-                        format!("repo__{repo_id}")
-                    } else {
-                        format!("dir__{repo_id}__{dir}")
-                    }
-                }
-                ClusterMode::Consumer => {
-                    let key = consumer_map
-                        .get(file)
-                        .map(|s| s.iter().copied().collect::<Vec<_>>().join(","))
-                        .unwrap_or_default();
-                    format!("cgrp__{repo_id}__{key}")
-                }
-            };
-            nodes.push(serde_json::json!({
-                "data": {
-                    "id": format!("f__{file}"),
-                    "label": short_path(file),
-                    "fullPath": file,
-                    "type": "file",
-                    "parent": parent,
-                    "repoId": repo_id,
-                }
-            }));
-        }
-
-        // ── Edges ─────────────────────────────────────────────────────────
-        for (idx, edge) in graph.edges.iter().enumerate() {
-            edges_json.push(serde_json::json!({
-                "data": {
-                    "id": format!("e{idx}"),
-                    "source": format!("f__{}", edge.from_file),
-                    "target": format!("f__{}", edge.to_file),
-                    "weight": edge.weight,
-                    "kinds": edge.reference_kinds.join(", "),
-                }
-            }));
-        }
-
-        let nodes_str = serde_json::to_string(&nodes).unwrap_or_default();
-        let edges_str = serde_json::to_string(&edges_json).unwrap_or_default();
         let repos_str = serde_json::to_string(&graph.repositories).unwrap_or_default();
         let max_weight = graph.edges.iter().map(|e| e.weight).max().unwrap_or(1);
 
         HTML_TEMPLATE
-            .replace("__NODES__", &nodes_str)
-            .replace("__EDGES__", &edges_str)
+            .replace("__FILES__", &format!("[{}]", files_json.join(",")))
+            .replace("__EDGES__", &format!("[{}]", edges_json.join(",")))
             .replace("__REPOS__", &repos_str)
             .replace("__MAX_WEIGHT__", &max_weight.to_string())
     }
@@ -606,307 +504,320 @@ fn mermaid_emit_node(out: &mut String, file: &str, indent: &str) {
     ));
 }
 
-// ── HTML template ─────────────────────────────────────────────────────────────
+// ── HTML template (Sigma.js v2) ───────────────────────────────────────────────
 
 const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>File Dependency Graph — codesearch</title>
-  <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.29.2/dist/cytoscape.min.js"></script>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      display: flex; height: 100vh; overflow: hidden;
-      background: #0d1117; color: #c9d1d9;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      font-size: 13px;
-    }
-    #sidebar {
-      width: 270px; min-width: 270px; padding: 16px 14px;
-      background: #161b22; border-right: 1px solid #30363d;
-      display: flex; flex-direction: column; gap: 14px; overflow-y: auto;
-    }
-    #sidebar h1 { font-size: 13px; font-weight: 600; color: #f0f6fc; letter-spacing: .3px; }
-    .section { display: flex; flex-direction: column; gap: 6px; }
-    .section-label { font-size: 10px; font-weight: 600; color: #8b949e; text-transform: uppercase; letter-spacing: .6px; }
-    .repo-item {
-      display: flex; align-items: center; gap: 8px;
-      padding: 5px 8px; border-radius: 6px; cursor: pointer;
-      transition: background .15s;
-    }
-    .repo-item:hover { background: #21262d; }
-    .repo-item.active { background: #21262d; }
-    .repo-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
-    .repo-name { color: #c9d1d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    input[type="text"] {
-      width: 100%; padding: 6px 10px; border-radius: 6px;
-      background: #0d1117; border: 1px solid #30363d; color: #c9d1d9;
-      font-size: 12px; outline: none;
-      transition: border-color .15s;
-    }
-    input[type="text"]:focus { border-color: #58a6ff; }
-    .stat-row { display: flex; justify-content: space-between; }
-    .stat-val { font-weight: 600; color: #58a6ff; }
-    input[type="range"] { width: 100%; accent-color: #58a6ff; }
-    .range-label { font-size: 11px; color: #8b949e; margin-top: 2px; }
-    .hint { font-size: 10px; color: #484f58; line-height: 1.5; margin-top: auto; }
-    #cy { flex: 1; }
-    #tooltip {
-      position: fixed; pointer-events: none; display: none; z-index: 999;
-      background: #161b22; border: 1px solid #30363d; border-radius: 6px;
-      padding: 6px 10px; font-size: 11px; color: #c9d1d9;
-      max-width: 320px; word-break: break-all; line-height: 1.4;
-    }
-    #empty-msg {
-      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-      text-align: center; color: #484f58; pointer-events: none; display: none;
-    }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>File Dependency Graph — codesearch</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { display: flex; height: 100vh; overflow: hidden; background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; }
+  #sidebar { width: 260px; min-width: 200px; background: #161b22; border-right: 1px solid #30363d; display: flex; flex-direction: column; overflow: hidden; }
+  #sidebar-inner { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 14px; }
+  h1 { font-size: 13px; font-weight: 600; color: #f0f6fc; }
+  .section-label { font-size: 10px; font-weight: 600; color: #8b949e; text-transform: uppercase; letter-spacing: .6px; margin-bottom: 4px; }
+  .repo-item { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; transition: background .15s; }
+  .repo-item:hover { background: #21262d; }
+  .repo-item.active { background: #21262d; }
+  .repo-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .repo-name { color: #c9d1d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  input[type="text"] { width: 100%; padding: 6px 10px; border-radius: 6px; background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; font-size: 12px; outline: none; }
+  input[type="text"]:focus { border-color: #58a6ff; }
+  .stat-row { display: flex; justify-content: space-between; font-size: 12px; }
+  .stat-val { font-weight: 600; color: #58a6ff; }
+  input[type="range"] { width: 100%; accent-color: #58a6ff; }
+  .range-label { font-size: 11px; color: #8b949e; }
+  #hint { padding: 10px 14px; font-size: 10px; color: #6e7681; border-top: 1px solid #30363d; line-height: 1.6; }
+  #graph-area { flex: 1; position: relative; }
+  #sigma-container { width: 100%; height: 100%; }
+  #tooltip { position: absolute; pointer-events: none; display: none; z-index: 100; background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 8px 12px; font-size: 11px; color: #c9d1d9; max-width: 320px; word-break: break-all; line-height: 1.5; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+</style>
 </head>
 <body>
 <div id="sidebar">
-  <h1>📦 File Dependencies</h1>
-
-  <div class="section">
-    <div class="section-label">Repositories</div>
-    <div id="repo-list"></div>
-    <div style="font-size:11px;color:#484f58;padding-left:4px">Click to isolate</div>
+  <div id="sidebar-inner">
+    <h1>File Dependencies</h1>
+    <div>
+      <div class="section-label">Repositories</div>
+      <div id="repo-list"></div>
+    </div>
+    <div>
+      <div class="section-label">Search</div>
+      <input type="text" id="search-input" placeholder="Filter by file path…">
+    </div>
+    <div>
+      <div class="section-label">Stats</div>
+      <div id="stats" style="display:flex;flex-direction:column;gap:3px;"></div>
+    </div>
+    <div>
+      <div class="section-label">Min edge weight</div>
+      <input type="range" id="weight-slider" min="1" max="__MAX_WEIGHT__" value="1">
+      <div class="range-label" id="weight-label">≥ 1 reference</div>
+    </div>
   </div>
-
-  <div class="section">
-    <div class="section-label">Search</div>
-    <input type="text" id="search" placeholder="Filter by file path…">
-  </div>
-
-  <div class="section">
-    <div class="section-label">Stats</div>
-    <div id="stats" style="display:flex;flex-direction:column;gap:3px;"></div>
-  </div>
-
-  <div class="section">
-    <div class="section-label">Min edge weight</div>
-    <input type="range" id="weight-slider" min="1" max="__MAX_WEIGHT__" value="1">
-    <div class="range-label" id="weight-label">≥ 1 reference</div>
-  </div>
-
-  <div class="hint">
-    Scroll to zoom · Drag to pan<br>
-    Click a node to highlight neighbours<br>
-    Click background to reset
-  </div>
+  <div id="hint">Scroll to zoom · Drag to pan<br>Click a node to highlight neighbours<br>Click background to reset</div>
+</div>
+<div id="graph-area">
+  <div id="sigma-container"></div>
+  <div id="tooltip"></div>
 </div>
 
-<div id="cy"></div>
-<div id="tooltip"></div>
-
+<script src="https://cdn.jsdelivr.net/npm/graphology@0.25.4/dist/graphology.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sigma@2.4.0/build/sigma.min.js"></script>
 <script>
-const NODES = __NODES__;
-const EDGES = __EDGES__;
+// ── Utilities ──────────────────────────────────────────────────────────────────
+function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function hexRgb(h) { return [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)]; }
+function withAlpha(h,a) { var c=hexRgb(h); return 'rgba('+c[0]+','+c[1]+','+c[2]+','+a+')'; }
+function dimColor(c) { if(!c)return '#2d333b'; try{var r=hexRgb(c);return 'rgba('+r[0]+','+r[1]+','+r[2]+',0.15)';}catch(e){return '#2d333b';} }
+
+// ── State ──────────────────────────────────────────────────────────────────────
+var activeRepoId = null;
+var currentMinWeight = 1;
+
+// ── Data ───────────────────────────────────────────────────────────────────────
+const FILES = __FILES__;
+const EDGES_DATA = __EDGES__;
 const REPOS = __REPOS__;
 const MAX_WEIGHT = __MAX_WEIGHT__;
 
-const COLOURS = [
-  '#388bfd','#3fb950','#d29922','#f78166','#a371f7',
-  '#39d353','#ffa657','#79c0ff','#ff7b72','#56d364'
-];
+const PALETTE = ['#388bfd','#3fb950','#d29922','#f78166','#a371f7','#ffa657','#79c0ff','#ff7b72','#56d364','#db6d28'];
 const repoIds = Object.keys(REPOS);
-const repoColour = {};
-repoIds.forEach((id, i) => { repoColour[id] = COLOURS[i % COLOURS.length]; });
+const repoColor = {};
+repoIds.forEach(function(id,i){ repoColor[id] = PALETTE[i % PALETTE.length]; });
 
-// ── Build Cytoscape stylesheet ────────────────────────────────────────────────
-function makeStyle() {
-  const base = [
-    {
-      selector: 'node[type="repo"]',
-      style: {
-        label: 'data(label)', 'text-valign': 'top', 'text-halign': 'center',
-        'font-size': 13, 'font-weight': 'bold', 'color': '#f0f6fc',
-        'background-opacity': .12, 'border-width': 1.5,
-        padding: '18px', shape: 'round-rectangle',
-      }
-    },
-    {
-      selector: 'node[type="directory"], node[type="consumer_group"]',
-      style: {
-        label: 'data(label)', 'text-valign': 'top', 'text-halign': 'center',
-        'font-size': 10, 'color': '#8b949e',
-        'background-opacity': .06, 'border-width': 1, 'border-style': 'dashed',
-        padding: '10px', shape: 'round-rectangle',
-      }
-    },
-    {
-      selector: 'node[type="file"]',
-      style: {
-        label: 'data(label)', shape: 'round-rectangle',
-        width: 'label', height: 'label', padding: '7px',
-        'font-size': 9, 'text-valign': 'center', 'text-halign': 'center',
-        'color': '#0d1117', 'border-width': 0,
-      }
-    },
-    {
-      selector: 'edge',
-      style: {
-        'curve-style': 'bezier',
-        'target-arrow-shape': 'triangle',
-        width: 'mapData(weight, 1, ' + MAX_WEIGHT + ', 1, 5)',
-        opacity: .6,
-        'line-color': '#30363d', 'target-arrow-color': '#30363d',
-      }
-    },
-    { selector: '.faded', style: { opacity: .05 } },
-    { selector: '.highlighted', style: { opacity: 1 } },
-    { selector: 'node:selected', style: { 'border-width': 2, 'border-color': '#f0f6fc' } },
-  ];
-
-  repoIds.forEach(id => {
-    const c = repoColour[id];
-    base.push({
-      selector: `node[repoId="${id}"][type="repo"]`,
-      style: { 'background-color': c, 'border-color': c, color: c }
-    });
-    base.push({
-      selector: `node[repoId="${id}"][type="directory"]`,
-      style: { 'border-color': c }
-    });
-    base.push({
-      selector: `node[repoId="${id}"][type="file"]`,
-      style: { 'background-color': c }
-    });
-  });
-
-  return base;
-}
-
-// ── Init Cytoscape ────────────────────────────────────────────────────────────
-let currentMinWeight = 1;
-
-function visibleEdges() {
-  return EDGES.filter(e => e.data.weight >= currentMinWeight);
-}
-
-const cy = cytoscape({
-  container: document.getElementById('cy'),
-  elements: [...NODES, ...visibleEdges()],
-  style: makeStyle(),
-  layout: {
-    name: 'cose',
-    animate: true,
-    animationDuration: 600,
-    nodeRepulsion: 12000,
-    edgeElasticity: 100,
-    idealEdgeLength: 80,
-    nestingFactor: 1.2,
-    gravity: 0.25,
-    numIter: 1000,
-    fit: true,
-    padding: 40,
-  },
-  wheelSensitivity: 0.3,
-});
-
-// ── Sidebar: repository list ──────────────────────────────────────────────────
+// ── Sidebar ────────────────────────────────────────────────────────────────────
 const repoList = document.getElementById('repo-list');
-let activeRepo = null;
-
-repoIds.forEach(id => {
+repoIds.forEach(function(id) {
   const repo = REPOS[id];
   const el = document.createElement('div');
   el.className = 'repo-item';
   el.dataset.repoId = id;
-  el.innerHTML = `<div class="repo-dot" style="background:${repoColour[id]}"></div>
-                  <span class="repo-name">${repo ? repo.name : id}</span>`;
-  el.addEventListener('click', () => {
-    if (activeRepo === id) {
-      activeRepo = null;
-      el.classList.remove('active');
-      cy.elements().removeClass('faded highlighted');
-      return;
-    }
-    document.querySelectorAll('.repo-item').forEach(r => r.classList.remove('active'));
-    el.classList.add('active');
-    activeRepo = id;
-    const keep = cy.elements().filter(n => n.data('repoId') === id || n.data('source') && true);
-    const repoNode = cy.$(`node[repoId="${id}"][type="repo"]`);
-    const descendants = repoNode.descendants();
-    const connected = descendants.connectedEdges();
-    const neighbourhood = repoNode.union(descendants).union(connected).union(connected.connectedNodes());
-    cy.elements().addClass('faded');
-    neighbourhood.removeClass('faded').addClass('highlighted');
-  });
+  el.innerHTML = '<div class="repo-dot" style="background:'+repoColor[id]+'"></div><span class="repo-name">'+escHtml(repo ? repo.name : id)+'</span>';
+  el.addEventListener('click', function() { toggleRepo(id, el); });
   repoList.appendChild(el);
 });
 
-// ── Stats ─────────────────────────────────────────────────────────────────────
+function toggleRepo(id, el) {
+  if (activeRepoId === id) {
+    activeRepoId = null;
+    document.querySelectorAll('.repo-item').forEach(function(r){r.classList.remove('active');});
+    restoreColors();
+    return;
+  }
+  document.querySelectorAll('.repo-item').forEach(function(r){r.classList.remove('active');});
+  el.classList.add('active');
+  activeRepoId = id;
+  isolateRepo(id);
+}
+
+// ── Build graphology graph ─────────────────────────────────────────────────────
+const graph = new graphology.Graph({ multi: false, type: 'directed' });
+
+// Layout: repos in a ring, files in sub-circles
+const REPO_R = repoIds.length === 1 ? 0 : 650;
+const repoCenters = {};
+repoIds.forEach(function(id, i) {
+  var angle = (2 * Math.PI * i) / Math.max(repoIds.length, 1) - Math.PI / 2;
+  repoCenters[id] = { x: REPO_R * Math.cos(angle), y: REPO_R * Math.sin(angle) };
+});
+
+// Group files by repo, assign positions
+var filesByRepo = {};
+FILES.forEach(function(f) {
+  if (!filesByRepo[f.repoId]) filesByRepo[f.repoId] = [];
+  filesByRepo[f.repoId].push(f);
+});
+
+FILES.forEach(function(f) {
+  var center = repoCenters[f.repoId] || { x: 0, y: 0 };
+  var repoFiles = filesByRepo[f.repoId] || [];
+  var idx = repoFiles.indexOf(f);
+  var n = repoFiles.length;
+  var r = n <= 1 ? 0 : Math.max(80, Math.sqrt(n) * 22);
+  var angle = (2 * Math.PI * idx) / Math.max(n, 1);
+  graph.addNode(f.id, {
+    x: center.x + r * Math.cos(angle),
+    y: center.y + r * Math.sin(angle),
+    size: 5,
+    color: repoColor[f.repoId] || '#58a6ff',
+    label: '',          // no label by default; shown only on hover
+    fullPath: f.id,
+    shortLabel: f.label,
+    repoId: f.repoId,
+    origColor: repoColor[f.repoId] || '#58a6ff',
+  });
+});
+
+function addEdges() {
+  EDGES_DATA.forEach(function(e, i) {
+    if (e.weight < currentMinWeight) return;
+    if (!graph.hasNode(e.source) || !graph.hasNode(e.target)) return;
+    var key = 'e'+i;
+    if (!graph.hasEdge(key)) {
+      graph.addEdgeWithKey(key, e.source, e.target, {
+        size: Math.min(3, 0.6 + (e.weight / MAX_WEIGHT) * 2.5),
+        color: '#3d444d',
+        weight: e.weight,
+        kinds: e.kinds,
+      });
+    }
+  });
+}
+addEdges();
+
+// ── Sigma ──────────────────────────────────────────────────────────────────────
+const sigmaContainer = document.getElementById('sigma-container');
+const renderer = new Sigma(graph, sigmaContainer, {
+  renderEdgeLabels: false,
+  defaultEdgeColor: '#3d444d',
+  defaultNodeColor: '#58a6ff',
+  labelColor: { color: '#c9d1d9' },
+  labelSize: 11,
+  labelRenderedSizeThreshold: 999,  // never auto-render file labels
+  minCameraRatio: 0.04,
+  maxCameraRatio: 14,
+});
+
+// ── SVG halos for repos ────────────────────────────────────────────────────────
+const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+svg.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1;';
+sigmaContainer.style.position = 'relative';
+sigmaContainer.appendChild(svg);
+
+function updateHalos() {
+  svg.innerHTML = '';
+  repoIds.forEach(function(id) {
+    var center = repoCenters[id];
+    if (!center) return;
+    var repoFiles = filesByRepo[id] || [];
+    var n = repoFiles.length;
+    var fileR = n <= 1 ? 0 : Math.max(80, Math.sqrt(n) * 22);
+    var cVp = renderer.graphToViewport({ x: center.x, y: center.y });
+    var eVp = renderer.graphToViewport({ x: center.x + fileR + 20, y: center.y });
+    var haloR = Math.max(20, Math.abs(eVp.x - cVp.x));
+    var color = repoColor[id];
+    var repo = REPOS[id];
+    var fill = withAlpha(color, activeRepoId && activeRepoId !== id ? 0.02 : 0.05);
+    var strokeOp = activeRepoId && activeRepoId !== id ? 0.15 : 0.55;
+
+    var circle = document.createElementNS('http://www.w3.org/2000/svg','circle');
+    circle.setAttribute('cx',cVp.x); circle.setAttribute('cy',cVp.y); circle.setAttribute('r',haloR);
+    circle.setAttribute('fill',fill); circle.setAttribute('stroke',color);
+    circle.setAttribute('stroke-width','1.5'); circle.setAttribute('stroke-dasharray','6 3');
+    circle.setAttribute('opacity',strokeOp);
+    svg.appendChild(circle);
+
+    if (haloR > 30) {
+      var label = document.createElementNS('http://www.w3.org/2000/svg','text');
+      label.setAttribute('x',cVp.x); label.setAttribute('y',cVp.y - haloR + 14);
+      label.setAttribute('text-anchor','middle'); label.setAttribute('fill',color);
+      label.setAttribute('font-size','12'); label.setAttribute('font-family','monospace');
+      label.setAttribute('opacity', activeRepoId && activeRepoId !== id ? 0.2 : 0.7);
+      label.textContent = repo ? repo.name : id;
+      svg.appendChild(label);
+    }
+  });
+}
+renderer.on('afterRender', updateHalos);
+
+// ── Stats ──────────────────────────────────────────────────────────────────────
 function updateStats() {
-  const visNodes = cy.nodes('[type="file"]:visible').length;
-  const visEdges = cy.edges(':visible').length;
+  var edgeCount = 0;
+  graph.forEachEdge(function(){ edgeCount++; });
   document.getElementById('stats').innerHTML =
-    `<div class="stat-row"><span>Files/dirs</span><span class="stat-val">${visNodes}</span></div>
-     <div class="stat-row"><span>Edges</span><span class="stat-val">${visEdges}</span></div>
-     <div class="stat-row"><span>Repositories</span><span class="stat-val">${repoIds.length}</span></div>`;
+    '<div class="stat-row"><span>Files/dirs</span><span class="stat-val">'+graph.order+'</span></div>'+
+    '<div class="stat-row"><span>Edges</span><span class="stat-val">'+edgeCount+'</span></div>'+
+    '<div class="stat-row"><span>Repositories</span><span class="stat-val">'+repoIds.length+'</span></div>';
 }
 updateStats();
 
-// ── Search ────────────────────────────────────────────────────────────────────
-document.getElementById('search').addEventListener('input', e => {
-  const q = e.target.value.trim().toLowerCase();
-  cy.elements().removeClass('faded highlighted');
-  if (!q) return;
-  const matched = cy.nodes('[type="file"]').filter(n =>
-    (n.data('fullPath') || '').toLowerCase().includes(q)
-  );
-  cy.elements().addClass('faded');
-  matched
-    .union(matched.connectedEdges())
-    .union(matched.connectedEdges().connectedNodes())
-    .removeClass('faded')
-    .addClass('highlighted');
+// ── Tooltip ────────────────────────────────────────────────────────────────────
+const tooltip = document.getElementById('tooltip');
+
+renderer.on('enterNode', function(e) {
+  var attrs = graph.getNodeAttributes(e.node);
+  tooltip.innerHTML = '<strong>'+escHtml(attrs.fullPath || e.node)+'</strong>'+
+    '<br><span style="color:'+repoColor[attrs.repoId]+'">'+escHtml(REPOS[attrs.repoId] ? REPOS[attrs.repoId].name : attrs.repoId)+'</span>';
+  tooltip.style.left = (e.event.x + 14) + 'px';
+  tooltip.style.top  = (e.event.y + 14) + 'px';
+  tooltip.style.display = 'block';
+});
+renderer.on('leaveNode', function() { tooltip.style.display = 'none'; });
+
+renderer.on('enterEdge', function(e) {
+  var attrs = graph.getEdgeAttributes(e.edge);
+  tooltip.innerHTML = '<strong>'+attrs.weight+'</strong> ref'+(attrs.weight!==1?'s':'')+
+    (attrs.kinds ? '<br><span style="color:#8b949e">'+escHtml(attrs.kinds)+'</span>' : '');
+  tooltip.style.display = 'block';
+});
+renderer.on('leaveEdge', function() { tooltip.style.display = 'none'; });
+
+// ── Click to highlight ─────────────────────────────────────────────────────────
+function storeOrig() {
+  graph.forEachNode(function(n,a){ if(!a.origColor) graph.setNodeAttribute(n,'origColor',a.color); });
+}
+
+function restoreColors() {
+  graph.forEachNode(function(n,a){ graph.setNodeAttribute(n,'color',a.origColor||a.color); });
+  graph.forEachEdge(function(e){ graph.setEdgeAttribute(e,'color','#3d444d'); });
+  updateHalos();
+}
+
+function isolateRepo(id) {
+  storeOrig();
+  graph.forEachNode(function(n,a){
+    graph.setNodeAttribute(n,'color', a.repoId===id ? (a.origColor||a.color) : dimColor(a.origColor||a.color));
+  });
+  graph.forEachEdge(function(e,a,src,tgt){
+    var sa = graph.getNodeAttributes(src), ta = graph.getNodeAttributes(tgt);
+    graph.setEdgeAttribute(e,'color', sa.repoId===id||ta.repoId===id ? repoColor[id] : '#1c2128');
+  });
+  updateHalos();
+}
+
+renderer.on('clickNode', function(e) {
+  storeOrig();
+  var clickedRepoId = graph.getNodeAttribute(e.node, 'repoId');
+  var neighbours = new Set([e.node]);
+  graph.forEachNeighbor(e.node, function(n){ neighbours.add(n); });
+  graph.forEachNode(function(n,a){
+    graph.setNodeAttribute(n,'color', neighbours.has(n) ? (a.origColor||a.color) : dimColor(a.origColor||a.color));
+  });
+  graph.forEachEdge(function(ek,a,src,tgt){
+    graph.setEdgeAttribute(ek,'color', (neighbours.has(src)&&neighbours.has(tgt)) ? repoColor[clickedRepoId]||'#58a6ff' : '#1c2128');
+  });
+  updateHalos();
 });
 
-// ── Weight slider ─────────────────────────────────────────────────────────────
+renderer.on('clickStage', function() {
+  activeRepoId = null;
+  document.querySelectorAll('.repo-item').forEach(function(r){r.classList.remove('active');});
+  restoreColors();
+});
+
+// ── Search ─────────────────────────────────────────────────────────────────────
+document.getElementById('search-input').addEventListener('input', function(e) {
+  var q = e.target.value.trim().toLowerCase();
+  if (!q) { restoreColors(); return; }
+  storeOrig();
+  var matched = new Set();
+  graph.forEachNode(function(n,a){ if((a.fullPath||'').toLowerCase().includes(q)) matched.add(n); });
+  graph.forEachNode(function(n,a){
+    graph.setNodeAttribute(n,'color', matched.has(n) ? (a.origColor||a.color) : dimColor(a.origColor||a.color));
+  });
+});
+
+// ── Weight slider ──────────────────────────────────────────────────────────────
 document.getElementById('weight-slider').addEventListener('input', function() {
   currentMinWeight = parseInt(this.value);
-  document.getElementById('weight-label').textContent =
-    `\u2265 ${currentMinWeight} reference${currentMinWeight !== 1 ? 's' : ''}`;
-  cy.remove('edge');
-  cy.add(visibleEdges());
+  document.getElementById('weight-label').textContent = '\u2265 '+currentMinWeight+' reference'+(currentMinWeight!==1?'s':'');
+  graph.forEachEdge(function(e){ graph.dropEdge(e); });
+  addEdges();
   updateStats();
-});
-
-// ── Click interactions ────────────────────────────────────────────────────────
-cy.on('tap', 'node[type="file"]', e => {
-  cy.elements().removeClass('highlighted faded');
-  const n = e.target;
-  const nb = n.union(n.openNeighborhood());
-  cy.elements().not(nb).addClass('faded');
-  nb.addClass('highlighted');
-});
-cy.on('tap', e => {
-  if (e.target === cy) {
-    cy.elements().removeClass('faded highlighted');
-    document.querySelectorAll('.repo-item').forEach(r => r.classList.remove('active'));
-    activeRepo = null;
-  }
-});
-
-// ── Tooltip ───────────────────────────────────────────────────────────────────
-const tooltip = document.getElementById('tooltip');
-cy.on('mouseover', 'node[type="file"]', e => {
-  tooltip.innerHTML = `<strong>${e.target.data('fullPath')}</strong>`;
-  tooltip.style.display = 'block';
-});
-cy.on('mouseover', 'edge', e => {
-  const d = e.target.data();
-  tooltip.innerHTML = `<strong>${d.weight}</strong> reference${d.weight !== 1 ? 's' : ''}<br><span style="color:#8b949e">${d.kinds}</span>`;
-  tooltip.style.display = 'block';
-});
-cy.on('mouseout', () => { tooltip.style.display = 'none'; });
-cy.on('mousemove', e => {
-  const oe = e.originalEvent;
-  tooltip.style.left = (oe.clientX + 14) + 'px';
-  tooltip.style.top  = (oe.clientY + 14) + 'px';
 });
 </script>
 </body>
