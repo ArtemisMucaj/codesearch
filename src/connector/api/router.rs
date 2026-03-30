@@ -99,10 +99,9 @@ impl<'a> Router<'a> {
                 repository,
                 format,
                 min_weight,
-                cross_repo,
             } => {
                 self.file_graph_controller
-                    .graph(repository, format, min_weight, cross_repo)
+                    .graph(repository, format, min_weight)
                     .await
             }
             Commands::Mcp { .. } => {

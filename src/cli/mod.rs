@@ -205,14 +205,14 @@ pub enum Commands {
     /// Visualise file-level dependency relationships as a graph.
     ///
     /// Edges are drawn from a file that makes symbol references to the file that
-    /// defines those symbols.  Repositories are shown as cluster boundaries so
-    /// you can see at a glance which files live together and which cross repo
-    /// lines.
+    /// defines those symbols.  Repositories are shown as cluster boundaries;
+    /// cross-repository edges are always included.  Use --repository to limit
+    /// which repositories appear in the graph.
     ///
     /// Pipe DOT output through Graphviz to produce an image:
     ///   codesearch graph | dot -Tsvg -o deps.svg && open deps.svg
     Graph {
-        /// Restrict the graph to one or more repository IDs (may be repeated).
+        /// Limit the graph to one or more repository IDs (may be repeated).
         /// When omitted every indexed repository is included.
         #[arg(short, long)]
         repository: Option<Vec<String>>,
@@ -226,10 +226,6 @@ pub enum Commands {
         #[arg(long, default_value = "1")]
         min_weight: usize,
 
-        /// Also include edges that cross repository boundaries.
-        /// By default only intra-repository edges are shown.
-        #[arg(long)]
-        cross_repo: bool,
     },
 
     /// Start MCP (Model Context Protocol) server for integration with AI tools

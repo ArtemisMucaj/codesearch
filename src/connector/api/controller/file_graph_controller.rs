@@ -21,12 +21,11 @@ impl<'a> FileGraphController<'a> {
         repository: Option<Vec<String>>,
         format: GraphFormat,
         min_weight: usize,
-        cross_repo: bool,
     ) -> Result<String> {
         let use_case = self.container.file_graph_use_case();
         let repo_ids = repository.as_deref();
         let graph = use_case
-            .build_graph(repo_ids, min_weight, cross_repo)
+            .build_graph(repo_ids, min_weight, true)
             .await?;
 
         if graph.is_empty() {
