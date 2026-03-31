@@ -10,7 +10,7 @@ pub use application::{
     FileRelationshipUseCase, ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode,
     IndexRepositoryUseCase, ListRepositoriesUseCase, MetadataRepository, ParserService,
     QueryExpander, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
-    SplitAnalysisUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
+    SymbolContext, SymbolContextUseCase, VectorRepository,
 };
 
 pub use cli::{
@@ -26,9 +26,9 @@ pub use connector::{
 };
 
 pub use domain::{
-    compute_file_hash, CodeChunk, ConsumerRepo, DomainError, Embedding, EmbeddingConfig, FileEdge,
+    compute_file_hash, CodeChunk, DomainError, Embedding, EmbeddingConfig, FileEdge,
     FileGraph, FileGraphRepo, FileHash, IndexingStatus, Language, NodeType, ReferenceKind,
-    Repository, SearchQuery, SearchResult, SplitAnalysis, SplitGroup, SymbolReference, VectorStore,
+    Repository, SearchQuery, SearchResult, SymbolReference, VectorStore,
 };
 
 pub use connector::api::{Container, ContainerConfig, Router};

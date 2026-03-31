@@ -5,7 +5,6 @@ mod file_hash;
 mod language;
 mod repository;
 mod search_result;
-mod split_analysis;
 mod symbol_reference;
 
 pub use code_chunk::*;
@@ -15,5 +14,4 @@ pub use file_hash::*;
 pub use language::*;
 pub use repository::*;
 pub use search_result::*;
-pub use split_analysis::*;
 pub use symbol_reference::*;

@@ -17,7 +17,7 @@ use crate::{
     ExplainUseCase, FileRelationshipUseCase, ImpactAnalysisUseCase, InMemoryVectorRepository,
     IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding,
     MockReranking, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking,
-    RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase, SplitAnalysisUseCase,
+    RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
     SymbolContextUseCase, TreeSitterParser, VectorRepository,
 };
 
@@ -519,10 +519,6 @@ impl Container {
             self.vector_repo.clone(),
             self.metadata_repository(),
         )
-    }
-
-    pub fn split_analysis_use_case(&self) -> SplitAnalysisUseCase {
-        SplitAnalysisUseCase::new(Arc::new(self.file_graph_use_case()))
     }
 
     pub fn data_dir(&self) -> &str {

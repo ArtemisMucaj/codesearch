@@ -229,27 +229,6 @@ pub enum Commands {
         regex: bool,
     },
 
-    /// Analyse a monolith repository and identify natural extraction boundaries.
-    ///
-    /// Looks at which external repositories reference which parts of the target
-    /// repository's public interface, then groups files by their "consumer
-    /// fingerprint" — the set of external repos that depend on them.  Files
-    /// with the same fingerprint naturally belong together in an extracted
-    /// library.
-    ///
-    /// Output is an interactive HTML page (open in any browser) showing the
-    /// monolith as a central cluster, extraction candidate sub-clusters inside
-    /// it, and external consumer repositories around it.
-    Split {
-        /// The repository ID to analyse (required).
-        /// Use `codesearch list` to find repository IDs.
-        repository: String,
-
-        /// Output format: html (interactive Sigma.js page, default) or json.
-        #[arg(short = 'F', long, value_enum, default_value = "html")]
-        format: GraphFormat,
-    },
-
     /// Visualise file-level dependency relationships as a graph.
     ///
     /// Edges are drawn from a file that makes symbol references to the file that

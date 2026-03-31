@@ -558,7 +558,7 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
       <div class="range-label" id="weight-label">≥ 1 reference</div>
     </div>
   </div>
-  <div id="hint">Hover a node — highlights its repo group + direct calls<br>Scroll to zoom · drag to pan · click background to reset</div>
+  <div id="hint">Hover a repo cluster to highlight its cross-repo connections<br>Hover a file node to see its direct calls · click background to reset</div>
 </div>
 <div id="graph-area">
   <div id="sigma-container"></div>
@@ -617,36 +617,57 @@ function toggleRepo(id, el) {
 // ── Build graphology graph ─────────────────────────────────────────────────────
 const graph = new graphology.Graph({ multi: false, type: 'directed' });
 
-// Layout: repos in a ring, files in sub-circles
-const REPO_R = repoIds.length === 1 ? 0 : 650;
+// Repos in a ring; files packed inside each cluster using phyllotaxis layout
+const REPO_RING_R = repoIds.length === 1 ? 0 : 650;
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));  // ~137.5°
 const repoCenters = {};
 repoIds.forEach(function(id, i) {
   var angle = (2 * Math.PI * i) / Math.max(repoIds.length, 1) - Math.PI / 2;
-  repoCenters[id] = { x: REPO_R * Math.cos(angle), y: REPO_R * Math.sin(angle) };
+  repoCenters[id] = { x: REPO_RING_R * Math.cos(angle), y: REPO_RING_R * Math.sin(angle) };
 });
 
-// Group files by repo, assign positions
+// Group files by repo
 var filesByRepo = {};
 FILES.forEach(function(f) {
   if (!filesByRepo[f.repoId]) filesByRepo[f.repoId] = [];
   filesByRepo[f.repoId].push(f);
 });
 
+// Add a large hub node for each repo (acts as cluster centre + label)
+repoIds.forEach(function(id) {
+  var c = repoCenters[id] || { x: 0, y: 0 };
+  var n = (filesByRepo[id] || []).length;
+  var repoName = REPOS[id] ? REPOS[id].name : id;
+  graph.addNode('repo::' + id, {
+    x: c.x, y: c.y,
+    size: Math.max(20, Math.min(42, 10 + Math.sqrt(n) * 2.8)),
+    color: repoColor[id] || '#58a6ff',
+    label: repoName,
+    nodeType: 'repo',
+    repoId: id,
+    origColor: repoColor[id] || '#58a6ff',
+  });
+});
+
+// Add file nodes using phyllotaxis so they fill the circle area evenly
 FILES.forEach(function(f) {
   var center = repoCenters[f.repoId] || { x: 0, y: 0 };
   var repoFiles = filesByRepo[f.repoId] || [];
   var idx = repoFiles.indexOf(f);
   var n = repoFiles.length;
-  var r = n <= 1 ? 0 : Math.max(80, Math.sqrt(n) * 22);
-  var angle = (2 * Math.PI * idx) / Math.max(n, 1);
+  var clusterR = n <= 1 ? 0 : Math.max(90, Math.sqrt(n) * 24);
+  // Phyllotaxis: r grows as sqrt(idx/n) so dots fill the disc uniformly
+  var r = n <= 1 ? 0 : clusterR * Math.sqrt((idx + 0.5) / n);
+  var angle = idx * GOLDEN_ANGLE;
   graph.addNode(f.id, {
     x: center.x + r * Math.cos(angle),
     y: center.y + r * Math.sin(angle),
     size: 5,
     color: repoColor[f.repoId] || '#58a6ff',
-    label: '',          // no label by default; shown only on hover
+    label: '',          // file path shown on hover only
     fullPath: f.id,
     shortLabel: f.label,
+    nodeType: 'file',
     repoId: f.repoId,
     origColor: repoColor[f.repoId] || '#58a6ff',
   });
@@ -679,8 +700,10 @@ const renderer = new Sigma(graph, sigmaContainer, {
   defaultEdgeColor: '#3d444d',
   defaultNodeColor: '#58a6ff',
   labelColor: { color: '#c9d1d9' },
-  labelSize: 11,
-  labelRenderedSizeThreshold: 999,
+  labelSize: 12,
+  labelWeight: '600',
+  // Hub nodes (size 20+) will render labels; file dots (size 5, label='') won't
+  labelRenderedSizeThreshold: 12,
   minCameraRatio: 0.04,
   maxCameraRatio: 14,
 });
@@ -717,16 +740,28 @@ function highlightNode(nodeKey) {
   });
 }
 
-// Isolate a repo (sidebar click): highlight that repo's nodes + outbound edges
-function isolateRepo(id) {
+// Highlight an entire repo cluster: its nodes + all directly connected foreign nodes/edges
+function highlightRepo(repoId) {
+  var lit = new Set();
+  // All nodes in the hovered repo
+  graph.forEachNode(function(n,a){ if (a.repoId === repoId) lit.add(n); });
+  // All direct neighbours of file nodes in this repo (cross-repo connections)
   graph.forEachNode(function(n,a){
-    graph.setNodeAttribute(n,'color', a.repoId===id ? a.origColor : dimColor(a.origColor));
+    if (a.repoId === repoId) graph.forEachNeighbor(n, function(nb){ lit.add(nb); });
   });
-  graph.forEachEdge(function(e,a,src,tgt){
+  graph.forEachNode(function(n,a){
+    graph.setNodeAttribute(n,'color', lit.has(n) ? a.origColor : dimColor(a.origColor));
+  });
+  var accentColor = repoColor[repoId] || '#58a6ff';
+  graph.forEachEdge(function(ek,a,src,tgt){
     var sa = graph.getNodeAttributes(src), ta = graph.getNodeAttributes(tgt);
-    graph.setEdgeAttribute(e,'color', (sa.repoId===id || ta.repoId===id) ? repoColor[id] : EDGE_DIM);
+    var connected = (sa.repoId === repoId || ta.repoId === repoId);
+    graph.setEdgeAttribute(ek,'color', connected ? accentColor : EDGE_DIM);
   });
 }
+
+// Isolate a repo (sidebar click): same as highlight but persistent
+function isolateRepo(id) { highlightRepo(id); }
 
 // ── Stats ──────────────────────────────────────────────────────────────────────
 function updateStats() {
@@ -744,15 +779,25 @@ const tooltip = document.getElementById('tooltip');
 
 renderer.on('enterNode', function(e) {
   var attrs = graph.getNodeAttributes(e.node);
-  var repoName = REPOS[attrs.repoId] ? REPOS[attrs.repoId].name : attrs.repoId;
-  tooltip.innerHTML =
-    '<strong>'+escHtml(attrs.fullPath || e.node)+'</strong>'+
-    '<br><span style="color:'+repoColor[attrs.repoId]+'">'+escHtml(repoName)+'</span>';
-  tooltip.style.left = (e.event.x + 14) + 'px';
-  tooltip.style.top  = (e.event.y + 14) + 'px';
-  tooltip.style.display = 'block';
-  // Only highlight on hover when no sidebar repo is active
-  if (!activeRepoId) highlightNode(e.node);
+  if (attrs.nodeType === 'repo') {
+    var n = (filesByRepo[attrs.repoId] || []).length;
+    tooltip.innerHTML = '<strong>'+escHtml(attrs.label)+'</strong><br>'+
+      n+' file'+(n!==1?'s':'')+
+      '<br><span style="color:#8b949e;font-size:10px">Hover to see cross-repo connections</span>';
+    tooltip.style.left = (e.event.x + 14) + 'px';
+    tooltip.style.top  = (e.event.y + 14) + 'px';
+    tooltip.style.display = 'block';
+    if (!activeRepoId) highlightRepo(attrs.repoId);
+  } else {
+    var repoName = REPOS[attrs.repoId] ? REPOS[attrs.repoId].name : attrs.repoId;
+    tooltip.innerHTML =
+      '<strong>'+escHtml(attrs.fullPath || e.node)+'</strong>'+
+      '<br><span style="color:'+repoColor[attrs.repoId]+'">'+escHtml(repoName)+'</span>';
+    tooltip.style.left = (e.event.x + 14) + 'px';
+    tooltip.style.top  = (e.event.y + 14) + 'px';
+    tooltip.style.display = 'block';
+    if (!activeRepoId) highlightNode(e.node);
+  }
 });
 
 renderer.on('leaveNode', function() {
