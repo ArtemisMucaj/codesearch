@@ -652,6 +652,9 @@ FILES.forEach(function(f) {
   });
 });
 
+const EDGE_DEFAULT = '#3d444d';
+const EDGE_DIM     = '#1c2128';
+
 function addEdges() {
   EDGES_DATA.forEach(function(e, i) {
     if (e.weight < currentMinWeight) return;
@@ -683,10 +686,6 @@ const renderer = new Sigma(graph, sigmaContainer, {
 });
 
 // ── Color helpers ──────────────────────────────────────────────────────────────
-// origColor is already stored on each node at creation time.
-const EDGE_DEFAULT = '#3d444d';
-const EDGE_DIM     = '#1c2128';
-
 function restoreColors() {
   graph.forEachNode(function(n,a){ graph.setNodeAttribute(n,'color',a.origColor); });
   graph.forEachEdge(function(e){ graph.setEdgeAttribute(e,'color',EDGE_DEFAULT); });
