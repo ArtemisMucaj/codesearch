@@ -558,7 +558,7 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
       <div class="range-label" id="weight-label">≥ 1 reference</div>
     </div>
   </div>
-  <div id="hint">Scroll to zoom · Drag to pan<br>Click a node to highlight neighbours<br>Click background to reset</div>
+  <div id="hint">Hover a node — highlights its repo group + direct calls<br>Scroll to zoom · drag to pan · click background to reset</div>
 </div>
 <div id="graph-area">
   <div id="sigma-container"></div>
@@ -656,15 +656,15 @@ function addEdges() {
   EDGES_DATA.forEach(function(e, i) {
     if (e.weight < currentMinWeight) return;
     if (!graph.hasNode(e.source) || !graph.hasNode(e.target)) return;
-    var key = 'e'+i;
-    if (!graph.hasEdge(key)) {
-      graph.addEdgeWithKey(key, e.source, e.target, {
-        size: Math.min(3, 0.6 + (e.weight / MAX_WEIGHT) * 2.5),
-        color: '#3d444d',
-        weight: e.weight,
-        kinds: e.kinds,
-      });
-    }
+    // Skip if an edge between this source→target already exists
+    // (can happen when the same file pair appears in multiple repo contexts)
+    if (graph.hasEdge(e.source, e.target)) return;
+    graph.addEdgeWithKey('e'+i, e.source, e.target, {
+      size: Math.min(3, 0.6 + (e.weight / MAX_WEIGHT) * 2.5),
+      color: EDGE_DEFAULT,
+      weight: e.weight,
+      kinds: e.kinds,
+    });
   });
 }
 addEdges();
@@ -677,52 +677,57 @@ const renderer = new Sigma(graph, sigmaContainer, {
   defaultNodeColor: '#58a6ff',
   labelColor: { color: '#c9d1d9' },
   labelSize: 11,
-  labelRenderedSizeThreshold: 999,  // never auto-render file labels
+  labelRenderedSizeThreshold: 999,
   minCameraRatio: 0.04,
   maxCameraRatio: 14,
 });
 
-// ── SVG halos for repos ────────────────────────────────────────────────────────
-const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-svg.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1;';
-sigmaContainer.style.position = 'relative';
-sigmaContainer.appendChild(svg);
+// ── Color helpers ──────────────────────────────────────────────────────────────
+// origColor is already stored on each node at creation time.
+const EDGE_DEFAULT = '#3d444d';
+const EDGE_DIM     = '#1c2128';
 
-function updateHalos() {
-  svg.innerHTML = '';
-  repoIds.forEach(function(id) {
-    var center = repoCenters[id];
-    if (!center) return;
-    var repoFiles = filesByRepo[id] || [];
-    var n = repoFiles.length;
-    var fileR = n <= 1 ? 0 : Math.max(80, Math.sqrt(n) * 22);
-    var cVp = renderer.graphToViewport({ x: center.x, y: center.y });
-    var eVp = renderer.graphToViewport({ x: center.x + fileR + 20, y: center.y });
-    var haloR = Math.max(20, Math.abs(eVp.x - cVp.x));
-    var color = repoColor[id];
-    var repo = REPOS[id];
-    var fill = withAlpha(color, activeRepoId && activeRepoId !== id ? 0.02 : 0.05);
-    var strokeOp = activeRepoId && activeRepoId !== id ? 0.15 : 0.55;
+function restoreColors() {
+  graph.forEachNode(function(n,a){ graph.setNodeAttribute(n,'color',a.origColor); });
+  graph.forEachEdge(function(e){ graph.setEdgeAttribute(e,'color',EDGE_DEFAULT); });
+}
 
-    var circle = document.createElementNS('http://www.w3.org/2000/svg','circle');
-    circle.setAttribute('cx',cVp.x); circle.setAttribute('cy',cVp.y); circle.setAttribute('r',haloR);
-    circle.setAttribute('fill',fill); circle.setAttribute('stroke',color);
-    circle.setAttribute('stroke-width','1.5'); circle.setAttribute('stroke-dasharray','6 3');
-    circle.setAttribute('opacity',strokeOp);
-    svg.appendChild(circle);
+// Highlight: same repo group + direct neighbours of hovered node.
+// Edges are shown only when they are a direct connection to/from hovered.
+function highlightNode(nodeKey) {
+  var attrs = graph.getNodeAttributes(nodeKey);
+  var hovRepoId = attrs.repoId;
 
-    if (haloR > 30) {
-      var label = document.createElementNS('http://www.w3.org/2000/svg','text');
-      label.setAttribute('x',cVp.x); label.setAttribute('y',cVp.y - haloR + 14);
-      label.setAttribute('text-anchor','middle'); label.setAttribute('fill',color);
-      label.setAttribute('font-size','12'); label.setAttribute('font-family','monospace');
-      label.setAttribute('opacity', activeRepoId && activeRepoId !== id ? 0.2 : 0.7);
-      label.textContent = repo ? repo.name : id;
-      svg.appendChild(label);
-    }
+  // Build lit set: same-repo nodes
+  var lit = new Set();
+  graph.forEachNode(function(n,a){
+    if (a.repoId === hovRepoId) lit.add(n);
+  });
+  // Add direct neighbours (can be in other repos)
+  graph.forEachNeighbor(nodeKey, function(n){ lit.add(n); });
+
+  // Apply node dimming
+  graph.forEachNode(function(n,a){
+    graph.setNodeAttribute(n,'color', lit.has(n) ? a.origColor : dimColor(a.origColor));
+  });
+  // Highlight only edges directly connected to the hovered node
+  var accentColor = repoColor[hovRepoId] || '#58a6ff';
+  graph.forEachEdge(function(ek,a,src,tgt){
+    var direct = (src === nodeKey || tgt === nodeKey);
+    graph.setEdgeAttribute(ek,'color', direct ? accentColor : EDGE_DIM);
   });
 }
-renderer.on('afterRender', updateHalos);
+
+// Isolate a repo (sidebar click): highlight that repo's nodes + outbound edges
+function isolateRepo(id) {
+  graph.forEachNode(function(n,a){
+    graph.setNodeAttribute(n,'color', a.repoId===id ? a.origColor : dimColor(a.origColor));
+  });
+  graph.forEachEdge(function(e,a,src,tgt){
+    var sa = graph.getNodeAttributes(src), ta = graph.getNodeAttributes(tgt);
+    graph.setEdgeAttribute(e,'color', (sa.repoId===id || ta.repoId===id) ? repoColor[id] : EDGE_DIM);
+  });
+}
 
 // ── Stats ──────────────────────────────────────────────────────────────────────
 function updateStats() {
@@ -740,58 +745,43 @@ const tooltip = document.getElementById('tooltip');
 
 renderer.on('enterNode', function(e) {
   var attrs = graph.getNodeAttributes(e.node);
-  tooltip.innerHTML = '<strong>'+escHtml(attrs.fullPath || e.node)+'</strong>'+
-    '<br><span style="color:'+repoColor[attrs.repoId]+'">'+escHtml(REPOS[attrs.repoId] ? REPOS[attrs.repoId].name : attrs.repoId)+'</span>';
+  var repoName = REPOS[attrs.repoId] ? REPOS[attrs.repoId].name : attrs.repoId;
+  tooltip.innerHTML =
+    '<strong>'+escHtml(attrs.fullPath || e.node)+'</strong>'+
+    '<br><span style="color:'+repoColor[attrs.repoId]+'">'+escHtml(repoName)+'</span>';
   tooltip.style.left = (e.event.x + 14) + 'px';
   tooltip.style.top  = (e.event.y + 14) + 'px';
   tooltip.style.display = 'block';
+  // Only highlight on hover when no sidebar repo is active
+  if (!activeRepoId) highlightNode(e.node);
 });
-renderer.on('leaveNode', function() { tooltip.style.display = 'none'; });
+
+renderer.on('leaveNode', function() {
+  tooltip.style.display = 'none';
+  if (!activeRepoId) restoreColors();
+});
 
 renderer.on('enterEdge', function(e) {
-  var attrs = graph.getEdgeAttributes(e.edge);
-  tooltip.innerHTML = '<strong>'+attrs.weight+'</strong> ref'+(attrs.weight!==1?'s':'')+
-    (attrs.kinds ? '<br><span style="color:#8b949e">'+escHtml(attrs.kinds)+'</span>' : '');
+  var a = graph.getEdgeAttributes(e.edge);
+  tooltip.innerHTML = '<strong>'+a.weight+'</strong> ref'+(a.weight!==1?'s':'')+
+    (a.kinds ? '<br><span style="color:#8b949e">'+escHtml(a.kinds)+'</span>' : '');
   tooltip.style.display = 'block';
 });
 renderer.on('leaveEdge', function() { tooltip.style.display = 'none'; });
 
-// ── Click to highlight ─────────────────────────────────────────────────────────
-function storeOrig() {
-  graph.forEachNode(function(n,a){ if(!a.origColor) graph.setNodeAttribute(n,'origColor',a.color); });
+// ── Sidebar repo isolation ─────────────────────────────────────────────────────
+function toggleRepo(id, el) {
+  if (activeRepoId === id) {
+    activeRepoId = null;
+    document.querySelectorAll('.repo-item').forEach(function(r){r.classList.remove('active');});
+    restoreColors();
+    return;
+  }
+  document.querySelectorAll('.repo-item').forEach(function(r){r.classList.remove('active');});
+  el.classList.add('active');
+  activeRepoId = id;
+  isolateRepo(id);
 }
-
-function restoreColors() {
-  graph.forEachNode(function(n,a){ graph.setNodeAttribute(n,'color',a.origColor||a.color); });
-  graph.forEachEdge(function(e){ graph.setEdgeAttribute(e,'color','#3d444d'); });
-  updateHalos();
-}
-
-function isolateRepo(id) {
-  storeOrig();
-  graph.forEachNode(function(n,a){
-    graph.setNodeAttribute(n,'color', a.repoId===id ? (a.origColor||a.color) : dimColor(a.origColor||a.color));
-  });
-  graph.forEachEdge(function(e,a,src,tgt){
-    var sa = graph.getNodeAttributes(src), ta = graph.getNodeAttributes(tgt);
-    graph.setEdgeAttribute(e,'color', sa.repoId===id||ta.repoId===id ? repoColor[id] : '#1c2128');
-  });
-  updateHalos();
-}
-
-renderer.on('clickNode', function(e) {
-  storeOrig();
-  var clickedRepoId = graph.getNodeAttribute(e.node, 'repoId');
-  var neighbours = new Set([e.node]);
-  graph.forEachNeighbor(e.node, function(n){ neighbours.add(n); });
-  graph.forEachNode(function(n,a){
-    graph.setNodeAttribute(n,'color', neighbours.has(n) ? (a.origColor||a.color) : dimColor(a.origColor||a.color));
-  });
-  graph.forEachEdge(function(ek,a,src,tgt){
-    graph.setEdgeAttribute(ek,'color', (neighbours.has(src)&&neighbours.has(tgt)) ? repoColor[clickedRepoId]||'#58a6ff' : '#1c2128');
-  });
-  updateHalos();
-});
 
 renderer.on('clickStage', function() {
   activeRepoId = null;
@@ -803,11 +793,15 @@ renderer.on('clickStage', function() {
 document.getElementById('search-input').addEventListener('input', function(e) {
   var q = e.target.value.trim().toLowerCase();
   if (!q) { restoreColors(); return; }
-  storeOrig();
+  activeRepoId = null;
+  document.querySelectorAll('.repo-item').forEach(function(r){r.classList.remove('active');});
   var matched = new Set();
   graph.forEachNode(function(n,a){ if((a.fullPath||'').toLowerCase().includes(q)) matched.add(n); });
   graph.forEachNode(function(n,a){
-    graph.setNodeAttribute(n,'color', matched.has(n) ? (a.origColor||a.color) : dimColor(a.origColor||a.color));
+    graph.setNodeAttribute(n,'color', matched.has(n) ? a.origColor : dimColor(a.origColor));
+  });
+  graph.forEachEdge(function(e,a,src,tgt){
+    graph.setEdgeAttribute(e,'color', matched.has(src)&&matched.has(tgt) ? EDGE_DEFAULT : EDGE_DIM);
   });
 });
 

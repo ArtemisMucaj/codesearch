@@ -398,6 +398,13 @@ DATA.groups.forEach(function(g) {
   });
 });
 
+// ── Group colour lookup (groupId → hex) ──────────────────────────────────────
+const groupColors = {};
+DATA.groups.forEach(function(g) { groupColors[g.id] = g.color; });
+
+// Store origColor on all nodes once before any highlight
+graph.forEachNode(function(n, a) { graph.setNodeAttribute(n, 'origColor', a.color); });
+
 // ── Sigma v2 renderer ─────────────────────────────────────────────────────────
 const sigmaContainer = document.getElementById('sigma-container');
 
@@ -413,42 +420,42 @@ const renderer = new Sigma(graph, sigmaContainer, {
   labelRenderedSizeThreshold: 5,
 });
 
-// ── SVG overlay for group halos ───────────────────────────────────────────────
-const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-svg.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1;';
-sigmaContainer.style.position = 'relative';
-sigmaContainer.appendChild(svg);
-
-function updateHalos() {
-  svg.innerHTML = '';
-
-  // Monolith boundary only — group membership is shown by colour, not by circles
-  const mCenter = renderer.graphToViewport({ x: CX, y: CY });
-  const mEdge   = renderer.graphToViewport({ x: CX + MONOLITH_R, y: CY });
-  const mR = Math.max(40, Math.abs(mEdge.x - mCenter.x));
-
-  const mc = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-  mc.setAttribute('cx', mCenter.x); mc.setAttribute('cy', mCenter.y); mc.setAttribute('r', mR);
-  mc.setAttribute('fill', 'none'); mc.setAttribute('stroke', '#388bfd');
-  mc.setAttribute('stroke-width', '2'); mc.setAttribute('stroke-dasharray', '8 4');
-  mc.setAttribute('opacity', '0.3');
-  svg.appendChild(mc);
-
-  const mlabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-  mlabel.setAttribute('x', mCenter.x); mlabel.setAttribute('y', mCenter.y - mR + 16);
-  mlabel.setAttribute('text-anchor', 'middle'); mlabel.setAttribute('fill', '#58a6ff');
-  mlabel.setAttribute('font-size', '13'); mlabel.setAttribute('font-family', 'monospace');
-  mlabel.setAttribute('opacity', '0.65');
-  mlabel.textContent = DATA.target.name;
-  svg.appendChild(mlabel);
-}
-
-renderer.on('afterRender', updateHalos);
-
 // ── Tooltip ───────────────────────────────────────────────────────────────────
 const tooltip  = document.getElementById('tooltip');
 const ttTitle  = document.getElementById('tt-title');
 const ttMeta   = document.getElementById('tt-meta');
+
+// ── Hover highlight ───────────────────────────────────────────────────────────
+const EDGE_DEFAULT = '#444c56';
+const EDGE_DIM     = '#2d333b';
+
+function restoreColors() {
+  graph.forEachNode(function(n, a) { graph.setNodeAttribute(n, 'color', a.origColor || a.color); });
+  graph.forEachEdge(function(e) { graph.setEdgeAttribute(e, 'color', EDGE_DEFAULT); graph.setEdgeAttribute(e, 'size', 1.5); });
+}
+
+function highlightNode(nodeKey) {
+  var attrs = graph.getNodeAttributes(nodeKey);
+  var gid = attrs.groupId || null;
+  var lit = new Set();
+  // same group: all nodes sharing groupId (or the node itself if consumer)
+  if (gid) {
+    graph.forEachNode(function(n, a) { if (a.groupId === gid) lit.add(n); });
+  } else {
+    lit.add(nodeKey);
+  }
+  // direct neighbors
+  graph.forEachNeighbor(nodeKey, function(n) { lit.add(n); });
+  graph.forEachNode(function(n, a) {
+    graph.setNodeAttribute(n, 'color', lit.has(n) ? (a.origColor || a.color) : dimColor(a.origColor || a.color));
+  });
+  var accentColor = (gid && groupColors[gid]) ? groupColors[gid] : '#58a6ff';
+  graph.forEachEdge(function(ek, a, src, tgt) {
+    var direct = (src === nodeKey || tgt === nodeKey);
+    graph.setEdgeAttribute(ek, 'color', direct ? accentColor : EDGE_DIM);
+    graph.setEdgeAttribute(ek, 'size', direct ? 2.5 : 1);
+  });
+}
 
 renderer.on('enterNode', function(e) {
   const attrs = graph.getNodeAttributes(e.node);
@@ -469,9 +476,13 @@ renderer.on('enterNode', function(e) {
   tooltip.style.left = (e.event.x + 16) + 'px';
   tooltip.style.top  = (e.event.y + 16) + 'px';
   tooltip.style.display = 'block';
+  if (!activeGroupId && !activeConsumerId) highlightNode(e.node);
 });
 
-renderer.on('leaveNode', function() { tooltip.style.display = 'none'; });
+renderer.on('leaveNode', function() {
+  tooltip.style.display = 'none';
+  if (!activeGroupId && !activeConsumerId) restoreColors();
+});
 
 // ── Selection / highlight ─────────────────────────────────────────────────────
 function clearSelection() {
@@ -487,15 +498,7 @@ function clearSelection() {
   });
 }
 
-// Store original colours once on first use
-function storeOrigColors() {
-  graph.forEachNode(function(n, attrs) {
-    if (!attrs.origColor) graph.setNodeAttribute(n, 'origColor', attrs.color);
-  });
-}
-
 function selectGroup(gid) {
-  storeOrigColors();
   if (activeGroupId === gid) { clearSelection(); return; }
   clearSelection();
   activeGroupId = gid;
@@ -519,7 +522,6 @@ function selectGroup(gid) {
 }
 
 function selectConsumer(cid) {
-  storeOrigColors();
   if (activeConsumerId === cid) { clearSelection(); return; }
   clearSelection();
   activeConsumerId = cid;
@@ -539,18 +541,13 @@ function selectConsumer(cid) {
   });
 }
 
+// Sidebar clicks do persistent group/consumer isolation; click stage to clear
 renderer.on('clickStage', clearSelection);
-renderer.on('clickNode', function(e) {
-  const attrs = graph.getNodeAttributes(e.node);
-  if (attrs.nodeType === 'group' || attrs.nodeType === 'file' || attrs.nodeType === 'support') selectGroup(attrs.groupId);
-  else if (attrs.nodeType === 'consumer') selectConsumer(attrs.consumerId);
-});
 
 // ── Search ─────────────────────────────────────────────────────────────────────
 document.getElementById('search-input').addEventListener('input', function(e) {
   const q = e.target.value.trim().toLowerCase();
   if (!q) { clearSelection(); return; }
-  storeOrigColors();
   const matched = new Set();
   graph.forEachNode(function(n, attrs) {
     if ((attrs.label || '').toLowerCase().includes(q) || (attrs.fullPath || '').toLowerCase().includes(q)) matched.add(n);
