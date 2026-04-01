@@ -267,6 +267,17 @@ pub enum Commands {
         cluster: ClusterMode,
     },
 
+    /// List the files that repository X uses from repository Y.
+    ///
+    /// Prints every file in <from> that references symbols defined in <to>,
+    /// grouped by the target file they depend on.  Use repository names or IDs.
+    Uses {
+        /// Repository that is doing the using (the caller side).
+        from: String,
+        /// Repository being used (the dependency side).
+        to: String,
+    },
+
     /// Start MCP (Model Context Protocol) server for integration with AI tools
     Mcp {
         /// Run as HTTP server on specified port (e.g., --http 8080)
