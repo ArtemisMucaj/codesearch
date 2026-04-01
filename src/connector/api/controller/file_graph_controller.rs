@@ -511,43 +511,51 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>File Dependency Graph — codesearch</title>
 <style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { display: flex; height: 100vh; overflow: hidden; background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px; }
-  #sidebar { width: 240px; min-width: 180px; background: #161b22; border-right: 1px solid #30363d; display: flex; flex-direction: column; overflow: hidden; }
-  #sidebar-inner { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 14px; }
-  h1 { font-size: 13px; font-weight: 600; color: #f0f6fc; }
-  .section-label { font-size: 10px; font-weight: 600; color: #8b949e; text-transform: uppercase; letter-spacing: .6px; margin-bottom: 4px; }
-  .repo-item { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; transition: background .15s; }
-  .repo-item:hover { background: #21262d; }
-  .repo-item.active { background: #21262d; outline: 1px solid #30363d; }
-  .repo-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
-  .repo-name { color: #c9d1d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-  input[type="text"] { width: 100%; padding: 6px 10px; border-radius: 6px; background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; font-size: 12px; outline: none; }
-  input[type="text"]:focus { border-color: #58a6ff; }
-  .stat-row { display: flex; justify-content: space-between; font-size: 12px; }
-  .stat-val { font-weight: 600; color: #58a6ff; }
-  #hint { padding: 10px 14px; font-size: 10px; color: #6e7681; border-top: 1px solid #30363d; line-height: 1.6; }
+  body { display: flex; height: 100vh; overflow: hidden; background: #06060a; color: #a8b3c5; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; font-size: 13px; }
+  #sidebar { width: 230px; min-width: 180px; background: #0c0c14; border-right: 1px solid rgba(255,255,255,0.06); display: flex; flex-direction: column; overflow: hidden; }
+  #sidebar-inner { flex: 1; overflow-y: auto; padding: 16px 14px; display: flex; flex-direction: column; gap: 18px; }
+  #sidebar-inner::-webkit-scrollbar { width: 4px; } #sidebar-inner::-webkit-scrollbar-track { background: transparent; } #sidebar-inner::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 2px; }
+  h1 { font-size: 12px; font-weight: 600; color: #e2e8f0; letter-spacing: .3px; }
+  .section-label { font-size: 10px; font-weight: 500; color: #4a5568; text-transform: uppercase; letter-spacing: .8px; margin-bottom: 6px; }
+  .repo-item { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; transition: background .12s; }
+  .repo-item:hover { background: rgba(255,255,255,0.05); }
+  .repo-item.active { background: rgba(255,255,255,0.07); }
+  .repo-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 6px currentColor; }
+  .repo-name { color: #94a3b8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  .repo-item.active .repo-name { color: #e2e8f0; }
+  input[type="text"] { width: 100%; padding: 6px 10px; border-radius: 6px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); color: #e2e8f0; font-size: 12px; outline: none; font-family: inherit; transition: border-color .15s; }
+  input[type="text"]::placeholder { color: #4a5568; }
+  input[type="text"]:focus { border-color: rgba(129,140,248,0.5); background: rgba(255,255,255,0.06); }
+  .stat-row { display: flex; justify-content: space-between; font-size: 11px; color: #4a5568; }
+  .stat-val { font-weight: 600; color: #818cf8; }
+  #hint { padding: 12px 14px; font-size: 10px; color: #2d3748; border-top: 1px solid rgba(255,255,255,0.04); line-height: 1.7; }
   #graph-area { flex: 1; position: relative; overflow: hidden; }
-  #sigma-container { width: 100%; height: 100%; }
-  #tooltip { position: absolute; pointer-events: none; display: none; z-index: 100; background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 8px 12px; font-size: 11px; color: #c9d1d9; max-width: 300px; word-break: break-all; line-height: 1.5; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+  #sigma-container { width: 100%; height: 100%; background: radial-gradient(ellipse at 42% 38%, rgba(99,102,241,0.055) 0%, transparent 60%), #06060a; }
+  #tooltip { position: absolute; pointer-events: none; display: none; z-index: 100; background: rgba(12,12,20,0.92); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 9px 13px; font-size: 11px; color: #cbd5e1; max-width: 280px; word-break: break-all; line-height: 1.6; box-shadow: 0 8px 24px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.03); backdrop-filter: blur(8px); }
+  /* SVG edge overlay */
+  #edge-svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2; }
   /* Detail panel */
-  #detail-panel { position: absolute; right: 0; top: 0; bottom: 0; width: 300px; background: #161b22; border-left: 1px solid #30363d; display: none; flex-direction: column; z-index: 50; box-shadow: -4px 0 16px rgba(0,0,0,0.4); }
-  #detail-header { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid #30363d; min-height: 44px; }
-  #detail-color { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-  #detail-title { font-size: 12px; font-weight: 600; color: #f0f6fc; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #detail-close { background: none; border: none; color: #8b949e; cursor: pointer; font-size: 20px; line-height: 1; padding: 0; flex-shrink: 0; }
-  #detail-close:hover { color: #c9d1d9; }
-  #detail-body { flex: 1; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
-  .d-meta { font-size: 11px; color: #8b949e; }
-  .d-path { font-size: 10px; color: #6e7681; word-break: break-all; margin-bottom: 4px; }
-  .d-sec { font-size: 10px; font-weight: 600; color: #8b949e; text-transform: uppercase; letter-spacing: .5px; margin-top: 8px; padding-bottom: 3px; border-bottom: 1px solid #21262d; }
-  .d-repo-group { display: flex; flex-direction: column; gap: 1px; margin-top: 4px; }
-  .d-repo-name { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: #c9d1d9; padding: 2px 0; }
-  .d-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
-  .d-file { font-size: 11px; color: #8b949e; padding: 1px 0 1px 13px; display: flex; align-items: baseline; gap: 5px; }
-  .d-file-repo { color: #6e7681; font-size: 10px; white-space: nowrap; }
-  .d-more { font-size: 10px; color: #6e7681; padding-left: 13px; }
-  .d-empty { font-size: 12px; color: #6e7681; font-style: italic; margin-top: 8px; }
+  #detail-panel { position: absolute; right: 0; top: 0; bottom: 0; width: 300px; background: rgba(10,10,18,0.97); border-left: 1px solid rgba(255,255,255,0.07); display: none; flex-direction: column; z-index: 50; box-shadow: -8px 0 32px rgba(0,0,0,0.6); backdrop-filter: blur(12px); }
+  #detail-header { display: flex; align-items: center; gap: 9px; padding: 14px 16px; border-bottom: 1px solid rgba(255,255,255,0.06); min-height: 48px; }
+  #detail-color { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 8px currentColor; }
+  #detail-title { font-size: 12px; font-weight: 600; color: #e2e8f0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #detail-close { background: none; border: none; color: #4a5568; cursor: pointer; font-size: 20px; line-height: 1; padding: 0; flex-shrink: 0; transition: color .12s; }
+  #detail-close:hover { color: #94a3b8; }
+  #detail-body { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; }
+  #detail-body::-webkit-scrollbar { width: 4px; } #detail-body::-webkit-scrollbar-track { background: transparent; } #detail-body::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 2px; }
+  .d-meta { font-size: 11px; color: #4a5568; margin-bottom: 2px; }
+  .d-path { font-size: 10px; color: #2d3748; word-break: break-all; margin-bottom: 6px; font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+  .d-sec { font-size: 10px; font-weight: 600; color: #4a5568; text-transform: uppercase; letter-spacing: .6px; margin-top: 10px; margin-bottom: 4px; padding-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+  .d-repo-group { display: flex; flex-direction: column; gap: 1px; margin-bottom: 4px; }
+  .d-repo-name { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: #cbd5e1; padding: 3px 0; }
+  .d-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+  .d-file { font-size: 11px; color: #4a5568; padding: 2px 0 2px 12px; display: flex; align-items: baseline; gap: 6px; font-family: 'JetBrains Mono', monospace; }
+  .d-file:hover { color: #94a3b8; }
+  .d-file-repo { color: #2d3748; font-size: 10px; white-space: nowrap; font-family: inherit; }
+  .d-more { font-size: 10px; color: #2d3748; padding-left: 12px; margin-top: 1px; }
+  .d-empty { font-size: 12px; color: #2d3748; font-style: italic; margin-top: 10px; }
 </style>
 </head>
 <body>
@@ -567,10 +575,11 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
       <div id="stats" style="display:flex;flex-direction:column;gap:3px;"></div>
     </div>
   </div>
-  <div id="hint">Hover cluster → highlight connections<br>Click node → open detail panel<br>Scroll to zoom · drag to pan · click canvas to reset</div>
+  <div id="hint">Hover → highlight · Click → detail panel<br>Scroll to zoom · drag to pan · click canvas to reset</div>
 </div>
 <div id="graph-area">
   <div id="sigma-container"></div>
+  <svg id="edge-svg"></svg>
   <div id="tooltip"></div>
   <div id="detail-panel">
     <div id="detail-header">
@@ -588,19 +597,20 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 // ── Utilities ──────────────────────────────────────────────────────────────────
 function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function hexRgb(h) { return [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)]; }
-function dimColor(c) { if(!c)return '#161b22'; try{var r=hexRgb(c);return 'rgba('+r[0]+','+r[1]+','+r[2]+',0.12)';}catch(e){return '#161b22';} }
-// shortName: show last 2 path components
+function dimColor(c) { if(!c)return '#06060a'; try{var r=hexRgb(c);return 'rgba('+r[0]+','+r[1]+','+r[2]+',0.07)';}catch(e){return '#06060a';} }
 function shortName(p) { var s=String(p).split('/'); return s.length>2?'\u2026/'+s.slice(-2).join('/'):p; }
 
 // ── State ──────────────────────────────────────────────────────────────────────
 var activeRepoId = null;
+var hoveredNode  = null;
 
 // ── Data ───────────────────────────────────────────────────────────────────────
 const FILES = __FILES__;
 const EDGES_DATA = __EDGES__;
 const REPOS = __REPOS__;
 
-const PALETTE = ['#388bfd','#3fb950','#d29922','#f78166','#a371f7','#ffa657','#79c0ff','#ff7b72','#56d364','#db6d28'];
+// Vibrant jewel-tones that pop on near-black
+const PALETTE = ['#818cf8','#34d399','#f472b6','#fb923c','#a78bfa','#38bdf8','#4ade80','#facc15','#e879f9','#2dd4bf'];
 const repoIds = Object.keys(REPOS);
 const repoColor = {};
 repoIds.forEach(function(id,i){ repoColor[id] = PALETTE[i % PALETTE.length]; });
@@ -683,15 +693,14 @@ FILES.forEach(function(f) {
   });
 });
 
-// Edges are hidden at rest (transparent); only revealed on hover
-const EDGE_HIDDEN = '#0d1117';  // same as body background
-const EDGE_DIM    = '#0d1117';
+// Edges stored in graphology for neighbour lookups, but rendered as SVG curves on hover
+const EDGE_HIDDEN = '#06060a';
 
 EDGES_DATA.forEach(function(e, i) {
   if (!graph.hasNode(e.source) || !graph.hasNode(e.target)) return;
   if (graph.hasEdge(e.source, e.target)) return;
   graph.addEdgeWithKey('e'+i, e.source, e.target, {
-    size: 1,
+    size: 0,
     color: EDGE_HIDDEN,
     weight: e.weight,
     kinds: e.kinds,
@@ -703,39 +712,84 @@ const sigmaContainer = document.getElementById('sigma-container');
 const renderer = new Sigma(graph, sigmaContainer, {
   renderEdgeLabels: false,
   defaultEdgeColor: EDGE_HIDDEN,
-  defaultNodeColor: '#58a6ff',
-  labelColor: { color: '#c9d1d9' },
-  labelSize: 12,
+  defaultNodeColor: '#818cf8',
+  labelColor: { color: '#e2e8f0' },
+  labelSize: 13,
   labelWeight: '600',
   labelRenderedSizeThreshold: 12,
+  hideEdgesOnMove: true,
   minCameraRatio: 0.04,
   maxCameraRatio: 14,
+  nodeReducer: function(node, data) {
+    if (node === hoveredNode) return Object.assign({}, data, { highlighted: true, size: data.size * 1.25 });
+    return data;
+  },
 });
 
-// ── Color helpers ──────────────────────────────────────────────────────────────
+// ── SVG curved edge overlay ────────────────────────────────────────────────────
+// Drawn on top of sigma; only populated during hover (hidden at rest).
+const edgeSvg = document.getElementById('edge-svg');
+var activeEdgePaths = []; // [{source, target, color}]
+
+function drawCurvedEdges() {
+  edgeSvg.innerHTML = '';
+  if (!activeEdgePaths.length) return;
+  var cam = renderer.getCamera().getState();
+  activeEdgePaths.forEach(function(ep) {
+    if (!graph.hasNode(ep.source) || !graph.hasNode(ep.target)) return;
+    var s = renderer.graphToViewport(graph.getNodeAttributes(ep.source));
+    var t = renderer.graphToViewport(graph.getNodeAttributes(ep.target));
+    var dx = t.x - s.x, dy = t.y - s.y;
+    var len = Math.sqrt(dx*dx + dy*dy) || 1;
+    // Perpendicular offset for quadratic bezier control point
+    var bend = Math.min(len * 0.18, 60);
+    var cx = (s.x + t.x) / 2 - (dy / len) * bend;
+    var cy = (s.y + t.y) / 2 + (dx / len) * bend;
+    var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', 'M'+s.x.toFixed(1)+','+s.y.toFixed(1)+
+      ' Q'+cx.toFixed(1)+','+cy.toFixed(1)+
+      ' '+t.x.toFixed(1)+','+t.y.toFixed(1));
+    path.setAttribute('fill', 'none');
+    path.setAttribute('stroke', ep.color);
+    path.setAttribute('stroke-width', '1.2');
+    path.setAttribute('stroke-opacity', '0.65');
+    edgeSvg.appendChild(path);
+  });
+}
+
+renderer.on('afterRender', drawCurvedEdges);
+renderer.getCamera().on('updated', drawCurvedEdges);
+
+// ── Color / edge helpers ───────────────────────────────────────────────────────
 function restoreColors() {
+  hoveredNode = null;
+  activeEdgePaths = [];
+  edgeSvg.innerHTML = '';
   graph.forEachNode(function(n,a){ graph.setNodeAttribute(n,'color',a.origColor); });
-  graph.forEachEdge(function(e){ graph.setEdgeAttribute(e,'color',EDGE_HIDDEN); });
+  renderer.refresh({ skipIndexation: true });
 }
 
 function highlightNode(nodeKey) {
+  hoveredNode = nodeKey;
   var attrs = graph.getNodeAttributes(nodeKey);
   var hovRepoId = attrs.repoId;
+  var accent = repoColor[hovRepoId] || '#818cf8';
   var lit = new Set();
   graph.forEachNode(function(n,a){ if (a.repoId === hovRepoId) lit.add(n); });
   graph.forEachNeighbor(nodeKey, function(n){ lit.add(n); });
   graph.forEachNode(function(n,a){
     graph.setNodeAttribute(n,'color', lit.has(n) ? a.origColor : dimColor(a.origColor));
   });
-  var accent = repoColor[hovRepoId] || '#58a6ff';
+  // Populate SVG edge paths for direct connections only
+  activeEdgePaths = [];
   graph.forEachEdge(function(ek,a,src,tgt){
-    var direct = (src === nodeKey || tgt === nodeKey);
-    graph.setEdgeAttribute(ek,'color', direct ? accent : EDGE_HIDDEN);
-    graph.setEdgeAttribute(ek,'size', direct ? 1 : 1);
+    if (src === nodeKey || tgt === nodeKey) activeEdgePaths.push({ source: src, target: tgt, color: accent });
   });
+  renderer.refresh({ skipIndexation: true });
 }
 
 function highlightRepo(repoId) {
+  var accent = repoColor[repoId] || '#818cf8';
   var lit = new Set();
   graph.forEachNode(function(n,a){ if (a.repoId === repoId) lit.add(n); });
   graph.forEachNode(function(n,a){
@@ -744,12 +798,15 @@ function highlightRepo(repoId) {
   graph.forEachNode(function(n,a){
     graph.setNodeAttribute(n,'color', lit.has(n) ? a.origColor : dimColor(a.origColor));
   });
-  var accent = repoColor[repoId] || '#58a6ff';
+  // Only cross-repo edges
+  activeEdgePaths = [];
   graph.forEachEdge(function(ek,a,src,tgt){
     var sa = graph.getNodeAttributes(src), ta = graph.getNodeAttributes(tgt);
-    var connected = (sa.repoId === repoId || ta.repoId === repoId);
-    graph.setEdgeAttribute(ek,'color', connected ? accent : EDGE_HIDDEN);
+    if ((sa.repoId === repoId || ta.repoId === repoId) && sa.repoId !== ta.repoId) {
+      activeEdgePaths.push({ source: src, target: tgt, color: accent });
+    }
   });
+  renderer.refresh({ skipIndexation: true });
 }
 
 function isolateRepo(id) { highlightRepo(id); }
@@ -862,7 +919,7 @@ function closeDetailPanel() {
 document.getElementById('detail-close').addEventListener('click', function() {
   closeDetailPanel();
   activeRepoId = null;
-  document.querySelectorAll('.repo-item').forEach(function(r){r.classList.remove('active');});
+  document.querySelectorAll('.repo-item').forEach(function(r){ r.classList.remove('active'); });
   restoreColors();
 });
 
@@ -871,20 +928,24 @@ const tooltip = document.getElementById('tooltip');
 
 renderer.on('enterNode', function(e) {
   var attrs = graph.getNodeAttributes(e.node);
+  var c = repoColor[attrs.repoId] || '#818cf8';
   if (attrs.nodeType === 'repo') {
     var n = (filesByRepo[attrs.repoId] || []).length;
-    tooltip.innerHTML = '<strong>'+escHtml(attrs.label)+'</strong><br>'+n+' file'+(n!==1?'s':'')+
-      '<br><span style="color:#8b949e;font-size:10px">Click for details</span>';
+    tooltip.innerHTML =
+      '<span style="color:'+c+';font-weight:600">'+escHtml(attrs.label)+'</span>'+
+      '<br><span style="color:#4a5568">'+n+' file'+(n!==1?'s':'')+'</span>'+
+      '<br><span style="color:#2d3748;font-size:10px">click for details</span>';
     if (!activeRepoId) highlightRepo(attrs.repoId);
   } else {
     var rn = REPOS[attrs.repoId] ? REPOS[attrs.repoId].name : attrs.repoId;
-    tooltip.innerHTML = '<strong>'+escHtml(attrs.fullPath || e.node)+'</strong>'+
-      '<br><span style="color:'+repoColor[attrs.repoId]+'">'+escHtml(rn)+'</span>'+
-      '<br><span style="color:#8b949e;font-size:10px">Click for details</span>';
+    tooltip.innerHTML =
+      '<span style="font-weight:600;color:#e2e8f0">'+escHtml(shortName(attrs.fullPath || e.node))+'</span>'+
+      '<br><span style="color:'+c+'">'+escHtml(rn)+'</span>'+
+      '<br><span style="color:#2d3748;font-size:10px">click for details</span>';
     if (!activeRepoId) highlightNode(e.node);
   }
-  tooltip.style.left = (e.event.x + 14) + 'px';
-  tooltip.style.top  = (e.event.y + 14) + 'px';
+  tooltip.style.left = (e.event.x + 16) + 'px';
+  tooltip.style.top  = (e.event.y + 16) + 'px';
   tooltip.style.display = 'block';
 });
 
@@ -896,12 +957,12 @@ renderer.on('leaveNode', function() {
 // ── Click handlers ─────────────────────────────────────────────────────────────
 renderer.on('clickNode', function(e) {
   var attrs = graph.getNodeAttributes(e.node);
-  // Persist highlight and open detail panel
   activeRepoId = attrs.repoId;
   document.querySelectorAll('.repo-item').forEach(function(r){r.classList.remove('active');});
   var sidebarEl = document.querySelector('.repo-item[data-repo-id="'+attrs.repoId+'"]');
   if (sidebarEl) sidebarEl.classList.add('active');
-  highlightRepo(attrs.repoId);
+  if (attrs.nodeType === 'repo') highlightRepo(attrs.repoId);
+  else highlightNode(e.node);
   openDetailPanel(e.node);
 });
 
@@ -934,14 +995,15 @@ document.getElementById('search-input').addEventListener('input', function(e) {
   activeRepoId = null;
   document.querySelectorAll('.repo-item').forEach(function(r){r.classList.remove('active');});
   if (!q) { restoreColors(); return; }
+  activeEdgePaths = [];
+  edgeSvg.innerHTML = '';
+  hoveredNode = null;
   var matched = new Set();
   graph.forEachNode(function(n,a){ if((a.fullPath||a.label||'').toLowerCase().includes(q)) matched.add(n); });
   graph.forEachNode(function(n,a){
     graph.setNodeAttribute(n,'color', matched.has(n) ? a.origColor : dimColor(a.origColor));
   });
-  graph.forEachEdge(function(ek,a,src,tgt){
-    graph.setEdgeAttribute(ek,'color', matched.has(src)&&matched.has(tgt) ? '#58a6ff' : EDGE_HIDDEN);
-  });
+  renderer.refresh({ skipIndexation: true });
 });
 </script>
 </body>
