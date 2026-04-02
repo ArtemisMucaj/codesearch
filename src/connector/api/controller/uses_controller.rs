@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::{Context, Result};
 
 use crate::connector::api::container::Container;
@@ -26,13 +28,13 @@ impl<'a> UsesController<'a> {
         let resolve = |name_or_id: &str| -> Option<(String, String)> {
             all_repos
                 .iter()
-                .find(|r: &&Repository| r.id() == name_or_id)
+                .find(|r| r.id() == name_or_id)
                 .or_else(|| {
                     all_repos
                         .iter()
-                        .find(|r: &&Repository| r.name().to_lowercase() == name_or_id.to_lowercase())
+                        .find(|r| r.name().eq_ignore_ascii_case(name_or_id))
                 })
-                .map(|r: &Repository| (r.id().to_string(), r.name().to_string()))
+                .map(|r| (r.id().to_string(), r.name().to_string()))
         };
 
         let (from_id, from_name) = resolve(&from)
@@ -68,19 +70,18 @@ impl<'a> UsesController<'a> {
             from_name, to_name
         );
 
-        let mut current_target = String::new();
+        let mut current_target = "";
+        let mut unique_sources: HashSet<&str> = HashSet::new();
+        let mut unique_targets: HashSet<&str> = HashSet::new();
         for e in &edges {
+            unique_sources.insert(&e.from_file);
             if e.to_file != current_target {
-                current_target = e.to_file.clone();
+                current_target = &e.to_file;
+                unique_targets.insert(&e.to_file);
                 out.push_str(&format!("  {}\n", e.to_file));
             }
             out.push_str(&format!("    ← {}\n", e.from_file));
         }
-
-        let unique_sources: std::collections::HashSet<_> =
-            edges.iter().map(|e| &e.from_file).collect();
-        let unique_targets: std::collections::HashSet<_> =
-            edges.iter().map(|e| &e.to_file).collect();
 
         out.push_str(&format!(
             "\n{} file(s) in '{}' depend on {} file(s) in '{}'.",

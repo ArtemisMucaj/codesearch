@@ -53,9 +53,10 @@ impl FileRelationshipUseCase {
             .map_err(|e| DomainError::storage(format!("Failed to list repositories: {e}")))?;
 
         let target_repos: Vec<_> = if let Some(ids) = repository_ids {
+            let id_set: HashSet<&str> = ids.iter().map(String::as_str).collect();
             all_repos
                 .into_iter()
-                .filter(|r| ids.contains(&r.id().to_string()))
+                .filter(|r| id_set.contains(r.id()))
                 .collect()
         } else {
             all_repos
@@ -86,7 +87,7 @@ impl FileRelationshipUseCase {
         // ── 3. Aggregate symbol references into file-level edges ──────────
         // Key: (from_file, from_repo_id, to_file, to_repo_id)
         // Value: (weight, reference_kinds)
-        let mut edge_map: HashMap<(String, String, String, String), (usize, HashSet<String>)> =
+        let mut edge_map: HashMap<(String, String, String, String), (usize, HashSet<&'static str>)> =
             HashMap::new();
 
         for repo in &target_repos {
@@ -119,7 +120,7 @@ impl FileRelationshipUseCase {
                 );
                 let entry = edge_map.entry(key).or_insert((0, HashSet::new()));
                 entry.0 += 1;
-                entry.1.insert(sr.reference_kind().as_str().to_string());
+                entry.1.insert(sr.reference_kind().as_str());
             }
         }
 
@@ -135,7 +136,8 @@ impl FileRelationshipUseCase {
                     to_repo_id,
                     weight,
                     reference_kinds: {
-                        let mut v: Vec<String> = kinds.into_iter().collect();
+                        let mut v: Vec<String> =
+                            kinds.into_iter().map(str::to_string).collect();
                         v.sort();
                         v
                     },
