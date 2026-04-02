@@ -1,44 +1,5 @@
 use clap::{Subcommand, ValueEnum};
 
-/// Node granularity for the file relationship graph.
-#[derive(Debug, Clone, Copy, Default, ValueEnum)]
-pub enum NodeGranularity {
-    /// Each individual source file is a node (default).
-    #[default]
-    File,
-    /// Files are collapsed to their parent directory — dramatically fewer nodes,
-    /// much easier to read in large codebases.
-    Directory,
-}
-
-/// Sub-clustering mode for the file relationship graph.
-#[derive(Debug, Clone, Copy, Default, ValueEnum)]
-pub enum ClusterMode {
-    /// Files are listed flat inside each repository cluster (default).
-    #[default]
-    None,
-    /// Files are grouped by their parent directory within each repository cluster.
-    Directory,
-    /// Files in each repository are grouped by which other repositories depend on them.
-    /// Useful for spotting which parts of a shared library each consumer actually uses.
-    Consumer,
-}
-
-/// Output format for the file relationship graph.
-#[derive(Debug, Clone, Copy, Default, ValueEnum)]
-pub enum GraphFormat {
-    /// Interactive HTML page powered by Cytoscape.js (default).
-    /// Open the output file in a browser: zoom, pan, search, click to highlight.
-    #[default]
-    Html,
-    /// Graphviz DOT language — pipe to `dot -Tsvg` to render.
-    Dot,
-    /// Mermaid diagram syntax — paste into any Mermaid renderer or GitHub markdown.
-    Mermaid,
-    /// JSON — structured data for programmatic consumption.
-    Json,
-}
-
 /// Output format for search results.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 pub enum OutputFormat {
@@ -227,44 +188,6 @@ pub enum Commands {
         /// you want to control anchoring yourself (e.g. "^MyNs/.*Service#get$").
         #[arg(long)]
         regex: bool,
-    },
-
-    /// Visualise file-level dependency relationships as a graph.
-    ///
-    /// Edges are drawn from a file that makes symbol references to the file that
-    /// defines those symbols.  Repositories are shown as cluster boundaries;
-    /// cross-repository edges are always included.  Use --repository to limit
-    /// which repositories appear in the graph.
-    ///
-    /// Pipe DOT output through Graphviz to produce an image:
-    ///   codesearch graph | dot -Tsvg -o deps.svg && open deps.svg
-    Graph {
-        /// Limit the graph to one or more repository IDs (may be repeated).
-        /// When omitted every indexed repository is included.
-        #[arg(short, long)]
-        repository: Option<Vec<String>>,
-
-        /// Output format: html (interactive, default), dot, mermaid, or json.
-        #[arg(short = 'F', long, value_enum, default_value = "html")]
-        format: GraphFormat,
-
-        /// Node granularity: file (default) or directory.
-        /// Use 'directory' to collapse all files in a folder into one node —
-        /// highly recommended for large codebases where file-level graphs are noisy.
-        #[arg(long, value_enum, default_value = "file")]
-        granularity: NodeGranularity,
-
-        /// Only include edges with at least this many symbol references.
-        /// Raising the threshold reduces noise in dense codebases.
-        #[arg(long, default_value = "1")]
-        min_weight: usize,
-
-        /// Sub-clustering mode within each repository boundary:
-        ///   none      — nodes listed flat (default).
-        ///   directory — nodes grouped by their parent directory.
-        ///   consumer  — nodes grouped by which repositories depend on them.
-        #[arg(long, value_enum, default_value = "none")]
-        cluster: ClusterMode,
     },
 
     /// List the files that repository X uses from repository Y.

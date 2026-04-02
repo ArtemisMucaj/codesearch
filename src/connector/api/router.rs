@@ -4,7 +4,7 @@ use crate::Commands;
 
 use super::container::Container;
 use super::controller::{
-    DeleteController, ExplainController, FileGraphController, ImpactController, IndexController,
+    DeleteController, ExplainController, ImpactController, IndexController,
     ListRepositoriesController, SearchController, StatsController, UsesController,
     SymbolContextController,
 };
@@ -18,7 +18,6 @@ pub struct Router<'a> {
     index_controller: IndexController<'a>,
     list_repositories_controller: ListRepositoriesController<'a>,
     delete_controller: DeleteController<'a>,
-    file_graph_controller: FileGraphController<'a>,
     uses_controller: UsesController<'a>,
 }
 
@@ -33,7 +32,6 @@ impl<'a> Router<'a> {
             index_controller: IndexController::new(container),
             list_repositories_controller: ListRepositoriesController::new(container),
             delete_controller: DeleteController::new(container),
-            file_graph_controller: FileGraphController::new(container),
             uses_controller: UsesController::new(container),
         }
     }
@@ -96,17 +94,6 @@ impl<'a> Router<'a> {
             } => {
                 self.explain_controller
                     .explain(symbol, repository, llm, dump_symbols, regex)
-                    .await
-            }
-            Commands::Graph {
-                repository,
-                format,
-                granularity,
-                min_weight,
-                cluster,
-            } => {
-                self.file_graph_controller
-                    .graph(repository, format, granularity, min_weight, cluster)
                     .await
             }
             Commands::Uses { from, to } => self.uses_controller.uses(from, to).await,
