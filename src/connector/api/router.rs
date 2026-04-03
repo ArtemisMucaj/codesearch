@@ -5,7 +5,8 @@ use crate::Commands;
 use super::container::Container;
 use super::controller::{
     DeleteController, ExplainController, ImpactController, IndexController,
-    ListRepositoriesController, SearchController, StatsController, SymbolContextController,
+    ListRepositoriesController, SearchController, StatsController, UsesController,
+    SymbolContextController,
 };
 
 pub struct Router<'a> {
@@ -17,6 +18,7 @@ pub struct Router<'a> {
     index_controller: IndexController<'a>,
     list_repositories_controller: ListRepositoriesController<'a>,
     delete_controller: DeleteController<'a>,
+    uses_controller: UsesController<'a>,
 }
 
 impl<'a> Router<'a> {
@@ -30,6 +32,7 @@ impl<'a> Router<'a> {
             index_controller: IndexController::new(container),
             list_repositories_controller: ListRepositoriesController::new(container),
             delete_controller: DeleteController::new(container),
+            uses_controller: UsesController::new(container),
         }
     }
 
@@ -93,6 +96,7 @@ impl<'a> Router<'a> {
                     .explain(symbol, repository, llm, dump_symbols, regex)
                     .await
             }
+            Commands::Uses { from, to } => self.uses_controller.uses(from, to).await,
             Commands::Mcp { .. } => {
                 Err(anyhow::anyhow!("MCP command is handled separately in main"))
             }

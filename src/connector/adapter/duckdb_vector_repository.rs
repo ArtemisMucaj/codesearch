@@ -1103,4 +1103,42 @@ impl VectorRepository for DuckdbVectorRepository {
 
         Ok(chunk)
     }
+
+    async fn get_symbol_to_file_map(
+        &self,
+        repository_id: &str,
+    ) -> Result<Vec<(String, String)>, DomainError> {
+        let conn = self.conn.lock().await;
+
+        let sql = format!(
+            "SELECT symbol_name, file_path \
+             FROM \"{}\".chunks \
+             WHERE repository_id = ? AND symbol_name IS NOT NULL",
+            self.namespace
+        );
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| DomainError::storage(format!("Failed to prepare symbol map query: {e}")))?;
+
+        let mut rows = stmt
+            .query(params![repository_id])
+            .map_err(|e| DomainError::storage(format!("Failed to run symbol map query: {e}")))?;
+
+        let mut result = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| DomainError::storage(format!("Failed to read symbol map row: {e}")))?
+        {
+            let symbol: String = row
+                .get(0)
+                .map_err(|e| DomainError::storage(format!("Failed to read symbol_name: {e}")))?;
+            let file: String = row
+                .get(1)
+                .map_err(|e| DomainError::storage(format!("Failed to read file_path: {e}")))?;
+            result.push((symbol, file));
+        }
+
+        Ok(result)
+    }
 }

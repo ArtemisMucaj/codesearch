@@ -155,6 +155,22 @@ impl VectorRepository for InMemoryVectorRepository {
         result.sort_by_key(|c| c.start_line());
         Ok(result)
     }
+
+    async fn get_symbol_to_file_map(
+        &self,
+        repository_id: &str,
+    ) -> Result<Vec<(String, String)>, DomainError> {
+        let chunks = self.chunks.lock().await;
+        let result = chunks
+            .values()
+            .filter(|c| c.repository_id() == repository_id)
+            .filter_map(|c| {
+                c.symbol_name()
+                    .map(|sym| (sym.to_string(), c.file_path().to_string()))
+            })
+            .collect();
+        Ok(result)
+    }
 }
 
 impl InMemoryVectorRepository {

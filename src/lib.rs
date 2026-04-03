@@ -7,13 +7,15 @@ pub mod tui;
 pub use application::{
     CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase, ChatClient, ContextNode,
     DeleteRepositoryUseCase, EmbeddingService, ExplainResult, ExplainUseCase, FileHashRepository,
-    ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode, IndexRepositoryUseCase,
-    ListRepositoriesUseCase, MetadataRepository, ParserService, QueryExpander, RerankingService,
-    Scip, SearchCodeUseCase, SnippetLookupUseCase, SymbolContext, SymbolContextUseCase,
-    VectorRepository,
+    FileRelationshipUseCase, ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode,
+    IndexRepositoryUseCase, ListRepositoriesUseCase, MetadataRepository, ParserService,
+    QueryExpander, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
+    SymbolContext, SymbolContextUseCase, VectorRepository,
 };
 
-pub use cli::{Commands, EmbeddingTarget, LlmTarget, OutputFormat, RerankingTarget, TuiMode};
+pub use cli::{
+    Commands, EmbeddingTarget, LlmTarget, OutputFormat, RerankingTarget, TuiMode,
+};
 
 pub use connector::{
     AnthropicClient, AnthropicReranking, DuckdbCallGraphRepository, DuckdbFileHashRepository,
