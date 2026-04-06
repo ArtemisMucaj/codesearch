@@ -17,6 +17,8 @@ pub struct FileEdge {
     pub weight: usize,
     /// Distinct reference kinds contributing to this edge (e.g. "Call", "Import").
     pub reference_kinds: Vec<String>,
+    /// Distinct callee symbol names from `to_file` that are referenced by `from_file`.
+    pub symbols: Vec<String>,
 }
 
 impl FileEdge {

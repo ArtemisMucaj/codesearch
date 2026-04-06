@@ -5,6 +5,20 @@ use anyhow::{Context, Result};
 use crate::connector::api::container::Container;
 use crate::domain::Repository;
 
+/// Extract a human-readable short name from a SCIP/call-graph symbol string.
+///
+/// SCIP symbols look like: `rust-analyzer cargo pkg 0.1.0 file/Module#method().`
+/// We want just `method` (or `Module::method` if there's an enclosing type).
+fn short_symbol_name(symbol: &str) -> &str {
+    // Strip common SCIP method-descriptor suffix `().`
+    let s = symbol.trim_end_matches("().");
+    // Take the portion after the last `#`, `::`, `.`, `/`, or `\`
+    s.rfind(|c| c == '#' || c == ':' || c == '.' || c == '/' || c == '\\')
+        .map(|i| &s[i + 1..])
+        .filter(|part| !part.is_empty())
+        .unwrap_or(s)
+}
+
 pub struct UsesController<'a> {
     container: &'a Container,
 }
@@ -80,7 +94,12 @@ impl<'a> UsesController<'a> {
                 unique_targets.insert(&e.to_file);
                 out.push_str(&format!("  {}\n", e.to_file));
             }
-            out.push_str(&format!("    ← {}\n", e.from_file));
+            out.push_str(&format!("    ← {}", e.from_file));
+            if !e.symbols.is_empty() {
+                let names: Vec<&str> = e.symbols.iter().map(|s| short_symbol_name(s)).collect();
+                out.push_str(&format!("  [{}]", names.join(", ")));
+            }
+            out.push('\n');
         }
 
         out.push_str(&format!(
