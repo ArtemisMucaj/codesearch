@@ -86,9 +86,11 @@ impl FileRelationshipUseCase {
 
         // ── 3. Aggregate symbol references into file-level edges ──────────
         // Key: (from_file, from_repo_id, to_file, to_repo_id)
-        // Value: (weight, reference_kinds)
-        let mut edge_map: HashMap<(String, String, String, String), (usize, HashSet<&'static str>)> =
-            HashMap::new();
+        // Value: (weight, reference_kinds, symbols)
+        let mut edge_map: HashMap<
+            (String, String, String, String),
+            (usize, HashSet<&'static str>, HashSet<String>),
+        > = HashMap::new();
 
         for repo in &target_repos {
             let refs = self.call_graph.find_by_repository(repo.id()).await?;
@@ -112,35 +114,38 @@ impl FileRelationshipUseCase {
                     continue;
                 }
 
-                let key = (
-                    from_file,
-                    from_repo,
-                    to_file.clone(),
-                    to_repo.clone(),
-                );
-                let entry = edge_map.entry(key).or_insert((0, HashSet::new()));
+                let key = (from_file, from_repo, to_file.clone(), to_repo.clone());
+                let entry = edge_map.entry(key).or_insert((0, HashSet::new(), HashSet::new()));
                 entry.0 += 1;
                 entry.1.insert(sr.reference_kind().as_str());
+                entry.2.insert(callee.to_string());
             }
         }
 
         // ── 4. Materialise into FileEdge + FileGraph ──────────────────────
         let mut edges: Vec<FileEdge> = edge_map
             .into_iter()
-            .filter(|(_, (w, _))| *w >= min_weight)
+            .filter(|(_, (w, _, _))| *w >= min_weight)
             .map(
-                |((from_file, from_repo_id, to_file, to_repo_id), (weight, kinds))| FileEdge {
-                    from_file,
-                    from_repo_id,
-                    to_file,
-                    to_repo_id,
-                    weight,
-                    reference_kinds: {
-                        let mut v: Vec<String> =
-                            kinds.into_iter().map(str::to_string).collect();
-                        v.sort();
-                        v
-                    },
+                |((from_file, from_repo_id, to_file, to_repo_id), (weight, kinds, syms))| {
+                    FileEdge {
+                        from_file,
+                        from_repo_id,
+                        to_file,
+                        to_repo_id,
+                        weight,
+                        reference_kinds: {
+                            let mut v: Vec<String> =
+                                kinds.into_iter().map(str::to_string).collect();
+                            v.sort();
+                            v
+                        },
+                        symbols: {
+                            let mut v: Vec<String> = syms.into_iter().collect();
+                            v.sort();
+                            v
+                        },
+                    }
                 },
             )
             .collect();
