@@ -1,4 +1,4 @@
-# Plan: Execution Features, Community Detection & Expanded MCP Surface
+# Plan: Execution Features, Cluster Detection & Expanded MCP Surface
 
 Inspired by [code-review-graph](https://github.com/tirth8205/code-review-graph). This document captures the approach for three related features that build on the existing call graph and file-graph infrastructure.
 
@@ -7,7 +7,7 @@ Inspired by [code-review-graph](https://github.com/tirth8205/code-review-graph).
 ## Table of Contents
 
 1. [Execution Features with Criticality Scoring](#1-execution-features-with-criticality-scoring)
-2. [Community Detection](#2-community-detection)
+2. [Cluster Detection](#2-cluster-detection)
 3. [Expanded MCP Tool Surface](#3-expanded-mcp-tool-surface)
 
 ---
@@ -109,21 +109,21 @@ Features are computed on demand — no persistence needed for an initial impleme
 
 ---
 
-## 2. Community Detection
+## 2. Cluster Detection
 
 ### What it is
 
-Group the file-level dependency graph (`FileGraph`) into named **communities** — clusters of files that are tightly coupled to each other and loosely coupled to the rest. Communities are the foundation for architecture overviews, smarter search boosting, and risk scoring (a change that crosses community boundaries is riskier than one confined within one).
+Group the file-level dependency graph (`FileGraph`) into named **clusters** — groups of files that are tightly coupled to each other and loosely coupled to the rest. Clusters are the foundation for architecture overviews, smarter search boosting, and risk scoring (a change that crosses cluster boundaries is riskier than one confined within one).
 
 ### Louvain vs Leiden — and why Leiden wins for code graphs
 
 code-review-graph uses the **Leiden algorithm** (via a Python igraph binding). The original plan suggested Louvain, but Leiden is the right choice here. Here is why.
 
-**Louvain (2008)** runs in two phases: (1) greedily move nodes to neighbouring communities to maximise modularity, (2) aggregate each community into a super-node and repeat. It is fast and widely used, but has a known structural defect: it can produce **disconnected communities** — nodes assigned to the same cluster that have no path between them in the graph. For a code dependency graph, a community whose files cannot reach each other via imports or calls is meaningless as an architectural unit.
+**Louvain (2008)** runs in two phases: (1) greedily move nodes to neighbouring clusters to maximise modularity, (2) aggregate each cluster into a super-node and repeat. It is fast and widely used, but has a known structural defect: it can produce **disconnected clusters** — nodes assigned to the same cluster that have no path between them in the graph. For a code dependency graph, a cluster whose files cannot reach each other via imports or calls is meaningless as an architectural unit.
 
-**Leiden (2019)** inserts a **refinement phase** between local moving and aggregation. During refinement, each node is allowed to move to a random subset of neighbouring communities rather than just the best one, which lets the algorithm escape local optima and guarantees that every resulting community is **internally connected**. In practice this produces tighter, more semantically coherent clusters, which is exactly what matters when the goal is to name architectural boundaries.
+**Leiden (2019)** inserts a **refinement phase** between local moving and aggregation. During refinement, each node is allowed to move to a random subset of neighbouring clusters rather than just the best one, which lets the algorithm escape local optima and guarantees that every resulting cluster is **internally connected**. In practice this produces tighter, more semantically coherent clusters, which is exactly what matters when the goal is to name architectural boundaries.
 
-**code-review-graph's workaround**: because their implementation runs in Python with igraph, they cap Leiden at `n_iterations=2` and skip the recursive sub-community splitting pass to avoid exponential blow-up on large repos. In Rust these constraints are unnecessary — a native Leiden implementation runs 20–50× faster than the Python binding, so the full algorithm can be used without iteration caps.
+**code-review-graph's workaround**: because their implementation runs in Python with igraph, they cap Leiden at `n_iterations=2` and skip the recursive sub-cluster splitting pass to avoid exponential blow-up on large repos. In Rust these constraints are unnecessary — a native Leiden implementation runs 20–50× faster than the Python binding, so the full algorithm can be used without iteration caps.
 
 ### Algorithm choice
 
@@ -133,9 +133,9 @@ Use **Leiden** implemented in pure Rust on top of `petgraph` for graph represent
 petgraph = "0.6"
 ```
 
-There is no production-ready Leiden crate for Rust yet, so the implementation lives inside `src/application/use_cases/community_detection.rs`. It is roughly 300 lines following the original Traag et al. (2019) paper: local moving → refinement → aggregation, repeat until modularity gain is below `1e-6` or 50 iterations are reached.
+There is no production-ready Leiden crate for Rust yet, so the implementation lives inside `src/application/use_cases/cluster_detection.rs`. It is roughly 300 lines following the original Traag et al. (2019) paper: local moving → refinement → aggregation, repeat until modularity gain is below `1e-6` or 50 iterations are reached.
 
-**Fallback**: when a repository has fewer than 10 file nodes, skip clustering and assign each file to its own community (graph is too small to be meaningful).
+**Fallback**: when a repository has fewer than 10 file nodes, skip clustering and assign each file to its own cluster (graph is too small to be meaningful).
 
 ### What to adopt from code-review-graph
 
@@ -158,13 +158,13 @@ The `FileEdge` domain model already carries `reference_kinds: Vec<String>`. Duri
 
 **2. O(edges) batch cohesion computation**
 
-A naïve cohesion metric iterates over all edges for each community — O(edges × communities). code-review-graph's batch approach is O(edges) total: build a single `qualified_name → community_index` map, then walk the edge list once, classifying each edge as internal (both endpoints in the same community) or external. Adopt this exactly:
+A naïve cohesion metric iterates over all edges for each cluster — O(edges × clusters). code-review-graph's batch approach is O(edges) total: build a single `qualified_name → cluster_index` map, then walk the edge list once, classifying each edge as internal (both endpoints in the same cluster) or external. Adopt this exactly:
 
 ```
 cohesion = internal_edges / (internal_edges + external_edges)
 ```
 
-**3. Four-step community naming heuristic**
+**3. Four-step cluster naming heuristic**
 
 "Longest common path prefix" (the original plan) degrades to a useless root prefix on flat repositories. code-review-graph's heuristic is more robust:
 
@@ -173,14 +173,14 @@ cohesion = internal_edges / (internal_edges + external_edges)
 3. Otherwise, extract the most frequent meaningful keywords from member symbol names (strip common words: get, set, test, new, is, has).
 4. Combine as `"{dir}-{keyword}"`, slug-cased, max 30 characters.
 
-Implement `fn name_community(members: &[String], symbol_map: &HashMap<String, String>) -> String` using the existing `Language::from_path` for extension detection and the same camelCase/snake_case split already used in the tree-sitter parser.
+Implement `fn name_cluster(members: &[String], symbol_map: &HashMap<String, String>) -> String` using the existing `Language::from_path` for extension detection and the same camelCase/snake_case split already used in the tree-sitter parser.
 
 ### New domain models
 
-**`src/domain/models/community.rs`**
+**`src/domain/models/cluster.rs`**
 
 ```rust
-pub struct Community {
+pub struct Cluster {
     pub id: String,              // UUID
     pub name: String,            // heuristic: longest common path prefix of member files
     pub repository_id: String,
@@ -190,8 +190,8 @@ pub struct Community {
     pub members: Vec<String>,    // file paths sorted alphabetically
 }
 
-pub struct CommunityGraph {
-    pub communities: Vec<Community>,
+pub struct ClusterGraph {
+    pub clusters: Vec<Cluster>,
     pub repository_id: String,
     pub total_files: usize,
     pub total_edges: usize,
@@ -200,7 +200,7 @@ pub struct CommunityGraph {
 
 ### New use case
 
-**`src/application/use_cases/community_detection.rs`**
+**`src/application/use_cases/cluster_detection.rs`**
 
 Depends on `FileRelationshipUseCase` to obtain the `FileGraph`.
 
@@ -208,30 +208,30 @@ Depends on `FileRelationshipUseCase` to obtain the `FileGraph`.
 
 1. Call `FileRelationshipUseCase::build_graph` with `min_weight = 1` and `include_cross_repo = false`.
 2. Convert `FileGraph` edges into a `petgraph::Graph<String, usize>` (undirected, edge weight = `FileEdge::weight`).
-3. Run Louvain community detection — iterate until modularity stops improving or a max iteration cap (50) is reached.
-4. Map each partition back to `Community` objects:
+3. Run Leiden cluster detection — iterate until modularity gain is below `1e-6` or 50 iterations are reached.
+4. Map each partition back to `Cluster` objects:
    - **Name**: longest common directory path prefix of member files; fall back to the most-referenced file's parent directory name.
    - **Dominant language**: most common `Language` among members (detected from file extensions via the existing `Language::from_path`).
-   - **Cohesion**: `actual_internal_edges / (n * (n-1) / 2)` where n = community size.
-5. Sort communities by descending size.
+   - **Cohesion**: `actual_internal_edges / (n * (n-1) / 2)` where n = cluster size.
+5. Sort clusters by descending size.
 
 **Public API:**
 
 ```rust
-impl CommunityDetectionUseCase {
+impl ClusterDetectionUseCase {
     pub async fn detect(
         &self,
         repository_id: &str,
-    ) -> Result<CommunityGraph, DomainError>;
+    ) -> Result<ClusterGraph, DomainError>;
 
-    /// Return the community a given file belongs to.
-    pub async fn community_for_file(
+    /// Return the cluster a given file belongs to.
+    pub async fn cluster_for_file(
         &self,
         file_path: &str,
         repository_id: &str,
-    ) -> Result<Option<Community>, DomainError>;
+    ) -> Result<Option<Cluster>, DomainError>;
 
-    /// Return a high-level architecture summary: one paragraph per community
+    /// Return a high-level architecture summary: one paragraph per cluster
     /// listing its name, size, dominant language, and top outgoing dependencies.
     pub async fn architecture_overview(
         &self,
@@ -240,16 +240,16 @@ impl CommunityDetectionUseCase {
 }
 ```
 
-The `architecture_overview` method is pure text assembly from `CommunityGraph` data — no LLM call needed. Format: a Markdown table with one row per community (name, files, language, top 3 dependencies by edge weight to other communities).
+The `architecture_overview` method is pure text assembly from `ClusterGraph` data — no LLM call needed. Format: a Markdown table with one row per cluster (name, files, language, top 3 dependencies by edge weight to other clusters).
 
 ### Storage
 
-Communities are also cheap to recompute (they derive from the call graph which is already persisted). No additional storage is needed unless cache-on-index is desired later. If that becomes necessary, add a `communities` table to the shared DuckDB connection using the same pattern as `DuckdbCallGraphRepository`.
+Communities are also cheap to recompute (they derive from the call graph which is already persisted). No additional storage is needed unless cache-on-index is desired later. If that becomes necessary, add a `clusters` table to the shared DuckDB connection using the same pattern as `DuckdbCallGraphRepository`.
 
 ### Wiring
 
-- Add `CommunityDetectionUseCase` to `Container` — depends on `file_graph_use_case()` and `metadata_repository()`.
-- Add a `communities` CLI command with subcommands `list`, `get <file>`, `overview`.
+- Add `ClusterDetectionUseCase` to `Container` — depends on `file_graph_use_case()` and `metadata_repository()`.
+- Add a `clusters` CLI command with subcommands `list`, `get <file>`, `overview`.
 - Route in `router.rs`.
 
 ---
@@ -265,8 +265,8 @@ The current MCP server (`src/connector/adapter/mcp/server.rs`) exposes 3 tools. 
 | `list_features` | `ExecutionFeaturesUseCase` | Top-N features sorted by criticality |
 | `get_feature` | `ExecutionFeaturesUseCase` | Single feature with full call chain |
 | `get_affected_features` | `ExecutionFeaturesUseCase` | Features impacted by a list of changed symbols |
-| `list_communities` | `CommunityDetectionUseCase` | All communities for a repository |
-| `get_architecture_overview` | `CommunityDetectionUseCase` | Markdown architecture summary |
+| `list_clusters` | `ClusterDetectionUseCase` | All clusters for a repository |
+| `get_architecture_overview` | `ClusterDetectionUseCase` | Markdown architecture summary |
 | `query_graph` | `CallGraphUseCase` (direct) | Nodes matching one named relationship pattern |
 
 ### Tool specifications
@@ -310,13 +310,13 @@ struct AffectedFeaturesInput {
 
 Typical AI use: "I changed these three functions — which execution features are now at risk?"
 
-#### `list_communities`
+#### `list_clusters`
 
 ```rust
-struct ListCommunitiesInput {
+struct ListClustersInput {
     repository_id: String,
 }
-// Returns: CommunityGraph as JSON.
+// Returns: ClusterGraph as JSON.
 ```
 
 Typical AI use: "What are the architectural layers of this codebase?"
@@ -334,9 +334,9 @@ Typical AI use: "Give me a one-page architecture overview before I start this la
 
 ### Changes to `server.rs`
 
-- Add the six new input structs above (`ListFeaturesInput`, `GetFeatureInput`, `AffectedFeaturesInput`, `ListCommunitiesInput`, `ArchitectureOverviewInput`, `QueryGraphInput`) plus the `GraphQueryResult` / `GraphQueryNode` output types.
+- Add the six new input structs above (`ListFeaturesInput`, `GetFeatureInput`, `AffectedFeaturesInput`, `ListClustersInput`, `ArchitectureOverviewInput`, `QueryGraphInput`) plus the `GraphQueryResult` / `GraphQueryNode` output types.
 - Add six new `#[tool(...)]` methods to `CodesearchMcpServer`.
-- `Container` must expose `execution_features_use_case()` and `community_detection_use_case()` factory methods (following the same pattern as `impact_use_case()`). `query_graph` calls `call_graph_use_case()` directly — no new factory method needed.
+- `Container` must expose `execution_features_use_case()` and `cluster_detection_use_case()` factory methods (following the same pattern as `impact_use_case()`). `query_graph` calls `call_graph_use_case()` directly — no new factory method needed.
 - Update the `instructions` string in `get_info()` to list all 9 tools.
 
 #### `query_graph`
@@ -408,7 +408,7 @@ Deduplicating by `symbol` (keeping the first location per symbol) prevents flood
 
 **`tests_for` is particularly useful**: it surfaces the test gap that the criticality scorer in execution features approximates heuristically. With `query_graph`, an AI can ask it explicitly and get zero results as a concrete signal that a function has no test coverage at all.
 
-This tool upgrades `get_symbol_context` from "give me everything" to a vocabulary of precise questions. The target count becomes **9 MCP tools** (5 original + 4 new = 9, treating `query_graph` as a full tool alongside the feature/community tools).
+This tool upgrades `get_symbol_context` from "give me everything" to a vocabulary of precise questions. The target count becomes **9 MCP tools** (5 original + 4 new = 9, treating `query_graph` as a full tool alongside the feature/cluster tools).
 
 ### Future tools (not in scope now, but designed to fit)
 
@@ -423,6 +423,6 @@ This tool upgrades `get_symbol_context` from "give me everything" to a vocabular
 
 1. **`query_graph` MCP tool** — zero new infrastructure; ~100 lines directly in `server.rs`. Ships first, independently. Immediately improves AI ergonomics over the existing `get_symbol_context`.
 2. **Execution features** — builds only on existing `CallGraphUseCase`. No new dependencies. Add domain model → use case → container method → 3 MCP tools.
-3. **Community detection** — add `petgraph`, implement Leiden, build `CommunityDetectionUseCase` on top of existing `FileRelationshipUseCase` → container → 2 MCP tools.
+3. **Cluster detection** — add `petgraph`, implement Leiden, build `ClusterDetectionUseCase` on top of existing `FileRelationshipUseCase` → container → 2 MCP tools.
 
 Each step is independently shippable. `query_graph` has no dependency on the other two.
