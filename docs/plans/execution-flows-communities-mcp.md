@@ -267,6 +267,7 @@ The current MCP server (`src/connector/adapter/mcp/server.rs`) exposes 3 tools. 
 | `get_affected_features` | `ExecutionFeaturesUseCase` | Features impacted by a list of changed symbols |
 | `list_communities` | `CommunityDetectionUseCase` | All communities for a repository |
 | `get_architecture_overview` | `CommunityDetectionUseCase` | Markdown architecture summary |
+| `query_graph` | `CallGraphUseCase` (direct) | Nodes matching one named relationship pattern |
 
 ### Tool specifications
 
@@ -333,23 +334,95 @@ Typical AI use: "Give me a one-page architecture overview before I start this la
 
 ### Changes to `server.rs`
 
-- Add the five new input structs above.
-- Add five new `#[tool(...)]` methods to `CodesearchMcpServer`.
-- `Container` must expose `execution_features_use_case()` and `community_detection_use_case()` factory methods (following the same pattern as `impact_use_case()`).
-- Update the `instructions` string in `get_info()` to list all 8 tools.
+- Add the six new input structs above (`ListFeaturesInput`, `GetFeatureInput`, `AffectedFeaturesInput`, `ListCommunitiesInput`, `ArchitectureOverviewInput`, `QueryGraphInput`) plus the `GraphQueryResult` / `GraphQueryNode` output types.
+- Add six new `#[tool(...)]` methods to `CodesearchMcpServer`.
+- `Container` must expose `execution_features_use_case()` and `community_detection_use_case()` factory methods (following the same pattern as `impact_use_case()`). `query_graph` calls `call_graph_use_case()` directly — no new factory method needed.
+- Update the `instructions` string in `get_info()` to list all 9 tools.
+
+#### `query_graph`
+
+`query_graph` is the most ergonomic of all the new tools and, paradoxically, the cheapest to build: **zero new infrastructure**. Every pattern it supports maps directly onto `CallGraphUseCase` methods + a `reference_kind` filter that already exists on `CallGraphQuery`.
+
+The value is not new data — it is a clean, intention-named vocabulary. Today an AI using `get_symbol_context` receives *all* callers and *all* callees at once, including noise (imports, type references, variable reads). If it wants to know "who inherits from this class", it must receive everything and filter mentally. `query_graph` asks for exactly one relationship type and returns only that.
+
+**Supported patterns** (directly from code-review-graph's `query.py`):
+
+| Pattern | Maps to | `reference_kind` filter |
+|---|---|---|
+| `callers_of` | `find_callers(symbol)` | none (all kinds) |
+| `callees_of` | `find_callees(symbol)` | none (all kinds) |
+| `imports_of` | `find_callees(symbol)` | `Import` |
+| `importers_of` | `find_callers(symbol)` | `Import` |
+| `inheritors_of` | `find_callers(symbol)` | `Inheritance`, `Implementation` |
+| `children_of` | `find_callees(symbol)` | `Inheritance`, `Implementation` |
+| `tests_for` | `find_callers(symbol)` | post-filter: caller symbol matches `test_*` / `*_test` / `*_spec`, or file path contains `test`/`spec` |
+| `file_summary` | `find_by_file(file_path)` | none |
+
+All 8 `ReferenceKind` variants needed (`Import`, `Inheritance`, `Implementation`) already exist in the domain model.
+
+**Input / output:**
+
+```rust
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QueryGraphInput {
+    /// One of: callers_of, callees_of, imports_of, importers_of,
+    /// inheritors_of, children_of, tests_for, file_summary
+    pub pattern: String,
+    /// Symbol name or file path, depending on pattern.
+    /// Resolved with the same substring-match fallback as analyze_impact.
+    pub target: String,
+    pub repository_id: Option<String>,
+    /// Maximum results (default 50, cap 500).
+    #[serde(default = "default_query_limit")]
+    pub limit: usize,
+}
+
+// Output — one entry per unique symbol (deduped from individual reference sites):
+pub struct GraphQueryNode {
+    pub symbol: String,
+    pub file_path: String,
+    pub line: u32,
+    pub reference_kind: String,
+    pub repository_id: String,
+}
+
+pub struct GraphQueryResult {
+    pub pattern: String,
+    pub target: String,
+    pub nodes: Vec<GraphQueryNode>,
+    pub total: usize,
+}
+```
+
+Deduplicating by `symbol` (keeping the first location per symbol) prevents flooding the AI with 40 rows for the same callee called from 40 sites.
+
+**Implementation**: No new use case. The `#[tool(name = "query_graph")]` method in `server.rs` calls `container.call_graph_use_case()` directly, matches on `input.pattern`, and dispatches to the appropriate `CallGraphUseCase` method with the right `CallGraphQuery::with_reference_kind(...)` chain. Approximately 100 lines total including the output mapping.
+
+**Concrete AI use-cases this unlocks:**
+
+- *"Before I change `IRepository`, who implements it?"* → `inheritors_of(IRepository)`
+- *"Is `authenticate` covered by tests?"* → `tests_for(authenticate)` → empty means no coverage
+- *"What does `UserService` import — I want to understand its dependencies"* → `imports_of(UserService)`
+- *"Which modules depend on this file I'm about to restructure?"* → `importers_of(src/auth/utils.rs)`
+- *"What's the full relationship picture of this file before I split it?"* → `file_summary(src/auth/service.rs)`
+
+**`tests_for` is particularly useful**: it surfaces the test gap that the criticality scorer in execution features approximates heuristically. With `query_graph`, an AI can ask it explicitly and get zero results as a concrete signal that a function has no test coverage at all.
+
+This tool upgrades `get_symbol_context` from "give me everything" to a vocabulary of precise questions. The target count becomes **9 MCP tools** (5 original + 4 new = 9, treating `query_graph` as a full tool alongside the feature/community tools).
 
 ### Future tools (not in scope now, but designed to fit)
 
 | Tool | Notes |
 |---|---|
 | `find_large_functions` | Query `vector_repo` for chunks where `end_line - start_line > threshold`. Straightforward. |
-| `query_graph` | Unified graph query: callers / callees / tests / imports / inheritance in one call. Wraps existing `CallGraphUseCase`. |
 | `cross_repo_search` | `SearchCodeUseCase` already supports `with_repositories`; just needs a dedicated MCP input that makes multi-repo explicit. |
 
 ---
 
 ## Implementation Order
 
-1. **Execution features** — builds only on existing `CallGraphUseCase`. No new dependencies. Add domain model → use case → container method → 3 MCP tools.
-2. **Community detection** — add `petgraph`, build `CommunityDetectionUseCase` on top of existing `FileRelationshipUseCase` → container → 2 MCP tools.
-Each step is independently shippable: the MCP tools for features can be released before community detection exists, since they have no shared dependencies.
+1. **`query_graph` MCP tool** — zero new infrastructure; ~100 lines directly in `server.rs`. Ships first, independently. Immediately improves AI ergonomics over the existing `get_symbol_context`.
+2. **Execution features** — builds only on existing `CallGraphUseCase`. No new dependencies. Add domain model → use case → container method → 3 MCP tools.
+3. **Community detection** — add `petgraph`, implement Leiden, build `CommunityDetectionUseCase` on top of existing `FileRelationshipUseCase` → container → 2 MCP tools.
+
+Each step is independently shippable. `query_graph` has no dependency on the other two.
