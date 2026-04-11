@@ -1,0 +1,395 @@
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+
+use crate::application::{CallGraphQuery, CallGraphUseCase};
+use crate::domain::{DomainError, ExecutionFeature, FeatureNode};
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Entry-point detection constants
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Exact short names that are always treated as entry points.
+const ENTRY_POINT_EXACT: &[&str] = &[
+    "main", "run", "start", "init", "handle", "execute", "process",
+];
+
+/// Prefixes that mark a symbol as an entry point (e.g. test functions).
+const ENTRY_POINT_PREFIXES: &[&str] = &["test_", "it_", "handle_", "on_"];
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Criticality scoring constants (weights must sum to 1.0)
+// ──────────────────────────────────────────────────────────────────────────────
+
+const WEIGHT_FILE_SPREAD: f32 = 0.30;
+const WEIGHT_SECURITY: f32 = 0.25;
+const WEIGHT_EXTERNAL_CALLS: f32 = 0.20;
+const WEIGHT_TEST_COVERAGE_GAP: f32 = 0.15;
+const WEIGHT_DEPTH: f32 = 0.10;
+
+/// Soft reference depth for depth-score normalisation. A path reaching this
+/// depth scores 1.0 on the depth signal; deeper paths are clamped to 1.0.
+const DEPTH_REFERENCE: f32 = 20.0;
+
+/// Score assigned when no test symbol is reachable from the entry point's
+/// callers (no test coverage gap detected).
+const TEST_COVERAGE_GAP_SCORE: f32 = 0.30;
+/// Score assigned when test coverage IS present.
+const TEST_COVERAGE_PRESENT_SCORE: f32 = 0.05;
+
+/// Security-sensitive keywords. If any node's symbol contains one of these
+/// substrings (case-insensitive) the security signal fires at full strength.
+const SECURITY_KEYWORDS: &[&str] = &[
+    "auth",
+    "crypto",
+    "validate",
+    "password",
+    "token",
+    "secret",
+    "permission",
+];
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Use case
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Use case that discovers execution features — named forward call chains
+/// rooted at entry-point symbols — and scores each one for criticality.
+pub struct ExecutionFeaturesUseCase {
+    call_graph: Arc<CallGraphUseCase>,
+}
+
+impl ExecutionFeaturesUseCase {
+    pub fn new(call_graph: Arc<CallGraphUseCase>) -> Self {
+        Self { call_graph }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Public API
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Detect all entry points for `repository_id` and compute their features,
+    /// returning up to `limit` results sorted by descending criticality.
+    pub async fn list_features(
+        &self,
+        repository_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ExecutionFeature>, DomainError> {
+        let entry_points = self.find_entry_points(repository_id).await?;
+        let mut features = Vec::with_capacity(entry_points.len().min(limit));
+
+        for ep in entry_points {
+            let feature = self.build_feature(&ep, repository_id).await?;
+            features.push(feature);
+        }
+
+        features.sort_by(|a, b| b.criticality.partial_cmp(&a.criticality).unwrap_or(std::cmp::Ordering::Equal));
+        features.truncate(limit);
+        Ok(features)
+    }
+
+    /// Retrieve a single feature by entry-point symbol name (exact or substring).
+    ///
+    /// Returns `None` when the symbol cannot be found in the call graph or is
+    /// not an entry point.
+    pub async fn get_feature(
+        &self,
+        symbol: &str,
+        repository_id: Option<&str>,
+    ) -> Result<Option<ExecutionFeature>, DomainError> {
+        let mut query = CallGraphQuery::new();
+        if let Some(repo) = repository_id {
+            query = query.with_repository(repo);
+        }
+
+        // Resolve the symbol to a fully-qualified name.
+        let resolved = self
+            .call_graph
+            .resolve_symbols(symbol, &query, 10)
+            .await?;
+
+        if resolved.is_empty() {
+            return Ok(None);
+        }
+
+        // Use the first resolved symbol as the entry point.
+        let fqn = &resolved[0];
+        let repo = repository_id.unwrap_or("");
+        let feature = self.build_feature(fqn, repo).await?;
+        Ok(Some(feature))
+    }
+
+    /// Given a set of changed symbols, return every feature whose call chain
+    /// includes at least one of them, sorted by descending criticality.
+    pub async fn get_affected_features(
+        &self,
+        changed_symbols: &[String],
+        repository_id: Option<&str>,
+    ) -> Result<Vec<ExecutionFeature>, DomainError> {
+        if changed_symbols.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let changed_set: HashSet<&str> = changed_symbols.iter().map(String::as_str).collect();
+
+        // Determine which repositories to scan.
+        let repo_ids: Vec<String> = if let Some(repo) = repository_id {
+            vec![repo.to_string()]
+        } else {
+            // Collect every repository that any of the changed symbols appears in.
+            let mut repos: HashSet<String> = HashSet::new();
+            for sym in changed_symbols {
+                let query = CallGraphQuery::new();
+                let callers = self.call_graph.find_callers(sym, &query).await?;
+                for r in &callers {
+                    repos.insert(r.repository_id().to_string());
+                }
+                let callees = self.call_graph.find_callees(sym, &query).await?;
+                for r in &callees {
+                    repos.insert(r.repository_id().to_string());
+                }
+            }
+            repos.into_iter().collect()
+        };
+
+        let mut affected: Vec<ExecutionFeature> = Vec::new();
+        for repo in &repo_ids {
+            let features = self.list_features(repo, usize::MAX).await?;
+            for feature in features {
+                let symbols_in_path: HashSet<&str> =
+                    feature.path.iter().map(|n| n.symbol.as_str()).collect();
+                if changed_set.iter().any(|s| symbols_in_path.contains(*s)) {
+                    affected.push(feature);
+                }
+            }
+        }
+
+        affected.sort_by(|a, b| b.criticality.partial_cmp(&a.criticality).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(affected)
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Entry-point detection
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Return the set of fully-qualified symbols in `repository_id` that are
+    /// entry points (zero callers, or matching a well-known name pattern).
+    async fn find_entry_points(&self, repository_id: &str) -> Result<Vec<String>, DomainError> {
+        let all_refs = self.call_graph.find_by_repository(repository_id).await?;
+
+        // Collect every symbol that appears as a caller and every symbol that
+        // appears as a callee.
+        let mut callee_symbols: HashSet<String> = HashSet::new();
+        let mut caller_symbols: HashSet<String> = HashSet::new();
+
+        // Also track location information for each caller symbol (first seen).
+        let mut caller_file: HashMap<String, String> = HashMap::new();
+
+        for r in &all_refs {
+            callee_symbols.insert(r.callee_symbol().to_string());
+            if let Some(caller) = r.caller_symbol() {
+                let caller = caller.to_string();
+                caller_file
+                    .entry(caller.clone())
+                    .or_insert_with(|| r.caller_file_path().to_string());
+                caller_symbols.insert(caller);
+            }
+        }
+
+        // A symbol is an entry point when it:
+        //   (a) appears as a caller (it calls something) AND
+        //   (b) does NOT appear as a callee (nothing calls it),
+        //       OR its short name matches a well-known entry-point pattern.
+        let mut entry_points: Vec<String> = caller_symbols
+            .iter()
+            .filter(|sym| {
+                let not_called = !callee_symbols.contains(*sym);
+                let name_match = short_name_is_entry_point(sym);
+                not_called || name_match
+            })
+            .cloned()
+            .collect();
+
+        entry_points.sort();
+        Ok(entry_points)
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Feature construction
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Build an `ExecutionFeature` for `entry_point` in `repository_id` by
+    /// running a forward BFS through the call graph and scoring the result.
+    async fn build_feature(
+        &self,
+        entry_point: &str,
+        repository_id: &str,
+    ) -> Result<ExecutionFeature, DomainError> {
+        let query = CallGraphQuery::new().with_repository(repository_id);
+
+        // ── Forward BFS ────────────────────────────────────────────────────
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<(String, usize, String, u32)> = VecDeque::new();
+
+        visited.insert(entry_point.to_string());
+        queue.push_back((entry_point.to_string(), 0, String::new(), 0));
+
+        let mut path: Vec<FeatureNode> = Vec::new();
+        let mut unresolved_callees: usize = 0;
+        let mut total_callees_seen: usize = 0;
+
+        while let Some((current, depth, file_path, line)) = queue.pop_front() {
+            path.push(FeatureNode {
+                symbol: current.clone(),
+                file_path,
+                line,
+                depth,
+                repository_id: repository_id.to_string(),
+            });
+
+            let callees = self.call_graph.find_callees(&current, &query).await?;
+            for reference in &callees {
+                total_callees_seen += 1;
+                let callee = reference.callee_symbol().to_string();
+                if visited.contains(&callee) {
+                    continue;
+                }
+                visited.insert(callee.clone());
+
+                // A callee is considered "external" (unresolved) when it does
+                // not appear as a caller_symbol anywhere in this repository's
+                // call graph — i.e. we have no outgoing edges for it.
+                // We approximate this by checking whether we've seen it as a
+                // caller; the check is done lazily after the BFS.
+                queue.push_back((
+                    callee,
+                    depth + 1,
+                    reference.reference_file_path().to_string(),
+                    reference.reference_line(),
+                ));
+            }
+        }
+
+        // Count unresolved callees: leaf nodes in the forward BFS (excluding the
+        // entry point) that produced no further callees — a proxy for external or
+        // stdlib calls that we could not trace further.
+        for node in path.iter().skip(1) {
+            // leaf nodes that the BFS couldn't expand
+            let has_callees_in_path = path.iter().any(|n| n.depth == node.depth + 1);
+            if !has_callees_in_path && node.depth == path.iter().map(|n| n.depth).max().unwrap_or(0) {
+                unresolved_callees += 1;
+            }
+        }
+        // Fallback: if total_callees_seen is 0 avoid division by zero.
+        if total_callees_seen == 0 {
+            total_callees_seen = 1;
+        }
+
+        // ── Criticality scoring ────────────────────────────────────────────
+        let total_nodes = path.len().max(1);
+        let distinct_files: HashSet<&str> = path.iter().map(|n| n.file_path.as_str()).collect();
+        let file_count = distinct_files.len();
+        let feature_depth = path.iter().map(|n| n.depth).max().unwrap_or(0);
+
+        // Signal 1 — file spread
+        let file_spread_score = (file_count as f32 / total_nodes as f32).min(1.0);
+
+        // Signal 2 — security sensitivity
+        let security_score = if path.iter().any(|n| is_security_sensitive(&n.symbol)) {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
+
+        // Signal 3 — external calls
+        let external_score = (unresolved_callees as f32 / total_callees_seen as f32).min(1.0);
+
+        // Signal 4 — test coverage gap
+        // Check whether any test symbol is a direct or indirect caller of the entry point.
+        let callers_query = CallGraphQuery::new().with_repository(repository_id);
+        let callers_of_entry = self
+            .call_graph
+            .find_callers(entry_point, &callers_query)
+            .await
+            .unwrap_or_default();
+        let has_test_caller = callers_of_entry.iter().any(|r| {
+            r.caller_symbol()
+                .map(|s| is_test_symbol(s))
+                .unwrap_or(false)
+        });
+        let test_gap_score = if has_test_caller {
+            TEST_COVERAGE_PRESENT_SCORE
+        } else {
+            TEST_COVERAGE_GAP_SCORE
+        };
+
+        // Signal 5 — depth
+        let depth_score = (feature_depth as f32 / DEPTH_REFERENCE).min(1.0);
+
+        let criticality = (WEIGHT_FILE_SPREAD * file_spread_score
+            + WEIGHT_SECURITY * security_score
+            + WEIGHT_EXTERNAL_CALLS * external_score
+            + WEIGHT_TEST_COVERAGE_GAP * test_gap_score
+            + WEIGHT_DEPTH * depth_score)
+            .min(1.0_f32);
+
+        let name = short_name(entry_point);
+        let id = format!("{}:{}", repository_id, entry_point);
+
+        Ok(ExecutionFeature {
+            id,
+            name,
+            entry_point: entry_point.to_string(),
+            repository_id: repository_id.to_string(),
+            file_count,
+            depth: feature_depth,
+            path,
+            criticality,
+        })
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Extract the short (human-readable) name from a fully-qualified symbol.
+///
+/// Strips everything up to and including the last `/`, `#`, `.`, or `::`.
+fn short_name(fqn: &str) -> String {
+    // Handle SCIP-style `path/to/file Package#Method`.
+    let base = fqn.rsplit_once('#').map(|(_, r)| r).unwrap_or(fqn);
+    // Handle `::` separators (Rust, C++).
+    let base = base.rsplit_once("::").map(|(_, r)| r).unwrap_or(base);
+    // Handle `.` separators (Python, Java).
+    let base = base.rsplit_once('.').map(|(_, r)| r).unwrap_or(base);
+    // Strip trailing `()` or generic parameters.
+    let base = base.split('(').next().unwrap_or(base);
+    let base = base.split('<').next().unwrap_or(base);
+    base.trim().to_string()
+}
+
+/// Return `true` when the short name of `fqn` matches a well-known entry-point
+/// pattern (exact names or prefixes).
+fn short_name_is_entry_point(fqn: &str) -> bool {
+    let sn = short_name(fqn);
+    let sn_lower = sn.to_lowercase();
+    if ENTRY_POINT_EXACT.iter().any(|&e| sn_lower == e) {
+        return true;
+    }
+    ENTRY_POINT_PREFIXES
+        .iter()
+        .any(|&p| sn_lower.starts_with(p))
+}
+
+/// Return `true` when a symbol looks like a test function.
+fn is_test_symbol(symbol: &str) -> bool {
+    let sn = short_name(symbol);
+    let sn_lower = sn.to_lowercase();
+    sn_lower.starts_with("test_") || sn_lower.starts_with("it_")
+}
+
+/// Return `true` when a symbol contains a security-sensitive keyword.
+fn is_security_sensitive(symbol: &str) -> bool {
+    let lower = symbol.to_lowercase();
+    SECURITY_KEYWORDS.iter().any(|&kw| lower.contains(kw))
+}

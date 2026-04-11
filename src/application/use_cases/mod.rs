@@ -1,5 +1,6 @@
 mod call_graph;
 mod delete_repository;
+mod execution_features;
 mod explain;
 mod file_relationship;
 mod impact_analysis;
@@ -13,6 +14,7 @@ mod symbol_context;
 
 pub use call_graph::*;
 pub use delete_repository::*;
+pub use execution_features::*;
 pub use explain::*;
 pub use file_relationship::*;
 pub use impact_analysis::*;

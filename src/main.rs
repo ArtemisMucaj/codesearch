@@ -165,6 +165,7 @@ async fn main() -> Result<()> {
                 | Commands::Impact { .. }
                 | Commands::Context { .. }
                 | Commands::Explain { .. }
+                | Commands::Features { .. }
                 | Commands::Uses { .. }
                 | Commands::Tui { .. }
         );

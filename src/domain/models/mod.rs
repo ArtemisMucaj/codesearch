@@ -1,5 +1,6 @@
 mod code_chunk;
 mod embedding;
+mod execution_feature;
 mod file_graph;
 mod file_hash;
 mod language;
@@ -9,6 +10,7 @@ mod symbol_reference;
 
 pub use code_chunk::*;
 pub use embedding::*;
+pub use execution_feature::*;
 pub use file_graph::*;
 pub use file_hash::*;
 pub use language::*;
