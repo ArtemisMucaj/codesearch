@@ -117,13 +117,13 @@ impl<'a> Router<'a> {
                         .get(symbol, repository, format)
                         .await
                 }
-                FeaturesSubcommand::Affected {
+                FeaturesSubcommand::Impacted {
                     symbols,
                     repository,
                     format,
                 } => {
                     self.execution_features_controller
-                        .affected(symbols, repository, format)
+                        .impacted(symbols, repository, format)
                         .await
                 }
             },

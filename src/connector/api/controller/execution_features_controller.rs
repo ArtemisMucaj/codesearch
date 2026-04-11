@@ -53,8 +53,8 @@ impl<'a> ExecutionFeaturesController<'a> {
         }
     }
 
-    /// Show features affected by a set of changed symbols.
-    pub async fn affected(
+    /// Show features impacted by a set of changed symbols.
+    pub async fn impacted(
         &self,
         symbols: Vec<String>,
         repository: Option<String>,
@@ -62,12 +62,12 @@ impl<'a> ExecutionFeaturesController<'a> {
     ) -> Result<String> {
         let use_case = self.container.execution_features_use_case();
         let features = use_case
-            .get_affected_features(&symbols, repository.as_deref())
+            .get_impacted_features(&symbols, repository.as_deref())
             .await?;
 
         if features.is_empty() {
             return Ok(format!(
-                "No features affected by the provided symbol(s): {}",
+                "No features impacted by the provided symbol(s): {}",
                 symbols.join(", ")
             ));
         }

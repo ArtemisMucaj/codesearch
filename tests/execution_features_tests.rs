@@ -480,12 +480,12 @@ async fn test_feature_id_is_stable() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// get_affected_features
+// get_impacted_features
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// A feature whose call chain includes a changed symbol must be returned.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_get_affected_features_includes_matching_feature() {
+async fn test_get_impacted_features_includes_matching_feature() {
     let cg = make_call_graph_use_case().await;
     // main → auth → session
     let refs = vec![
@@ -496,9 +496,9 @@ async fn test_get_affected_features_includes_matching_feature() {
 
     let uc = ExecutionFeaturesUseCase::new(cg);
     let affected = uc
-        .get_affected_features(&["session".to_string()], Some("repo1"))
+        .get_impacted_features(&["session".to_string()], Some("repo1"))
         .await
-        .expect("get_affected_features failed");
+        .expect("get_impacted_features failed");
 
     assert!(
         !affected.is_empty(),
@@ -514,7 +514,7 @@ async fn test_get_affected_features_includes_matching_feature() {
 
 /// A feature whose call chain does NOT include any changed symbol must be excluded.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_get_affected_features_excludes_unrelated_feature() {
+async fn test_get_impacted_features_excludes_unrelated_feature() {
     let cg = make_call_graph_use_case().await;
     // Two separate call chains.
     let refs = vec![
@@ -526,9 +526,9 @@ async fn test_get_affected_features_excludes_unrelated_feature() {
     let uc = ExecutionFeaturesUseCase::new(cg);
     // Only `metrics` changed — only the `run` chain should be affected.
     let affected = uc
-        .get_affected_features(&["metrics".to_string()], Some("repo1"))
+        .get_impacted_features(&["metrics".to_string()], Some("repo1"))
         .await
-        .expect("get_affected_features failed");
+        .expect("get_impacted_features failed");
 
     let ep_names: Vec<&str> = affected.iter().map(|f| f.entry_point.as_str()).collect();
     assert!(
@@ -545,16 +545,16 @@ async fn test_get_affected_features_excludes_unrelated_feature() {
 
 /// An empty `changed_symbols` slice must always return an empty result.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_get_affected_features_empty_input() {
+async fn test_get_impacted_features_empty_input() {
     let cg = make_call_graph_use_case().await;
     let refs = vec![call_ref("main", "foo", "src/main.rs", 1, "repo1")];
     cg.save_references(&refs).await.expect("seed failed");
 
     let uc = ExecutionFeaturesUseCase::new(cg);
     let affected = uc
-        .get_affected_features(&[], Some("repo1"))
+        .get_impacted_features(&[], Some("repo1"))
         .await
-        .expect("get_affected_features failed");
+        .expect("get_impacted_features failed");
 
     assert!(
         affected.is_empty(),
@@ -564,7 +564,7 @@ async fn test_get_affected_features_empty_input() {
 
 /// Affected features must be sorted by descending criticality.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_get_affected_features_sorted_by_criticality() {
+async fn test_get_impacted_features_sorted_by_criticality() {
     let cg = make_call_graph_use_case().await;
     // Two entry points that both call `shared_util`.
     let refs = vec![
@@ -576,9 +576,9 @@ async fn test_get_affected_features_sorted_by_criticality() {
 
     let uc = ExecutionFeaturesUseCase::new(cg);
     let affected = uc
-        .get_affected_features(&["shared_util".to_string()], Some("repo1"))
+        .get_impacted_features(&["shared_util".to_string()], Some("repo1"))
         .await
-        .expect("get_affected_features failed");
+        .expect("get_impacted_features failed");
 
     // Verify sorted by descending criticality.
     for window in affected.windows(2) {

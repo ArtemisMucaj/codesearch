@@ -120,7 +120,7 @@ impl ExecutionFeaturesUseCase {
 
     /// Given a set of changed symbols, return every feature whose call chain
     /// includes at least one of them, sorted by descending criticality.
-    pub async fn get_affected_features(
+    pub async fn get_impacted_features(
         &self,
         changed_symbols: &[String],
         repository_id: Option<&str>,

@@ -31,8 +31,8 @@ pub enum FeaturesSubcommand {
         format: OutputFormat,
     },
 
-    /// Show features affected by a set of changed symbols.
-    Affected {
+    /// Show features impacted by a set of changed symbols.
+    Impacted {
         /// One or more changed symbol names.
         #[arg(required = true)]
         symbols: Vec<String>,
