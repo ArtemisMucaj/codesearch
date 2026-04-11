@@ -1,3 +1,4 @@
+pub mod clusters_controller;
 pub mod delete_controller;
 pub mod execution_features_controller;
 pub mod explain_controller;
@@ -9,6 +10,7 @@ pub mod stats_controller;
 pub mod symbol_context_controller;
 pub mod uses_controller;
 
+pub use clusters_controller::ClustersController;
 pub use delete_controller::DeleteController;
 pub use execution_features_controller::ExecutionFeaturesController;
 pub use explain_controller::ExplainController;

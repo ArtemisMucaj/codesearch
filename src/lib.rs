@@ -5,17 +5,18 @@ pub mod domain;
 pub mod tui;
 
 pub use application::{
-    CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase, ChatClient, ContextNode,
-    DeleteRepositoryUseCase, EmbeddingService, ExecutionFeaturesUseCase, ExplainResult,
-    ExplainUseCase, FileHashRepository, FileRelationshipUseCase, ImpactAnalysis,
-    ImpactAnalysisUseCase, ImpactNode, IndexRepositoryUseCase, ListRepositoriesUseCase,
-    MetadataRepository, ParserService, QueryExpander, RerankingService, Scip, SearchCodeUseCase,
-    SnippetLookupUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
+    CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase, ChatClient,
+    ClusterDetectionUseCase, ContextNode, DeleteRepositoryUseCase, EmbeddingService,
+    ExecutionFeaturesUseCase, ExplainResult, ExplainUseCase, FileHashRepository,
+    FileRelationshipUseCase, ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode,
+    IndexRepositoryUseCase, ListRepositoriesUseCase, MetadataRepository, ParserService,
+    QueryExpander, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
+    SymbolContext, SymbolContextUseCase, VectorRepository,
 };
 
 pub use cli::{
-    Commands, EmbeddingTarget, FeaturesSubcommand, LlmTarget, OutputFormat, RerankingTarget,
-    TuiMode,
+    ClusterOutputFormat, Commands, ClustersSubcommand, EmbeddingTarget, FeaturesSubcommand,
+    LlmTarget, OutputFormat, RerankingTarget, TuiMode,
 };
 
 pub use connector::{
@@ -26,9 +27,9 @@ pub use connector::{
 };
 
 pub use domain::{
-    compute_file_hash, CodeChunk, DomainError, Embedding, EmbeddingConfig, ExecutionFeature,
-    FeatureNode, FileHash, IndexingStatus, Language, NodeType, ReferenceKind, Repository,
-    SearchQuery, SearchResult, SymbolReference, VectorStore,
+    compute_file_hash, Cluster, ClusterGraph, CodeChunk, DomainError, Embedding, EmbeddingConfig,
+    ExecutionFeature, FeatureNode, FileHash, IndexingStatus, Language, NodeType, ReferenceKind,
+    Repository, SearchQuery, SearchResult, SymbolReference, VectorStore,
 };
 
 pub use connector::api::{Container, ContainerConfig, Router};

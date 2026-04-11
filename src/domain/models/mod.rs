@@ -1,3 +1,4 @@
+mod cluster;
 mod code_chunk;
 mod embedding;
 mod execution_feature;
@@ -8,6 +9,7 @@ mod repository;
 mod search_result;
 mod symbol_reference;
 
+pub use cluster::*;
 pub use code_chunk::*;
 pub use embedding::*;
 pub use execution_feature::*;
