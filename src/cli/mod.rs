@@ -59,6 +59,25 @@ pub enum OutputFormat {
     Vimgrep,
 }
 
+/// Output format for cluster commands (text or json only).
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum OutputFormatTextJson {
+    /// Human-readable text (default)
+    #[default]
+    Text,
+    /// JSON array of result objects
+    Json,
+}
+
+impl From<OutputFormatTextJson> for OutputFormat {
+    fn from(f: OutputFormatTextJson) -> Self {
+        match f {
+            OutputFormatTextJson::Text => OutputFormat::Text,
+            OutputFormatTextJson::Json => OutputFormat::Json,
+        }
+    }
+}
+
 /// Subcommands for the `clusters` command.
 #[derive(Subcommand)]
 pub enum ClustersSubcommand {
@@ -69,7 +88,7 @@ pub enum ClustersSubcommand {
 
         /// Output format: text or json.
         #[arg(short = 'F', long, value_enum, default_value = "text")]
-        format: OutputFormat,
+        format: OutputFormatTextJson,
     },
 
     /// Show the cluster that a specific file belongs to.
@@ -82,7 +101,7 @@ pub enum ClustersSubcommand {
 
         /// Output format: text or json.
         #[arg(short = 'F', long, value_enum, default_value = "text")]
-        format: OutputFormat,
+        format: OutputFormatTextJson,
     },
 
     /// Print a high-level Markdown architecture overview table.

@@ -1,6 +1,6 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 
-use crate::cli::OutputFormat;
+use crate::cli::{OutputFormat, OutputFormatTextJson};
 
 use super::super::Container;
 
@@ -17,14 +17,22 @@ impl<'a> ClustersController<'a> {
     pub async fn list(
         &self,
         repository: String,
-        format: OutputFormat,
+        format: OutputFormatTextJson,
     ) -> Result<String> {
         let use_case = self.container.cluster_detection_use_case();
-        let cg = use_case.detect(&repository).await?;
+        let cg = use_case
+            .detect(&repository)
+            .await
+            .context("detecting clusters for repository")?;
 
+        let format: OutputFormat = format.into();
         Ok(match format {
-            OutputFormat::Json => serde_json::to_string_pretty(&cg)?,
-            _ => {
+            OutputFormat::Json => serde_json::to_string_pretty(&cg)
+                .context("serializing cluster graph")?,
+            OutputFormat::Vimgrep => {
+                anyhow::bail!("vimgrep output format is not supported for cluster list")
+            }
+            OutputFormat::Text => {
                 if cg.clusters.is_empty() {
                     return Ok(format!(
                         "No clusters detected for repository `{}` \
@@ -69,19 +77,30 @@ impl<'a> ClustersController<'a> {
         &self,
         file_path: String,
         repository: String,
-        format: OutputFormat,
+        format: OutputFormatTextJson,
     ) -> Result<String> {
         let use_case = self.container.cluster_detection_use_case();
-        let result = use_case.cluster_for_file(&file_path, &repository).await?;
+        let result = use_case
+            .cluster_for_file(&file_path, &repository)
+            .await
+            .context(format!(
+                "finding cluster for file {} in repository {}",
+                file_path, repository
+            ))?;
 
+        let format: OutputFormat = format.into();
         Ok(match result {
             None => format!(
                 "File `{}` was not found in any cluster for repository `{}`.",
                 file_path, repository
             ),
             Some(c) => match format {
-                OutputFormat::Json => serde_json::to_string_pretty(&c)?,
-                _ => format!(
+                OutputFormat::Json => serde_json::to_string_pretty(&c)
+                    .context("serializing cluster")?,
+                OutputFormat::Vimgrep => {
+                    anyhow::bail!("vimgrep output format is not supported for cluster get")
+                }
+                OutputFormat::Text => format!(
                     "File `{}` belongs to cluster `{}` \
                      ({} files, {}, cohesion {:.2})\n",
                     file_path, c.name, c.size, c.dominant_language, c.cohesion
@@ -93,6 +112,9 @@ impl<'a> ClustersController<'a> {
     /// Print a Markdown architecture overview table.
     pub async fn overview(&self, repository: String) -> Result<String> {
         let use_case = self.container.cluster_detection_use_case();
-        Ok(use_case.architecture_overview(&repository).await?)
+        Ok(use_case
+            .architecture_overview(&repository)
+            .await
+            .context("generating architecture overview")?)
     }
 }

@@ -52,6 +52,7 @@ fn composite_weight(edge: &FileEdge) -> f64 {
 // ── Graph representation ──────────────────────────────────────────────────
 
 /// A compact undirected weighted graph stored as adjacency lists.
+#[derive(Clone)]
 struct Graph {
     /// Number of nodes.
     n: usize,
@@ -97,21 +98,44 @@ fn leiden(graph: &Graph) -> Vec<usize> {
     // Start: every node in its own cluster.
     let mut partition: Vec<usize> = (0..graph.n).collect();
     let mut prev_modularity = modularity(graph, &partition);
+    let mut current_graph = graph.clone();
+    let mut node_to_supernode: Vec<usize> = (0..graph.n).collect();
 
     for _ in 0..MAX_ITERATIONS {
-        local_moving_phase(graph, &mut partition);
-        refine_phase(graph, &mut partition);
+        local_moving_phase(&current_graph, &mut partition);
+        refine_phase(&current_graph, &mut partition);
 
-        let new_modularity = modularity(graph, &partition);
+        // Aggregation step: collapse each partition into a super-node.
+        let (new_graph, new_partition) = aggregate_partition(&current_graph, &partition);
+
+        // Update the mapping from original nodes to supernodes.
+        for node in 0..node_to_supernode.len() {
+            let supernode = node_to_supernode[node];
+            node_to_supernode[node] = partition[supernode];
+        }
+
+        current_graph = new_graph;
+        partition = new_partition;
+
+        let new_modularity = modularity(&current_graph, &partition);
         if new_modularity - prev_modularity < MIN_MODULARITY_GAIN {
             break;
         }
         prev_modularity = new_modularity;
     }
 
+    // Map back to original nodes.
+    let final_partition: Vec<usize> = (0..graph.n)
+        .map(|node| {
+            let supernode = node_to_supernode[node];
+            partition[supernode]
+        })
+        .collect();
+
     // Renumber clusters 0..k contiguously.
-    renumber(&mut partition);
-    partition
+    let mut result = final_partition;
+    renumber(&mut result);
+    result
 }
 
 /// Modularity Q = (1/2m) Σ_ij [ A_ij - k_i k_j / 2m ] δ(c_i, c_j)
@@ -293,6 +317,45 @@ fn renumber(partition: &mut Vec<usize>) {
     }
 }
 
+/// Aggregate a graph by collapsing each partition into a super-node.
+///
+/// Returns a new graph where each node represents a cluster from the original
+/// partition, and a new partition mapping (where each super-node is in its own cluster).
+fn aggregate_partition(graph: &Graph, partition: &[usize]) -> (Graph, Vec<usize>) {
+    // Build mapping from old cluster ID to new node index.
+    let num_clusters = partition.iter().copied().max().map(|m| m + 1).unwrap_or(0);
+
+    // Create new graph with one node per cluster.
+    let mut new_graph = Graph::new(num_clusters);
+
+    // Aggregate edge weights between clusters.
+    let mut edge_weights: HashMap<(usize, usize), f64> = HashMap::new();
+
+    for u in 0..graph.n {
+        let cu = partition[u];
+        for &(v, w) in &graph.adj[u] {
+            if v <= u {
+                continue; // Process each edge only once.
+            }
+            let cv = partition[v];
+            if cu != cv {
+                let (lo, hi) = if cu < cv { (cu, cv) } else { (cv, cu) };
+                *edge_weights.entry((lo, hi)).or_insert(0.0) += w;
+            }
+        }
+    }
+
+    // Add aggregated edges to new graph.
+    for ((u, v), w) in edge_weights {
+        new_graph.add_edge(u, v, w);
+    }
+
+    // New partition: each super-node is initially in its own cluster.
+    let new_partition: Vec<usize> = (0..num_clusters).collect();
+
+    (new_graph, new_partition)
+}
+
 // ── Cluster naming ────────────────────────────────────────────────────────
 
 /// Common words excluded when extracting meaningful keywords from symbol names.
@@ -429,8 +492,8 @@ fn slugify(s: &str, max_len: usize) -> String {
         }
     }
     let trimmed = result.trim_matches('-').to_string();
-    if trimmed.len() > max_len {
-        trimmed[..max_len].to_string()
+    if trimmed.chars().count() > max_len {
+        trimmed.chars().take(max_len).collect()
     } else {
         trimmed
     }
@@ -463,9 +526,11 @@ fn batch_cohesion(
                 let cid = id_by_index[ci];
                 stats.entry(cid.to_string()).and_modify(|(int, _)| *int += 1);
             }
-            (Some(&ci), Some(_)) => {
-                let cid = id_by_index[ci];
-                stats.entry(cid.to_string()).and_modify(|(_, ext)| *ext += 1);
+            (Some(&ci), Some(&cj)) => {
+                let cid_from = id_by_index[ci];
+                let cid_to = id_by_index[cj];
+                stats.entry(cid_from.to_string()).and_modify(|(_, ext)| *ext += 1);
+                stats.entry(cid_to.to_string()).and_modify(|(_, ext)| *ext += 1);
             }
             _ => {}
         }
@@ -507,19 +572,44 @@ impl ClusterDetectionUseCase {
 
         // Fallback: trivial singleton clusters for small graphs.
         if n < MIN_NODES_FOR_CLUSTERING {
+            // Compute cohesion for each singleton based on the graph edges.
+            let file_to_edges: HashMap<String, (usize, usize)> = {
+                let mut map: HashMap<String, (usize, usize)> = HashMap::new();
+                for file in &files {
+                    map.insert(file.clone(), (0, 0));
+                }
+                for edge in &graph.edges {
+                    if edge.from_file == edge.to_file {
+                        // Self-edge: internal to the singleton.
+                        map.entry(edge.from_file.clone()).and_modify(|(int, _)| *int += 1);
+                    } else {
+                        // External edge.
+                        map.entry(edge.from_file.clone()).and_modify(|(_, ext)| *ext += 1);
+                        map.entry(edge.to_file.clone()).and_modify(|(_, ext)| *ext += 1);
+                    }
+                }
+                map
+            };
+
             let clusters: Vec<Cluster> = files
                 .iter()
                 .enumerate()
                 .map(|(i, path)| {
                     let lang =
                         Language::from_path(Path::new(path)).as_str().to_string();
+                    let (int_e, ext_e) = file_to_edges.get(path).copied().unwrap_or((0, 0));
+                    let cohesion = if int_e + ext_e == 0 {
+                        0.0_f32
+                    } else {
+                        int_e as f32 / (int_e + ext_e) as f32
+                    };
                     Cluster {
                         id: Uuid::new_v4().to_string(),
                         name: name_cluster(&[path.clone()], &HashMap::new()),
                         repository_id: repository_id.to_string(),
                         dominant_language: lang,
                         size: 1,
-                        cohesion: 1.0,
+                        cohesion,
                         members: vec![path.clone()],
                     }
                 })
@@ -684,11 +774,18 @@ impl ClusterDetectionUseCase {
             ));
         }
 
-        // Build file→cluster_name lookup.
+        // Build file→cluster_id lookup.
         let file_to_cluster: HashMap<&str, &str> = cg
             .clusters
             .iter()
-            .flat_map(|c| c.members.iter().map(move |m| (m.as_str(), c.name.as_str())))
+            .flat_map(|c| c.members.iter().map(move |m| (m.as_str(), c.id.as_str())))
+            .collect();
+
+        // Build cluster_id→name lookup for display.
+        let cluster_id_to_name: HashMap<&str, &str> = cg
+            .clusters
+            .iter()
+            .map(|c| (c.id.as_str(), c.name.as_str()))
             .collect();
 
         // Reload graph to compute inter-cluster edge weights.
@@ -697,7 +794,7 @@ impl ClusterDetectionUseCase {
             .build_graph(Some(&[repository_id.to_string()]), 1, false)
             .await?;
 
-        // Aggregate: (from_cluster, to_cluster) → total_weight
+        // Aggregate: (from_cluster_id, to_cluster_id) → total_weight
         let mut inter: HashMap<(&str, &str), f64> = HashMap::new();
         for edge in &graph.edges {
             let from_c = file_to_cluster.get(edge.from_file.as_str());
@@ -726,7 +823,7 @@ impl ClusterDetectionUseCase {
             // Top 3 outgoing inter-cluster edges.
             let mut deps: Vec<(&str, f64)> = inter
                 .iter()
-                .filter(|((fc, _), _)| *fc == cluster.name.as_str())
+                .filter(|((fc, _), _)| *fc == cluster.id.as_str())
                 .map(|((_, tc), &w)| (*tc, w))
                 .collect();
             deps.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -735,7 +832,10 @@ impl ClusterDetectionUseCase {
                 "—".to_string()
             } else {
                 deps.iter()
-                    .map(|(name, w)| format!("{} ({:.0})", name, w))
+                    .map(|(cluster_id, w)| {
+                        let name = cluster_id_to_name.get(cluster_id).unwrap_or(cluster_id);
+                        format!("{} ({:.0})", name, w)
+                    })
                     .collect::<Vec<_>>()
                     .join(", ")
             };
