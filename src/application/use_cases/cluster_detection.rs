@@ -586,12 +586,13 @@ impl ClusterDetectionUseCase {
         Self { file_graph }
     }
 
-    /// Build the dependency graph and run Leiden detection.
+    /// Build the dependency graph, run the Leiden algorithm, and return the
+    /// resulting clusters together with the raw [`crate::domain::FileGraph`].
     ///
-    /// Returns both the [`ClusterGraph`] result *and* the raw [`crate::domain::FileGraph`] so
-    /// callers that need the edge list (e.g. `architecture_overview`) can reuse
-    /// it without a second call to `build_graph`.
-    async fn detect_internal(
+    /// Callers that only need the [`ClusterGraph`] should use [`Self::create_clusters`].
+    /// The graph is exposed here so `architecture_overview` can reuse it for
+    /// inter-cluster edge aggregation without a second `build_graph` call.
+    async fn create_clusters_with_graph(
         &self,
         repository_id: &str,
     ) -> Result<(ClusterGraph, crate::domain::FileGraph), DomainError> {
@@ -787,11 +788,11 @@ impl ClusterDetectionUseCase {
     }
 
     /// Detect clusters in the dependency graph of `repository_id`.
-    pub async fn detect(
+    pub async fn create_clusters(
         &self,
         repository_id: &str,
     ) -> Result<ClusterGraph, DomainError> {
-        Ok(self.detect_internal(repository_id).await?.0)
+        Ok(self.create_clusters_with_graph(repository_id).await?.0)
     }
 
     /// Return the cluster a given file belongs to.
@@ -800,7 +801,7 @@ impl ClusterDetectionUseCase {
         file_path: &str,
         repository_id: &str,
     ) -> Result<Option<Cluster>, DomainError> {
-        let cg = self.detect(repository_id).await?;
+        let cg = self.create_clusters(repository_id).await?;
         Ok(cg
             .clusters
             .into_iter()
@@ -815,7 +816,7 @@ impl ClusterDetectionUseCase {
         &self,
         repository_id: &str,
     ) -> Result<String, DomainError> {
-        let (cg, graph) = self.detect_internal(repository_id).await?;
+        let (cg, graph) = self.create_clusters_with_graph(repository_id).await?;
 
         if cg.clusters.is_empty() {
             return Ok(format!(

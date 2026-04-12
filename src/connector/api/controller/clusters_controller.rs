@@ -21,7 +21,7 @@ impl<'a> ClustersController<'a> {
     ) -> Result<String> {
         let use_case = self.container.cluster_detection_use_case();
         let cg = use_case
-            .detect(&repository)
+            .create_clusters(&repository)
             .await
             .context("detecting clusters for repository")?;
 
