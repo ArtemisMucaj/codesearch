@@ -1,52 +1,26 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use crate::application::{CallGraphQuery, CallGraphUseCase};
 use crate::domain::{DomainError, ExecutionFeature, FeatureNode};
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Entry-point detection constants
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// Exact short names that are always treated as entry points.
-const ENTRY_POINT_EXACT: &[&str] = &[
-    "main", "run", "start", "init", "handle", "execute", "process",
-];
-
-/// Prefixes that mark a symbol as an entry point (e.g. test functions).
-const ENTRY_POINT_PREFIXES: &[&str] = &["test_", "it_", "handle_", "on_"];
-
-// ──────────────────────────────────────────────────────────────────────────────
 // Criticality scoring constants (weights must sum to 1.0)
 // ──────────────────────────────────────────────────────────────────────────────
 
-const WEIGHT_FILE_SPREAD: f32 = 0.30;
-const WEIGHT_SECURITY: f32 = 0.25;
-const WEIGHT_EXTERNAL_CALLS: f32 = 0.20;
-const WEIGHT_TEST_COVERAGE_GAP: f32 = 0.15;
-const WEIGHT_DEPTH: f32 = 0.10;
+const WEIGHT_FILE_SPREAD: f32 = 0.35;
+const WEIGHT_EXTERNAL_CALLS: f32 = 0.25;
+const WEIGHT_TEST_COVERAGE_GAP: f32 = 0.25;
+const WEIGHT_DEPTH: f32 = 0.15;
 
 /// Soft reference depth for depth-score normalisation. A path reaching this
 /// depth scores 1.0 on the depth signal; deeper paths are clamped to 1.0.
 const DEPTH_REFERENCE: f32 = 20.0;
 
-/// Score assigned when no test symbol is reachable from the entry point's
-/// callers (no test coverage gap detected).
+/// Score assigned when no test symbol directly calls the entry point.
 const TEST_COVERAGE_GAP_SCORE: f32 = 0.30;
-/// Score assigned when test coverage IS present.
+/// Score assigned when a test caller IS present.
 const TEST_COVERAGE_PRESENT_SCORE: f32 = 0.05;
-
-/// Security-sensitive keywords. If any node's symbol contains one of these
-/// substrings (case-insensitive) the security signal fires at full strength.
-const SECURITY_KEYWORDS: &[&str] = &[
-    "auth",
-    "crypto",
-    "validate",
-    "password",
-    "token",
-    "secret",
-    "permission",
-];
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Use case
@@ -138,12 +112,11 @@ impl ExecutionFeaturesUseCase {
             }
         };
 
-        // Verify the resolved symbol is actually an entry point. A symbol
-        // qualifies when its short name matches a known pattern or nothing in
+        // Verify the resolved symbol is actually an entry point: nothing within
         // the same repository calls it.
         let repo_query = CallGraphQuery::new().with_repository(&effective_repo);
         let callers_in_repo = self.call_graph.find_callers(&fqn, &repo_query).await?;
-        if !callers_in_repo.is_empty() && !short_name_is_entry_point(&fqn) {
+        if !callers_in_repo.is_empty() {
             return Ok(None);
         }
 
@@ -205,41 +178,26 @@ impl ExecutionFeaturesUseCase {
     // ──────────────────────────────────────────────────────────────────────────
 
     /// Return the set of fully-qualified symbols in `repository_id` that are
-    /// entry points (zero callers, or matching a well-known name pattern).
+    /// entry points: symbols that call at least one other symbol but are
+    /// themselves never called within the repository.
     async fn find_entry_points(&self, repository_id: &str) -> Result<Vec<String>, DomainError> {
         let all_refs = self.call_graph.find_by_repository(repository_id).await?;
 
-        // Collect every symbol that appears as a caller and every symbol that
-        // appears as a callee.
         let mut callee_symbols: HashSet<String> = HashSet::new();
         let mut caller_symbols: HashSet<String> = HashSet::new();
-
-        // Also track location information for each caller symbol (first seen).
-        let mut caller_file: HashMap<String, String> = HashMap::new();
 
         for r in &all_refs {
             callee_symbols.insert(r.callee_symbol().to_string());
             if let Some(caller) = r.caller_symbol() {
-                let caller = caller.to_string();
-                caller_file
-                    .entry(caller.clone())
-                    .or_insert_with(|| r.caller_file_path().to_string());
-                caller_symbols.insert(caller);
+                caller_symbols.insert(caller.to_string());
             }
         }
 
-        // A symbol is an entry point when it:
-        //   (a) appears as a caller (it calls something) AND
-        //   (b) does NOT appear as a callee (nothing calls it),
-        //       OR its short name matches a well-known entry-point pattern.
+        // Entry point = calls something (has outgoing edges) AND is never called
+        // (has no incoming edges within this repository).
         let mut entry_points: Vec<String> = caller_symbols
-            .iter()
-            .filter(|sym| {
-                let not_called = !callee_symbols.contains(*sym);
-                let name_match = short_name_is_entry_point(sym);
-                not_called || name_match
-            })
-            .cloned()
+            .into_iter()
+            .filter(|sym| !callee_symbols.contains(sym))
             .collect();
 
         entry_points.sort();
@@ -352,21 +310,15 @@ impl ExecutionFeaturesUseCase {
         let file_count = distinct_files.len();
         let feature_depth = path.iter().map(|n| n.depth).max().unwrap_or(0);
 
-        // Signal 1 — file spread
+        // Signal 1 — file spread: ratio of distinct files to total path nodes.
         let file_spread_score = (file_count as f32 / total_nodes as f32).min(1.0);
 
-        // Signal 2 — security sensitivity
-        let security_score = if path.iter().any(|n| is_security_sensitive(&n.symbol)) {
-            1.0_f32
-        } else {
-            0.0_f32
-        };
-
-        // Signal 3 — external calls
+        // Signal 2 — external calls: ratio of leaf nodes (no outgoing edges in
+        // this repo) to all callee references seen during BFS.
         let external_score = (unresolved_callees as f32 / total_callees_seen as f32).min(1.0);
 
-        // Signal 4 — test coverage gap
-        // Check whether any test symbol is a direct or indirect caller of the entry point.
+        // Signal 3 — test coverage gap: high when nothing directly calls the
+        // entry point with a test_ / it_ prefix.
         let callers_query = CallGraphQuery::new().with_repository(repository_id);
         let callers_of_entry = self
             .call_graph
@@ -383,11 +335,10 @@ impl ExecutionFeaturesUseCase {
             TEST_COVERAGE_GAP_SCORE
         };
 
-        // Signal 5 — depth
+        // Signal 4 — depth: normalised call-chain length.
         let depth_score = (feature_depth as f32 / DEPTH_REFERENCE).min(1.0);
 
         let criticality = (WEIGHT_FILE_SPREAD * file_spread_score
-            + WEIGHT_SECURITY * security_score
             + WEIGHT_EXTERNAL_CALLS * external_score
             + WEIGHT_TEST_COVERAGE_GAP * test_gap_score
             + WEIGHT_DEPTH * depth_score)
@@ -429,28 +380,9 @@ fn short_name(fqn: &str) -> String {
     base.trim().to_string()
 }
 
-/// Return `true` when the short name of `fqn` matches a well-known entry-point
-/// pattern (exact names or prefixes).
-fn short_name_is_entry_point(fqn: &str) -> bool {
-    let sn = short_name(fqn);
-    let sn_lower = sn.to_lowercase();
-    if ENTRY_POINT_EXACT.iter().any(|&e| sn_lower == e) {
-        return true;
-    }
-    ENTRY_POINT_PREFIXES
-        .iter()
-        .any(|&p| sn_lower.starts_with(p))
-}
-
 /// Return `true` when a symbol looks like a test function.
 fn is_test_symbol(symbol: &str) -> bool {
     let sn = short_name(symbol);
     let sn_lower = sn.to_lowercase();
     sn_lower.starts_with("test_") || sn_lower.starts_with("it_")
-}
-
-/// Return `true` when a symbol contains a security-sensitive keyword.
-fn is_security_sensitive(symbol: &str) -> bool {
-    let lower = symbol.to_lowercase();
-    SECURITY_KEYWORDS.iter().any(|&kw| lower.contains(kw))
 }

@@ -73,46 +73,6 @@ async fn test_zero_caller_symbol_is_entry_point() {
     );
 }
 
-/// A symbol whose short name matches a well-known pattern (e.g. `handle_request`)
-/// is flagged as an entry point even when it does have callers.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_well_known_name_is_entry_point_even_with_callers() {
-    let cg = make_call_graph_use_case().await;
-    // dispatcher calls handle_request, and handle_request calls process_data.
-    // handle_request HAS a caller (dispatcher) but its name matches the
-    // `handle_*` prefix pattern — it should still surface as an entry point.
-    let refs = vec![
-        call_ref(
-            "dispatcher",
-            "handle_request",
-            "src/dispatcher.rs",
-            10,
-            "repo1",
-        ),
-        call_ref(
-            "handle_request",
-            "process_data",
-            "src/handler.rs",
-            20,
-            "repo1",
-        ),
-    ];
-    cg.save_references(&refs).await.expect("seed failed");
-
-    let uc = ExecutionFeaturesUseCase::new(cg);
-    let features = uc
-        .list_features("repo1", 100)
-        .await
-        .expect("list_features failed");
-
-    let entry_points: Vec<&str> = features.iter().map(|f| f.entry_point.as_str()).collect();
-    assert!(
-        entry_points.contains(&"handle_request"),
-        "handle_request should be an entry point due to name pattern; got: {:?}",
-        entry_points
-    );
-}
-
 /// Symbols that only appear as callees (never as callers) are not entry points.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_pure_callee_is_not_entry_point() {
@@ -257,49 +217,6 @@ async fn test_diamond_dependency_no_duplicates() {
 // ──────────────────────────────────────────────────────────────────────────────
 // Criticality scoring
 // ──────────────────────────────────────────────────────────────────────────────
-
-/// A feature touching a security-sensitive symbol scores higher criticality
-/// than an otherwise identical feature without security keywords.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_security_sensitive_raises_criticality() {
-    let cg = make_call_graph_use_case().await;
-    // Two entry points: one calls a security-sensitive symbol, the other doesn't.
-    let refs = vec![
-        // Secure path: main_secure → validate_password
-        call_ref(
-            "main_secure",
-            "validate_password",
-            "src/main.rs",
-            1,
-            "repo1",
-        ),
-        // Plain path: run_plain → compute_sum
-        call_ref("run_plain", "compute_sum", "src/runner.rs", 1, "repo1"),
-    ];
-    cg.save_references(&refs).await.expect("seed failed");
-
-    let uc = ExecutionFeaturesUseCase::new(cg);
-    let features = uc
-        .list_features("repo1", 100)
-        .await
-        .expect("list_features failed");
-
-    let secure = features
-        .iter()
-        .find(|f| f.entry_point == "main_secure")
-        .expect("main_secure feature not found");
-    let plain = features
-        .iter()
-        .find(|f| f.entry_point == "run_plain")
-        .expect("run_plain feature not found");
-
-    assert!(
-        secure.criticality > plain.criticality,
-        "security-sensitive path should score higher: secure={}, plain={}",
-        secure.criticality,
-        plain.criticality
-    );
-}
 
 /// Criticality must always be in the range [0.0, 1.0].
 #[tokio::test(flavor = "multi_thread")]
