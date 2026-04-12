@@ -188,25 +188,9 @@ fn modularity(graph: &Graph, partition: &[usize]) -> f64 {
 /// Local moving phase: repeatedly scan all nodes and move each to the
 /// neighbouring cluster that maximises the modularity gain.
 fn local_moving_phase(graph: &Graph, partition: &mut Vec<usize>) {
-    // Precompute sum of internal weights per cluster.
-    let mut cluster_internal: HashMap<usize, f64> = HashMap::new();
     let mut cluster_total: HashMap<usize, f64> = HashMap::new();
     for u in 0..graph.n {
-        let c = partition[u];
-        cluster_total.entry(c).or_insert(0.0);
-        cluster_internal.entry(c).or_insert(0.0);
-    }
-    for u in 0..graph.n {
-        for &(v, w) in &graph.adj[u] {
-            if partition[u] == partition[v] {
-                *cluster_internal.entry(partition[u]).or_insert(0.0) += w;
-            }
-        }
         *cluster_total.entry(partition[u]).or_insert(0.0) += graph.degree[u];
-    }
-    // Each undirected edge was counted twice above.
-    for v in cluster_internal.values_mut() {
-        *v /= 2.0;
     }
 
     let m2 = 2.0 * graph.total_weight;
@@ -406,7 +390,7 @@ const STOP_WORDS: &[&str] = &[
 /// 2. If one symbol accounts for >40 % of members, use it.
 /// 3. Otherwise, most frequent meaningful keyword from symbol names.
 /// 4. Combine as `"{dir}-{keyword}"`, slug-cased, max 30 chars.
-pub fn name_cluster(members: &[String], symbol_map: &HashMap<String, String>) -> String {
+fn name_cluster(members: &[String], symbol_map: &HashMap<String, String>) -> String {
     if members.is_empty() {
         return "unknown".to_string();
     }
@@ -501,13 +485,11 @@ fn split_identifier(s: &str) -> Vec<&str> {
 fn slugify(s: &str, max_len: usize) -> String {
     let slug: String = s
         .chars()
-        .filter_map(|c| {
+        .map(|c| {
             if c.is_alphanumeric() {
-                Some(c.to_ascii_lowercase())
-            } else if c == '-' || c == '_' {
-                Some('-')
+                c.to_ascii_lowercase()
             } else {
-                Some('-')
+                '-'
             }
         })
         .collect();
@@ -547,24 +529,18 @@ fn batch_cohesion(
     // cluster_index → cluster_id string
     let id_by_index: Vec<&str> = cluster_ids.iter().map(String::as_str).collect();
 
-    let mut stats: HashMap<String, (usize, usize)> = HashMap::new();
-    for cid in cluster_ids {
-        stats.insert(cid.clone(), (0, 0));
-    }
+    let mut stats: HashMap<String, (usize, usize)> = HashMap::with_capacity(cluster_ids.len());
 
     for edge in edges {
         let c_from = file_to_cluster.get(&edge.from_file);
         let c_to = file_to_cluster.get(&edge.to_file);
         match (c_from, c_to) {
             (Some(&ci), Some(&cj)) if ci == cj => {
-                let cid = id_by_index[ci];
-                stats.entry(cid.to_string()).and_modify(|(int, _)| *int += 1);
+                stats.entry(id_by_index[ci].to_string()).or_insert((0, 0)).0 += 1;
             }
             (Some(&ci), Some(&cj)) => {
-                let cid_from = id_by_index[ci];
-                let cid_to = id_by_index[cj];
-                stats.entry(cid_from.to_string()).and_modify(|(_, ext)| *ext += 1);
-                stats.entry(cid_to.to_string()).and_modify(|(_, ext)| *ext += 1);
+                stats.entry(id_by_index[ci].to_string()).or_insert((0, 0)).1 += 1;
+                stats.entry(id_by_index[cj].to_string()).or_insert((0, 0)).1 += 1;
             }
             _ => {}
         }
@@ -632,8 +608,7 @@ impl ClusterDetectionUseCase {
 
             let clusters: Vec<Cluster> = files
                 .iter()
-                .enumerate()
-                .map(|(_, path)| {
+                .map(|path| {
                     let lang =
                         Language::from_path(Path::new(path)).as_str().to_string();
                     let (int_e, ext_e) = file_to_edges.get(path).copied().unwrap_or((0, 0));
@@ -801,11 +776,14 @@ impl ClusterDetectionUseCase {
         file_path: &str,
         repository_id: &str,
     ) -> Result<Option<Cluster>, DomainError> {
-        let cg = self.create_clusters(repository_id).await?;
-        Ok(cg
+        let (mut cg, _) = self.create_clusters_with_graph(repository_id).await?;
+        // Build a file → cluster index for O(1) lookup instead of scanning all members.
+        let cluster_idx: Option<usize> = cg
             .clusters
-            .into_iter()
-            .find(|c| c.members.iter().any(|m| m == file_path)))
+            .iter()
+            .enumerate()
+            .find_map(|(i, c)| c.members.iter().any(|m| m == file_path).then_some(i));
+        Ok(cluster_idx.map(|i| cg.clusters.swap_remove(i)))
     }
 
     /// Return a high-level architecture summary as a Markdown table.
