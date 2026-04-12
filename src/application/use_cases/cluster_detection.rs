@@ -338,7 +338,13 @@ fn aggregate_partition(graph: &Graph, partition: &[usize]) -> (Graph, Vec<usize>
                 continue; // Process each edge only once.
             }
             let cv = partition[v];
-            if cu != cv {
+            if cu == cv {
+                // Intra-cluster edge becomes a self-loop on the super-node.
+                // Accumulate its weight so that total_weight and degree remain
+                // consistent with the original graph, which is required for
+                // correct modularity and delta-gain computations on the coarse graph.
+                *edge_weights.entry((cu, cu)).or_insert(0.0) += w;
+            } else {
                 let (lo, hi) = if cu < cv { (cu, cv) } else { (cv, cu) };
                 *edge_weights.entry((lo, hi)).or_insert(0.0) += w;
             }
@@ -346,8 +352,16 @@ fn aggregate_partition(graph: &Graph, partition: &[usize]) -> (Graph, Vec<usize>
     }
 
     // Add aggregated edges to new graph.
+    // Self-loops (u == v) must contribute to total_weight and degree but must
+    // NOT appear in adj — movement decisions only involve distinct neighbours,
+    // and a self-loop would create a spurious neighbour entry for a node.
     for ((u, v), w) in edge_weights {
-        new_graph.add_edge(u, v, w);
+        if u == v {
+            new_graph.total_weight += w;
+            new_graph.degree[u] += 2.0 * w; // both endpoints collapse to the same super-node
+        } else {
+            new_graph.add_edge(u, v, w);
+        }
     }
 
     // New partition: each super-node is initially in its own cluster.

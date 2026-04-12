@@ -15,7 +15,7 @@ pub use application::{
 };
 
 pub use cli::{
-    ClusterOutputFormat, Commands, ClustersSubcommand, EmbeddingTarget, FeaturesSubcommand,
+    Commands, ClustersSubcommand, EmbeddingTarget, FeaturesSubcommand,
     LlmTarget, OutputFormat, RerankingTarget, TuiMode,
 };
 
