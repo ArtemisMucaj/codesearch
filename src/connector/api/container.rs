@@ -14,10 +14,10 @@ use crate::connector::adapter::NamespaceEmbeddingConfig;
 use crate::{
     AnthropicClient, AnthropicReranking, DeleteRepositoryUseCase, DuckdbCallGraphRepository,
     DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
-    ExplainUseCase, FileRelationshipUseCase, ImpactAnalysisUseCase, InMemoryVectorRepository,
-    IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding,
-    MockReranking, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking,
-    RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
+    ExecutionFeaturesUseCase, ExplainUseCase, FileRelationshipUseCase, ImpactAnalysisUseCase,
+    InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander,
+    MockEmbedding, MockReranking, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding,
+    OrtReranking, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
     SymbolContextUseCase, TreeSitterParser, VectorRepository,
 };
 
@@ -519,6 +519,10 @@ impl Container {
             self.vector_repo.clone(),
             self.metadata_repository(),
         )
+    }
+
+    pub fn execution_features_use_case(&self) -> ExecutionFeaturesUseCase {
+        ExecutionFeaturesUseCase::new(self.call_graph_use_case.clone())
     }
 
     pub fn data_dir(&self) -> &str {

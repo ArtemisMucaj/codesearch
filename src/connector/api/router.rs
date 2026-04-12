@@ -1,12 +1,12 @@
 use anyhow::Result;
 
-use crate::Commands;
+use crate::{Commands, FeaturesSubcommand};
 
 use super::container::Container;
 use super::controller::{
-    DeleteController, ExplainController, ImpactController, IndexController,
-    ListRepositoriesController, SearchController, StatsController, UsesController,
-    SymbolContextController,
+    DeleteController, ExecutionFeaturesController, ExplainController, ImpactController,
+    IndexController, ListRepositoriesController, SearchController, StatsController,
+    SymbolContextController, UsesController,
 };
 
 pub struct Router<'a> {
@@ -19,6 +19,7 @@ pub struct Router<'a> {
     list_repositories_controller: ListRepositoriesController<'a>,
     delete_controller: DeleteController<'a>,
     uses_controller: UsesController<'a>,
+    execution_features_controller: ExecutionFeaturesController<'a>,
 }
 
 impl<'a> Router<'a> {
@@ -33,6 +34,7 @@ impl<'a> Router<'a> {
             list_repositories_controller: ListRepositoriesController::new(container),
             delete_controller: DeleteController::new(container),
             uses_controller: UsesController::new(container),
+            execution_features_controller: ExecutionFeaturesController::new(container),
         }
     }
 
@@ -96,6 +98,35 @@ impl<'a> Router<'a> {
                     .explain(symbol, repository, llm, dump_symbols, regex)
                     .await
             }
+            Commands::Features { subcommand } => match subcommand {
+                FeaturesSubcommand::List {
+                    repository,
+                    limit,
+                    format,
+                } => {
+                    self.execution_features_controller
+                        .list(repository, limit, format)
+                        .await
+                }
+                FeaturesSubcommand::Get {
+                    symbol,
+                    repository,
+                    format,
+                } => {
+                    self.execution_features_controller
+                        .get(symbol, repository, format)
+                        .await
+                }
+                FeaturesSubcommand::Impacted {
+                    symbols,
+                    repository,
+                    format,
+                } => {
+                    self.execution_features_controller
+                        .impacted(symbols, repository, format)
+                        .await
+                }
+            },
             Commands::Uses { from, to } => self.uses_controller.uses(from, to).await,
             Commands::Mcp { .. } => {
                 Err(anyhow::anyhow!("MCP command is handled separately in main"))
