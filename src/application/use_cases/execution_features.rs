@@ -17,10 +17,9 @@ const WEIGHT_DEPTH: f32 = 0.15;
 /// depth scores 1.0 on the depth signal; deeper paths are clamped to 1.0.
 const DEPTH_REFERENCE: f32 = 20.0;
 
-/// Score assigned when no test symbol directly calls the entry point.
+/// Baseline test-coverage-gap score. Entry points by structural definition
+/// have no callers in the repository, so the gap always applies uniformly.
 const TEST_COVERAGE_GAP_SCORE: f32 = 0.30;
-/// Score assigned when a test caller IS present.
-const TEST_COVERAGE_PRESENT_SCORE: f32 = 0.05;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Use case
@@ -56,7 +55,7 @@ impl ExecutionFeaturesUseCase {
             features.push(feature);
         }
 
-        features.sort_by(|a, b| b.criticality.partial_cmp(&a.criticality).unwrap_or(std::cmp::Ordering::Equal));
+        features.sort_by(|a, b| b.criticality.total_cmp(&a.criticality));
         features.truncate(limit);
         Ok(features)
     }
@@ -169,7 +168,7 @@ impl ExecutionFeaturesUseCase {
             }
         }
 
-        affected.sort_by(|a, b| b.criticality.partial_cmp(&a.criticality).unwrap_or(std::cmp::Ordering::Equal));
+        affected.sort_by(|a, b| b.criticality.total_cmp(&a.criticality));
         Ok(affected)
     }
 
@@ -317,23 +316,9 @@ impl ExecutionFeaturesUseCase {
         // this repo) to all callee references seen during BFS.
         let external_score = (unresolved_callees as f32 / total_callees_seen as f32).min(1.0);
 
-        // Signal 3 — test coverage gap: high when nothing directly calls the
-        // entry point with a test_ / it_ prefix.
-        let callers_query = CallGraphQuery::new().with_repository(repository_id);
-        let callers_of_entry = self
-            .call_graph
-            .find_callers(entry_point, &callers_query)
-            .await?;
-        let has_test_caller = callers_of_entry.iter().any(|r| {
-            r.caller_symbol()
-                .map(|s| is_test_symbol(s))
-                .unwrap_or(false)
-        });
-        let test_gap_score = if has_test_caller {
-            TEST_COVERAGE_PRESENT_SCORE
-        } else {
-            TEST_COVERAGE_GAP_SCORE
-        };
+        // Signal 3 — test coverage gap. Entry points have no callers in the
+        // repository by definition, so the gap score applies unconditionally.
+        let test_gap_score = TEST_COVERAGE_GAP_SCORE;
 
         // Signal 4 — depth: normalised call-chain length.
         let depth_score = (feature_depth as f32 / DEPTH_REFERENCE).min(1.0);
@@ -378,11 +363,4 @@ fn short_name(fqn: &str) -> String {
     let base = base.split('(').next().unwrap_or(base);
     let base = base.split('<').next().unwrap_or(base);
     base.trim().to_string()
-}
-
-/// Return `true` when a symbol looks like a test function.
-fn is_test_symbol(symbol: &str) -> bool {
-    let sn = short_name(symbol);
-    let sn_lower = sn.to_lowercase();
-    sn_lower.starts_with("test_") || sn_lower.starts_with("it_")
 }
