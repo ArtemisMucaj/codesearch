@@ -111,10 +111,43 @@ impl ExecutionFeaturesUseCase {
             return Ok(None);
         }
 
-        // Use the first resolved symbol as the entry point.
-        let fqn = &resolved[0];
-        let repo = repository_id.unwrap_or("");
-        let feature = self.build_feature(fqn, repo).await?;
+        let fqn = resolved[0].clone();
+
+        // Determine the effective repository, either from the caller-supplied
+        // hint or by discovering it from the resolved symbol's call-graph edges.
+        let effective_repo: String = if let Some(repo) = repository_id {
+            repo.to_string()
+        } else {
+            let discovery_query = CallGraphQuery::new();
+            // Check outgoing edges first; entry points typically have them.
+            let callees = self
+                .call_graph
+                .find_callees(&fqn, &discovery_query)
+                .await?;
+            if let Some(r) = callees.first() {
+                r.repository_id().to_string()
+            } else {
+                let callers = self
+                    .call_graph
+                    .find_callers(&fqn, &discovery_query)
+                    .await?;
+                callers
+                    .first()
+                    .map(|r| r.repository_id().to_string())
+                    .unwrap_or_default()
+            }
+        };
+
+        // Verify the resolved symbol is actually an entry point. A symbol
+        // qualifies when its short name matches a known pattern or nothing in
+        // the same repository calls it.
+        let repo_query = CallGraphQuery::new().with_repository(&effective_repo);
+        let callers_in_repo = self.call_graph.find_callers(&fqn, &repo_query).await?;
+        if !callers_in_repo.is_empty() && !short_name_is_entry_point(&fqn) {
+            return Ok(None);
+        }
+
+        let feature = self.build_feature(&fqn, &effective_repo).await?;
         Ok(Some(feature))
     }
 
@@ -229,13 +262,47 @@ impl ExecutionFeaturesUseCase {
         // ── Forward BFS ────────────────────────────────────────────────────
         let mut visited: HashSet<String> = HashSet::new();
         let mut queue: VecDeque<(String, usize, String, u32)> = VecDeque::new();
+        let mut path: Vec<FeatureNode> = Vec::new();
+        // Symbols that have at least one outgoing edge in this repo.
+        // Non-root nodes absent from this set are BFS leaves (unresolved / external).
+        let mut symbols_with_callees: HashSet<String> = HashSet::new();
+        let mut total_callees_seen: usize = 0;
 
         visited.insert(entry_point.to_string());
-        queue.push_back((entry_point.to_string(), 0, String::new(), 0));
 
-        let mut path: Vec<FeatureNode> = Vec::new();
-        let mut unresolved_callees: usize = 0;
-        let mut total_callees_seen: usize = 0;
+        // Pre-fetch the entry-point's callees to (a) resolve its own file path
+        // so the root node is not seeded with an empty string, and (b) avoid a
+        // redundant call_graph lookup on the first BFS iteration.
+        let initial_callees = self.call_graph.find_callees(entry_point, &query).await?;
+        let entry_file_path = initial_callees
+            .first()
+            .map(|r| r.caller_file_path().to_string())
+            .unwrap_or_default();
+
+        path.push(FeatureNode {
+            symbol: entry_point.to_string(),
+            file_path: entry_file_path,
+            line: 0,
+            depth: 0,
+            repository_id: repository_id.to_string(),
+        });
+
+        if !initial_callees.is_empty() {
+            symbols_with_callees.insert(entry_point.to_string());
+        }
+        for reference in &initial_callees {
+            total_callees_seen += 1;
+            let callee = reference.callee_symbol().to_string();
+            if !visited.contains(&callee) {
+                visited.insert(callee.clone());
+                queue.push_back((
+                    callee,
+                    1,
+                    reference.reference_file_path().to_string(),
+                    reference.reference_line(),
+                ));
+            }
+        }
 
         while let Some((current, depth, file_path, line)) = queue.pop_front() {
             path.push(FeatureNode {
@@ -247,6 +314,9 @@ impl ExecutionFeaturesUseCase {
             });
 
             let callees = self.call_graph.find_callees(&current, &query).await?;
+            if !callees.is_empty() {
+                symbols_with_callees.insert(current.clone());
+            }
             for reference in &callees {
                 total_callees_seen += 1;
                 let callee = reference.callee_symbol().to_string();
@@ -254,12 +324,6 @@ impl ExecutionFeaturesUseCase {
                     continue;
                 }
                 visited.insert(callee.clone());
-
-                // A callee is considered "external" (unresolved) when it does
-                // not appear as a caller_symbol anywhere in this repository's
-                // call graph — i.e. we have no outgoing edges for it.
-                // We approximate this by checking whether we've seen it as a
-                // caller; the check is done lazily after the BFS.
                 queue.push_back((
                     callee,
                     depth + 1,
@@ -269,17 +333,15 @@ impl ExecutionFeaturesUseCase {
             }
         }
 
-        // Count unresolved callees: leaf nodes in the forward BFS (excluding the
-        // entry point) that produced no further callees — a proxy for external or
-        // stdlib calls that we could not trace further.
-        for node in path.iter().skip(1) {
-            // leaf nodes that the BFS couldn't expand
-            let has_callees_in_path = path.iter().any(|n| n.depth == node.depth + 1);
-            if !has_callees_in_path && node.depth == path.iter().map(|n| n.depth).max().unwrap_or(0) {
-                unresolved_callees += 1;
-            }
-        }
-        // Fallback: if total_callees_seen is 0 avoid division by zero.
+        // Unresolved callees: non-root nodes with no outgoing edges in this
+        // repository — a proxy for external / stdlib calls we cannot trace.
+        let unresolved_callees = path
+            .iter()
+            .skip(1)
+            .filter(|n| !symbols_with_callees.contains(&n.symbol))
+            .count();
+
+        // Avoid division by zero in the external_score calculation below.
         if total_callees_seen == 0 {
             total_callees_seen = 1;
         }
@@ -309,8 +371,7 @@ impl ExecutionFeaturesUseCase {
         let callers_of_entry = self
             .call_graph
             .find_callers(entry_point, &callers_query)
-            .await
-            .unwrap_or_default();
+            .await?;
         let has_test_caller = callers_of_entry.iter().any(|r| {
             r.caller_symbol()
                 .map(|s| is_test_symbol(s))

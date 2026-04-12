@@ -44,7 +44,11 @@ impl<'a> ExecutionFeaturesController<'a> {
             .await?;
 
         match result {
-            None => Ok(format!("No entry-point feature found for '{symbol}'.")),
+            None => Ok(match format {
+                OutputFormat::Json => "null".to_string(),
+                OutputFormat::Vimgrep => String::new(),
+                OutputFormat::Text => format!("No entry-point feature found for '{symbol}'."),
+            }),
             Some(feature) => Ok(match format {
                 OutputFormat::Json => serde_json::to_string_pretty(&feature)?,
                 OutputFormat::Vimgrep => Self::format_feature_vimgrep(&feature),
@@ -65,17 +69,19 @@ impl<'a> ExecutionFeaturesController<'a> {
             .get_impacted_features(&symbols, repository.as_deref())
             .await?;
 
-        if features.is_empty() {
-            return Ok(format!(
-                "No features impacted by the provided symbol(s): {}",
-                symbols.join(", ")
-            ));
-        }
-
         Ok(match format {
             OutputFormat::Json => serde_json::to_string_pretty(&features)?,
             OutputFormat::Vimgrep => Self::format_list_vimgrep(&features),
-            OutputFormat::Text => Self::format_list_text(&features),
+            OutputFormat::Text => {
+                if features.is_empty() {
+                    format!(
+                        "No features impacted by the provided symbol(s): {}",
+                        symbols.join(", ")
+                    )
+                } else {
+                    Self::format_list_text(&features)
+                }
+            }
         })
     }
 

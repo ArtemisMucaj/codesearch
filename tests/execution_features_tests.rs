@@ -454,6 +454,26 @@ async fn test_get_feature_found() {
     assert_eq!(feature.repository_id, "repo1");
 }
 
+/// `get_feature` returns `None` when the symbol exists but is not an entry point
+/// (i.e. it has callers and its name does not match a known entry-point pattern).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_feature_non_entry_point_returns_none() {
+    let cg = make_call_graph_use_case().await;
+    // main → helper: 'helper' has a caller and is not a known entry-point name.
+    let refs = vec![call_ref("main", "helper", "src/main.rs", 1, "repo1")];
+    cg.save_references(&refs).await.expect("seed failed");
+
+    let uc = ExecutionFeaturesUseCase::new(cg);
+    let result = uc
+        .get_feature("helper", Some("repo1"))
+        .await
+        .expect("get_feature must not error");
+    assert!(
+        result.is_none(),
+        "non-entry-point 'helper' should return None"
+    );
+}
+
 /// The feature id must be a non-empty stable string derived from repository and entry point.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_feature_id_is_stable() {
