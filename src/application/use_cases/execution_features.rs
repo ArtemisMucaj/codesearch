@@ -298,11 +298,6 @@ impl ExecutionFeaturesUseCase {
             .filter(|n| !symbols_with_callees.contains(&n.symbol))
             .count();
 
-        // Avoid division by zero in the external_score calculation below.
-        if total_callees_seen == 0 {
-            total_callees_seen = 1;
-        }
-
         // ── Criticality scoring ────────────────────────────────────────────
         let total_nodes = path.len().max(1);
         let distinct_files: HashSet<&str> = path.iter().map(|n| n.file_path.as_str()).collect();
@@ -314,7 +309,8 @@ impl ExecutionFeaturesUseCase {
 
         // Signal 2 — external calls: ratio of leaf nodes (no outgoing edges in
         // this repo) to all callee references seen during BFS.
-        let external_score = (unresolved_callees as f32 / total_callees_seen as f32).min(1.0);
+        let external_score =
+            (unresolved_callees as f32 / total_callees_seen.max(1) as f32).min(1.0);
 
         // Signal 3 — test coverage gap. Entry points have no callers in the
         // repository by definition, so the gap score applies unconditionally.
