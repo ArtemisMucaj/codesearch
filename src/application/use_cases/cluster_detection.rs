@@ -24,14 +24,34 @@ use crate::domain::{Cluster, ClusterGraph, DomainError, FileEdge, Language};
 
 // ── Edge-weight constants by reference kind ───────────────────────────────
 
+/// Weight for call/method-call references — the strongest coupling signal.
+const CALL_WEIGHT: f64 = 1.0;
+/// Weight for inheritance relationships.
+const INHERITANCE_WEIGHT: f64 = 0.8;
+/// Weight for interface/trait implementation.
+const IMPLEMENTATION_WEIGHT: f64 = 0.7;
+/// Weight for type references (field types, return types, etc.).
+const TYPEREFERENCE_WEIGHT: f64 = 0.6;
+/// Weight for import/use declarations.
+const IMPORT_WEIGHT: f64 = 0.5;
+/// Default weight for unrecognised reference kinds.
+const DEFAULT_KIND_WEIGHT: f64 = 0.3;
+
+/// A symbol must appear in at least this fraction of cluster members to be
+/// used directly as the cluster name (step 2 of the naming heuristic).
+const DOMINANT_SYMBOL_THRESHOLD: f64 = 0.4;
+
+/// Maximum character length for a generated cluster-name slug.
+const SLUG_MAX_LENGTH: usize = 30;
+
 fn kind_weight(kind: &str) -> f64 {
     match kind.to_lowercase().as_str() {
-        "call" | "methodcall" => 1.0,
-        "inheritance" => 0.8,
-        "implementation" => 0.7,
-        "typereference" => 0.6,
-        "import" => 0.5,
-        _ => 0.3,
+        "call" | "methodcall" => CALL_WEIGHT,
+        "inheritance" => INHERITANCE_WEIGHT,
+        "implementation" => IMPLEMENTATION_WEIGHT,
+        "typereference" => TYPEREFERENCE_WEIGHT,
+        "import" => IMPORT_WEIGHT,
+        _ => DEFAULT_KIND_WEIGHT,
     }
 }
 
@@ -41,7 +61,7 @@ fn kind_weight(kind: &str) -> f64 {
 fn composite_weight(edge: &FileEdge) -> f64 {
     let base = edge.weight as f64;
     if edge.reference_kinds.is_empty() {
-        return base * 0.3;
+        return base * DEFAULT_KIND_WEIGHT;
     }
     let mean_kind: f64 =
         edge.reference_kinds.iter().map(|k| kind_weight(k)).sum::<f64>()
@@ -424,11 +444,11 @@ pub fn name_cluster(members: &[String], symbol_map: &HashMap<String, String>) ->
             *sym_freq.entry(short).or_insert(0) += 1;
         }
     }
-    let threshold = (members.len() as f64 * 0.4).ceil() as usize;
+    let threshold = (members.len() as f64 * DOMINANT_SYMBOL_THRESHOLD).ceil() as usize;
     if let Some((&dominant_sym, _)) =
         sym_freq.iter().find(|(_, &c)| c >= threshold)
     {
-        let slug = slugify(dominant_sym, 30);
+        let slug = slugify(dominant_sym, SLUG_MAX_LENGTH);
         return slug;
     }
 
@@ -454,7 +474,7 @@ pub fn name_cluster(members: &[String], symbol_map: &HashMap<String, String>) ->
     } else {
         format!("{}-{}", top_dir, top_kw)
     };
-    slugify(&combined, 30)
+    slugify(&combined, SLUG_MAX_LENGTH)
 }
 
 /// Split a camelCase or snake_case identifier into words.
@@ -566,11 +586,15 @@ impl ClusterDetectionUseCase {
         Self { file_graph }
     }
 
-    /// Detect clusters in the dependency graph of `repository_id`.
-    pub async fn detect(
+    /// Build the dependency graph and run Leiden detection.
+    ///
+    /// Returns both the [`ClusterGraph`] result *and* the raw [`crate::domain::FileGraph`] so
+    /// callers that need the edge list (e.g. `architecture_overview`) can reuse
+    /// it without a second call to `build_graph`.
+    async fn detect_internal(
         &self,
         repository_id: &str,
-    ) -> Result<ClusterGraph, DomainError> {
+    ) -> Result<(ClusterGraph, crate::domain::FileGraph), DomainError> {
         let graph = self
             .file_graph
             .build_graph(Some(&[repository_id.to_string()]), 1, false)
@@ -608,7 +632,7 @@ impl ClusterDetectionUseCase {
             let clusters: Vec<Cluster> = files
                 .iter()
                 .enumerate()
-                .map(|(i, path)| {
+                .map(|(_, path)| {
                     let lang =
                         Language::from_path(Path::new(path)).as_str().to_string();
                     let (int_e, ext_e) = file_to_edges.get(path).copied().unwrap_or((0, 0));
@@ -628,12 +652,15 @@ impl ClusterDetectionUseCase {
                     }
                 })
                 .collect();
-            return Ok(ClusterGraph {
-                clusters,
-                repository_id: repository_id.to_string(),
-                total_files: n,
-                total_edges,
-            });
+            return Ok((
+                ClusterGraph {
+                    clusters,
+                    repository_id: repository_id.to_string(),
+                    total_files: n,
+                    total_edges,
+                },
+                graph,
+            ));
         }
 
         // Build index: file path → node index.
@@ -686,10 +713,8 @@ impl ClusterDetectionUseCase {
             .map(|_| Uuid::new_v4().to_string())
             .collect();
 
-        // Build file→cluster_id map for cohesion.
-        let file_to_cluster_id: HashMap<String, usize> = file_to_cluster.clone();
         let cohesion_stats =
-            batch_cohesion(&file_to_cluster_id, &graph.edges, &cluster_ids);
+            batch_cohesion(&file_to_cluster, &graph.edges, &cluster_ids);
 
         // Build a simple file→first_symbol map from edge symbols for naming.
         let mut file_symbol_map: HashMap<String, String> = HashMap::new();
@@ -750,12 +775,23 @@ impl ClusterDetectionUseCase {
         // Sort by descending size, then name for stability.
         clusters.sort_by(|a, b| b.size.cmp(&a.size).then(a.name.cmp(&b.name)));
 
-        Ok(ClusterGraph {
-            clusters,
-            repository_id: repository_id.to_string(),
-            total_files: n,
-            total_edges,
-        })
+        Ok((
+            ClusterGraph {
+                clusters,
+                repository_id: repository_id.to_string(),
+                total_files: n,
+                total_edges,
+            },
+            graph,
+        ))
+    }
+
+    /// Detect clusters in the dependency graph of `repository_id`.
+    pub async fn detect(
+        &self,
+        repository_id: &str,
+    ) -> Result<ClusterGraph, DomainError> {
+        Ok(self.detect_internal(repository_id).await?.0)
     }
 
     /// Return the cluster a given file belongs to.
@@ -779,7 +815,7 @@ impl ClusterDetectionUseCase {
         &self,
         repository_id: &str,
     ) -> Result<String, DomainError> {
-        let cg = self.detect(repository_id).await?;
+        let (cg, graph) = self.detect_internal(repository_id).await?;
 
         if cg.clusters.is_empty() {
             return Ok(format!(
@@ -801,12 +837,6 @@ impl ClusterDetectionUseCase {
             .iter()
             .map(|c| (c.id.as_str(), c.name.as_str()))
             .collect();
-
-        // Reload graph to compute inter-cluster edge weights.
-        let graph = self
-            .file_graph
-            .build_graph(Some(&[repository_id.to_string()]), 1, false)
-            .await?;
 
         // Aggregate: (from_cluster_id, to_cluster_id) → total_weight
         let mut inter: HashMap<(&str, &str), f64> = HashMap::new();
