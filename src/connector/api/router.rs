@@ -1,12 +1,13 @@
 use anyhow::Result;
 
+use crate::cli::ClustersSubcommand;
 use crate::{Commands, FeaturesSubcommand};
 
 use super::container::Container;
 use super::controller::{
-    DeleteController, ExecutionFeaturesController, ExplainController, ImpactController,
-    IndexController, ListRepositoriesController, SearchController, StatsController,
-    SymbolContextController, UsesController,
+    ClustersController, DeleteController, ExecutionFeaturesController, ExplainController,
+    ImpactController, IndexController, ListRepositoriesController, SearchController,
+    StatsController, SymbolContextController, UsesController,
 };
 
 pub struct Router<'a> {
@@ -20,6 +21,7 @@ pub struct Router<'a> {
     delete_controller: DeleteController<'a>,
     uses_controller: UsesController<'a>,
     execution_features_controller: ExecutionFeaturesController<'a>,
+    clusters_controller: ClustersController<'a>,
 }
 
 impl<'a> Router<'a> {
@@ -35,6 +37,7 @@ impl<'a> Router<'a> {
             delete_controller: DeleteController::new(container),
             uses_controller: UsesController::new(container),
             execution_features_controller: ExecutionFeaturesController::new(container),
+            clusters_controller: ClustersController::new(container),
         }
     }
 
@@ -128,6 +131,19 @@ impl<'a> Router<'a> {
                 }
             },
             Commands::Uses { from, to } => self.uses_controller.uses(from, to).await,
+            Commands::Clusters { subcommand } => match subcommand {
+                ClustersSubcommand::List { repository, format } => {
+                    self.clusters_controller.list(repository, format).await
+                }
+                ClustersSubcommand::Get {
+                    file,
+                    repository,
+                    format,
+                } => self.clusters_controller.get(file, repository, format).await,
+                ClustersSubcommand::Overview { repository } => {
+                    self.clusters_controller.overview(repository).await
+                }
+            },
             Commands::Mcp { .. } => {
                 Err(anyhow::anyhow!("MCP command is handled separately in main"))
             }

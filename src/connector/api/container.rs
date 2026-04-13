@@ -12,13 +12,14 @@ use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::scip::ScipRunner;
 use crate::connector::adapter::NamespaceEmbeddingConfig;
 use crate::{
-    AnthropicClient, AnthropicReranking, DeleteRepositoryUseCase, DuckdbCallGraphRepository,
-    DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
-    ExecutionFeaturesUseCase, ExplainUseCase, FileRelationshipUseCase, ImpactAnalysisUseCase,
-    InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander,
-    MockEmbedding, MockReranking, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding,
-    OrtReranking, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
-    SymbolContextUseCase, TreeSitterParser, VectorRepository,
+    AnthropicClient, AnthropicReranking, ClusterDetectionUseCase, DeleteRepositoryUseCase,
+    DuckdbCallGraphRepository, DuckdbFileHashRepository, DuckdbMetadataRepository,
+    DuckdbVectorRepository, EmbeddingService, ExecutionFeaturesUseCase, ExplainUseCase,
+    FileRelationshipUseCase, ImpactAnalysisUseCase, InMemoryVectorRepository,
+    IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding,
+    MockReranking, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking,
+    RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase, SymbolContextUseCase,
+    TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -523,6 +524,10 @@ impl Container {
 
     pub fn execution_features_use_case(&self) -> ExecutionFeaturesUseCase {
         ExecutionFeaturesUseCase::new(self.call_graph_use_case.clone())
+    }
+
+    pub fn cluster_detection_use_case(&self) -> ClusterDetectionUseCase {
+        ClusterDetectionUseCase::new(Arc::new(self.file_graph_use_case()))
     }
 
     pub fn data_dir(&self) -> &str {

@@ -59,6 +59,58 @@ pub enum OutputFormat {
     Vimgrep,
 }
 
+/// Output format for cluster commands (text or json only).
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum OutputFormatTextJson {
+    /// Human-readable text (default)
+    #[default]
+    Text,
+    /// JSON array of result objects
+    Json,
+}
+
+impl From<OutputFormatTextJson> for OutputFormat {
+    fn from(f: OutputFormatTextJson) -> Self {
+        match f {
+            OutputFormatTextJson::Text => OutputFormat::Text,
+            OutputFormatTextJson::Json => OutputFormat::Json,
+        }
+    }
+}
+
+/// Subcommands for the `clusters` command.
+#[derive(Subcommand)]
+pub enum ClustersSubcommand {
+    /// List all clusters detected in the repository.
+    List {
+        /// Repository ID or name to analyse.
+        repository: String,
+
+        /// Output format: text or json.
+        #[arg(short = 'F', long, value_enum, default_value = "text")]
+        format: OutputFormatTextJson,
+    },
+
+    /// Show the cluster that a specific file belongs to.
+    Get {
+        /// File path to look up (as indexed — relative to the repository root).
+        file: String,
+
+        /// Repository ID or name.
+        repository: String,
+
+        /// Output format: text or json.
+        #[arg(short = 'F', long, value_enum, default_value = "text")]
+        format: OutputFormatTextJson,
+    },
+
+    /// Print a high-level Markdown architecture overview table.
+    Overview {
+        /// Repository ID or name.
+        repository: String,
+    },
+}
+
 /// Initial mode for the interactive TUI.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum TuiMode {
@@ -253,6 +305,15 @@ pub enum Commands {
         from: String,
         /// Repository being used (the dependency side).
         to: String,
+    },
+
+    /// Detect and explore architectural clusters in a repository's file dependency graph.
+    ///
+    /// Uses the Leiden community-detection algorithm on the file-level call graph
+    /// to identify groups of tightly-coupled files (architectural modules).
+    Clusters {
+        #[command(subcommand)]
+        subcommand: ClustersSubcommand,
     },
 
     /// Start MCP (Model Context Protocol) server for integration with AI tools

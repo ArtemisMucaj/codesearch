@@ -1,4 +1,5 @@
 mod call_graph;
+mod cluster_detection;
 mod delete_repository;
 mod execution_features;
 mod explain;
@@ -13,6 +14,7 @@ mod snippet_lookup;
 mod symbol_context;
 
 pub use call_graph::*;
+pub use cluster_detection::*;
 pub use delete_repository::*;
 pub use execution_features::*;
 pub use explain::*;
