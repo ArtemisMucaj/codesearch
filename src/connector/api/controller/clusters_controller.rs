@@ -89,23 +89,29 @@ impl<'a> ClustersController<'a> {
             ))?;
 
         let format: OutputFormat = format.into();
-        Ok(match result {
-            None => format!(
+        Ok(match (result, format) {
+            (None, OutputFormat::Json) => serde_json::to_string_pretty(
+                &serde_json::json!({ "file": file_path, "cluster": null, "repository": repository }),
+            )
+            .context("serializing not-found response")?,
+            (None, OutputFormat::Vimgrep) => {
+                anyhow::bail!("vimgrep output format is not supported for cluster get")
+            }
+            (None, OutputFormat::Text) => format!(
                 "File `{}` was not found in any cluster for repository `{}`.",
                 file_path, repository
             ),
-            Some(c) => match format {
-                OutputFormat::Json => serde_json::to_string_pretty(&c)
-                    .context("serializing cluster")?,
-                OutputFormat::Vimgrep => {
-                    anyhow::bail!("vimgrep output format is not supported for cluster get")
-                }
-                OutputFormat::Text => format!(
-                    "File `{}` belongs to cluster `{}` \
-                     ({} files, {}, cohesion {:.2})\n",
-                    file_path, c.name, c.size, c.dominant_language, c.cohesion
-                ),
-            },
+            (Some(c), OutputFormat::Json) => {
+                serde_json::to_string_pretty(&c).context("serializing cluster")?
+            }
+            (Some(_), OutputFormat::Vimgrep) => {
+                anyhow::bail!("vimgrep output format is not supported for cluster get")
+            }
+            (Some(c), OutputFormat::Text) => format!(
+                "File `{}` belongs to cluster `{}` \
+                 ({} files, {}, cohesion {:.2})\n",
+                file_path, c.name, c.size, c.dominant_language, c.cohesion
+            ),
         })
     }
 

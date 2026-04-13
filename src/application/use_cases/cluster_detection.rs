@@ -37,10 +37,6 @@ const IMPORT_WEIGHT: f64 = 0.5;
 /// Default weight for unrecognised reference kinds.
 const DEFAULT_KIND_WEIGHT: f64 = 0.3;
 
-/// A symbol must appear in at least this fraction of cluster members to be
-/// used directly as the cluster name (step 2 of the naming heuristic).
-const DOMINANT_SYMBOL_THRESHOLD: f64 = 0.4;
-
 /// Maximum character length for a generated cluster-name slug.
 const SLUG_MAX_LENGTH: usize = 30;
 
@@ -78,10 +74,15 @@ struct Graph {
     n: usize,
     /// `adj[u]` = list of (neighbour, weight) pairs (undirected: stored in both directions).
     adj: Vec<Vec<(usize, f64)>>,
-    /// Total weight of all edges (each undirected edge counted once).
+    /// Total weight of all edges (each undirected edge counted once), including self-loops.
     total_weight: f64,
     /// Weighted degree of each node: sum of incident edge weights.
     degree: Vec<f64>,
+    /// Sum of self-loop weights accumulated during graph aggregation.
+    ///
+    /// Self-loops are not stored in `adj` (they would create spurious neighbours),
+    /// but their mass must be included in the internal-edge term of [`modularity`].
+    self_loop_weight: f64,
 }
 
 impl Graph {
@@ -91,6 +92,7 @@ impl Graph {
             adj: vec![Vec::new(); n],
             total_weight: 0.0,
             degree: vec![0.0; n],
+            self_loop_weight: 0.0,
         }
     }
 
@@ -165,7 +167,6 @@ fn modularity(graph: &Graph, partition: &[usize]) -> f64 {
         return 0.0;
     }
     let mut q = 0.0;
-    // Sum over internal edges
     for u in 0..graph.n {
         for &(v, w) in &graph.adj[u] {
             if v > u && partition[u] == partition[v] {
@@ -173,7 +174,10 @@ fn modularity(graph: &Graph, partition: &[usize]) -> f64 {
             }
         }
     }
-    q /= graph.total_weight; // Σ internal weights / m
+    // Self-loop mass was collapsed from intra-cluster edges during aggregation;
+    // it represents internal weight that must be counted alongside adj edges.
+    q += graph.self_loop_weight;
+    q /= graph.total_weight;
 
     // Subtract expected: Σ_c (Σ_i∈c k_i)^2 / (2m)^2
     let k = graph.n;
@@ -363,6 +367,7 @@ fn aggregate_partition(graph: &Graph, partition: &[usize]) -> (Graph, Vec<usize>
         if u == v {
             new_graph.total_weight += w;
             new_graph.degree[u] += 2.0 * w; // both endpoints collapse to the same super-node
+            new_graph.self_loop_weight += w;
         } else {
             new_graph.add_edge(u, v, w);
         }
@@ -428,12 +433,12 @@ fn name_cluster(members: &[String], symbol_map: &HashMap<String, String>) -> Str
             *sym_freq.entry(short).or_insert(0) += 1;
         }
     }
-    let threshold = (members.len() as f64 * DOMINANT_SYMBOL_THRESHOLD).ceil() as usize;
-    if let Some((&dominant_sym, _)) =
-        sym_freq.iter().find(|(_, &c)| c >= threshold)
-    {
-        let slug = slugify(dominant_sym, SLUG_MAX_LENGTH);
-        return slug;
+    // Pick the highest-frequency symbol; use it if it strictly exceeds the threshold.
+    // Integer-safe: count * 5 > len * 2  ≡  count / len > 0.4 (DOMINANT_SYMBOL_THRESHOLD).
+    if let Some((&dominant_sym, &count)) = sym_freq.iter().max_by_key(|(_, &c)| c) {
+        if count * 5 > members.len() * 2 {
+            return slugify(dominant_sym, SLUG_MAX_LENGTH);
+        }
     }
 
     // Step 3: most frequent meaningful keyword from symbol names.
@@ -824,7 +829,7 @@ impl ClusterDetectionUseCase {
             let to_c = file_to_cluster.get(edge.to_file.as_str());
             if let (Some(&fc), Some(&tc)) = (from_c, to_c) {
                 if fc != tc {
-                    *inter.entry((fc, tc)).or_insert(0.0) += edge.weight as f64;
+                    *inter.entry((fc, tc)).or_insert(0.0) += composite_weight(edge);
                 }
             }
         }
