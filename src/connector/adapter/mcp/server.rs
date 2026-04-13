@@ -23,15 +23,8 @@ use super::tools::SearchResultOutput;
 /// Server-side maximum for the number of results a single search can return.
 const MAX_LIMIT: usize = 100;
 
-/// Server-side maximum for the number of nodes a single query_graph call can return.
-const MAX_QUERY_LIMIT: usize = 500;
-
 fn default_limit() -> usize {
     10
-}
-
-fn default_query_limit() -> usize {
-    50
 }
 
 fn default_text_search() -> bool {
@@ -116,9 +109,8 @@ pub struct QueryGraphInput {
     /// Restrict results to a specific repository ID.
     pub repository_id: Option<String>,
 
-    /// Maximum number of unique nodes to return (default: 50, server cap: 500).
-    #[serde(default = "default_query_limit")]
-    pub limit: usize,
+    /// Maximum number of unique nodes to return. Omit to return all results.
+    pub limit: Option<usize>,
 }
 
 /// A single deduplicated graph node returned by query_graph
@@ -145,7 +137,7 @@ pub struct GraphQueryResult {
     pub target: String,
     /// Deduplicated nodes matching the query
     pub nodes: Vec<GraphQueryNode>,
-    /// Total number of nodes returned (after deduplication)
+    /// Total number of nodes returned (after deduplication; equals len(nodes))
     pub total: usize,
 }
 
@@ -294,7 +286,6 @@ impl CodesearchMcpServer {
         params: Parameters<QueryGraphInput>,
     ) -> Result<CallToolResult, McpError> {
         let input = params.0;
-        let limit = input.limit.min(MAX_QUERY_LIMIT);
 
         let use_case = self.container.call_graph_use_case();
 
@@ -302,7 +293,9 @@ impl CodesearchMcpServer {
         if let Some(repo_id) = &input.repository_id {
             base_query = base_query.with_repository(repo_id.clone());
         }
-        base_query = base_query.with_limit(limit as u32);
+        if let Some(limit) = input.limit {
+            base_query = base_query.with_limit(limit as u32);
+        }
 
         // Each arm returns (references, use_caller).
         // use_caller=true  → node.symbol = caller_symbol (who performs the action)
@@ -427,29 +420,29 @@ impl CodesearchMcpServer {
 
         // Deduplicate by symbol name, keeping the first reference site per unique symbol.
         let mut seen: HashSet<String> = HashSet::new();
-        let nodes: Vec<GraphQueryNode> = references
-            .into_iter()
-            .filter_map(|r| {
-                let symbol = if use_caller {
-                    r.caller_symbol()
-                        .unwrap_or_else(|| r.caller_file_path())
-                        .to_string()
-                } else {
-                    r.callee_symbol().to_string()
-                };
-                if symbol.is_empty() || !seen.insert(symbol.clone()) {
-                    return None;
-                }
-                Some(GraphQueryNode {
-                    symbol,
-                    file_path: r.reference_file_path().to_string(),
-                    line: r.reference_line(),
-                    reference_kind: r.reference_kind().as_str().to_string(),
-                    repository_id: r.repository_id().to_string(),
-                })
+        let deduped = references.into_iter().filter_map(|r| {
+            let symbol = if use_caller {
+                r.caller_symbol()
+                    .unwrap_or_else(|| r.caller_file_path())
+                    .to_string()
+            } else {
+                r.callee_symbol().to_string()
+            };
+            if symbol.is_empty() || !seen.insert(symbol.clone()) {
+                return None;
+            }
+            Some(GraphQueryNode {
+                symbol,
+                file_path: r.reference_file_path().to_string(),
+                line: r.reference_line(),
+                reference_kind: r.reference_kind().as_str().to_string(),
+                repository_id: r.repository_id().to_string(),
             })
-            .take(limit)
-            .collect();
+        });
+        let nodes: Vec<GraphQueryNode> = match input.limit {
+            Some(n) => deduped.take(n).collect(),
+            None => deduped.collect(),
+        };
 
         let total = nodes.len();
         let result = GraphQueryResult {
