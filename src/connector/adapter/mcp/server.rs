@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 
 use rmcp::handler::server::tool::ToolRouter;
@@ -94,13 +95,25 @@ pub struct ContextToolInput {
     pub regex: bool,
 }
 
+/// Relationship pattern for the query_graph tool.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryPattern {
+    CallersOf,
+    CalleesOf,
+    ImportsOf,
+    ImportersOf,
+    InheritorsOf,
+    ChildrenOf,
+    TestsFor,
+    FileSummary,
+}
+
 /// Input parameters for the query_graph tool
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct QueryGraphInput {
-    /// Relationship pattern to query. One of:
-    /// callers_of, callees_of, imports_of, importers_of,
-    /// inheritors_of, children_of, tests_for, file_summary
-    pub pattern: String,
+    /// Relationship pattern to query.
+    pub pattern: QueryPattern,
 
     /// Symbol name or file path (for file_summary) to query.
     /// Resolved with the same substring-match fallback as analyze_impact.
@@ -132,7 +145,7 @@ pub struct GraphQueryNode {
 #[derive(Debug, Serialize)]
 pub struct GraphQueryResult {
     /// The pattern that was queried
-    pub pattern: String,
+    pub pattern: QueryPattern,
     /// The target symbol or file that was queried
     pub target: String,
     /// Deduplicated nodes matching the query
@@ -300,8 +313,8 @@ impl CodesearchMcpServer {
         // Each arm returns (references, use_caller).
         // use_caller=true  → node.symbol = caller_symbol (who performs the action)
         // use_caller=false → node.symbol = callee_symbol (what is acted upon)
-        let (references, use_caller) = match input.pattern.as_str() {
-            "callers_of" => {
+        let (references, use_caller) = match input.pattern {
+            QueryPattern::CallersOf => {
                 let refs = use_case
                     .find_callers(&input.target, &base_query)
                     .await
@@ -310,7 +323,7 @@ impl CodesearchMcpServer {
                     })?;
                 (refs, true)
             }
-            "callees_of" => {
+            QueryPattern::CalleesOf => {
                 let refs = use_case
                     .find_callees(&input.target, &base_query)
                     .await
@@ -319,7 +332,7 @@ impl CodesearchMcpServer {
                     })?;
                 (refs, false)
             }
-            "imports_of" => {
+            QueryPattern::ImportsOf => {
                 let q = base_query.with_reference_kind("import");
                 let refs = use_case
                     .find_callees(&input.target, &q)
@@ -329,7 +342,7 @@ impl CodesearchMcpServer {
                     })?;
                 (refs, false)
             }
-            "importers_of" => {
+            QueryPattern::ImportersOf => {
                 let q = base_query.with_reference_kind("import");
                 let refs = use_case
                     .find_callers(&input.target, &q)
@@ -339,9 +352,24 @@ impl CodesearchMcpServer {
                     })?;
                 (refs, true)
             }
-            "inheritors_of" => {
-                let q_inh = base_query.clone().with_reference_kind("inheritance");
-                let q_imp = base_query.clone().with_reference_kind("implementation");
+            QueryPattern::InheritorsOf => {
+                // Halve the per-query limit so the combined result stays within the
+                // requested bound before deduplication.
+                let per_limit = input.limit.map(|n| ((n + 1) / 2) as u32);
+                let q_inh = {
+                    let q = base_query.clone().with_reference_kind("inheritance");
+                    match per_limit {
+                        Some(pl) => q.with_limit(pl),
+                        None => q,
+                    }
+                };
+                let q_imp = {
+                    let q = base_query.clone().with_reference_kind("implementation");
+                    match per_limit {
+                        Some(pl) => q.with_limit(pl),
+                        None => q,
+                    }
+                };
                 let mut refs = use_case
                     .find_callers(&input.target, &q_inh)
                     .await
@@ -357,9 +385,22 @@ impl CodesearchMcpServer {
                 refs.append(&mut refs2);
                 (refs, true)
             }
-            "children_of" => {
-                let q_inh = base_query.clone().with_reference_kind("inheritance");
-                let q_imp = base_query.clone().with_reference_kind("implementation");
+            QueryPattern::ChildrenOf => {
+                let per_limit = input.limit.map(|n| ((n + 1) / 2) as u32);
+                let q_inh = {
+                    let q = base_query.clone().with_reference_kind("inheritance");
+                    match per_limit {
+                        Some(pl) => q.with_limit(pl),
+                        None => q,
+                    }
+                };
+                let q_imp = {
+                    let q = base_query.clone().with_reference_kind("implementation");
+                    match per_limit {
+                        Some(pl) => q.with_limit(pl),
+                        None => q,
+                    }
+                };
                 let mut refs = use_case
                     .find_callees(&input.target, &q_inh)
                     .await
@@ -375,7 +416,7 @@ impl CodesearchMcpServer {
                 refs.append(&mut refs2);
                 (refs, false)
             }
-            "tests_for" => {
+            QueryPattern::TestsFor => {
                 let refs = use_case
                     .find_callers(&input.target, &base_query)
                     .await
@@ -385,18 +426,43 @@ impl CodesearchMcpServer {
                 let filtered: Vec<_> = refs
                     .into_iter()
                     .filter(|r| {
+                        // Symbol-name heuristics (language-agnostic conventions).
                         let sym = r.caller_symbol().unwrap_or("").to_lowercase();
-                        let file = r.reference_file_path().to_lowercase();
-                        sym.starts_with("test_")
+                        if sym.starts_with("test_")
                             || sym.ends_with("_test")
                             || sym.ends_with("_spec")
-                            || file.contains("test")
-                            || file.contains("spec")
+                        {
+                            return true;
+                        }
+                        // Path heuristics: inspect components and file stem rather than
+                        // doing a raw substring match to avoid false positives like
+                        // "contest.rs" or "inspect.rs".
+                        let path = Path::new(r.reference_file_path());
+                        let test_dir = path.components().any(|c| {
+                            if let std::path::Component::Normal(s) = c {
+                                let s = s.to_string_lossy().to_lowercase();
+                                matches!(s.as_str(), "test" | "tests" | "spec" | "specs")
+                            } else {
+                                false
+                            }
+                        });
+                        if test_dir {
+                            return true;
+                        }
+                        path.file_stem()
+                            .map(|s| {
+                                let s = s.to_string_lossy().to_lowercase();
+                                s == "test"
+                                    || s.starts_with("test_")
+                                    || s.ends_with("_test")
+                                    || s.ends_with("_spec")
+                            })
+                            .unwrap_or(false)
                     })
                     .collect();
                 (filtered, true)
             }
-            "file_summary" => {
+            QueryPattern::FileSummary => {
                 let refs = use_case
                     .find_by_file(&input.target, &base_query)
                     .await
@@ -405,26 +471,15 @@ impl CodesearchMcpServer {
                     })?;
                 (refs, false)
             }
-            unknown => {
-                return Err(McpError::internal_error(
-                    format!(
-                        "Unknown pattern '{}'. Supported patterns: callers_of, callees_of, \
-                         imports_of, importers_of, inheritors_of, children_of, tests_for, \
-                         file_summary",
-                        unknown
-                    ),
-                    None,
-                ));
-            }
         };
 
         // Deduplicate by symbol name, keeping the first reference site per unique symbol.
+        // When use_caller is true, entries without a caller_symbol are dropped — a file
+        // path is not a valid symbol and must not appear in GraphQueryNode.symbol.
         let mut seen: HashSet<String> = HashSet::new();
         let deduped = references.into_iter().filter_map(|r| {
             let symbol = if use_caller {
-                r.caller_symbol()
-                    .unwrap_or_else(|| r.caller_file_path())
-                    .to_string()
+                r.caller_symbol()?.to_string()
             } else {
                 r.callee_symbol().to_string()
             };
