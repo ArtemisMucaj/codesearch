@@ -17,12 +17,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::application::CallGraphQuery;
 use crate::connector::api::Container;
-use crate::domain::{FileEdge, SearchQuery, VectorStore};
+use crate::domain::{FileEdge, SearchQuery};
 
 use super::tools::SearchResultOutput;
 
 /// Server-side maximum for the number of results a single search can return.
 const MAX_LIMIT: usize = 100;
+
+/// Server-side maximum for the number of execution features `list_features` can
+/// return. Caps caller-supplied limits so a huge value cannot trigger unbounded
+/// call-graph traversal and serialization.
+const MAX_FEATURES_LIMIT: usize = 100;
 
 fn default_limit() -> usize {
     10
@@ -240,38 +245,6 @@ pub struct GetFileClusterInput {
 pub struct ArchitectureOverviewInput {
     /// Repository ID to summarise as a Markdown architecture table.
     pub repository_id: String,
-}
-
-/// Input parameters for the index_repository tool
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct IndexRepositoryInput {
-    /// Filesystem path to the repository to index.
-    pub path: String,
-
-    /// Optional human-readable name (defaults to the directory name).
-    pub name: Option<String>,
-
-    /// When true, delete any existing index for this path and re-index from
-    /// scratch. Defaults to false (incremental indexing).
-    #[serde(default)]
-    pub force: bool,
-}
-
-/// Result returned by the index_repository tool.
-#[derive(Debug, Serialize)]
-pub struct IndexRepositoryResult {
-    /// Stable repository ID.
-    pub id: String,
-    /// Repository name.
-    pub name: String,
-    /// Absolute path that was indexed.
-    pub path: String,
-    /// Number of files indexed.
-    pub file_count: u64,
-    /// Number of code chunks produced.
-    pub chunk_count: u64,
-    /// Per-language file counts.
-    pub languages: std::collections::HashMap<String, u64>,
 }
 
 // ── MCP Server ───────────────────────────────────────────────────────────────
@@ -669,10 +642,11 @@ impl CodesearchMcpServer {
         params: Parameters<ListFeaturesInput>,
     ) -> Result<CallToolResult, McpError> {
         let input = params.0;
+        let limit = input.limit.min(MAX_FEATURES_LIMIT);
 
         let use_case = self.container.execution_features_use_case();
         let features = use_case
-            .list_features(&input.repository_id, input.limit)
+            .list_features(&input.repository_id, limit)
             .await
             .map_err(|e| {
                 McpError::internal_error(format!("Listing features failed: {}", e), None)
@@ -881,63 +855,6 @@ impl CodesearchMcpServer {
 
         Ok(CallToolResult::success(vec![Content::text(overview)]))
     }
-
-    /// Index (or incrementally re-index) a repository at the given filesystem
-    /// path so its code becomes searchable and its call graph is built. Set
-    /// `force=true` to delete any existing index for the path and re-index from
-    /// scratch. Returns the resulting repository's ID, file/chunk counts, and
-    /// language breakdown. This is a heavy, long-running operation.
-    #[tool(name = "index_repository")]
-    async fn index_repository(
-        &self,
-        params: Parameters<IndexRepositoryInput>,
-    ) -> Result<CallToolResult, McpError> {
-        let input = params.0;
-
-        // Mirror the CLI IndexController: pick the vector store and namespace
-        // based on how the container was configured.
-        let (store, namespace) = if self.container.memory_storage() {
-            (VectorStore::InMemory, None)
-        } else {
-            (
-                VectorStore::DuckDb,
-                Some(self.container.namespace().to_string()),
-            )
-        };
-
-        let use_case = self.container.index_use_case();
-        let repo = use_case
-            .execute(
-                &input.path,
-                input.name.as_deref(),
-                store,
-                namespace,
-                input.force,
-            )
-            .await
-            .map_err(|e| McpError::internal_error(format!("Indexing failed: {}", e), None))?;
-
-        let languages = repo
-            .languages()
-            .iter()
-            .map(|(lang, stats)| (lang.clone(), stats.file_count))
-            .collect();
-
-        let result = IndexRepositoryResult {
-            id: repo.id().to_string(),
-            name: repo.name().to_string(),
-            path: repo.path().to_string(),
-            file_count: repo.file_count(),
-            chunk_count: repo.chunk_count(),
-            languages,
-        };
-
-        let json = serde_json::to_string_pretty(&result).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize index result: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
-    }
 }
 
 #[tool_handler]
@@ -962,8 +879,7 @@ impl ServerHandler for CodesearchMcpServer {
                  • file_uses — which files in one repository depend on files in another\n\
                  • list_clusters — architectural clusters via Leiden community detection\n\
                  • get_file_cluster — the cluster a given file belongs to\n\
-                 • architecture_overview — Markdown table summarising clusters and dependencies\n\
-                 • index_repository — index or re-index a repository at a filesystem path"
+                 • architecture_overview — Markdown table summarising clusters and dependencies"
                     .into(),
             ),
         }

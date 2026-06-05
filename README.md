@@ -396,7 +396,6 @@ The HTTP server exposes the MCP endpoint at `/mcp`.
 | `list_clusters` | Architectural clusters via Leiden community detection. Accepts `repository_id`. |
 | `get_file_cluster` | The cluster a given file belongs to. Accepts `file_path` and `repository_id`. |
 | `architecture_overview` | Markdown table summarising clusters and inter-cluster dependencies. Accepts `repository_id`. |
-| `index_repository` | Index or re-index a repository at a filesystem path. Accepts `path`, `name`, and `force`. |
 
 The `query_graph` tool supports eight intention-named relationship `pattern`s, returning
 only the requested edge type instead of every relationship at once:
