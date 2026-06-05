@@ -14,4 +14,6 @@ This directory contains documentation for the CodeSearch project.
 - [Indexing Pipeline](./features/indexing.md)
 - [Search Features](./features/search.md)
 - [Call Graph Analysis](./features/call-graph.md)
+- [Architecture & Dependency Analysis](./features/architecture-analysis.md)
+- [Embedding Backends](./features/embedding-backends.md)
 - [Editor Integrations](./features/editor-integrations.md)

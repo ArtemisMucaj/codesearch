@@ -4,13 +4,17 @@ CodeSearch provides output formats and plugins for integrating semantic search i
 
 ## Output Formats
 
-The `--format` (`-F`) flag controls output for `search`, `context`, and `impact`:
+The `--format` (`-F`) flag controls output for `search`, `context`, `impact`,
+`explain`, `features`, and `clusters`:
 
 | Format | Description | Commands |
 |--------|-------------|----------|
 | `text` | Human-readable output with code previews (default) | all |
 | `json` | Structured JSON array for programmatic consumption | all |
-| `vimgrep` | `file:line:col:text` for Neovim quickfix list and Telescope | all |
+| `vimgrep` | `file:line:col:text` for Neovim quickfix list and Telescope | `search`, `context`, `impact`, `features` |
+
+> `clusters list` / `clusters get` support `text` and `json` only; `vimgrep` is not
+> available for them. `clusters overview` always emits a Markdown table.
 
 ## Zed
 
@@ -32,7 +36,22 @@ Add the following block to `~/.config/zed/settings.json` (see [`ide/zed/settings
 }
 ```
 
-Restart Zed and open the AI assistant — the server will be listed in the context-server panel. The assistant can then call `search_code`, `analyze_impact`, and `get_symbol_context` autonomously while you chat.
+Restart Zed and open the AI assistant — the server will be listed in the context-server panel. The assistant can then call `search_code`, `analyze_impact`, `get_symbol_context`, and `query_graph` autonomously while you chat.
+
+#### Exposed MCP tools
+
+| Tool | Description |
+|------|-------------|
+| `search_code` | Hybrid/semantic search (`query`, `limit`, `min_score`, `languages`, `repositories`, `text_search`) |
+| `analyze_impact` | Blast-radius analysis for a symbol (`symbol`, `repository_id`, `regex`) |
+| `get_symbol_context` | 360° caller/callee context for a symbol (`symbol`, `repository_id`, `regex`) |
+| `query_graph` | Single-relationship graph query (`pattern`, `target`, `repository_id`, `limit`) |
+
+`query_graph` accepts one of eight intention-named `pattern`s: `callers_of`,
+`callees_of`, `imports_of`, `importers_of`, `inheritors_of`, `children_of`,
+`tests_for`, and `file_summary`. See
+[Architecture & Dependency Analysis](./architecture-analysis.md#querying-the-graph-from-ai-tools-query_graph)
+for what each pattern returns.
 
 ### Tasks (command palette integration)
 

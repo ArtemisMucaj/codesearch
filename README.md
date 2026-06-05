@@ -62,6 +62,9 @@ codesearch search "function that handles authentication"
 # Show indexed repositories
 codesearch list
 
+# Show indexing statistics
+codesearch stats
+
 # Delete a repository by name or path
 codesearch delete my-repo
 codesearch delete /path/to/repo
@@ -69,11 +72,20 @@ codesearch delete /path/to/repo
 # Show the blast radius of a symbol change (BFS over call graph)
 codesearch impact authenticate
 
-# Show 360-degree caller/callee context for a symbol
+# Show full caller/callee call-chain context for a symbol
 codesearch context authenticate
 
 # LLM-powered explanation of a symbol's full call flow and business purpose
 codesearch explain authenticate
+
+# Rank entry-point execution features by criticality
+codesearch features list my-repo
+
+# Detect architectural clusters in the file dependency graph
+codesearch clusters list my-repo
+
+# List the files one repository uses from another
+codesearch uses web core
 
 # Launch the interactive TUI (search, impact, and context in one terminal UI)
 codesearch tui
@@ -149,7 +161,7 @@ CodeSearch builds a call graph during indexing and exposes two commands to query
 
 ### Impact Analysis
 
-Shows every symbol that would be affected (transitively) if a given symbol changes. Uses BFS over the call graph up to a configurable depth.
+Shows every symbol that would be affected (transitively) if a given symbol changes. Uses BFS over the call graph, grouping affected symbols by hop depth.
 
 ```bash
 # Show what breaks if `authenticate` changes
@@ -213,6 +225,11 @@ process_request [call]  src/router.rs:10
 |------|---------|---------|-------------|
 | `-r, --repository` | both | (none) | Restrict to a specific repository |
 | `-F, --format` | both | `text` | Output format: `text`, `json`, or `vimgrep` |
+| `--regex` | both | off | Treat the symbol as an explicit POSIX regex (no auto-wrapping) |
+
+> **Symbol matching:** By default the symbol argument is matched as a substring
+> (`load` matches any fully-qualified name containing `load`). Pass `--regex` to
+> supply your own anchored pattern, e.g. `codesearch impact "^MyNs/.*Service#get$" --regex`.
 
 > **Note:** Call graph data is populated during `codesearch index`. Re-index after code changes to keep the graph up to date.
 
@@ -238,6 +255,57 @@ codesearch tui --query "authentication"
 ```
 
 See [Getting Started — Launch the Interactive TUI](docs/features/getting-started.md#launch-the-interactive-tui) for all options.
+
+## Architecture & Dependency Analysis
+
+Beyond per-symbol call graphs, CodeSearch analyses the file- and repository-level
+dependency graph built during indexing.
+
+### Execution Features (`features`)
+
+Discovers entry-point execution flows (forward call chains rooted at entry-point
+symbols) and ranks them by a criticality score.
+
+```bash
+# List the most critical features in a repository
+codesearch features list my-repo --limit 20
+
+# Show a single feature by its entry-point symbol
+codesearch features get handle_request
+
+# Show which features are impacted by changing one or more symbols
+codesearch features impacted authenticate hash_password
+```
+
+### Clusters (`clusters`)
+
+Runs the [Leiden](https://en.wikipedia.org/wiki/Leiden_algorithm) community-detection
+algorithm over the file-level call graph to surface tightly-coupled groups of files
+(architectural modules).
+
+```bash
+# List detected clusters
+codesearch clusters list my-repo
+
+# Find which cluster a file belongs to
+codesearch clusters get src/api/auth.rs my-repo
+
+# Print a high-level Markdown architecture overview table
+codesearch clusters overview my-repo
+```
+
+### Cross-repository Usage (`uses`)
+
+Lists every file in one repository that references symbols defined in another,
+grouped by the target file they depend on.
+
+```bash
+# Files in the `web` repo that use files from the `core` repo
+codesearch uses web core
+```
+
+See [Architecture & Dependency Analysis](docs/features/architecture-analysis.md) for
+output examples, flags, and JSON schemas.
 
 ## Editor Integrations
 
@@ -312,7 +380,20 @@ codesearch mcp --http 8080 --public
 
 The HTTP server exposes the MCP endpoint at `/mcp`.
 
-**Exposed tool**: `search_code` — accepts `query`, `limit`, `min_score`, `languages`, and `repositories` parameters.
+**Exposed tools:**
+
+| Tool | Description |
+|------|-------------|
+| `search_code` | Hybrid/semantic search. Accepts `query`, `limit`, `min_score`, `languages`, `repositories`, and `text_search`. |
+| `analyze_impact` | Blast-radius analysis for a symbol. Accepts `symbol`, `repository_id`, and `regex`. |
+| `get_symbol_context` | 360° caller/callee context for a symbol. Accepts `symbol`, `repository_id`, and `regex`. |
+| `query_graph` | Precise relationship queries over the call graph. Accepts `pattern`, `target`, `repository_id`, and `limit`. |
+
+The `query_graph` tool supports eight intention-named relationship `pattern`s, returning
+only the requested edge type instead of every relationship at once:
+
+`callers_of`, `callees_of`, `imports_of`, `importers_of`, `inheritors_of`,
+`children_of`, `tests_for`, and `file_summary`.
 
 ### Storage Backends
 

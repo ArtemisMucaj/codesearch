@@ -76,7 +76,12 @@ The codebase follows **Domain-Driven Design (DDD)** with a strict **Ports & Adap
 | RRF result fusion | `src/application/use_cases/rrf_fuse.rs` |
 | Impact (blast radius) analysis | `src/application/use_cases/impact_analysis.rs` |
 | Symbol context (callers/callees) | `src/application/use_cases/symbol_context.rs` |
-| Call graph extraction | `src/application/use_cases/call_graph.rs` |
+| Call graph extraction & relationship queries | `src/application/use_cases/call_graph.rs` |
+| LLM explanation of a symbol's call flow | `src/application/use_cases/explain.rs` |
+| Execution features + criticality scoring | `src/application/use_cases/execution_features.rs` |
+| Architectural cluster detection (Leiden) | `src/application/use_cases/cluster_detection.rs` |
+| File / cross-repo relationship graph (`uses`) | `src/application/use_cases/file_relationship.rs` |
+| Source snippet lookup | `src/application/use_cases/snippet_lookup.rs` |
 | List / delete repositories | `src/application/use_cases/{list,delete}_repository.rs` |
 
 ### Dependency Injection
