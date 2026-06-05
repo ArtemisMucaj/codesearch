@@ -112,6 +112,24 @@ codesearch tui --query "authentication"
 codesearch tui --mode impact
 ```
 
+### Analyze Architecture & Dependencies
+
+Explore the repository-level dependency graph — entry-point features, architectural
+clusters, and cross-repository usage:
+
+```bash
+# Rank entry-point execution features by criticality
+codesearch features list my-repo
+
+# Detect architectural clusters (Leiden community detection)
+codesearch clusters list my-repo
+
+# List the files one repository uses from another
+codesearch uses web core
+```
+
+See [Architecture & Dependency Analysis](./architecture-analysis.md) for full details.
+
 ### Start the MCP Server
 
 Run CodeSearch as a [Model Context Protocol](https://modelcontextprotocol.io/) server for AI tool integration:
@@ -147,13 +165,17 @@ codesearch -v search "my query"
 
 ## How Search Works
 
-Codesearch uses **semantic vector search**:
+Codesearch defaults to **hybrid search** — a semantic (vector) leg and a keyword
+(BM25-style) leg, fused via Reciprocal Rank Fusion (RRF):
 
 1. Your query is converted to a 384-dimensional embedding
 2. The DuckDB VSS extension finds semantically similar code using HNSW indexes
-3. A cross-encoder reranker (bge-reranker-base) rescores candidates for higher relevance (enabled by default, disable with `--no-rerank`)
-4. Results are ranked by cosine similarity (0.0 to 1.0) or reranking score
-5. Filters can be applied by language, node type, repository, or minimum score
+3. In parallel, a keyword leg matches content and symbol names; the two ranked lists are fused with RRF (pass `--no-text-search` for semantic-only)
+4. A cross-encoder reranker (bge-reranker-base) rescores candidates for higher relevance (enabled by default, disable with `--no-rerank`)
+5. Results are ranked by fused RRF score (hybrid), cosine similarity (semantic-only), or reranking score
+6. Filters can be applied by language, node type, repository, or minimum score
+
+See [Search Features](./search.md) for the full hybrid-vs-semantic breakdown.
 
 **Why VSS (Vector Similarity Search)?**
 - ✓ Finds conceptually similar code, not just keyword matches

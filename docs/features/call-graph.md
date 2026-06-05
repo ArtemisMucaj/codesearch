@@ -39,6 +39,9 @@ codesearch impact authenticate --format json
 
 # Vimgrep output (file:line:col:text) for Neovim quickfix
 codesearch impact authenticate --format vimgrep
+
+# Match the root symbol with an explicit regex
+codesearch impact "^MyNs/.*Service#get$" --regex
 ```
 
 ### Options
@@ -47,6 +50,12 @@ codesearch impact authenticate --format vimgrep
 |------|---------|-------------|
 | `-r, --repository` | (none) | Restrict the graph traversal to one repository |
 | `-F, --format` | `text` | Output format: `text`, `json`, or `vimgrep` |
+| `--regex` | off | Treat SYMBOL as an explicit POSIX regex (no auto-wrapping) |
+
+> **Symbol matching:** By default the symbol argument is matched as a substring —
+> `load` resolves to any fully-qualified name containing `load`. Pass `--regex` to
+> control anchoring yourself (e.g. `^MyNs/.*Service#get$`). The same applies to
+> `context` and `explain`.
 
 ### Example Text Output
 
@@ -95,6 +104,9 @@ codesearch context authenticate --format json
 
 # Vimgrep output (file:line:col:text) for Neovim quickfix
 codesearch context authenticate --format vimgrep
+
+# Match the symbol with an explicit regex
+codesearch context ".*Repository.*" --regex
 ```
 
 ### Options
@@ -103,6 +115,7 @@ codesearch context authenticate --format vimgrep
 |------|---------|-------------|
 | `-r, --repository` | (none) | Restrict lookup to one repository |
 | `-F, --format` | `text` | Output format: `text`, `json`, or `vimgrep` |
+| `--regex` | off | Treat SYMBOL as an explicit POSIX regex (no auto-wrapping) |
 
 ### Example Text Output
 

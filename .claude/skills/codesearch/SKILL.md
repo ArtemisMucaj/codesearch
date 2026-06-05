@@ -3,7 +3,7 @@ name: codesearch
 description: Semantic code search using ML embeddings and AST analysis. Replaces built-in search tools for intent-based code exploration. Use when the user asks to find code by describing what it does, understand code relationships, or explore a codebase semantically.
 metadata:
   author: ArtemisMucaj
-  version: "0.6.0"
+  version: "0.7.0"
 compatibility: Requires the codesearch binary installed and a repository indexed with `codesearch index`.
 ---
 
@@ -21,6 +21,9 @@ Invoke this skill **immediately** when:
 - You need to discover code related to a **concept** rather than an exact string
 - User asks about **blast radius** or **impact** of changing a function/symbol
 - User asks **who calls** a function or **what does a function call** (symbol context)
+- User asks for an **explanation** of a symbol's full call flow or business purpose (`explain`)
+- User asks about the **architectural structure** of a repo — modules, clusters, entry-point features
+- User asks **which files one repository uses** from another (cross-repo dependencies)
 
 ## When to Use Built-in Tools Instead
 
@@ -117,32 +120,105 @@ Codesearch uses Tree-sitter to extract and index these code constructs:
 
 ## Call Graph Analysis
 
-Once a repository is indexed, the call graph is available for two complementary commands.
+Once a repository is indexed, the call graph powers several complementary commands.
 
 ### Impact Analysis — blast radius of a change
 
 ```shell
-# Who breaks if `authenticate` changes? (default depth: 5 hops)
+# Who breaks if `authenticate` changes? (BFS over the call graph)
 codesearch impact authenticate
-
-# Limit to 2 hops
-codesearch impact authenticate --depth 2
 
 # Restrict to one repository; JSON output for scripts
 codesearch impact authenticate --repository my-api --format json
 ```
 
-### Symbol Context — 360-degree callers + callees
+### Symbol Context — full caller/callee call-chain tree
 
 ```shell
 # Who calls `authenticate`, and what does it call?
 codesearch context authenticate
 
-# Limit results per direction
-codesearch context authenticate --limit 10
+# Restrict to one repository; JSON output
+codesearch context authenticate --repository my-api --format json
+```
 
-# JSON output
-codesearch context authenticate --format json
+### Matching symbols by regex
+
+`impact`, `context`, and `explain` resolve the symbol name with a substring match
+by default (`load` matches any fully-qualified name containing `load`). Pass
+`--regex` to supply your own POSIX pattern with explicit anchoring:
+
+```shell
+codesearch impact "^MyNs/.*Service#get$" --regex
+codesearch context ".*Repository.*" --regex
+```
+
+### Explain — LLM-generated call-flow explanation
+
+Produces a structured natural-language description of a symbol's purpose, data/control
+flow, business feature, and key dependencies. Requires `ANTHROPIC_API_KEY` (default
+backend) or an OpenAI-compatible endpoint.
+
+```shell
+# Explain a symbol using the default Anthropic backend
+codesearch explain authenticate
+
+# Use an OpenAI-compatible backend (e.g. LM Studio)
+codesearch explain authenticate --llm open-ai
+
+# Also dump every analyzed symbol's source chunk
+codesearch explain authenticate --dump-symbols
+```
+
+## Architecture & Dependency Analysis
+
+These commands operate on the file- and repository-level dependency graph built during
+indexing. They help answer "how is this codebase structured?" rather than "where is X?".
+
+### Execution Features — entry-point flows ranked by criticality
+
+```shell
+# List the most critical entry-point features in a repository
+codesearch features list my-repo
+
+# Limit the number of features and emit JSON
+codesearch features list my-repo --limit 10 --format json
+
+# Inspect a single feature by its entry-point symbol
+codesearch features get handle_request
+
+# Which features are impacted by changing one or more symbols?
+codesearch features impacted authenticate hash_password
+```
+
+### Clusters — architectural modules (Leiden community detection)
+
+```shell
+# List tightly-coupled file clusters (architectural modules)
+codesearch clusters list my-repo
+
+# Which cluster does a given file belong to?
+codesearch clusters get src/api/auth.rs my-repo
+
+# Print a high-level Markdown architecture overview table
+codesearch clusters overview my-repo
+```
+
+### Uses — cross-repository file dependencies
+
+```shell
+# List the files in repo `web` that use files from repo `core`
+codesearch uses web core
+```
+
+## Interactive TUI
+
+For exploratory sessions a full-screen terminal UI bundles search, impact, and context:
+
+```shell
+codesearch tui                       # open in search mode
+codesearch tui --mode impact         # open in impact mode
+codesearch tui --query "auth flow"   # pre-populate and dispatch a query
 ```
 
 ## Repository Management
@@ -200,4 +276,4 @@ codesearch --no-rerank search "query"
 
 ## Keywords
 
-semantic search, hybrid search, code search, natural language search, find code, explore codebase, code understanding, intent search, AST analysis, embeddings, code discovery, code exploration, BM25, keyword search, RRF, reciprocal rank fusion, call graph, impact analysis, blast radius, symbol context, callers, callees, dependency analysis
+semantic search, hybrid search, code search, natural language search, find code, explore codebase, code understanding, intent search, AST analysis, embeddings, code discovery, code exploration, BM25, keyword search, RRF, reciprocal rank fusion, call graph, impact analysis, blast radius, symbol context, callers, callees, dependency analysis, explain, call flow, execution features, criticality, clusters, architecture overview, Leiden, module detection, cross-repository dependencies, uses, regex symbol match
