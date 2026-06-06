@@ -17,12 +17,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::application::CallGraphQuery;
 use crate::connector::api::Container;
-use crate::domain::SearchQuery;
+use crate::domain::{FileEdge, SearchQuery};
 
 use super::tools::SearchResultOutput;
 
 /// Server-side maximum for the number of results a single search can return.
 const MAX_LIMIT: usize = 100;
+
+/// Server-side maximum for the number of execution features `list_features` can
+/// return. Caps caller-supplied limits so a huge value cannot trigger unbounded
+/// call-graph traversal and serialization.
+const MAX_FEATURES_LIMIT: usize = 100;
 
 fn default_limit() -> usize {
     10
@@ -152,6 +157,94 @@ pub struct GraphQueryResult {
     pub nodes: Vec<GraphQueryNode>,
     /// Total number of nodes returned (after deduplication; equals len(nodes))
     pub total: usize,
+}
+
+fn default_features_limit() -> usize {
+    20
+}
+
+/// Input parameters for the list_repositories tool (takes no arguments).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListRepositoriesInput {}
+
+/// Input parameters for the list_features tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListFeaturesInput {
+    /// Repository ID to discover execution features (entry-point call chains) in.
+    pub repository_id: String,
+
+    /// Maximum number of features to return, sorted by descending criticality
+    /// (default: 20).
+    #[serde(default = "default_features_limit")]
+    pub limit: usize,
+}
+
+/// Input parameters for the get_feature tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetFeatureInput {
+    /// Entry-point symbol name (exact or substring) to retrieve the feature for.
+    pub symbol: String,
+
+    /// Restrict the lookup to a specific repository ID.
+    pub repository_id: Option<String>,
+}
+
+/// Input parameters for the get_impacted_features tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ImpactedFeaturesInput {
+    /// Changed symbols. Every feature whose forward call chain includes at least
+    /// one of these symbols is returned, sorted by descending criticality.
+    pub symbols: Vec<String>,
+
+    /// Restrict the analysis to a specific repository ID.
+    pub repository_id: Option<String>,
+}
+
+/// Input parameters for the file_uses tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FileUsesInput {
+    /// Source repository (name or ID): the dependent side of the relationship.
+    pub from: String,
+
+    /// Target repository (name or ID): the dependency side of the relationship.
+    pub to: String,
+}
+
+/// A file-level dependency relationship returned by the file_uses tool.
+#[derive(Debug, Serialize)]
+pub struct FileUsesResult {
+    /// Resolved name of the source ("from") repository.
+    pub from_repository: String,
+    /// Resolved name of the target ("to") repository.
+    pub to_repository: String,
+    /// Directed file→file edges from the source repository into the target.
+    pub edges: Vec<FileEdge>,
+    /// Total number of edges returned.
+    pub total: usize,
+}
+
+/// Input parameters for the list_clusters tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListClustersInput {
+    /// Repository ID to detect architectural clusters in.
+    pub repository_id: String,
+}
+
+/// Input parameters for the get_file_cluster tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetFileClusterInput {
+    /// File path to locate within the repository's cluster graph.
+    pub file_path: String,
+
+    /// Repository ID the file belongs to.
+    pub repository_id: String,
+}
+
+/// Input parameters for the architecture_overview tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ArchitectureOverviewInput {
+    /// Repository ID to summarise as a Markdown architecture table.
+    pub repository_id: String,
 }
 
 // ── MCP Server ───────────────────────────────────────────────────────────────
@@ -376,12 +469,13 @@ impl CodesearchMcpServer {
                     .map_err(|e| {
                         McpError::internal_error(format!("query_graph failed: {}", e), None)
                     })?;
-                let mut refs2 = use_case
-                    .find_callers(&input.target, &q_imp)
-                    .await
-                    .map_err(|e| {
-                        McpError::internal_error(format!("query_graph failed: {}", e), None)
-                    })?;
+                let mut refs2 =
+                    use_case
+                        .find_callers(&input.target, &q_imp)
+                        .await
+                        .map_err(|e| {
+                            McpError::internal_error(format!("query_graph failed: {}", e), None)
+                        })?;
                 refs.append(&mut refs2);
                 (refs, true)
             }
@@ -407,12 +501,13 @@ impl CodesearchMcpServer {
                     .map_err(|e| {
                         McpError::internal_error(format!("query_graph failed: {}", e), None)
                     })?;
-                let mut refs2 = use_case
-                    .find_callees(&input.target, &q_imp)
-                    .await
-                    .map_err(|e| {
-                        McpError::internal_error(format!("query_graph failed: {}", e), None)
-                    })?;
+                let mut refs2 =
+                    use_case
+                        .find_callees(&input.target, &q_imp)
+                        .await
+                        .map_err(|e| {
+                            McpError::internal_error(format!("query_graph failed: {}", e), None)
+                        })?;
                 refs.append(&mut refs2);
                 (refs, false)
             }
@@ -513,6 +608,253 @@ impl CodesearchMcpServer {
 
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    /// List every indexed repository together with its file/chunk counts and
+    /// per-language breakdown. Doubles as the "stats" view: sum the `file_count`
+    /// and `chunk_count` fields across the returned repositories for aggregate
+    /// totals. Use the returned repository IDs as the `repository_id` argument
+    /// for the other tools.
+    #[tool(name = "list_repositories")]
+    async fn list_repositories(
+        &self,
+        _params: Parameters<ListRepositoriesInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let use_case = self.container.list_use_case();
+        let repos = use_case.execute().await.map_err(|e| {
+            McpError::internal_error(format!("Failed to list repositories: {}", e), None)
+        })?;
+
+        let json = serde_json::to_string_pretty(&repos).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize repositories: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Discover execution features — named forward call chains rooted at
+    /// entry-point symbols (symbols that call others but are never called within
+    /// the repository) — and score each for criticality. Returns up to `limit`
+    /// features sorted by descending criticality.
+    /// Requires the repository to have been indexed with call-graph support.
+    #[tool(name = "list_features")]
+    async fn list_features(
+        &self,
+        params: Parameters<ListFeaturesInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = params.0;
+        let limit = input.limit.min(MAX_FEATURES_LIMIT);
+
+        let use_case = self.container.execution_features_use_case();
+        let features = use_case
+            .list_features(&input.repository_id, limit)
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Listing features failed: {}", e), None)
+            })?;
+
+        let json = serde_json::to_string_pretty(&features).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize features: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Retrieve a single execution feature by entry-point symbol name (exact or
+    /// substring match). Returns `null` when the symbol cannot be resolved to an
+    /// entry point in the call graph.
+    /// Requires the repository to have been indexed with call-graph support.
+    #[tool(name = "get_feature")]
+    async fn get_feature(
+        &self,
+        params: Parameters<GetFeatureInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = params.0;
+
+        let use_case = self.container.execution_features_use_case();
+        let feature = use_case
+            .get_feature(&input.symbol, input.repository_id.as_deref())
+            .await
+            .map_err(|e| McpError::internal_error(format!("Feature lookup failed: {}", e), None))?;
+
+        let json = serde_json::to_string_pretty(&feature).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize feature: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Given a set of changed symbols, return every execution feature whose
+    /// forward call chain includes at least one of them, sorted by descending
+    /// criticality. Use this to assess which user-facing flows a change touches.
+    /// Requires the repository to have been indexed with call-graph support.
+    #[tool(name = "get_impacted_features")]
+    async fn get_impacted_features(
+        &self,
+        params: Parameters<ImpactedFeaturesInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = params.0;
+
+        let use_case = self.container.execution_features_use_case();
+        let features = use_case
+            .get_impacted_features(&input.symbols, input.repository_id.as_deref())
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Impacted features lookup failed: {}", e), None)
+            })?;
+
+        let json = serde_json::to_string_pretty(&features).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize features: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Show which files in one repository depend on files in another (or the same)
+    /// repository. Resolves both `from` and `to` by repository name or ID, builds
+    /// the cross-repository file-dependency graph, and returns the directed
+    /// file→file edges flowing from the source into the target, each annotated
+    /// with the referenced symbols and reference kinds.
+    /// Requires the repositories to have been indexed with call-graph support.
+    #[tool(name = "file_uses")]
+    async fn file_uses(
+        &self,
+        params: Parameters<FileUsesInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = params.0;
+
+        let repos = self
+            .container
+            .list_use_case()
+            .execute()
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Failed to list repositories: {}", e), None)
+            })?;
+
+        let resolve = |name_or_id: &str| -> Option<(String, String)> {
+            repos
+                .iter()
+                .find(|r| r.id() == name_or_id)
+                .or_else(|| {
+                    repos
+                        .iter()
+                        .find(|r| r.name().eq_ignore_ascii_case(name_or_id))
+                })
+                .map(|r| (r.id().to_string(), r.name().to_string()))
+        };
+
+        let (from_id, from_name) = resolve(&input.from).ok_or_else(|| {
+            McpError::invalid_params(format!("Repository not found: '{}'", input.from), None)
+        })?;
+        let (to_id, to_name) = resolve(&input.to).ok_or_else(|| {
+            McpError::invalid_params(format!("Repository not found: '{}'", input.to), None)
+        })?;
+
+        let graph = self
+            .container
+            .file_graph_use_case()
+            .build_graph(Some(&[from_id.clone(), to_id.clone()]), 1, true)
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Failed to build file graph: {}", e), None)
+            })?;
+
+        let mut edges: Vec<FileEdge> = graph
+            .edges
+            .into_iter()
+            .filter(|e| e.from_repo_id == from_id && e.to_repo_id == to_id)
+            .collect();
+        edges.sort_by(|a, b| {
+            a.to_file
+                .cmp(&b.to_file)
+                .then(a.from_file.cmp(&b.from_file))
+        });
+
+        let total = edges.len();
+        let result = FileUsesResult {
+            from_repository: from_name,
+            to_repository: to_name,
+            edges,
+            total,
+        };
+
+        let json = serde_json::to_string_pretty(&result).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize file uses: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Detect architectural clusters in a repository by running Leiden community
+    /// detection over its file-dependency graph. Returns the clusters with their
+    /// names, dominant language, cohesion score, and member files.
+    /// Requires the repository to have been indexed with call-graph support.
+    #[tool(name = "list_clusters")]
+    async fn list_clusters(
+        &self,
+        params: Parameters<ListClustersInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = params.0;
+
+        let use_case = self.container.cluster_detection_use_case();
+        let cluster_graph = use_case
+            .create_clusters(&input.repository_id)
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Cluster detection failed: {}", e), None)
+            })?;
+
+        let json = serde_json::to_string_pretty(&cluster_graph).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize clusters: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Return the architectural cluster a specific file belongs to. Returns
+    /// `null` when the file is not part of any detected cluster.
+    /// Requires the repository to have been indexed with call-graph support.
+    #[tool(name = "get_file_cluster")]
+    async fn get_file_cluster(
+        &self,
+        params: Parameters<GetFileClusterInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = params.0;
+
+        let use_case = self.container.cluster_detection_use_case();
+        let cluster = use_case
+            .cluster_for_file(&input.file_path, &input.repository_id)
+            .await
+            .map_err(|e| McpError::internal_error(format!("Cluster lookup failed: {}", e), None))?;
+
+        let json = serde_json::to_string_pretty(&cluster).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize cluster: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Produce a high-level architecture overview of a repository as a Markdown
+    /// table: one row per cluster with its file count, dominant language, and top
+    /// inter-cluster dependencies.
+    /// Requires the repository to have been indexed with call-graph support.
+    #[tool(name = "architecture_overview")]
+    async fn architecture_overview(
+        &self,
+        params: Parameters<ArchitectureOverviewInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = params.0;
+
+        let use_case = self.container.cluster_detection_use_case();
+        let overview = use_case
+            .architecture_overview(&input.repository_id)
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Architecture overview failed: {}", e), None)
+            })?;
+
+        Ok(CallToolResult::success(vec![Content::text(overview)]))
+    }
 }
 
 #[tool_handler]
@@ -529,7 +871,15 @@ impl ServerHandler for CodesearchMcpServer {
                  • analyze_impact — blast-radius analysis: what breaks if symbol X changes?\n\
                  • get_symbol_context — 360° view of a symbol's callers and callees\n\
                  • query_graph — precise relationship queries: callers_of, callees_of, \
-                   imports_of, importers_of, inheritors_of, children_of, tests_for, file_summary"
+                   imports_of, importers_of, inheritors_of, children_of, tests_for, file_summary\n\
+                 • list_repositories — list indexed repositories with file/chunk counts (stats)\n\
+                 • list_features — entry-point call chains scored by criticality\n\
+                 • get_feature — a single execution feature by entry-point symbol\n\
+                 • get_impacted_features — features whose call chain includes changed symbols\n\
+                 • file_uses — which files in one repository depend on files in another\n\
+                 • list_clusters — architectural clusters via Leiden community detection\n\
+                 • get_file_cluster — the cluster a given file belongs to\n\
+                 • architecture_overview — Markdown table summarising clusters and dependencies"
                     .into(),
             ),
         }

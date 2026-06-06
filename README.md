@@ -388,6 +388,14 @@ The HTTP server exposes the MCP endpoint at `/mcp`.
 | `analyze_impact` | Blast-radius analysis for a symbol. Accepts `symbol`, `repository_id`, and `regex`. |
 | `get_symbol_context` | 360° caller/callee context for a symbol. Accepts `symbol`, `repository_id`, and `regex`. |
 | `query_graph` | Precise relationship queries over the call graph. Accepts `pattern`, `target`, `repository_id`, and `limit`. |
+| `list_repositories` | List indexed repositories with file/chunk counts and language breakdown (also serves as stats). Takes no arguments. |
+| `list_features` | Entry-point execution features scored by criticality. Accepts `repository_id` and `limit`. |
+| `get_feature` | A single execution feature by entry-point symbol. Accepts `symbol` and `repository_id`. |
+| `get_impacted_features` | Features whose call chain includes any changed symbol. Accepts `symbols` and `repository_id`. |
+| `file_uses` | Files in one repository that depend on files in another. Accepts `from` and `to` (repository name or ID). |
+| `list_clusters` | Architectural clusters via Leiden community detection. Accepts `repository_id`. |
+| `get_file_cluster` | The cluster a given file belongs to. Accepts `file_path` and `repository_id`. |
+| `architecture_overview` | Markdown table summarising clusters and inter-cluster dependencies. Accepts `repository_id`. |
 
 The `query_graph` tool supports eight intention-named relationship `pattern`s, returning
 only the requested edge type instead of every relationship at once:
