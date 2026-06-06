@@ -94,6 +94,23 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Lightweight commands that write agent/git integration files or inspect a
+    // tool payload. They never touch the index or build a container, so handle
+    // them before logging is initialised — `hook-check` in particular must keep
+    // stdout clean for its JSON output.
+    match &cli.command {
+        Commands::HookCheck => {
+            codesearch::connector::api::agent::hook_check::run();
+            return Ok(());
+        }
+        Commands::Install { .. } | Commands::Uninstall { .. } | Commands::Hooks { .. } => {
+            let report = codesearch::connector::api::agent::dispatch(&cli.command)?;
+            println!("{report}");
+            return Ok(());
+        }
+        _ => {}
+    }
+
     // Extract MCP mode info before moving cli.command
     let (is_mcp, http_port, public_bind) = match &cli.command {
         Commands::Mcp { http, public } => (true, *http, *public),

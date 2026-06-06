@@ -111,6 +111,35 @@ pub enum ClustersSubcommand {
     },
 }
 
+/// AI coding agent to integrate codesearch with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AgentPlatform {
+    /// Claude Code — `PreToolUse` hooks in settings.json (live, reactive nudge).
+    Claude,
+    /// OpenCode — a `tool.execute.before`/`after` plugin (live, reactive nudge).
+    Opencode,
+    /// Pi coding agent — a TypeScript extension using `tool_call`/`tool_result`
+    /// (live, reactive nudge).
+    Pi,
+    /// Zed — always-on `.rules` instructions plus MCP `context_servers`
+    /// registration (Zed has no payload pre-tool hook).
+    Zed,
+    /// Install into every supported platform.
+    All,
+}
+
+/// Subcommands for the `hooks` command (git automation that keeps the index fresh).
+#[derive(Subcommand)]
+pub enum HooksSubcommand {
+    /// Install `post-commit` and `post-checkout` hooks that re-index in the
+    /// background (incremental, no LLM calls).
+    Install,
+    /// Remove the codesearch git hooks.
+    Uninstall,
+    /// Report whether the codesearch git hooks are installed.
+    Status,
+}
+
 /// Initial mode for the interactive TUI.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum TuiMode {
@@ -326,6 +355,45 @@ pub enum Commands {
         #[arg(long)]
         public: bool,
     },
+
+    /// Integrate codesearch into an AI coding agent so it reaches for semantic
+    /// search instead of grepping. Writes a `PreToolUse` hook (Claude),
+    /// a plugin (OpenCode), a live extension (Pi), or `.rules` + MCP
+    /// registration (Zed). Installs into the user profile by default.
+    Install {
+        /// Target platform (default: every supported platform).
+        #[arg(value_enum, default_value = "all")]
+        platform: AgentPlatform,
+
+        /// Install into the current project (e.g. `.claude/settings.json`)
+        /// instead of the user profile (e.g. `~/.claude/settings.json`).
+        #[arg(long)]
+        project: bool,
+    },
+
+    /// Remove a codesearch agent integration previously written by `install`.
+    Uninstall {
+        /// Target platform (default: every supported platform).
+        #[arg(value_enum, default_value = "all")]
+        platform: AgentPlatform,
+
+        /// Remove the project-scoped integration instead of the user-profile one.
+        #[arg(long)]
+        project: bool,
+    },
+
+    /// Manage git hooks that keep the index fresh by re-indexing the repository
+    /// in the background after each commit or branch checkout.
+    Hooks {
+        #[command(subcommand)]
+        subcommand: HooksSubcommand,
+    },
+
+    /// Internal: read a `PreToolUse` payload on stdin and, when the current
+    /// project is indexed, emit a nudge toward codesearch. Invoked by the
+    /// agent hooks written by `install`; not intended for direct use.
+    #[command(hide = true)]
+    HookCheck,
 
     /// Launch the interactive TUI (search, impact, context in one terminal UI)
     Tui {

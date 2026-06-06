@@ -150,6 +150,12 @@ impl<'a> Router<'a> {
             Commands::Tui { .. } => {
                 Err(anyhow::anyhow!("TUI command is handled separately in main"))
             }
+            Commands::Install { .. }
+            | Commands::Uninstall { .. }
+            | Commands::Hooks { .. }
+            | Commands::HookCheck => Err(anyhow::anyhow!(
+                "agent integration commands are handled separately in main"
+            )),
         }
     }
 }

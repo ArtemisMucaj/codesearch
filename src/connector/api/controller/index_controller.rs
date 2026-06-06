@@ -28,7 +28,35 @@ impl<'a> IndexController<'a> {
             .execute(&path, name.as_deref(), vector_store, ns, force)
             .await?;
 
+        // Drop a per-project marker so the installed agent hooks know this
+        // working tree is indexed and may nudge toward codesearch. Best-effort:
+        // a marker-write failure must never fail the index.
+        self.write_project_marker(&path, &repo);
+
         Ok(self.format_index_success(&repo))
+    }
+
+    /// Write `.codesearch/project.json` into the indexed repository root.
+    /// Skipped for in-memory indexing (no persistent project to mark).
+    fn write_project_marker(&self, path: &str, repo: &Repository) {
+        use super::super::agent::marker::{write_marker, ProjectMarker};
+
+        if self.container.memory_storage() {
+            return;
+        }
+        let root = std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+        let marker = ProjectMarker::new(
+            repo.id().to_string(),
+            repo.name().to_string(),
+            repo.namespace().map(str::to_string),
+        );
+        if let Err(e) = write_marker(&root, &marker) {
+            tracing::warn!(
+                "failed to write project marker at {}: {}",
+                root.display(),
+                e
+            );
+        }
     }
 
     fn format_index_success(&self, repo: &Repository) -> String {
