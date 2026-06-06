@@ -22,6 +22,13 @@
 * unit tests for `InMemoryVectorRepository` hybrid paths: cosine vs RRF score ranges, dual-leg ranking, post-fusion `min_score` filtering, no early pruning, empty-term fallback, and limit enforcement
 * integration tests for end-to-end hybrid search: results returned with positive scores, keyword-matched chunk surfaces, special SQL characters (`%`, `_`, `!`) do not cause errors, and semantic-only baseline confirms the flag gates the BM25 leg
 
+## [0.24.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.23.0...v0.24.0) (2026-06-06)
+
+
+### Features
+
+* expose analysis and indexing tools over MCP ([#151](https://github.com/ArtemisMucaj/codesearch/issues/151)) ([237b6da](https://github.com/ArtemisMucaj/codesearch/commit/237b6da42f3d9c4745d2d3fcc71e442e92f03bb5))
+
 ## [0.23.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.22.0...v0.23.0) (2026-04-13)
 
 
