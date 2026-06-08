@@ -1,4 +1,4 @@
-//! End-to-end tests for the `install` / `uninstall` / `hooks` / `hook-check`
+//! End-to-end tests for the `install` / `uninstall` / `hooks` / `pre-tool-call`
 //! commands. These drive the real binary in a child process with a scratch
 //! working directory, so they exercise the actual CLI wiring without mutating
 //! the test process's environment.
@@ -35,7 +35,7 @@ fn install_all_project_writes_every_platform() {
     // Claude: PreToolUse hooks in .claude/settings.json
     let claude = std::fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
     assert!(claude.contains("PreToolUse"));
-    assert!(claude.contains("codesearch hook-check"));
+    assert!(claude.contains("codesearch pre-tool-call"));
 
     // OpenCode: auto-loaded plugin
     assert!(dir.join(".opencode/plugins/codesearch.js").exists());
@@ -56,18 +56,18 @@ fn install_all_project_writes_every_platform() {
     assert!(!dir.join(".opencode/plugins/codesearch.js").exists());
     assert!(!dir.join(".pi/extensions/codesearch.ts").exists());
     let claude = std::fs::read_to_string(dir.join(".claude/settings.json")).unwrap();
-    assert!(!claude.contains("codesearch hook-check"));
+    assert!(!claude.contains("codesearch pre-tool-call"));
 }
 
 #[test]
-fn hook_check_nudges_only_when_indexed() {
+fn pre_tool_call_nudges_only_when_indexed() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
 
     let payload = r#"{"tool_name":"Grep","tool_input":{"pattern":"auth"}}"#;
 
     // No marker yet → no output.
-    let out = pipe_hook_check(dir, payload);
+    let out = pipe_pre_tool_call(dir, payload);
     assert!(
         out.trim().is_empty(),
         "expected no nudge without marker, got: {out}"
@@ -81,7 +81,7 @@ fn hook_check_nudges_only_when_indexed() {
     )
     .unwrap();
 
-    let out = pipe_hook_check(dir, payload);
+    let out = pipe_pre_tool_call(dir, payload);
     assert!(
         out.contains("hookSpecificOutput"),
         "expected nudge, got: {out}"
@@ -89,14 +89,14 @@ fn hook_check_nudges_only_when_indexed() {
     assert!(out.contains("codesearch search"));
 }
 
-fn pipe_hook_check(dir: &Path, payload: &str) -> String {
+fn pipe_pre_tool_call(dir: &Path, payload: &str) -> String {
     let mut child = Command::new(bin())
-        .arg("hook-check")
+        .arg("pre-tool-call")
         .current_dir(dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-        .expect("spawn hook-check");
+        .expect("spawn pre-tool-call");
     child
         .stdin
         .take()

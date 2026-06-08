@@ -1,7 +1,7 @@
-//! The `codesearch hook-check` command.
+//! The `codesearch pre-tool-call` command.
 //!
-//! Installed agent hooks pipe their `PreToolUse` payload (the tool name and its
-//! arguments, as JSON) into `codesearch hook-check` on stdin. When the current
+//! Installed agent hooks pipe their pre-tool-call payload (the tool name and its
+//! arguments, as JSON) into `codesearch pre-tool-call` on stdin. When the current
 //! project is indexed and the agent is about to grep or read source files to
 //! answer a question, we print a Claude-Code-style `hookSpecificOutput` blob
 //! that steers it toward `codesearch search`/`context`/`impact` instead.
@@ -115,7 +115,7 @@ pub fn render_output(additional_context: &str) -> String {
     blob.to_string()
 }
 
-/// Entry point for `codesearch hook-check`: read stdin, evaluate, print.
+/// Entry point for `codesearch pre-tool-call`: read stdin, evaluate, print.
 ///
 /// Always returns successfully — the hook must never fail the tool call.
 pub fn run() {

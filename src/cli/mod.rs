@@ -389,11 +389,11 @@ pub enum Commands {
         subcommand: HooksSubcommand,
     },
 
-    /// Internal: read a `PreToolUse` payload on stdin and, when the current
+    /// Internal: read a tool-call payload on stdin and, when the current
     /// project is indexed, emit a nudge toward codesearch. Invoked by the
     /// agent hooks written by `install`; not intended for direct use.
     #[command(hide = true)]
-    HookCheck,
+    PreToolCall,
 
     /// Launch the interactive TUI (search, impact, context in one terminal UI)
     Tui {

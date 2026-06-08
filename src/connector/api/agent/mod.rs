@@ -11,8 +11,8 @@
 //! * **Git hooks** ([`git_hooks`]) — `post-commit`/`post-checkout` automation
 //!   that keeps the index fresh so the nudge always points at current data.
 //!
-//! All decision logic for the live nudge lives in [`hook_check`] and is reused
-//! across platforms via the `codesearch hook-check` command.
+//! All decision logic for the live nudge lives in [`pre_tool_call`] and is
+//! reused across platforms via the `codesearch pre-tool-call` command.
 
 use std::path::{Path, PathBuf};
 
@@ -24,10 +24,10 @@ use crate::Commands;
 
 pub mod claude;
 pub mod git_hooks;
-pub mod hook_check;
 pub mod marker;
 pub mod opencode;
 pub mod pi;
+pub mod pre_tool_call;
 pub mod zed;
 
 /// Whether an integration is written to the user profile or the current project.
@@ -130,7 +130,7 @@ fn platform_label(p: AgentPlatform) -> &'static str {
 
 /// The command the installed hooks invoke. We assume `codesearch` is on PATH —
 /// the same assumption the bundled skill already makes.
-pub const HOOK_COMMAND: &str = "codesearch hook-check";
+pub const PRE_TOOL_CALL_COMMAND: &str = "codesearch pre-tool-call";
 
 /// Resolve the user's home directory from `$HOME`.
 pub fn home_dir() -> Result<PathBuf> {

@@ -153,7 +153,7 @@ impl<'a> Router<'a> {
             Commands::Install { .. }
             | Commands::Uninstall { .. }
             | Commands::Hooks { .. }
-            | Commands::HookCheck => Err(anyhow::anyhow!(
+            | Commands::PreToolCall => Err(anyhow::anyhow!(
                 "agent integration commands are handled separately in main"
             )),
         }

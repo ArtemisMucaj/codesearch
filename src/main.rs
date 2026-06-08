@@ -96,11 +96,11 @@ async fn main() -> Result<()> {
 
     // Lightweight commands that write agent/git integration files or inspect a
     // tool payload. They never touch the index or build a container, so handle
-    // them before logging is initialised — `hook-check` in particular must keep
-    // stdout clean for its JSON output.
+    // them before logging is initialised — `pre-tool-call` in particular must
+    // keep stdout clean for its JSON output.
     match &cli.command {
-        Commands::HookCheck => {
-            codesearch::connector::api::agent::hook_check::run();
+        Commands::PreToolCall => {
+            codesearch::connector::api::agent::pre_tool_call::run();
             return Ok(());
         }
         Commands::Install { .. } | Commands::Uninstall { .. } | Commands::Hooks { .. } => {

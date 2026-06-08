@@ -4,13 +4,13 @@
 //! `additionalContext` output into the model's context at decision time. We
 //! register two matchers — one for `Bash` (so shell greps are caught) and one
 //! for the `Read`/`Grep`/`Glob` tools — both delegating to `codesearch
-//! hook-check`, which decides whether to nudge. The hook only adds context and
-//! never blocks.
+//! pre-tool-call`, which decides whether to nudge. The hook only adds context
+//! and never blocks.
 
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use super::{display_path, load_json_object, write_json, Scope, HOOK_COMMAND};
+use super::{display_path, load_json_object, write_json, Scope, PRE_TOOL_CALL_COMMAND};
 
 /// Matchers we register. Matching `Read|Grep|Glob` as well as `Bash` covers both
 /// older Claude Code (dedicated Grep/Glob tools) and newer builds that route
@@ -24,7 +24,7 @@ fn settings_path(scope: Scope) -> Result<std::path::PathBuf> {
 }
 
 /// Is this a PreToolUse entry that we installed (i.e. one of its hooks runs
-/// `codesearch hook-check`)?
+/// `codesearch pre-tool-call`)?
 fn is_ours(entry: &Value) -> bool {
     entry
         .get("hooks")
@@ -33,7 +33,7 @@ fn is_ours(entry: &Value) -> bool {
             hooks.iter().any(|h| {
                 h.get("command")
                     .and_then(Value::as_str)
-                    .map(|c| c.contains(HOOK_COMMAND))
+                    .map(|c| c.contains(PRE_TOOL_CALL_COMMAND))
                     .unwrap_or(false)
             })
         })
@@ -60,7 +60,7 @@ pub fn install(scope: Scope) -> Result<Vec<String>> {
     for matcher in MATCHERS {
         pre.push(json!({
             "matcher": matcher,
-            "hooks": [{ "type": "command", "command": HOOK_COMMAND }],
+            "hooks": [{ "type": "command", "command": PRE_TOOL_CALL_COMMAND }],
         }));
     }
 
