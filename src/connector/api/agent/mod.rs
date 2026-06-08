@@ -159,16 +159,22 @@ pub fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
 
-/// Load a JSON object from `path`, returning an empty map when the file is
-/// missing or cannot be parsed as an object. (We never silently discard a
-/// parseable object; callers merge into what we return.)
-pub fn load_json_object(path: &Path) -> Map<String, Value> {
+/// Load a JSON object from `path`. A missing file yields an empty map, but a
+/// present file that is unreadable, not valid JSON, or not a JSON object is an
+/// error — we must not silently discard a user's existing config by treating a
+/// parse failure as "empty" and then writing an empty map back over it.
+pub fn load_json_object(path: &Path) -> Result<Map<String, Value>> {
     match std::fs::read_to_string(path) {
-        Ok(raw) => serde_json::from_str::<Value>(&raw)
-            .ok()
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default(),
-        Err(_) => Map::new(),
+        Ok(raw) => {
+            let value: Value = serde_json::from_str(&raw)
+                .with_context(|| format!("parsing {}", path.display()))?;
+            value
+                .as_object()
+                .cloned()
+                .with_context(|| format!("{} must contain a JSON object", path.display()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Map::new()),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
 }
 

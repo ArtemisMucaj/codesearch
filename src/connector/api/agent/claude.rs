@@ -42,7 +42,7 @@ fn is_ours(entry: &Value) -> bool {
 
 pub fn install(scope: Scope) -> Result<Vec<String>> {
     let path = settings_path(scope)?;
-    let mut settings = load_json_object(&path);
+    let mut settings = load_json_object(&path)?;
 
     // hooks → PreToolUse: keep every entry that is not ours, then append fresh.
     let hooks = settings
@@ -81,7 +81,7 @@ pub fn uninstall(scope: Scope) -> Result<Vec<String>> {
             display_path(&path)
         )]);
     }
-    let mut settings = load_json_object(&path);
+    let mut settings = load_json_object(&path)?;
 
     let removed = if let Some(hooks) = settings.get_mut("hooks").and_then(Value::as_object_mut) {
         if let Some(pre) = hooks.get("PreToolUse").and_then(Value::as_array) {
@@ -149,7 +149,7 @@ mod tests {
             install(Scope::Global).unwrap();
             install(Scope::Global).unwrap(); // twice → no duplicates
 
-            let settings = load_json_object(&path);
+            let settings = load_json_object(&path).unwrap();
             let pre = settings["hooks"]["PreToolUse"].as_array().unwrap();
             // 1 foreign + 2 ours, no duplication on the second install.
             assert_eq!(pre.len(), 3);
@@ -158,7 +158,7 @@ mod tests {
 
             // Uninstall removes only ours.
             uninstall(Scope::Global).unwrap();
-            let settings = load_json_object(&path);
+            let settings = load_json_object(&path).unwrap();
             let pre = settings["hooks"]["PreToolUse"].as_array().unwrap();
             assert_eq!(pre.len(), 1);
             assert_eq!(pre[0]["matcher"], "Write");

@@ -102,7 +102,7 @@ pub fn install(scope: Scope) -> Result<Vec<String>> {
 
     // 2. MCP context server registration.
     let settings = settings_path(scope)?;
-    let mut obj = load_json_object(&settings);
+    let mut obj = load_json_object(&settings)?;
     let servers = obj
         .entry("context_servers")
         .or_insert_with(|| json!({}))
@@ -154,7 +154,7 @@ pub fn uninstall(scope: Scope) -> Result<Vec<String>> {
 
     let settings = settings_path(scope)?;
     if settings.exists() {
-        let mut obj = load_json_object(&settings);
+        let mut obj = load_json_object(&settings)?;
         let mut removed = false;
         if let Some(servers) = obj
             .get_mut("context_servers")

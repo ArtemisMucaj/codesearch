@@ -87,15 +87,21 @@ fn hooks_dir() -> Result<PathBuf> {
 fn install_one(dir: &Path, name: &str, script: &str, marker: &str) -> Result<String> {
     let path = dir.join(name);
     if path.exists() {
-        let content = std::fs::read_to_string(&path)?;
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading hook {}", path.display()))?;
         if content.contains(marker) {
             return Ok(format!("{name}: already installed"));
         }
         let merged = format!("{}\n\n{}", content.trim_end(), script);
-        std::fs::write(&path, merged)?;
+        std::fs::write(&path, merged)
+            .with_context(|| format!("writing hook {}", path.display()))?;
+        // An existing hook may not be executable (e.g. created by another tool);
+        // ensure git can run the section we just appended.
+        set_executable(&path)?;
         Ok(format!("{name}: appended to existing hook"))
     } else {
-        std::fs::write(&path, format!("#!/bin/sh\n{script}"))?;
+        std::fs::write(&path, format!("#!/bin/sh\n{script}"))
+            .with_context(|| format!("writing hook {}", path.display()))?;
         set_executable(&path)?;
         Ok(format!("{name}: installed"))
     }
@@ -108,7 +114,8 @@ fn uninstall_one(dir: &Path, name: &str, marker: &str, marker_end: &str) -> Resu
     if !path.exists() {
         return Ok(format!("{name}: not present"));
     }
-    let content = std::fs::read_to_string(&path)?;
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading hook {}", path.display()))?;
     let (Some(start), Some(end)) = (content.find(marker), content.find(marker_end)) else {
         return Ok(format!("{name}: no codesearch section"));
     };
@@ -122,10 +129,11 @@ fn uninstall_one(dir: &Path, name: &str, marker: &str, marker_end: &str) -> Resu
     remaining.push_str(tail);
     let trimmed = remaining.trim();
     if trimmed.is_empty() || trimmed == "#!/bin/sh" || trimmed == "#!/bin/bash" {
-        std::fs::remove_file(&path)?;
+        std::fs::remove_file(&path).with_context(|| format!("removing hook {}", path.display()))?;
         Ok(format!("{name}: removed"))
     } else {
-        std::fs::write(&path, format!("{}\n", remaining.trim_end()))?;
+        std::fs::write(&path, format!("{}\n", remaining.trim_end()))
+            .with_context(|| format!("writing hook {}", path.display()))?;
         Ok(format!(
             "{name}: codesearch section removed (other content kept)"
         ))
@@ -135,9 +143,12 @@ fn uninstall_one(dir: &Path, name: &str, marker: &str, marker_end: &str) -> Resu
 #[cfg(unix)]
 fn set_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(path)?.permissions();
+    let mut perms = std::fs::metadata(path)
+        .with_context(|| format!("reading permissions of {}", path.display()))?
+        .permissions();
     perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms)?;
+    std::fs::set_permissions(path, perms)
+        .with_context(|| format!("setting permissions on {}", path.display()))?;
     Ok(())
 }
 
