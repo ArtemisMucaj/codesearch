@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Commands::Install { .. } | Commands::Uninstall { .. } | Commands::Hooks { .. } => {
-            let report = codesearch::agent::dispatch(&cli.command)?;
+            let report = codesearch::agent::install::dispatch(&cli.command)?;
             println!("{report}");
             return Ok(());
         }

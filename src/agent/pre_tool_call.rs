@@ -14,7 +14,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::marker;
+use crate::connector::marker;
 
 /// Search-oriented executables that, when invoked through a shell, indicate the
 /// agent is hunting for code the index could surface faster.
