@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod application;
 pub mod cli;
 pub mod connector;
@@ -10,13 +11,13 @@ pub use application::{
     ExecutionFeaturesUseCase, ExplainResult, ExplainUseCase, FileHashRepository,
     FileRelationshipUseCase, ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode,
     IndexRepositoryUseCase, ListRepositoriesUseCase, MetadataRepository, ParserService,
-    QueryExpander, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
-    SymbolContext, SymbolContextUseCase, VectorRepository,
+    QueryExpander, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase, SymbolContext,
+    SymbolContextUseCase, VectorRepository,
 };
 
 pub use cli::{
-    Commands, ClustersSubcommand, EmbeddingTarget, FeaturesSubcommand,
-    LlmTarget, OutputFormat, RerankingTarget, TuiMode,
+    AgentPlatform, ClustersSubcommand, Commands, EmbeddingTarget, FeaturesSubcommand,
+    HooksSubcommand, LlmTarget, OutputFormat, RerankingTarget, TuiMode,
 };
 
 pub use connector::{
