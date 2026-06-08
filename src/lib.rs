@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod application;
 pub mod cli;
 pub mod connector;

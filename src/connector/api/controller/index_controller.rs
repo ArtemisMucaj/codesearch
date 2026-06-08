@@ -41,7 +41,7 @@ impl<'a> IndexController<'a> {
     /// filesystem work runs on a blocking task so it never stalls a Tokio
     /// worker during concurrent indexing.
     async fn write_project_marker(&self, path: &str, repo: &Repository) {
-        use super::super::agent::marker::{write_marker, ProjectMarker};
+        use crate::agent::marker::{write_marker, ProjectMarker};
 
         if self.container.memory_storage() {
             return;

@@ -100,11 +100,11 @@ async fn main() -> Result<()> {
     // keep stdout clean for its JSON output.
     match &cli.command {
         Commands::PreToolCall => {
-            codesearch::connector::api::agent::pre_tool_call::run();
+            codesearch::agent::pre_tool_call::run();
             return Ok(());
         }
         Commands::Install { .. } | Commands::Uninstall { .. } | Commands::Hooks { .. } => {
-            let report = codesearch::connector::api::agent::dispatch(&cli.command)?;
+            let report = codesearch::agent::dispatch(&cli.command)?;
             println!("{report}");
             return Ok(());
         }
