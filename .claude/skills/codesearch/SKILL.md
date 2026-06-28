@@ -23,6 +23,7 @@ Invoke this skill **immediately** when:
 - User asks **who calls** a function or **what does a function call** (symbol context)
 - User asks for an **explanation** of a symbol's full call flow or business purpose (`explain`)
 - User asks about the **architectural structure** of a repo — modules, clusters, entry-point features
+- User asks which **symbols form a feature/community** together, or which community a symbol belongs to (`symbol-clusters`)
 - User asks **which files one repository uses** from another (cross-repo dependencies)
 
 ## When to Use Built-in Tools Instead
@@ -193,6 +194,9 @@ codesearch features impacted authenticate hash_password
 
 ### Clusters — architectural modules (Leiden community detection)
 
+Runs Leiden community detection over the **file** dependency graph to find
+tightly-coupled groups of files (architectural modules).
+
 ```shell
 # List tightly-coupled file clusters (architectural modules)
 codesearch clusters list my-repo
@@ -203,6 +207,31 @@ codesearch clusters get src/api/auth.rs my-repo
 # Print a high-level Markdown architecture overview table
 codesearch clusters overview my-repo
 ```
+
+### Symbol Clusters — behavioural communities (Leiden over the call graph)
+
+The same Leiden algorithm one level finer: it clusters the **symbol** call graph
+(functions, methods, types) instead of files, so the communities are
+behavioural units — a feature, a subsystem, a collaborating set of functions —
+that frequently cut across file boundaries. Use file-level `clusters` to answer
+"what are this repo's modules?"; use `symbol-clusters` to answer "which symbols
+form a feature together, regardless of where they live?".
+
+```shell
+# List symbol communities (size, dominant language, cohesion, sample members)
+codesearch symbol-clusters list my-repo
+
+# Which community does a given symbol belong to?
+# Resolves by exact fully-qualified name, then short-name suffix, then substring.
+codesearch symbol-clusters get authenticate my-repo
+codesearch symbol-clusters get "MyNs/Auth#authenticate()." my-repo
+
+# JSON output for scripting (both subcommands; vimgrep is not supported)
+codesearch symbol-clusters list my-repo --format json
+```
+
+Requires the repository to have been indexed with call-graph support (the
+default). When the call graph is empty, the list is empty.
 
 ### Uses — cross-repository file dependencies
 
@@ -276,4 +305,4 @@ codesearch --no-rerank search "query"
 
 ## Keywords
 
-semantic search, hybrid search, code search, natural language search, find code, explore codebase, code understanding, intent search, AST analysis, embeddings, code discovery, code exploration, BM25, keyword search, RRF, reciprocal rank fusion, call graph, impact analysis, blast radius, symbol context, callers, callees, dependency analysis, explain, call flow, execution features, criticality, clusters, architecture overview, Leiden, module detection, cross-repository dependencies, uses, regex symbol match
+semantic search, hybrid search, code search, natural language search, find code, explore codebase, code understanding, intent search, AST analysis, embeddings, code discovery, code exploration, BM25, keyword search, RRF, reciprocal rank fusion, call graph, impact analysis, blast radius, symbol context, callers, callees, dependency analysis, explain, call flow, execution features, criticality, clusters, architecture overview, Leiden, module detection, symbol clusters, symbol communities, community detection, cross-repository dependencies, uses, regex symbol match

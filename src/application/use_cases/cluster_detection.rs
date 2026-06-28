@@ -278,21 +278,22 @@ fn leiden_core(graph: &Graph) -> Vec<usize> {
         let mut refined = refine_partition(&current, &partition, &mut rng);
         renumber(&mut refined);
 
-        // Aggregate by the refined partition; `super_of[node]` is the new
-        // super-node index for each current node.
-        let (aggregated, super_of) = aggregate_by(&current, &refined);
+        // Aggregate by the refined partition. The renumbered `refined` vector is
+        // itself the current-node → super-node map (sub-community i becomes
+        // super-node i), so there is no separate mapping to return.
+        let aggregated = aggregate_by(&current, &refined);
 
         // Seed the next level's partition from the *unrefined* community: every
         // refined sub-community (now a super-node) inherits the community it was
         // refined out of, so local moving resumes from the coarse structure.
         let mut next_partition = vec![0usize; aggregated.n];
         for node in 0..current.n {
-            next_partition[super_of[node]] = partition[node];
+            next_partition[refined[node]] = partition[node];
         }
 
         // Compose the original→super mapping through this aggregation.
         for slot in node_to_super.iter_mut() {
-            *slot = super_of[*slot];
+            *slot = refined[*slot];
         }
 
         current = aggregated;
@@ -302,6 +303,23 @@ fn leiden_core(graph: &Graph) -> Vec<usize> {
     (0..graph.n)
         .map(|node| partition[node_to_super[node]])
         .collect()
+}
+
+/// Group node indices by their partition label, in ascending (label, node)
+/// order. The deterministic ordering is what lets the post-passes split
+/// communities the same way on every run.
+fn group_by_label(partition: &[usize]) -> BTreeMap<usize, Vec<usize>> {
+    let mut by_label: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (node, &label) in partition.iter().enumerate() {
+        by_label.entry(label).or_default().push(node);
+    }
+    by_label
+}
+
+/// First label not currently in use — the starting point for handing out fresh
+/// labels to the pieces a post-pass splits off.
+fn first_free_label(partition: &[usize]) -> usize {
+    partition.iter().copied().max().unwrap_or(0) + 1
 }
 
 /// Enforce Leiden's defining guarantee: every community is a single connected
@@ -316,14 +334,9 @@ fn enforce_connectivity(graph: &Graph, partition: &mut [usize]) {
     if graph.n == 0 {
         return;
     }
-    let mut next_label = partition.iter().copied().max().unwrap_or(0) + 1;
+    let mut next_label = first_free_label(partition);
 
-    let mut nodes_by_label: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for (node, &label) in partition.iter().enumerate() {
-        nodes_by_label.entry(label).or_default().push(node);
-    }
-
-    for (_label, nodes) in nodes_by_label {
+    for (_label, nodes) in group_by_label(partition) {
         let members: HashSet<usize> = nodes.iter().copied().collect();
         let mut visited: HashSet<usize> = HashSet::new();
         let mut first_component = true;
@@ -369,14 +382,9 @@ fn split_oversized(graph: &Graph, partition: &mut [usize]) {
         return;
     }
     let max_size = (graph.n as f64 * MAX_COMMUNITY_FRACTION).ceil() as usize;
-    let mut next_label = partition.iter().copied().max().unwrap_or(0) + 1;
+    let mut next_label = first_free_label(partition);
 
-    let mut nodes_by_label: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for (node, &label) in partition.iter().enumerate() {
-        nodes_by_label.entry(label).or_default().push(node);
-    }
-
-    for (_label, nodes) in nodes_by_label {
+    for (_label, nodes) in group_by_label(partition) {
         if nodes.len() < MIN_SPLIT_SIZE || nodes.len() <= max_size {
             continue;
         }
@@ -631,14 +639,13 @@ fn renumber(partition: &mut Vec<usize>) {
 }
 
 /// Aggregate `graph` by collapsing each group in `membership` (assumed
-/// contiguous `0..k`) into a single super-node.
+/// contiguous `0..k`) into a single super-node, returning the aggregated graph.
 ///
-/// Returns the aggregated graph together with `super_of`, where
-/// `super_of[node]` is the super-node index of each original node (== its
-/// `membership`). Intra-group edges and each node's existing self-loop mass are
-/// carried forward as the super-node's self-loop, so total edge weight is
-/// conserved across aggregation levels.
-fn aggregate_by(graph: &Graph, membership: &[usize]) -> (Graph, Vec<usize>) {
+/// `membership` doubles as the node → super-node map (node `i` collapses into
+/// super-node `membership[i]`), so it is not returned. Intra-group edges and
+/// each node's existing self-loop mass are carried forward as the super-node's
+/// self-loop, so total edge weight is conserved across aggregation levels.
+fn aggregate_by(graph: &Graph, membership: &[usize]) -> Graph {
     let num = membership.iter().copied().max().map(|m| m + 1).unwrap_or(0);
     let mut new_graph = Graph::new(num);
 
@@ -674,7 +681,7 @@ fn aggregate_by(graph: &Graph, membership: &[usize]) -> (Graph, Vec<usize>) {
         new_graph.add_self_loop(node, w);
     }
 
-    (new_graph, membership.to_vec())
+    new_graph
 }
 
 // ── Cluster naming ────────────────────────────────────────────────────────
