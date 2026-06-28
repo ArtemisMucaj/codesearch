@@ -7,6 +7,7 @@ pub mod index_controller;
 pub mod list_repositories_controller;
 pub mod search_controller;
 pub mod stats_controller;
+pub mod symbol_clusters_controller;
 pub mod symbol_context_controller;
 pub mod uses_controller;
 
@@ -19,5 +20,6 @@ pub use index_controller::IndexController;
 pub use list_repositories_controller::ListRepositoriesController;
 pub use search_controller::SearchController;
 pub use stats_controller::StatsController;
+pub use symbol_clusters_controller::SymbolClustersController;
 pub use symbol_context_controller::SymbolContextController;
 pub use uses_controller::UsesController;

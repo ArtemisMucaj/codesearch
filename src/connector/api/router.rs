@@ -1,13 +1,13 @@
 use anyhow::Result;
 
-use crate::cli::ClustersSubcommand;
+use crate::cli::{ClustersSubcommand, SymbolClustersSubcommand};
 use crate::{Commands, FeaturesSubcommand};
 
 use super::container::Container;
 use super::controller::{
     ClustersController, DeleteController, ExecutionFeaturesController, ExplainController,
     ImpactController, IndexController, ListRepositoriesController, SearchController,
-    StatsController, SymbolContextController, UsesController,
+    StatsController, SymbolClustersController, SymbolContextController, UsesController,
 };
 
 pub struct Router<'a> {
@@ -22,6 +22,7 @@ pub struct Router<'a> {
     uses_controller: UsesController<'a>,
     execution_features_controller: ExecutionFeaturesController<'a>,
     clusters_controller: ClustersController<'a>,
+    symbol_clusters_controller: SymbolClustersController<'a>,
 }
 
 impl<'a> Router<'a> {
@@ -38,6 +39,7 @@ impl<'a> Router<'a> {
             uses_controller: UsesController::new(container),
             execution_features_controller: ExecutionFeaturesController::new(container),
             clusters_controller: ClustersController::new(container),
+            symbol_clusters_controller: SymbolClustersController::new(container),
         }
     }
 
@@ -142,6 +144,22 @@ impl<'a> Router<'a> {
                 } => self.clusters_controller.get(file, repository, format).await,
                 ClustersSubcommand::Overview { repository } => {
                     self.clusters_controller.overview(repository).await
+                }
+            },
+            Commands::SymbolClusters { subcommand } => match subcommand {
+                SymbolClustersSubcommand::List { repository, format } => {
+                    self.symbol_clusters_controller
+                        .list(repository, format)
+                        .await
+                }
+                SymbolClustersSubcommand::Get {
+                    symbol,
+                    repository,
+                    format,
+                } => {
+                    self.symbol_clusters_controller
+                        .get(symbol, repository, format)
+                        .await
                 }
             },
             Commands::Mcp { .. } => {

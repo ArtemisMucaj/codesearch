@@ -11,6 +11,7 @@ pub(crate) mod pattern_utils;
 mod rrf_fuse;
 mod search_code;
 mod snippet_lookup;
+mod symbol_cluster_detection;
 mod symbol_context;
 
 pub use call_graph::*;
@@ -25,4 +26,5 @@ pub use list_repositories::*;
 pub use rrf_fuse::*;
 pub use search_code::*;
 pub use snippet_lookup::*;
+pub use symbol_cluster_detection::*;
 pub use symbol_context::*;

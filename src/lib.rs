@@ -11,12 +11,12 @@ pub use application::{
     FileRelationshipUseCase, ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode,
     IndexRepositoryUseCase, ListRepositoriesUseCase, MetadataRepository, ParserService,
     QueryExpander, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
-    SymbolContext, SymbolContextUseCase, VectorRepository,
+    SymbolClusterDetectionUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
 };
 
 pub use cli::{
-    Commands, ClustersSubcommand, EmbeddingTarget, FeaturesSubcommand,
-    LlmTarget, OutputFormat, RerankingTarget, TuiMode,
+    ClustersSubcommand, Commands, EmbeddingTarget, FeaturesSubcommand, LlmTarget, OutputFormat,
+    RerankingTarget, SymbolClustersSubcommand, TuiMode,
 };
 
 pub use connector::{
@@ -29,7 +29,8 @@ pub use connector::{
 pub use domain::{
     compute_file_hash, Cluster, ClusterGraph, CodeChunk, DomainError, Embedding, EmbeddingConfig,
     ExecutionFeature, FeatureNode, FileHash, IndexingStatus, Language, NodeType, ReferenceKind,
-    Repository, SearchQuery, SearchResult, SymbolReference, VectorStore,
+    Repository, SearchQuery, SearchResult, SymbolCommunity, SymbolCommunityGraph, SymbolReference,
+    VectorStore,
 };
 
 pub use connector::api::{Container, ContainerConfig, Router};

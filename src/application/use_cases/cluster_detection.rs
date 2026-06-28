@@ -3,27 +3,35 @@
 //! The algorithm follows Traag et al. (2019):
 //!   1. **Local moving** — each node greedily moves to the neighbour partition
 //!      that maximises modularity gain.
-//!   2. **Refinement** — a second greedy pass that lets nodes escape the local
-//!      optimum the moving phase settled into.
-//!   3. **Aggregation** — each partition is collapsed into a super-node and
-//!      the procedure repeats until the modularity gain is below `1e-6` or
-//!      50 iterations have elapsed.
+//!   2. **Refinement** — each community is rebuilt from singletons and its nodes
+//!      re-merged into well-connected sub-communities by a randomized,
+//!      gain-weighted pass (the step that makes this Leiden, not Louvain).
+//!   3. **Aggregation** — the *refined* partition is collapsed into super-nodes,
+//!      each seeded with its pre-refinement community, and the procedure repeats
+//!      until the modularity gain is below `1e-6` or 50 iterations have elapsed.
 //!
-//! The moving/refinement passes are modularity-greedy (Louvain-style) and do
-//! **not** by themselves guarantee that a community is internally connected —
-//! the defect Leiden was designed to fix. That guarantee is enforced explicitly
-//! as a post-pass ([`enforce_connectivity`]): any community that is not a single
-//! connected component in the induced subgraph is split into its components.
-//! A second post-pass ([`split_oversized`]) subdivides any community that grows
-//! to dominate the graph, so one mega-cluster cannot swallow the codebase.
+//! The refinement step ([`refine_partition`]) is the real thing: it rebuilds
+//! each community from singletons, re-merging nodes into well-connected
+//! sub-communities via a randomized, gain-weighted choice. This is what gives
+//! Leiden its two guarantees over Louvain — every community is internally
+//! connected, and the stochastic merges escape the local optima plain
+//! local-moving freezes into. Two post-passes then run for robustness:
+//! [`split_oversized`] subdivides any community that grows to dominate the graph
+//! (so one mega-cluster cannot swallow the codebase), and
+//! [`enforce_connectivity`] re-asserts the connectivity guarantee as a final
+//! safety net.
 //!
-//! All phases are deterministic: candidate clusters are visited in a stable
-//! order and graphs are built from sorted edge lists, so the same input always
-//! yields the same partition (cluster *membership*; the opaque UUIDs assigned to
-//! each cluster are not stable and carry no ordering meaning).
+//! The result is deterministic despite the randomness: the refinement RNG is
+//! seeded with a fixed constant ([`LEIDEN_SEED`]), candidate communities are
+//! visited in a stable order, and graphs are built from sorted edge lists, so
+//! the same input always yields the same partition (cluster *membership*; the
+//! opaque UUIDs assigned to each cluster are not stable and carry no ordering
+//! meaning).
 //!
-//! Edge weights are differentiated by reference kind (see `kind_weight`) so
-//! the algorithm clusters files that share strong semantic bonds.
+//! Edge weights are differentiated by reference kind (see [`kind_weight`]) so
+//! the algorithm clusters nodes that share strong semantic bonds. The graph
+//! primitives ([`Graph`], [`leiden`]) are `pub(crate)` so symbol-level community
+//! detection can reuse the exact same algorithm.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -52,7 +60,7 @@ const DEFAULT_KIND_WEIGHT: f64 = 0.3;
 /// Maximum character length for a generated cluster-name slug.
 const SLUG_MAX_LENGTH: usize = 30;
 
-fn kind_weight(kind: &str) -> f64 {
+pub(crate) fn kind_weight(kind: &str) -> f64 {
     match kind.to_lowercase().as_str() {
         "call" | "methodcall" => CALL_WEIGHT,
         "inheritance" => INHERITANCE_WEIGHT,
@@ -83,40 +91,112 @@ fn composite_weight(edge: &FileEdge) -> f64 {
 // ── Graph representation ──────────────────────────────────────────────────
 
 /// A compact undirected weighted graph stored as adjacency lists.
+///
+/// Exposed at `pub(crate)` so other use cases (e.g. symbol-level community
+/// detection) can build a graph and run [`leiden`] on it without duplicating the
+/// algorithm.
 #[derive(Clone)]
-struct Graph {
+pub(crate) struct Graph {
     /// Number of nodes.
     n: usize,
     /// `adj[u]` = list of (neighbour, weight) pairs (undirected: stored in both directions).
     adj: Vec<Vec<(usize, f64)>>,
     /// Total weight of all edges (each undirected edge counted once), including self-loops.
     total_weight: f64,
-    /// Weighted degree of each node: sum of incident edge weights.
+    /// Weighted degree of each node: sum of incident edge weights (a self-loop
+    /// contributes twice, as it touches the node at both ends).
     degree: Vec<f64>,
-    /// Sum of self-loop weights accumulated during graph aggregation.
+    /// Per-node self-loop weight, accumulated during graph aggregation.
     ///
-    /// Self-loops are not stored in `adj` (they would create spurious neighbours),
-    /// but their mass must be included in the internal-edge term of [`modularity`].
-    self_loop_weight: f64,
+    /// Self-loops are not stored in `adj` (they would create spurious
+    /// neighbours), but their mass is internal to whichever community the node
+    /// belongs to and must be included in the internal-edge term of
+    /// [`modularity`]. Tracking it per node (rather than as one scalar) lets the
+    /// multi-level Leiden recursion carry intra-community mass forward correctly
+    /// across successive aggregations.
+    self_loops: Vec<f64>,
 }
 
 impl Graph {
-    fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         Self {
             n,
             adj: vec![Vec::new(); n],
             total_weight: 0.0,
             degree: vec![0.0; n],
-            self_loop_weight: 0.0,
+            self_loops: vec![0.0; n],
         }
     }
 
-    fn add_edge(&mut self, u: usize, v: usize, w: f64) {
+    pub(crate) fn add_edge(&mut self, u: usize, v: usize, w: f64) {
         self.adj[u].push((v, w));
         self.adj[v].push((u, w));
         self.degree[u] += w;
         self.degree[v] += w;
         self.total_weight += w;
+    }
+
+    /// Add `w` of self-loop mass to `node`. A self-loop touches the node twice,
+    /// so it adds `2w` to the weighted degree but `w` to the total edge weight.
+    fn add_self_loop(&mut self, node: usize, w: f64) {
+        if w == 0.0 {
+            return;
+        }
+        self.self_loops[node] += w;
+        self.degree[node] += 2.0 * w;
+        self.total_weight += w;
+    }
+
+    /// Total self-loop (intra-community) mass across all nodes.
+    fn self_loop_total(&self) -> f64 {
+        self.self_loops.iter().sum()
+    }
+}
+
+// ── Deterministic PRNG ────────────────────────────────────────────────────
+
+/// Fixed seed for the refinement RNG. Leiden's refinement is stochastic by
+/// design (that randomness is what lets it escape the local optima Louvain gets
+/// stuck in); seeding it with a constant keeps the result reproducible across
+/// runs and processes while preserving the exploration.
+const LEIDEN_SEED: u64 = 0x5EED_1DEA_C0DE_F00D;
+
+/// Theta controls how sharply refinement prefers higher-gain merges: smaller →
+/// greedier, larger → more uniform exploration. Mid-range keeps some stochastic
+/// exploration without diluting clearly-better merges.
+const REFINE_THETA: f64 = 0.05;
+
+/// Minimal self-contained SplitMix64 PRNG — avoids pulling in the `rand` crate
+/// for the handful of values the refinement needs.
+struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Uniform f64 in `[0, 1)`.
+    fn next_f64(&mut self) -> f64 {
+        // 53-bit mantissa for a uniform double.
+        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+/// In-place Fisher–Yates shuffle using `rng`.
+fn shuffle<T>(items: &mut [T], rng: &mut SplitMix64) {
+    for i in (1..items.len()).rev() {
+        let j = (rng.next_u64() % (i as u64 + 1)) as usize;
+        items.swap(i, j);
     }
 }
 
@@ -135,10 +215,10 @@ const MIN_SPLIT_SIZE: usize = 10;
 /// Run Leiden cluster detection on `graph` and return a partition: a
 /// `Vec<usize>` where `partition[node_index]` is the cluster id.
 ///
-/// This is the modularity-greedy core ([`leiden_core`]) followed by the two
-/// guarantee-enforcing post-passes ([`enforce_connectivity`] then
-/// [`split_oversized`]); labels are renumbered contiguously at the end.
-fn leiden(graph: &Graph) -> Vec<usize> {
+/// This is the Leiden core ([`leiden_core`]) followed by the two
+/// guarantee-enforcing post-passes ([`split_oversized`] then
+/// [`enforce_connectivity`]); labels are renumbered contiguously at the end.
+pub(crate) fn leiden(graph: &Graph) -> Vec<usize> {
     if graph.n == 0 {
         return Vec::new();
     }
@@ -147,59 +227,80 @@ fn leiden(graph: &Graph) -> Vec<usize> {
     // Split any community that dominates the graph (uses the bare core on the
     // induced subgraph, so this does not recurse through the post-passes).
     split_oversized(graph, &mut result);
-    // Guarantee every final community is internally connected. Run last so that
-    // pieces produced by the oversized split are also connectivity-checked.
+    // Belt-and-braces: true Leiden refinement already yields connected
+    // communities, but the oversized split and any future change could not, so
+    // re-assert the guarantee as the final step.
     enforce_connectivity(graph, &mut result);
     renumber(&mut result);
     result
 }
 
-/// The bare modularity-greedy algorithm (local moving + refinement +
-/// aggregation), returning a partition mapped back to the original nodes. The
-/// labels are **not** renumbered and the connectivity / oversized guarantees are
-/// **not** enforced here — that is [`leiden`]'s job. Kept separate so the
-/// oversized-split post-pass can re-cluster a subgraph without re-triggering the
-/// post-passes (which would recurse indefinitely on an indivisible blob).
+/// The Leiden core (Traag et al. 2019): repeatedly (1) move nodes to the
+/// best neighbouring community, (2) **refine** each community into
+/// well-connected sub-communities via a randomized, gain-weighted pass, then
+/// (3) aggregate the graph using the *refined* partition while seeding the next
+/// level from the *unrefined* community of each node. The refinement is what
+/// separates Leiden from Louvain: it guarantees every community is internally
+/// connected and lets the search escape the local optima plain local-moving
+/// settles into.
+///
+/// Returns a partition mapped back to the original nodes (not renumbered, no
+/// post-passes — that is [`leiden`]'s job, kept separate so [`split_oversized`]
+/// can re-cluster a subgraph without recursing through the post-passes).
 fn leiden_core(graph: &Graph) -> Vec<usize> {
     if graph.n == 0 {
         return Vec::new();
     }
 
-    // Start: every node in its own cluster.
-    let mut partition: Vec<usize> = (0..graph.n).collect();
-    let mut prev_modularity = modularity(graph, &partition);
-    let mut current_graph = graph.clone();
-    let mut node_to_supernode: Vec<usize> = (0..graph.n).collect();
+    let mut rng = SplitMix64::new(LEIDEN_SEED);
+    let mut current = graph.clone();
+    // Partition `p` over the current (aggregated) graph's nodes.
+    let mut partition: Vec<usize> = (0..current.n).collect();
+    // Map every original node to its node index in `current`.
+    let mut node_to_super: Vec<usize> = (0..graph.n).collect();
+    let mut prev_modularity = f64::NEG_INFINITY;
 
     for _ in 0..MAX_ITERATIONS {
-        local_moving_phase(&current_graph, &mut partition);
-        refine_phase(&current_graph, &mut partition);
+        local_moving_phase(&current, &mut partition);
+        renumber(&mut partition);
 
-        // Aggregation step: collapse each partition into a super-node.
-        let (new_graph, new_partition) = aggregate_partition(&current_graph, &partition);
+        let num_communities = partition.iter().copied().max().map(|m| m + 1).unwrap_or(0);
+        let q = modularity(&current, &partition);
 
-        // Update the mapping from original nodes to supernodes.
-        for node in 0..node_to_supernode.len() {
-            let supernode = node_to_supernode[node];
-            node_to_supernode[node] = partition[supernode];
-        }
-
-        current_graph = new_graph;
-        partition = new_partition;
-
-        let new_modularity = modularity(&current_graph, &partition);
-        if new_modularity - prev_modularity < MIN_MODULARITY_GAIN {
+        // Nothing left to aggregate (every node already its own community) or no
+        // meaningful modularity improvement: stop with the current partition.
+        if num_communities >= current.n || q - prev_modularity < MIN_MODULARITY_GAIN {
             break;
         }
-        prev_modularity = new_modularity;
+        prev_modularity = q;
+
+        // Refine each community into well-connected sub-communities.
+        let mut refined = refine_partition(&current, &partition, &mut rng);
+        renumber(&mut refined);
+
+        // Aggregate by the refined partition; `super_of[node]` is the new
+        // super-node index for each current node.
+        let (aggregated, super_of) = aggregate_by(&current, &refined);
+
+        // Seed the next level's partition from the *unrefined* community: every
+        // refined sub-community (now a super-node) inherits the community it was
+        // refined out of, so local moving resumes from the coarse structure.
+        let mut next_partition = vec![0usize; aggregated.n];
+        for node in 0..current.n {
+            next_partition[super_of[node]] = partition[node];
+        }
+
+        // Compose the original→super mapping through this aggregation.
+        for slot in node_to_super.iter_mut() {
+            *slot = super_of[*slot];
+        }
+
+        current = aggregated;
+        partition = next_partition;
     }
 
-    // Map back to original nodes.
     (0..graph.n)
-        .map(|node| {
-            let supernode = node_to_supernode[node];
-            partition[supernode]
-        })
+        .map(|node| partition[node_to_super[node]])
         .collect()
 }
 
@@ -336,8 +437,9 @@ fn modularity(graph: &Graph, partition: &[usize]) -> f64 {
         }
     }
     // Self-loop mass was collapsed from intra-cluster edges during aggregation;
-    // it represents internal weight that must be counted alongside adj edges.
-    q += graph.self_loop_weight;
+    // it is always internal to a node's own community, so it is counted
+    // unconditionally alongside the intra-community adj edges.
+    q += graph.self_loop_total();
     q /= graph.total_weight;
 
     // Subtract expected: Σ_c (Σ_i∈c k_i)^2 / (2m)^2
@@ -420,70 +522,102 @@ fn local_moving_phase(graph: &Graph, partition: &mut Vec<usize>) {
     }
 }
 
-/// Refinement phase: a second greedy pass that lets nodes escape the local
-/// optimum the moving phase settled into. For each node we take the first
-/// neighbouring cluster (in ascending id order) that yields a positive
-/// modularity gain. We iterate once over all nodes to keep runtime bounded.
+/// Leiden refinement: within each community of `community` (the partition
+/// produced by local moving), break the community back into singletons and
+/// re-merge nodes into well-connected sub-communities.
 ///
-/// Note: this pass does **not** guarantee internally-connected communities —
-/// that is enforced separately by [`enforce_connectivity`] after the algorithm
-/// converges. The candidate order is deterministic so the partition is stable
-/// across runs.
-fn refine_phase(graph: &Graph, partition: &mut Vec<usize>) {
+/// Each still-isolated node is offered the neighbouring sub-communities **inside
+/// its own community** whose modularity gain is non-negative, and is merged into
+/// one chosen stochastically with probability proportional to `exp(gain / θ)`.
+/// Two properties fall out of this:
+/// * **Connectivity** — a sub-community only ever grows by absorbing a node that
+///   has an edge into it, so every resulting sub-community is connected.
+/// * **Escape from local optima** — the randomized, gain-weighted choice lets
+///   Leiden split communities Louvain would have frozen, the defect this whole
+///   change is about.
+///
+/// Returns the refined sub-community label per node (not yet renumbered).
+fn refine_partition(graph: &Graph, community: &[usize], rng: &mut SplitMix64) -> Vec<usize> {
+    let n = graph.n;
+    // Every node starts in its own singleton sub-community (id == node index).
+    let mut refined: Vec<usize> = (0..n).collect();
     let m2 = 2.0 * graph.total_weight;
     if m2 == 0.0 {
-        return;
+        return refined;
     }
+    // Weighted-degree sum and node count of each refined sub-community.
+    let mut sub_degree: Vec<f64> = graph.degree.clone();
+    let mut sub_size: Vec<usize> = vec![1; n];
 
-    let mut cluster_total: HashMap<usize, f64> = HashMap::new();
-    for u in 0..graph.n {
-        *cluster_total.entry(partition[u]).or_insert(0.0) += graph.degree[u];
-    }
+    let mut order: Vec<usize> = (0..n).collect();
+    shuffle(&mut order, rng);
 
-    for u in 0..graph.n {
-        let cu = partition[u];
-        let ku = graph.degree[u];
+    for &v in &order {
+        // Only nodes still alone in their sub-community may be merged — this is
+        // what keeps refined sub-communities well-connected.
+        if sub_size[refined[v]] != 1 {
+            continue;
+        }
+        let cv = community[v];
+        let kv = graph.degree[v];
 
-        // Collect distinct neighbouring clusters.
-        let mut neighbours: Vec<usize> = graph.adj[u]
-            .iter()
-            .map(|&(v, _)| partition[v])
-            .filter(|&c| c != cu)
-            .collect();
-        neighbours.sort_unstable();
-        neighbours.dedup();
-
-        if neighbours.is_empty() {
+        // Edge weight from v to each candidate sub-community within v's community.
+        let mut weight_to: HashMap<usize, f64> = HashMap::new();
+        for &(u, w) in &graph.adj[v] {
+            if community[u] == cv && refined[u] != refined[v] {
+                *weight_to.entry(refined[u]).or_insert(0.0) += w;
+            }
+        }
+        if weight_to.is_empty() {
             continue;
         }
 
-        // Weight from u to each candidate cluster.
-        let sigma_cu = *cluster_total.get(&cu).unwrap_or(&0.0);
-        let ku_in: f64 = graph.adj[u]
-            .iter()
-            .filter(|&&(v, _)| partition[v] == cu)
-            .map(|&(_, w)| w)
-            .sum();
-        let remove_gain = ku_in - ku * (sigma_cu - ku) / m2;
-
-        // Try each neighbouring cluster (deterministic — no actual randomness
-        // needed for the correctness guarantee; we just visit all candidates).
-        for ct in neighbours {
-            let w_to_ct: f64 = graph.adj[u]
-                .iter()
-                .filter(|&&(v, _)| partition[v] == ct)
-                .map(|&(_, w)| w)
-                .sum();
-            let sigma_ct = *cluster_total.get(&ct).unwrap_or(&0.0);
-            let gain = w_to_ct - ku * sigma_ct / m2 + remove_gain;
-            if gain > 0.0 {
-                *cluster_total.entry(cu).or_insert(0.0) -= ku;
-                *cluster_total.entry(ct).or_insert(0.0) += ku;
-                partition[u] = ct;
-                break; // take first improving move
+        // Candidate sub-communities with non-negative modularity gain, visited in
+        // ascending id so the (seeded) sampling below is reproducible.
+        let mut candidates: Vec<(usize, f64)> = weight_to.into_iter().collect();
+        candidates.sort_unstable_by_key(|&(c, _)| c);
+        let mut gains: Vec<(usize, f64)> = Vec::new();
+        for (c, w_to_c) in candidates {
+            // Merging a singleton into c: gain = w_to_c - k_v * Σ_c / 2m
+            // (the singleton has no internal mass, so its removal cost is 0).
+            let gain = w_to_c - kv * sub_degree[c] / m2;
+            if gain >= 0.0 {
+                gains.push((c, gain));
             }
         }
+        if gains.is_empty() {
+            continue;
+        }
+
+        // Sample a target ~ exp(gain / θ), shifted by the max gain for numerical
+        // stability.
+        let max_gain = gains.iter().map(|&(_, g)| g).fold(f64::MIN, f64::max);
+        let weights: Vec<f64> = gains
+            .iter()
+            .map(|&(_, g)| ((g - max_gain) / REFINE_THETA).exp())
+            .collect();
+        let total: f64 = weights.iter().sum();
+        let threshold = rng.next_f64() * total;
+        let mut acc = 0.0;
+        let mut chosen = gains[0].0;
+        for (idx, &w) in weights.iter().enumerate() {
+            acc += w;
+            if threshold <= acc {
+                chosen = gains[idx].0;
+                break;
+            }
+        }
+
+        // Merge v into the chosen sub-community.
+        let old = refined[v];
+        refined[v] = chosen;
+        sub_degree[chosen] += kv;
+        sub_degree[old] -= kv;
+        sub_size[chosen] += 1;
+        sub_size[old] -= 1;
     }
+
+    refined
 }
 
 /// Renumber partition labels to be contiguous starting from 0.
@@ -496,68 +630,57 @@ fn renumber(partition: &mut Vec<usize>) {
     }
 }
 
-/// Aggregate a graph by collapsing each partition into a super-node.
+/// Aggregate `graph` by collapsing each group in `membership` (assumed
+/// contiguous `0..k`) into a single super-node.
 ///
-/// Returns a new graph where each node represents a cluster from the original
-/// partition, and a new partition mapping (where each super-node is in its own cluster).
-fn aggregate_partition(graph: &Graph, partition: &[usize]) -> (Graph, Vec<usize>) {
-    // Build mapping from old cluster ID to new node index.
-    let num_clusters = partition.iter().copied().max().map(|m| m + 1).unwrap_or(0);
+/// Returns the aggregated graph together with `super_of`, where
+/// `super_of[node]` is the super-node index of each original node (== its
+/// `membership`). Intra-group edges and each node's existing self-loop mass are
+/// carried forward as the super-node's self-loop, so total edge weight is
+/// conserved across aggregation levels.
+fn aggregate_by(graph: &Graph, membership: &[usize]) -> (Graph, Vec<usize>) {
+    let num = membership.iter().copied().max().map(|m| m + 1).unwrap_or(0);
+    let mut new_graph = Graph::new(num);
 
-    // Create new graph with one node per cluster.
-    let mut new_graph = Graph::new(num_clusters);
-
-    // Aggregate edge weights between clusters.
-    let mut edge_weights: HashMap<(usize, usize), f64> = HashMap::new();
+    let mut inter: HashMap<(usize, usize), f64> = HashMap::new();
+    let mut self_mass: Vec<f64> = vec![0.0; num];
 
     for u in 0..graph.n {
-        let cu = partition[u];
+        let cu = membership[u];
+        // Carry this node's own self-loop mass into its super-node.
+        self_mass[cu] += graph.self_loops[u];
         for &(v, w) in &graph.adj[u] {
             if v <= u {
-                continue; // Process each edge only once.
+                continue; // each undirected edge once
             }
-            let cv = partition[v];
+            let cv = membership[v];
             if cu == cv {
-                // Intra-cluster edge becomes a self-loop on the super-node.
-                // Accumulate its weight so that total_weight and degree remain
-                // consistent with the original graph, which is required for
-                // correct modularity and delta-gain computations on the coarse graph.
-                *edge_weights.entry((cu, cu)).or_insert(0.0) += w;
+                self_mass[cu] += w;
             } else {
                 let (lo, hi) = if cu < cv { (cu, cv) } else { (cv, cu) };
-                *edge_weights.entry((lo, hi)).or_insert(0.0) += w;
+                *inter.entry((lo, hi)).or_insert(0.0) += w;
             }
         }
     }
 
-    // Add aggregated edges to new graph in a deterministic order (HashMap
-    // iteration order is process-randomised, and adjacency-list ordering feeds
-    // back into later phases, so sort the collapsed edges before inserting).
-    // Self-loops (u == v) must contribute to total_weight and degree but must
-    // NOT appear in adj — movement decisions only involve distinct neighbours,
-    // and a self-loop would create a spurious neighbour entry for a node.
-    let mut aggregated: Vec<((usize, usize), f64)> = edge_weights.into_iter().collect();
-    aggregated.sort_unstable_by_key(|&((u, v), _)| (u, v));
-    for ((u, v), w) in aggregated {
-        if u == v {
-            new_graph.total_weight += w;
-            new_graph.degree[u] += 2.0 * w; // both endpoints collapse to the same super-node
-            new_graph.self_loop_weight += w;
-        } else {
-            new_graph.add_edge(u, v, w);
-        }
+    // Insert in deterministic order (HashMap iteration is process-randomised and
+    // adjacency ordering feeds back into later phases).
+    let mut inter_edges: Vec<((usize, usize), f64)> = inter.into_iter().collect();
+    inter_edges.sort_unstable_by_key(|&((u, v), _)| (u, v));
+    for ((u, v), w) in inter_edges {
+        new_graph.add_edge(u, v, w);
+    }
+    for (node, &w) in self_mass.iter().enumerate() {
+        new_graph.add_self_loop(node, w);
     }
 
-    // New partition: each super-node is initially in its own cluster.
-    let new_partition: Vec<usize> = (0..num_clusters).collect();
-
-    (new_graph, new_partition)
+    (new_graph, membership.to_vec())
 }
 
 // ── Cluster naming ────────────────────────────────────────────────────────
 
 /// Common words excluded when extracting meaningful keywords from symbol names.
-const STOP_WORDS: &[&str] = &[
+pub(crate) const STOP_WORDS: &[&str] = &[
     "get", "set", "test", "new", "is", "has", "to", "from", "with", "the", "and", "or", "of", "in",
     "at", "by", "for",
 ];
@@ -642,7 +765,7 @@ fn name_cluster(members: &[String], symbol_map: &HashMap<String, String>) -> Str
 }
 
 /// Split a camelCase or snake_case identifier into words.
-fn split_identifier(s: &str) -> Vec<&str> {
+pub(crate) fn split_identifier(s: &str) -> Vec<&str> {
     // Try snake_case first.
     if s.contains('_') {
         return s.split('_').filter(|w| !w.is_empty()).collect();
@@ -662,7 +785,7 @@ fn split_identifier(s: &str) -> Vec<&str> {
 }
 
 /// Convert a string to a lowercase slug, truncated to `max_len` characters.
-fn slugify(s: &str, max_len: usize) -> String {
+pub(crate) fn slugify(s: &str, max_len: usize) -> String {
     let slug: String = s
         .chars()
         .map(|c| {
@@ -1180,6 +1303,85 @@ mod tests {
         let mut partition = vec![0, 0, 0, 0];
         split_oversized(&g, &mut partition);
         assert!(partition.iter().all(|&l| l == 0));
+    }
+
+    /// Build two `size`-cliques joined by a single weak bridge edge.
+    fn two_cliques(size: usize, bridge_weight: f64) -> Graph {
+        let mut g = Graph::new(size * 2);
+        for (base, _) in [(0usize, ()), (size, ())] {
+            for i in base..base + size {
+                for j in (i + 1)..base + size {
+                    g.add_edge(i, j, 1.0);
+                }
+            }
+        }
+        g.add_edge(0, size, bridge_weight);
+        g
+    }
+
+    #[test]
+    fn test_leiden_separates_two_cliques() {
+        // The real refinement must recover the two cliques as separate,
+        // internally-connected communities.
+        let g = two_cliques(6, 0.05);
+        let partition = leiden(&g);
+        assert!(
+            partition[0..6].iter().all(|&l| l == partition[0]),
+            "first clique split: {:?}",
+            partition
+        );
+        assert!(
+            partition[6..12].iter().all(|&l| l == partition[6]),
+            "second clique split: {:?}",
+            partition
+        );
+        assert_ne!(
+            partition[0], partition[6],
+            "cliques merged: {:?}",
+            partition
+        );
+    }
+
+    #[test]
+    fn test_leiden_is_deterministic() {
+        // Seeded refinement ⇒ identical partitions across repeated runs.
+        let g = two_cliques(8, 0.1);
+        assert_eq!(leiden(&g), leiden(&g));
+    }
+
+    #[test]
+    fn test_leiden_communities_are_connected() {
+        // Every community Leiden returns must be a single connected component of
+        // the induced subgraph (the guarantee that distinguishes it from Louvain).
+        let g = two_cliques(7, 0.05);
+        let partition = leiden(&g);
+
+        let num = partition.iter().copied().max().unwrap() + 1;
+        for community in 0..num {
+            let members: Vec<usize> = (0..g.n).filter(|&i| partition[i] == community).collect();
+            if members.len() < 2 {
+                continue;
+            }
+            // BFS within the community from the first member.
+            let set: std::collections::HashSet<usize> = members.iter().copied().collect();
+            let mut seen = std::collections::HashSet::new();
+            let mut stack = vec![members[0]];
+            seen.insert(members[0]);
+            while let Some(u) = stack.pop() {
+                for &(v, _) in &g.adj[u] {
+                    if set.contains(&v) && seen.insert(v) {
+                        stack.push(v);
+                    }
+                }
+            }
+            assert_eq!(
+                seen.len(),
+                members.len(),
+                "community {} is not internally connected: {:?}",
+                community,
+                members
+            );
+        }
     }
 
     #[test]
