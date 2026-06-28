@@ -179,7 +179,7 @@ Or after copying the release binary to your `$PATH`:
 ```bash
 codesearch index .
 codesearch search "embedding similarity"
-codesearch impact MyStruct --depth 5
+codesearch impact MyStruct
 codesearch context some_function
 ```
 
