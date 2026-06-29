@@ -9,22 +9,22 @@ compatibility: Requires the codesearch binary installed and a repository indexed
 
 # Codesearch
 
-Hybrid code search powered by ML embeddings, BM25-style keyword matching, and Reciprocal Rank Fusion. Finds code by meaning **and** by exact keyword — both in a single query, by default.
+Hybrid code search powered by ML embeddings, BM25-style keyword matching, and Reciprocal Rank Fusion. Finds code by meaning and by exact keyword — both in a single query, by default.
 
 ## When to Use This Skill
 
-Invoke this skill **immediately** when:
-- User asks to find code by **intent** (e.g., "where is authentication handled?")
-- User asks to understand **what code does** (e.g., "how does the indexer work?")
-- User asks to explore **functionality** (e.g., "find error handling logic")
-- User asks about **implementation details** (e.g., "how are embeddings generated?")
-- You need to discover code related to a **concept** rather than an exact string
-- User asks about **blast radius** or **impact** of changing a function/symbol
-- User asks **who calls** a function or **what does a function call** (symbol context)
-- User asks for an **explanation** of a symbol's full call flow or business purpose (`explain`)
-- User asks about the **architectural structure** of a repo — modules, clusters, entry-point features
-- User asks which **symbols form a feature/community** together, or which community a symbol belongs to (`symbol-clusters`)
-- User asks **which files one repository uses** from another (cross-repo dependencies)
+Invoke this skill immediately when:
+- User asks to find code by intent (e.g., "where is authentication handled?")
+- User asks to understand what code does (e.g., "how does the indexer work?")
+- User asks to explore functionality (e.g., "find error handling logic")
+- User asks about implementation details (e.g., "how are embeddings generated?")
+- You need to discover code related to a concept rather than an exact string
+- User asks about blast radius or impact of changing a function/symbol
+- User asks who calls a function or what does a function call (symbol context)
+- User asks for an explanation of a symbol's full call flow or business purpose (`explain`)
+- User asks about the architectural structure of a repo — modules, clusters, entry-point features
+- User asks which symbols form a feature/community together, or which community a symbol belongs to (`symbol-clusters`)
+- User asks which files one repository uses from another (cross-repo dependencies)
 
 ## When to Use Built-in Tools Instead
 
@@ -48,7 +48,7 @@ After installation, verify it works:
 codesearch --version
 ```
 
-> **Note:** The script downloads the latest release binary from GitHub for the current OS/architecture. It installs to `$INSTALL_DIR` (defaults to `$HOME/.local/bin` above). Ensure `$HOME/.local/bin` is in your `PATH`. If it's not already in your PATH, add this line to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.):
+> Note: The script downloads the latest release binary from GitHub for the current OS/architecture. It installs to `$INSTALL_DIR` (defaults to `$HOME/.local/bin` above). Ensure `$HOME/.local/bin` is in your `PATH`. If it's not already in your PATH, add this line to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.):
 > ```shell
 > export PATH="$HOME/.local/bin:$PATH"
 > ```
@@ -71,7 +71,7 @@ codesearch index /path/to/repo --force
 
 ## Search
 
-Use `codesearch search` to find code. By default it runs **hybrid search** (semantic vector similarity + BM25 keyword matching, fused via RRF) for best precision and recall.
+Use `codesearch search` to find code. By default it runs hybrid search (semantic vector similarity + BM25 keyword matching, fused via RRF) for best precision and recall.
 
 ```shell
 # Hybrid search — default, no flag needed
@@ -108,7 +108,7 @@ codesearch search "config loading" --repository my-project
 
 ### Supported Languages
 
-Codesearch supports: **Rust**, **Python**, **JavaScript**, **TypeScript**, **Go**, **HCL**, **PHP**, **C++**
+Codesearch supports: Rust, Python, JavaScript, TypeScript, Go, HCL, PHP, C++
 
 ### What Gets Indexed
 
@@ -194,7 +194,7 @@ codesearch features impacted authenticate hash_password
 
 ### Clusters — architectural modules (Leiden community detection)
 
-Runs Leiden community detection over the **file** dependency graph to find
+Runs Leiden community detection over the file dependency graph to find
 tightly-coupled groups of files (architectural modules).
 
 ```shell
@@ -210,7 +210,7 @@ codesearch clusters overview my-repo
 
 ### Symbol Clusters — behavioural communities (Leiden over the call graph)
 
-The same Leiden algorithm one level finer: it clusters the **symbol** call graph
+The same Leiden algorithm one level finer: it clusters the symbol call graph
 (functions, methods, types) instead of files, so the communities are
 behavioural units — a feature, a subsystem, a collaborating set of functions —
 that frequently cut across file boundaries. Use file-level `clusters` to answer
@@ -265,7 +265,7 @@ codesearch delete <id-or-path>
 
 ## Query Best Practices
 
-**Do:**
+Do:
 ```shell
 codesearch search "How are file chunks created and stored?"
 codesearch search "Vector embedding generation process"
@@ -273,7 +273,7 @@ codesearch search "Configuration loading and validation"
 codesearch search "HTTP request routing logic"
 ```
 
-**Don't:**
+Don't:
 ```shell
 codesearch search "func"          # Too vague
 codesearch search "error"         # Too generic
@@ -282,22 +282,17 @@ codesearch search "HandleRequest" # Use Grep for exact name matches
 
 ## Recommended Workflow
 
-1. **Start with `codesearch search`** to find relevant code semantically
-2. **Use `Read` tool** to examine the files and lines from search results
-3. **Use `Grep`** only for exact string searches when you know the identifier name
-4. **Use `codesearch search`** again with refined queries if initial results aren't specific enough
+1. Start with `codesearch search` to find relevant code semantically
+2. Use `Read` tool to examine the files and lines from search results
+3. Use `Grep` only for exact string searches when you know the identifier name
+4. Use `codesearch search` again with refined queries if initial results aren't specific enough
 
 ## Namespace Resolution Is Automatic
 
-**Do not pass `--namespace` or the embedding flags (`--embedding-target`,
-`--embedding-model`, `--embedding-dimensions`).** Run commands from inside the
+Do not pass `--namespace` or the embedding flags (`--embedding-target`,
+`--embedding-model`, `--embedding-dimensions`). Run commands from inside the
 repository and codesearch selects the correct namespace and embedding
 configuration on its own.
-
-It works like this: indexing records the repository's git remote; every later
-command matches the current directory against it (by git remote first — so it
-holds across re-clones to a different path — then by on-disk path) and adopts
-that namespace and embedding config automatically.
 
 ```shell
 # Index once (under a custom namespace if you want).
@@ -308,7 +303,7 @@ cd /path/to/repo
 codesearch search "user authentication flow"
 ```
 
-Rely on this. Only set `--namespace` explicitly to **override** the resolved
+Rely on this. Only set `--namespace` explicitly to override the resolved
 value — an explicit flag always wins.
 
 ## Advanced Configuration
