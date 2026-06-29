@@ -126,6 +126,66 @@ Clusters for `my-repo` — 3 clusters, 42 files, 118 edges
 File `src/api/auth.rs` belongs to cluster `auth` (8 files, rust, cohesion 0.82)
 ```
 
+## Symbol Communities (`codesearch symbol-clusters`)
+
+`symbol-clusters` runs the **same Leiden algorithm one level finer** — over the
+symbol call graph (`symbol_references`) rather than the file-dependency graph.
+Nodes are individual symbols (functions, methods, types) and edges are
+caller→callee references weighted by reference kind. The resulting communities
+are *behavioural* units — a feature, a subsystem, a collaborating set of
+functions — that frequently cut across file and directory boundaries, which the
+file-level `clusters` view cannot show.
+
+Use `clusters` to answer "what are this repo's modules?" and `symbol-clusters`
+to answer "which symbols form a feature together, regardless of where they live?".
+
+### Subcommands
+
+```bash
+# List all symbol communities detected in the repository
+codesearch symbol-clusters list my-repo
+
+# JSON output
+codesearch symbol-clusters list my-repo --format json
+
+# Show which community a symbol belongs to. The symbol is resolved by exact
+# fully-qualified name, then short-name suffix, then substring (case-sensitive).
+codesearch symbol-clusters get authenticate my-repo
+codesearch symbol-clusters get "MyNs/Auth#authenticate()." my-repo
+```
+
+### Options
+
+| Flag | Subcommand | Default | Description |
+|------|------------|---------|-------------|
+| `-F, --format` | `list`, `get` | `text` | Output format: `text` or `json` (vimgrep is not supported) |
+
+Requires the repository to have been indexed with call-graph support (the
+default). When the call graph is empty, no communities are returned.
+
+### Example: `symbol-clusters list`
+
+```text
+Symbol communities for `my-repo` — 5 communities, 214 symbols, 087 edges
+────────────────────────────────────────────────────────────
+  1. authenticate (18 symbols, rust, cohesion 0.71)
+      MyNs/Auth#authenticate().
+      MyNs/Auth#verify_password().
+      MyNs/Session#issue_token().
+      … and 15 more
+  2. indexing (24 symbols, rust, cohesion 0.66)
+      …
+```
+
+### Example: `symbol-clusters get`
+
+```text
+Symbol `authenticate` belongs to community `authenticate` (18 symbols, rust, cohesion 0.71)
+    MyNs/Auth#authenticate().
+    MyNs/Auth#verify_password().
+    …
+```
+
 ## Cross-repository Usage (`codesearch uses`)
 
 `codesearch uses <from> <to>` lists every file in the `<from>` repository that

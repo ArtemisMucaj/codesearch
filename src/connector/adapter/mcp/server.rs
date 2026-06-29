@@ -247,6 +247,24 @@ pub struct ArchitectureOverviewInput {
     pub repository_id: String,
 }
 
+/// Input parameters for the list_symbol_clusters tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListSymbolClustersInput {
+    /// Repository ID to detect symbol communities in.
+    pub repository_id: String,
+}
+
+/// Input parameters for the get_symbol_cluster tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetSymbolClusterInput {
+    /// Symbol to locate — a fully-qualified name or a bare short name
+    /// (e.g. `authenticate` or `pkg/Auth#authenticate().`).
+    pub symbol: String,
+
+    /// Repository ID the symbol belongs to.
+    pub repository_id: String,
+}
+
 // ── MCP Server ───────────────────────────────────────────────────────────────
 
 /// MCP Server that exposes codesearch functionality
@@ -855,6 +873,60 @@ impl CodesearchMcpServer {
 
         Ok(CallToolResult::success(vec![Content::text(overview)]))
     }
+
+    /// Detect symbol communities in a repository by running Leiden community
+    /// detection over its symbol call graph (one level finer than `list_clusters`,
+    /// which works on files). Returns the communities with their names, dominant
+    /// language, cohesion score, and member symbols — behavioural units that
+    /// frequently cut across files.
+    /// Requires the repository to have been indexed with call-graph support.
+    #[tool(name = "list_symbol_clusters")]
+    async fn list_symbol_clusters(
+        &self,
+        params: Parameters<ListSymbolClustersInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = params.0;
+
+        let use_case = self.container.symbol_cluster_detection_use_case();
+        let community_graph = use_case
+            .detect_communities(&input.repository_id)
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Symbol community detection failed: {}", e), None)
+            })?;
+
+        let json = serde_json::to_string_pretty(&community_graph).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize communities: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Return the symbol community a specific symbol belongs to. Resolves the
+    /// symbol by exact fully-qualified name, then boundary suffix, then substring.
+    /// Returns `null` when the symbol is not part of any detected community.
+    /// Requires the repository to have been indexed with call-graph support.
+    #[tool(name = "get_symbol_cluster")]
+    async fn get_symbol_cluster(
+        &self,
+        params: Parameters<GetSymbolClusterInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = params.0;
+
+        let use_case = self.container.symbol_cluster_detection_use_case();
+        let community = use_case
+            .community_for_symbol(&input.symbol, &input.repository_id)
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Symbol community lookup failed: {}", e), None)
+            })?;
+
+        let json = serde_json::to_string_pretty(&community).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize community: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
 }
 
 #[tool_handler]
@@ -877,9 +949,11 @@ impl ServerHandler for CodesearchMcpServer {
                  • get_feature — a single execution feature by entry-point symbol\n\
                  • get_impacted_features — features whose call chain includes changed symbols\n\
                  • file_uses — which files in one repository depend on files in another\n\
-                 • list_clusters — architectural clusters via Leiden community detection\n\
+                 • list_clusters — architectural (file-level) clusters via Leiden community detection\n\
                  • get_file_cluster — the cluster a given file belongs to\n\
-                 • architecture_overview — Markdown table summarising clusters and dependencies"
+                 • architecture_overview — Markdown table summarising clusters and dependencies\n\
+                 • list_symbol_clusters — symbol-level communities via Leiden over the call graph\n\
+                 • get_symbol_cluster — the symbol community a given symbol belongs to"
                     .into(),
             ),
         }

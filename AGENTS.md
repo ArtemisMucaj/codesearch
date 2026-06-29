@@ -79,7 +79,8 @@ The codebase follows **Domain-Driven Design (DDD)** with a strict **Ports & Adap
 | Call graph extraction & relationship queries | `src/application/use_cases/call_graph.rs` |
 | LLM explanation of a symbol's call flow | `src/application/use_cases/explain.rs` |
 | Execution features + criticality scoring | `src/application/use_cases/execution_features.rs` |
-| Architectural cluster detection (Leiden) | `src/application/use_cases/cluster_detection.rs` |
+| Architectural (file-level) cluster detection (Leiden) | `src/application/use_cases/cluster_detection.rs` |
+| Symbol-level community detection (Leiden over the call graph) | `src/application/use_cases/symbol_cluster_detection.rs` |
 | File / cross-repo relationship graph (`uses`) | `src/application/use_cases/file_relationship.rs` |
 | Source snippet lookup | `src/application/use_cases/snippet_lookup.rs` |
 | List / delete repositories | `src/application/use_cases/{list,delete}_repository.rs` |
@@ -179,7 +180,7 @@ Or after copying the release binary to your `$PATH`:
 ```bash
 codesearch index .
 codesearch search "embedding similarity"
-codesearch impact MyStruct --depth 5
+codesearch impact MyStruct
 codesearch context some_function
 ```
 

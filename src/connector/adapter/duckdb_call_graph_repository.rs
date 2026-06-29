@@ -592,9 +592,13 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
                 "regexp_matches(caller_symbol, ?)".to_string(),
             )
         } else {
+            // `ESCAPE '\'` lets us treat `_` and `%` inside the symbol name as
+            // literals rather than LIKE wildcards (see `escape_like`). Without
+            // it a snake_case query like `my_func` scans as `my<any>func`,
+            // forcing a near-full table scan of `symbol_references`.
             (
-                "callee_symbol LIKE ?".to_string(),
-                "caller_symbol LIKE ?".to_string(),
+                r"callee_symbol LIKE ? ESCAPE '\'".to_string(),
+                r"caller_symbol LIKE ? ESCAPE '\'".to_string(),
             )
         };
 
@@ -657,7 +661,9 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
         let pattern = if query.is_regex {
             short_name.to_string()
         } else {
-            format!("%{}", short_name)
+            // Leading `%` is the wildcard; the name itself is escaped so its own
+            // `_`/`%`/`\` characters match literally (paired with `ESCAPE '\'`).
+            format!("%{}", escape_like(short_name))
         };
 
         // Params order: pattern (callee leg), extra filters (callee leg),
@@ -731,6 +737,20 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
 ///
 /// This handles both plain symbols (`Home#canDestroy`) and SCIP-style
 /// method descriptors (`Home#canDestroy().`) uniformly.
+/// Escape the LIKE metacharacters (`\`, `%`, `_`) in a literal string so it can
+/// be embedded in a `LIKE ? ESCAPE '\'` pattern and matched verbatim. Backslash
+/// is escaped first so the escapes added for `%`/`_` are not themselves doubled.
+fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn scip_boundary_match(symbol: &str, sep: &str, name: &str) -> bool {
     let needle = format!("{}{}", sep, name);
     if let Some(pos) = symbol.rfind(&needle) {
@@ -744,6 +764,16 @@ fn scip_boundary_match(symbol: &str, sep: &str, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_escape_like_escapes_wildcards() {
+        // `_` and `%` must be backslash-escaped; backslash itself is doubled.
+        assert_eq!(escape_like("my_func"), r"my\_func");
+        assert_eq!(escape_like("a%b"), r"a\%b");
+        assert_eq!(escape_like(r"ns\Type"), r"ns\\Type");
+        // Names without wildcards are returned verbatim.
+        assert_eq!(escape_like("authenticate"), "authenticate");
+    }
 
     async fn create_test_repo() -> DuckdbCallGraphRepository {
         let conn = Connection::open_in_memory().unwrap();

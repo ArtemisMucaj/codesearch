@@ -111,6 +111,35 @@ pub enum ClustersSubcommand {
     },
 }
 
+/// Subcommands for the `symbol-clusters` command — Leiden communities detected
+/// over the symbol call graph (one level finer than file-level `clusters`).
+#[derive(Subcommand)]
+pub enum SymbolClustersSubcommand {
+    /// List all symbol communities detected in the repository.
+    List {
+        /// Repository ID or name to analyse.
+        repository: String,
+
+        /// Output format: text or json.
+        #[arg(short = 'F', long, value_enum, default_value = "text")]
+        format: OutputFormatTextJson,
+    },
+
+    /// Show the community that a specific symbol belongs to.
+    Get {
+        /// Symbol to look up — a fully-qualified name or a bare short name
+        /// (e.g. `authenticate` or `pkg/Auth#authenticate().`).
+        symbol: String,
+
+        /// Repository ID or name.
+        repository: String,
+
+        /// Output format: text or json.
+        #[arg(short = 'F', long, value_enum, default_value = "text")]
+        format: OutputFormatTextJson,
+    },
+}
+
 /// Initial mode for the interactive TUI.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum TuiMode {
@@ -314,6 +343,12 @@ pub enum Commands {
     Clusters {
         #[command(subcommand)]
         subcommand: ClustersSubcommand,
+    },
+
+    /// Detect & query symbol communities (Leiden over the call graph).
+    SymbolClusters {
+        #[command(subcommand)]
+        subcommand: SymbolClustersSubcommand,
     },
 
     /// Start MCP (Model Context Protocol) server for integration with AI tools

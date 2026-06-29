@@ -294,6 +294,23 @@ codesearch clusters get src/api/auth.rs my-repo
 codesearch clusters overview my-repo
 ```
 
+### Symbol Clusters (`symbol-clusters`)
+
+Runs the same Leiden algorithm over the **symbol** call graph instead of files,
+grouping individual functions, methods, and types into behavioural communities
+that often cut across file boundaries.
+
+```bash
+# List detected symbol communities
+codesearch symbol-clusters list my-repo
+
+# Find which community a symbol belongs to (exact, short-name, or substring)
+codesearch symbol-clusters get authenticate my-repo
+
+# JSON output (vimgrep is not supported for either subcommand)
+codesearch symbol-clusters list my-repo --format json
+```
+
 ### Cross-repository Usage (`uses`)
 
 Lists every file in one repository that references symbols defined in another,
@@ -396,6 +413,8 @@ The HTTP server exposes the MCP endpoint at `/mcp`.
 | `list_clusters` | Architectural clusters via Leiden community detection. Accepts `repository_id`. |
 | `get_file_cluster` | The cluster a given file belongs to. Accepts `file_path` and `repository_id`. |
 | `architecture_overview` | Markdown table summarising clusters and inter-cluster dependencies. Accepts `repository_id`. |
+| `list_symbol_clusters` | Symbol-level communities via Leiden over the call graph. Accepts `repository_id`. |
+| `get_symbol_cluster` | The symbol community a given symbol belongs to. Accepts `symbol` and `repository_id`. |
 
 The `query_graph` tool supports eight intention-named relationship `pattern`s, returning
 only the requested edge type instead of every relationship at once:

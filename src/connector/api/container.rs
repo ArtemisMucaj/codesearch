@@ -18,8 +18,8 @@ use crate::{
     FileRelationshipUseCase, ImpactAnalysisUseCase, InMemoryVectorRepository,
     IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding,
     MockReranking, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking,
-    RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase, SymbolContextUseCase,
-    TreeSitterParser, VectorRepository,
+    RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase, SymbolClusterDetectionUseCase,
+    SymbolContextUseCase, TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -528,6 +528,10 @@ impl Container {
 
     pub fn cluster_detection_use_case(&self) -> ClusterDetectionUseCase {
         ClusterDetectionUseCase::new(Arc::new(self.file_graph_use_case()))
+    }
+
+    pub fn symbol_cluster_detection_use_case(&self) -> SymbolClusterDetectionUseCase {
+        SymbolClusterDetectionUseCase::new(self.call_graph_use_case.clone())
     }
 
     pub fn data_dir(&self) -> &str {

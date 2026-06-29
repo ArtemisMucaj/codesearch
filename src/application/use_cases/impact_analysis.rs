@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::application::use_cases::pattern_utils::build_fuzzy_pattern;
 use crate::application::{CallGraphQuery, CallGraphUseCase};
@@ -11,9 +11,29 @@ use crate::domain::DomainError;
 
 pub const ANONYMOUS_SYMBOL: &str = "<anonymous>";
 
-/// Maximum number of fully-qualified symbols to resolve from a short name during
-/// fallback resolution. Caps the ambiguity fan-out without blocking common cases.
-const RESOLVE_SYMBOLS_LIMIT: u32 = 10;
+/// Maximum number of fully-qualified symbols to resolve from a short name before
+/// seeding the blast-radius BFS. Caps the ambiguity fan-out; when a name resolves
+/// to more than this many FQNs the extras are dropped and the result is flagged
+/// as truncated (see [`ImpactAnalysisUseCase::resolve_capped`]) rather than
+/// silently analysing an arbitrary alphabetical slice.
+const RESOLVE_SYMBOLS_LIMIT: u32 = 100;
+
+/// Build the human-readable label for the analysed symbol from its resolved
+/// roots. A single root is shown verbatim; multiple roots show the count, with a
+/// `+ … capped` note when resolution hit [`RESOLVE_SYMBOLS_LIMIT`] so the user
+/// knows the blast radius is partial.
+fn display_label(symbol: &str, resolved: &[String], truncated: bool) -> String {
+    match resolved.len() {
+        1 => resolved[0].clone(),
+        n if truncated => {
+            format!(
+                "{} ({}+ symbols, capped at {})",
+                symbol, n, RESOLVE_SYMBOLS_LIMIT
+            )
+        }
+        n => format!("{} ({} symbols)", symbol, n),
+    }
+}
 
 /// A single node in the impact (blast-radius) graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +138,37 @@ impl ImpactAnalysisUseCase {
         Self { call_graph }
     }
 
+    /// Resolve `pattern` to root symbols, capped at [`RESOLVE_SYMBOLS_LIMIT`].
+    ///
+    /// Asks the repository for one row beyond the cap so that hitting the cap can
+    /// be detected: when more matches exist than the cap, the extras are dropped
+    /// and `true` is returned for the truncation flag (and a warning is logged),
+    /// so the blast radius is never silently computed over an arbitrary
+    /// alphabetical slice of a larger match set.
+    async fn resolve_capped(
+        &self,
+        pattern: &str,
+        query: &CallGraphQuery,
+    ) -> Result<(Vec<String>, bool), DomainError> {
+        let mut resolved = self
+            .call_graph
+            .resolve_symbols(pattern, query, RESOLVE_SYMBOLS_LIMIT + 1)
+            .await?;
+        let truncated = resolved.len() as u32 > RESOLVE_SYMBOLS_LIMIT;
+        if truncated {
+            resolved.truncate(RESOLVE_SYMBOLS_LIMIT as usize);
+            warn!(
+                pattern,
+                cap = RESOLVE_SYMBOLS_LIMIT,
+                "impact: symbol resolved to more than {} FQNs; blast radius covers \
+                 only the first {} — narrow the symbol for a complete result",
+                RESOLVE_SYMBOLS_LIMIT,
+                RESOLVE_SYMBOLS_LIMIT
+            );
+        }
+        Ok((resolved, truncated))
+    }
+
     /// Compute blast radius.
     ///
     /// `symbol`        – symbol name or substring to analyse (e.g. `"authenticate"`),
@@ -149,17 +200,11 @@ impl ImpactAnalysisUseCase {
         // Determine the set of root symbols to BFS from and a display label.
         let (root_symbols, display_symbol): (Vec<String>, String) = if is_regex {
             // Regex mode: always resolve via pattern matching; never try an exact hit.
-            let resolved = self
-                .call_graph
-                .resolve_symbols(symbol, &query, RESOLVE_SYMBOLS_LIMIT)
-                .await?;
+            let (resolved, truncated) = self.resolve_capped(symbol, &query).await?;
             if resolved.is_empty() {
                 (vec![symbol.to_string()], symbol.to_string())
-            } else if resolved.len() == 1 {
-                let s = resolved[0].clone();
-                (resolved, s)
             } else {
-                let display = format!("{} ({} symbols)", symbol, resolved.len());
+                let display = display_label(symbol, &resolved, truncated);
                 (resolved, display)
             }
         } else {
@@ -168,10 +213,7 @@ impl ImpactAnalysisUseCase {
             // caller_symbol).  This correctly handles root entry-point symbols
             // that have zero callers but appear as caller_symbol — find_callers
             // would return empty for them, incorrectly triggering fuzzy expansion.
-            let exact_resolved = self
-                .call_graph
-                .resolve_symbols(symbol, &query, RESOLVE_SYMBOLS_LIMIT)
-                .await?;
+            let (exact_resolved, exact_truncated) = self.resolve_capped(symbol, &query).await?;
             if !exact_resolved.is_empty() {
                 debug!(
                     symbol,
@@ -179,11 +221,7 @@ impl ImpactAnalysisUseCase {
                     "impact: exact-match found {} symbols",
                     exact_resolved.len()
                 );
-                let display = if exact_resolved.len() == 1 {
-                    exact_resolved[0].clone()
-                } else {
-                    format!("{} ({} symbols)", symbol, exact_resolved.len())
-                };
+                let display = display_label(symbol, &exact_resolved, exact_truncated);
                 (exact_resolved, display)
             } else {
                 let auto_pattern = format!(".*{}.*", build_fuzzy_pattern(symbol));
@@ -192,10 +230,7 @@ impl ImpactAnalysisUseCase {
                     symbol,
                     auto_pattern, "impact: exact-match empty, trying auto-wrap regex"
                 );
-                let resolved = self
-                    .call_graph
-                    .resolve_symbols(&auto_pattern, &auto_query, RESOLVE_SYMBOLS_LIMIT)
-                    .await?;
+                let (resolved, truncated) = self.resolve_capped(&auto_pattern, &auto_query).await?;
                 debug!(
                     symbol,
                     resolved_count = resolved.len(),
@@ -208,11 +243,8 @@ impl ImpactAnalysisUseCase {
                         "impact: no rows match pattern — symbol may not be indexed"
                     );
                     (vec![symbol.to_string()], symbol.to_string())
-                } else if resolved.len() == 1 {
-                    let s = resolved[0].clone();
-                    (resolved, s)
                 } else {
-                    let display = format!("{} ({} symbols)", symbol, resolved.len());
+                    let display = display_label(symbol, &resolved, truncated);
                     (resolved, display)
                 }
             }
