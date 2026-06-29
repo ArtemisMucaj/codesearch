@@ -24,6 +24,26 @@ const DEFAULT_MAX_SEQ_LENGTH: usize = 512;
 /// amortising per-call overhead.
 const BATCH_SIZE: usize = 32;
 
+/// Instruction prepended to *queries* (not documents) for instruction-tuned
+/// embedding models such as Qwen3-Embedding.  The model was trained to embed
+/// queries in the form `Instruct: {task}\nQuery: {text}`; documents are embedded
+/// verbatim.  Using a code-retrieval-flavoured task description nudges the model
+/// toward the right embedding subspace for this tool.
+const QUERY_INSTRUCTION: &str =
+    "Given a code search query, retrieve relevant code that matches the query";
+
+/// How the per-token hidden states emitted by a `[batch, seq, hidden]` model are
+/// reduced to a single vector per sequence.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Pooling {
+    /// Attention-masked mean over all tokens — the convention for BERT-style
+    /// sentence-transformers models (e.g. all-MiniLM-L6-v2).
+    Mean,
+    /// Hidden state of the last non-padded token — the convention for
+    /// causal/decoder embedding models (e.g. Qwen3-Embedding).
+    LastToken,
+}
+
 pub struct OrtEmbedding {
     session: Arc<Mutex<Session>>,
     tokenizer: Arc<Tokenizer>,
@@ -32,6 +52,8 @@ pub struct OrtEmbedding {
     /// input (e.g. BERT-style models).  All-zero segment IDs are used because
     /// embedding models always encode a single sequence.
     needs_token_type_ids: bool,
+    /// Pooling strategy applied to `[batch, seq, hidden]` outputs.
+    pooling: Pooling,
 }
 
 impl OrtEmbedding {
@@ -83,6 +105,17 @@ impl OrtEmbedding {
             .iter()
             .any(|i| i.name() == "token_type_ids");
 
+        // Pooling is inferred from the model architecture: BERT-style encoders
+        // declare a `token_type_ids` (segment) input and are mean-pooled, while
+        // causal/decoder embedding models (Qwen3-Embedding) have no segment
+        // input and are pooled on their last token.
+        let pooling = if needs_token_type_ids {
+            Pooling::Mean
+        } else {
+            Pooling::LastToken
+        };
+        debug!("Embedding pooling strategy: {:?}", pooling);
+
         let config = EmbeddingConfig::new(
             model_name.to_string(),
             DEFAULT_DIMENSIONS,
@@ -94,6 +127,7 @@ impl OrtEmbedding {
             tokenizer: Arc::new(tokenizer),
             config,
             needs_token_type_ids,
+            pooling,
         })
     }
 }
@@ -108,6 +142,7 @@ fn embed_texts_impl(
     tokenizer: &Tokenizer,
     max_seq_length: usize,
     needs_token_type_ids: bool,
+    pooling: Pooling,
     texts: &[String],
 ) -> Result<Vec<Vec<f32>>, DomainError> {
     if texts.is_empty() {
@@ -145,9 +180,8 @@ fn embed_texts_impl(
     }
 
     let shape = [batch_size, max_len];
-    let input_ids_tensor = Tensor::from_array((shape, input_ids)).map_err(|e| {
-        DomainError::internal(format!("Failed to create input_ids tensor: {}", e))
-    })?;
+    let input_ids_tensor = Tensor::from_array((shape, input_ids))
+        .map_err(|e| DomainError::internal(format!("Failed to create input_ids tensor: {}", e)))?;
     let attention_mask_tensor = Tensor::from_array((shape, attention_mask)).map_err(|e| {
         DomainError::internal(format!("Failed to create attention_mask tensor: {}", e))
     })?;
@@ -158,13 +192,9 @@ fn embed_texts_impl(
 
     let outputs = if needs_token_type_ids {
         let token_type_ids = vec![0i64; batch_size * max_len];
-        let token_type_ids_tensor =
-            Tensor::from_array((shape, token_type_ids)).map_err(|e| {
-                DomainError::internal(format!(
-                    "Failed to create token_type_ids tensor: {}",
-                    e
-                ))
-            })?;
+        let token_type_ids_tensor = Tensor::from_array((shape, token_type_ids)).map_err(|e| {
+            DomainError::internal(format!("Failed to create token_type_ids tensor: {}", e))
+        })?;
         session_guard.run(ort::inputs![
             "input_ids" => input_ids_tensor,
             "attention_mask" => attention_mask_tensor,
@@ -183,9 +213,9 @@ fn embed_texts_impl(
         .next()
         .ok_or_else(|| DomainError::internal("No output tensor found"))?;
 
-    let (shape, data) = output_value.try_extract_tensor::<f32>().map_err(|e| {
-        DomainError::internal(format!("Failed to extract output tensor: {}", e))
-    })?;
+    let (shape, data) = output_value
+        .try_extract_tensor::<f32>()
+        .map_err(|e| DomainError::internal(format!("Failed to extract output tensor: {}", e)))?;
 
     let shape: Vec<usize> = shape.iter().map(|&x| x as usize).collect();
     debug!("Output tensor shape: {:?}", shape);
@@ -196,26 +226,39 @@ fn embed_texts_impl(
 
         (0..batch_size)
             .map(|i| {
-                let mut embedding = vec![0.0f32; hidden_size];
-                let mut count = 0.0f32;
-
                 let mask = encodings[i].get_attention_mask();
-                for j in 0..seq_len.min(max_len) {
-                    let mask_val = if j < mask.len() { mask[j] as f32 } else { 0.0 };
-                    if mask_val > 0.0 {
-                        for (k, emb_k) in embedding.iter_mut().enumerate().take(hidden_size) {
-                            let idx = i * seq_len * hidden_size + j * hidden_size + k;
-                            *emb_k += data[idx] * mask_val;
+                let mut embedding = match pooling {
+                    Pooling::Mean => {
+                        let mut acc = vec![0.0f32; hidden_size];
+                        let mut count = 0.0f32;
+                        for j in 0..seq_len.min(max_len) {
+                            let mask_val = if j < mask.len() { mask[j] as f32 } else { 0.0 };
+                            if mask_val > 0.0 {
+                                for (k, emb_k) in acc.iter_mut().enumerate().take(hidden_size) {
+                                    let idx = i * seq_len * hidden_size + j * hidden_size + k;
+                                    *emb_k += data[idx] * mask_val;
+                                }
+                                count += mask_val;
+                            }
                         }
-                        count += mask_val;
+                        if count > 0.0 {
+                            for v in &mut acc {
+                                *v /= count;
+                            }
+                        }
+                        acc
                     }
-                }
-
-                if count > 0.0 {
-                    for v in &mut embedding {
-                        *v /= count;
+                    Pooling::LastToken => {
+                        // Index of the last attended token.  Inputs are
+                        // right-padded, so this is `(number of real tokens) - 1`,
+                        // clamped to the model's sequence length.
+                        let real_len = mask.iter().take(max_len).filter(|&&m| m > 0).count();
+                        let last = real_len.saturating_sub(1).min(seq_len.saturating_sub(1));
+                        (0..hidden_size)
+                            .map(|k| data[i * seq_len * hidden_size + last * hidden_size + k])
+                            .collect()
                     }
-                }
+                };
 
                 let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
                 if norm > 0.0 {
@@ -268,11 +311,12 @@ impl EmbeddingService for OrtEmbedding {
         let tokenizer = Arc::clone(&self.tokenizer);
         let max_seq = self.config.max_sequence_length();
         let needs_tti = self.needs_token_type_ids;
+        let pooling = self.pooling;
         let model_name = self.config.model_name().to_string();
         let chunk_id = chunk.id().to_string();
 
         let vectors = tokio::task::spawn_blocking(move || {
-            embed_texts_impl(&session, &tokenizer, max_seq, needs_tti, &[text])
+            embed_texts_impl(&session, &tokenizer, max_seq, needs_tti, pooling, &[text])
         })
         .await
         .map_err(|e| DomainError::internal(format!("Embedding task panicked: {e}")))??;
@@ -308,9 +352,10 @@ impl EmbeddingService for OrtEmbedding {
             let tokenizer = Arc::clone(&self.tokenizer);
             let max_seq = self.config.max_sequence_length();
             let needs_tti = self.needs_token_type_ids;
+            let pooling = self.pooling;
 
             let vectors = tokio::task::spawn_blocking(move || {
-                embed_texts_impl(&session, &tokenizer, max_seq, needs_tti, &texts)
+                embed_texts_impl(&session, &tokenizer, max_seq, needs_tti, pooling, &texts)
             })
             .await
             .map_err(|e| DomainError::internal(format!("Embedding task panicked: {e}")))??;
@@ -337,14 +382,21 @@ impl EmbeddingService for OrtEmbedding {
     }
 
     async fn embed_query(&self, query: &str) -> Result<Vec<f32>, DomainError> {
-        let text = query.to_string();
+        // Instruction-tuned (last-token) models expect queries wrapped in an
+        // `Instruct: ...\nQuery: ...` template; documents are left bare so the
+        // two sides of the retrieval pair stay in the trained format.
+        let text = match self.pooling {
+            Pooling::LastToken => format!("Instruct: {QUERY_INSTRUCTION}\nQuery: {query}"),
+            Pooling::Mean => query.to_string(),
+        };
         let session = Arc::clone(&self.session);
         let tokenizer = Arc::clone(&self.tokenizer);
         let max_seq = self.config.max_sequence_length();
         let needs_tti = self.needs_token_type_ids;
+        let pooling = self.pooling;
 
         let vectors = tokio::task::spawn_blocking(move || {
-            embed_texts_impl(&session, &tokenizer, max_seq, needs_tti, &[text])
+            embed_texts_impl(&session, &tokenizer, max_seq, needs_tti, pooling, &[text])
         })
         .await
         .map_err(|e| DomainError::internal(format!("Embedding task panicked: {e}")))??;
