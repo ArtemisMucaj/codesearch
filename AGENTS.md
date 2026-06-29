@@ -156,6 +156,26 @@ cargo build --release
 ./target/release/codesearch
 ```
 
+#### Building in a sandboxed / offline environment
+
+By default the `ort` crate downloads a prebuilt ONNX Runtime binary from
+`cdn.pyke.io` during the build. In a sandboxed or air-gapped environment (e.g. an
+agent runner behind an egress proxy) that download is often blocked, so the build
+fails before any project code is compiled.
+
+When that happens, temporarily enable `ort`'s `load-dynamic` feature so the build
+links nothing and instead `dlopen`s an ONNX Runtime shared library at runtime:
+
+```toml
+# Cargo.toml — for local sandbox builds only; do NOT commit this change
+ort = { version = "2.0.0-rc.9", features = ["ndarray", "load-dynamic"] }
+```
+
+This lets `cargo build`/`cargo check`/`cargo test` compile and run (tests use mock
+embeddings and never touch ONNX). Point `ORT_DYLIB_PATH` at a `libonnxruntime.so`
+if you actually need inference. Revert the feature before committing — it changes
+how release binaries locate ONNX Runtime and must not ship by default.
+
 ### Run
 
 ```bash

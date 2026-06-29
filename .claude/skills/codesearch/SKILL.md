@@ -3,7 +3,7 @@ name: codesearch
 description: Semantic code search using ML embeddings and AST analysis. Replaces built-in search tools for intent-based code exploration. Use when the user asks to find code by describing what it does, understand code relationships, or explore a codebase semantically.
 metadata:
   author: ArtemisMucaj
-  version: "0.7.0"
+  version: "0.8.0"
 compatibility: Requires the codesearch binary installed and a repository indexed with `codesearch index`.
 ---
 
@@ -287,13 +287,32 @@ codesearch search "HandleRequest" # Use Grep for exact name matches
 3. **Use `Grep`** only for exact string searches when you know the identifier name
 4. **Use `codesearch search`** again with refined queries if initial results aren't specific enough
 
+## Automatic Namespace Resolution
+
+You normally **do not** need to pass `--namespace` (or the embedding flags) when
+searching. At index time codesearch records the repository's git remote, and
+every later command run from inside that repository auto-resolves the namespace
+and embedding configuration it was indexed with — matched by git remote first
+(so it survives re-clones to a different path), then by on-disk path.
+
+```shell
+# Indexed under a custom namespace once…
+codesearch --namespace my-project index /path/to/repo
+
+# …then just search from inside the repo — the namespace is resolved for you.
+cd /path/to/repo
+codesearch search "user authentication flow"
+```
+
+Pass a flag explicitly to override resolution; it always takes precedence.
+
 ## Advanced Configuration
 
 ```shell
 # Use a custom data directory for the index
 codesearch --data-dir /custom/path search "query"
 
-# Use a namespace to isolate projects
+# Force a specific namespace (overrides auto-resolution)
 codesearch --namespace my-project search "query"
 
 # Use in-memory storage (no persistence, useful for one-off searches)

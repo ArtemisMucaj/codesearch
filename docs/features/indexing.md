@@ -90,7 +90,10 @@ Data is stored using configurable backends:
 - Repository information: ID, name, path, creation/update timestamps
 - Code statistics: chunk count, file count
 - Storage metadata: vector store type, namespace
+- Git remote: a normalised remote URL (e.g. `github.com/owner/repo`) captured from `.git/config` at index time
 - Code chunks: full content, file paths, line numbers, language, node type, symbol names
+
+> The `repositories` and `namespace_config` tables are **global** (one per database file, not namespace-scoped), so each row records which namespace it belongs to. This is what makes [automatic namespace resolution](#automatic-namespace-resolution) a single cheap lookup.
 
 **Vectors** (via `DuckdbVectorRepository` with VSS):
 - Stores `FLOAT[{dimensions}]` embedding vectors directly in DuckDB — the column width is fixed at namespace creation time based on `--embedding-dimensions` (default 384)
@@ -173,6 +176,34 @@ pub struct IndexConfig {
     pub max_chunk_size: usize,
 }
 ```
+
+## Automatic Namespace Resolution
+
+A repository can be indexed under any namespace (DuckDB schema) and with any
+embedding backend/model/dimension. Normally every later command would have to
+repeat those flags (`--namespace`, `--embedding-dimensions`, …) to reach the
+right data. Instead, codesearch resolves them for you.
+
+At index time the repository's **git remote** is normalised (protocol/auth
+stripped, `.git` suffix removed, host lower-cased — so `git@github.com:owner/repo.git`,
+`https://github.com/owner/repo`, and `ssh://git@github.com/owner/repo` all
+collapse to `github.com/owner/repo`) and stored alongside the namespace.
+
+When any command runs, codesearch performs a quick **read-only** lookup against
+the global `repositories` table *before* opening the namespace:
+
+1. Detect the git remote of the current working directory (walking up to the
+   repository root; for `index`, the indexed path is used instead).
+2. Match it against the stored remotes; if there is no remote, fall back to the
+   canonical on-disk path.
+3. On a hit, adopt that repository's namespace and read its embedding
+   target/model/dimensions from `namespace_config`.
+
+Because the git remote is independent of the clone location, this works even
+after a repository is re-cloned to a different directory or machine. Any flag the
+user passes explicitly always wins; resolution only fills in what was left at its
+default. It is skipped entirely under `--memory-storage`, and degrades silently
+to the defaults when the repository has not been indexed.
 
 ## Error Handling
 

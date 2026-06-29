@@ -1,3 +1,4 @@
+pub mod git_remote;
 pub mod interfaces;
 pub mod use_cases;
 

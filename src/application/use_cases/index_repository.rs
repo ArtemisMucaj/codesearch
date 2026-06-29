@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use crate::application::git_remote::detect_remote;
 use crate::application::{
     CallGraphUseCase, EmbeddingService, FileHashRepository, MetadataRepository, ParserService,
     VectorRepository,
@@ -212,8 +213,20 @@ impl IndexRepositoryUseCase {
                 .to_string()
         });
 
-        let repository =
-            Repository::new_with_storage(repo_name.clone(), path_str.to_string(), store, namespace);
+        // Capture the git remote (if any) as a stable, clone-independent key so
+        // later commands can auto-resolve this repository's namespace.
+        let git_remote = detect_remote(absolute_path);
+        if let Some(ref remote) = git_remote {
+            debug!("Detected git remote '{}' for {}", remote, repo_name);
+        }
+
+        let repository = Repository::new_with_storage(
+            repo_name.clone(),
+            path_str.to_string(),
+            store,
+            namespace,
+            git_remote,
+        );
         self.repository_repo.save(&repository).await?;
 
         info!("Indexing repository: {} at {}", repo_name, path_str);
@@ -392,6 +405,15 @@ impl IndexRepositoryUseCase {
         repository: &Repository,
     ) -> Result<Repository, DomainError> {
         let start_time = Instant::now();
+
+        // Refresh the stored git remote if it has appeared or changed since the
+        // last index (e.g. a remote was added after the first index).
+        let detected_remote = detect_remote(absolute_path);
+        if detected_remote.is_some() && detected_remote.as_deref() != repository.git_remote() {
+            self.repository_repo
+                .update_git_remote(repository.id(), detected_remote.as_deref())
+                .await?;
+        }
 
         // Load existing file hashes
         let existing_hashes = self

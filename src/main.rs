@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use rmcp::ServiceExt;
 use tracing_subscriber::EnvFilter;
 
@@ -92,7 +92,10 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // Parse via ArgMatches so we can tell which global flags the user actually
+    // supplied (vs. their default values) and only auto-resolve the rest.
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
     // Extract MCP mode info before moving cli.command
     let (is_mcp, http_port, public_bind) = match &cli.command {
@@ -153,6 +156,52 @@ async fn main() -> Result<()> {
     let data_dir = expand_tilde(&cli.data_dir);
     std::fs::create_dir_all(&data_dir)?;
 
+    // Auto-resolve the namespace and embedding configuration from the indexed
+    // metadata so commands run from inside a repository "just work" without the
+    // user re-specifying the flags used at index time. Only kicks in when the
+    // user did not pin a namespace explicitly and is not using in-memory storage.
+    let mut namespace = cli.namespace.clone();
+    let mut embedding_target = cli.embedding_target;
+    let mut embedding_model = cli.embedding_model.clone();
+    let mut embedding_dimensions = cli.embedding_dimensions;
+
+    if !cli.memory_storage && !flag_set(&matches, "namespace") {
+        let repo_root = match &cli.command {
+            Commands::Index { path, .. } => std::fs::canonicalize(path).ok(),
+            _ => std::env::current_dir().ok(),
+        };
+        if let Some(root) = repo_root {
+            let db_path = std::path::Path::new(&data_dir).join("codesearch.duckdb");
+            if let Some(ctx) = codesearch::resolve_repo_context(&db_path, &root) {
+                namespace = ctx.namespace.clone();
+
+                if !flag_set(&matches, "embedding_target") {
+                    if let Some(target) = ctx.embedding_target.as_deref() {
+                        embedding_target = match target {
+                            "api" => EmbeddingTarget::Api,
+                            _ => EmbeddingTarget::Onnx,
+                        };
+                    }
+                }
+                if !flag_set(&matches, "embedding_model") && ctx.embedding_model.is_some() {
+                    embedding_model = ctx.embedding_model.clone();
+                }
+                if !flag_set(&matches, "embedding_dimensions") {
+                    if let Some(dims) = ctx.embedding_dimensions {
+                        embedding_dimensions = dims;
+                    }
+                }
+
+                tracing::info!(
+                    "Auto-selected namespace '{}' (matched by {} for '{}') from indexed metadata",
+                    namespace,
+                    ctx.matched_by,
+                    ctx.repository_name
+                );
+            }
+        }
+    }
+
     // Read-only mode for commands that never write to the database.
     // This avoids acquiring DuckDB's exclusive write lock, allowing multiple
     // codesearch processes (e.g. concurrent searches) to run simultaneously.
@@ -174,13 +223,13 @@ async fn main() -> Result<()> {
     let config = ContainerConfig {
         data_dir,
         mock_embeddings: cli.mock_embeddings,
-        namespace: cli.namespace,
+        namespace,
         memory_storage: cli.memory_storage,
         no_rerank: cli.no_rerank,
         expand_query: cli.expand_query,
-        embedding_target: cli.embedding_target,
-        embedding_model: cli.embedding_model,
-        embedding_dimensions: cli.embedding_dimensions,
+        embedding_target,
+        embedding_model,
+        embedding_dimensions,
         reranking_target: cli.reranking_target,
         llm_target: cli.llm_target,
         parse_concurrency: cli.embedding_requests,
@@ -312,6 +361,23 @@ async fn run_http_server(container: Arc<Container>, port: u16, public: bool) -> 
         .await?;
 
     Ok(())
+}
+
+/// Whether a (possibly global) argument was supplied on the command line, as
+/// opposed to falling back to its default value. Walks into the matched
+/// subcommand because global args may be recorded at either level.
+fn flag_set(matches: &clap::ArgMatches, id: &str) -> bool {
+    use clap::parser::ValueSource;
+    fn walk(m: &clap::ArgMatches, id: &str) -> bool {
+        if matches!(m.value_source(id), Some(ValueSource::CommandLine)) {
+            return true;
+        }
+        match m.subcommand() {
+            Some((_, sub)) => walk(sub, id),
+            None => false,
+        }
+    }
+    walk(matches, id)
 }
 
 fn expand_tilde(path: &str) -> String {

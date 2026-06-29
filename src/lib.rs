@@ -37,4 +37,6 @@ pub use domain::{
 
 pub use domain::{CommunityMeta, GraphEdge, GraphLevel, GraphNode, GraphView};
 
-pub use connector::api::{Container, ContainerConfig, Router};
+pub use connector::api::{
+    resolve_repo_context, Container, ContainerConfig, ResolvedContext, Router,
+};

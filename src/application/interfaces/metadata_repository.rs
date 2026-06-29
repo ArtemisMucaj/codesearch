@@ -29,4 +29,11 @@ pub trait MetadataRepository: Send + Sync {
         id: &str,
         languages: HashMap<String, LanguageStats>,
     ) -> Result<(), DomainError>;
+
+    /// Update the stored normalised git remote for a repository.
+    async fn update_git_remote(
+        &self,
+        id: &str,
+        git_remote: Option<&str>,
+    ) -> Result<(), DomainError>;
 }
