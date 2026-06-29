@@ -186,6 +186,53 @@ Symbol `authenticate` belongs to community `authenticate` (18 symbols, rust, coh
     …
 ```
 
+## Visualizing the Graph (`codesearch visualize`)
+
+`visualize` renders the Leiden communities — at either level — into a shareable
+file, coloured by community. It reuses the exact partition, names, and cohesion
+from `clusters` / `symbol-clusters`, so the picture matches the text output.
+
+```bash
+# Interactive HTML of the file-dependency graph (default level + format)
+codesearch visualize my-repo --output graph.html
+
+# Symbol call graph as an interactive page
+codesearch visualize my-repo --level symbol --output symbols.html
+
+# Static SVG for a README, or an Obsidian canvas
+codesearch visualize my-repo --format svg    --output graph.svg
+codesearch visualize my-repo --format canvas --output graph.canvas
+
+# Collapse to a one-node-per-community meta-graph (auto-applied for huge graphs)
+codesearch visualize my-repo --aggregate --output overview.html
+```
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-l, --level` | `file` | Which graph: `file` (modules) or `symbol` (behavioural communities) |
+| `-F, --format` | `html` | `html`, `svg`, or `canvas` |
+| `-o, --output` | `codesearch-graph.<ext>` | Path to write the artifact to |
+| `--aggregate` | `false` | Render the community meta-graph instead of every node |
+| `--node-limit` | `5000` | Auto-aggregate when the graph exceeds this many nodes |
+
+### Formats
+
+- **HTML** — a self-contained [vis-network](https://visjs.github.io/vis-network/)
+  page: nodes coloured/sized by community and degree, a search box, per-community
+  filter toggles, a click-to-inspect panel, and force-directed layout that
+  freezes once settled. (The page loads vis-network from a CDN, so rendering it
+  needs network access in the browser.)
+- **SVG** — a static image laid out with a deterministic force simulation; drop
+  it straight into Markdown, a README, or Notion. No JavaScript.
+- **Canvas** — an Obsidian `.canvas` file; each community is a labelled group.
+
+> Above `--node-limit` nodes, the HTML/SVG views would be an unreadable hairball,
+> so `visualize` automatically switches to the aggregated community meta-graph
+> (one node per community, edges weighted by cross-community link count). Pass
+> `--aggregate` to force that view at any size.
+
 ## Cross-repository Usage (`codesearch uses`)
 
 `codesearch uses <from> <to>` lists every file in the `<from>` repository that
