@@ -69,6 +69,11 @@ pub struct Repository {
     store: VectorStore,
     /// Namespace for vector storage (DuckDB schema or ChromaDB collection).
     namespace: Option<String>,
+    /// Normalised git remote (e.g. `github.com/owner/repo`), when the indexed
+    /// path is a git repository. Used as a stable, portable key to resolve which
+    /// namespace this repository was indexed under, regardless of clone path.
+    #[serde(default)]
+    git_remote: Option<String>,
     /// Language statistics (language name -> stats).
     #[serde(default)]
     languages: HashMap<String, LanguageStats>,
@@ -87,6 +92,7 @@ impl Repository {
             file_count: 0,
             store: VectorStore::default(),
             namespace: None,
+            git_remote: None,
             languages: HashMap::new(),
         }
     }
@@ -96,6 +102,7 @@ impl Repository {
         path: String,
         store: VectorStore,
         namespace: Option<String>,
+        git_remote: Option<String>,
     ) -> Self {
         let now = current_timestamp();
         Self {
@@ -108,6 +115,7 @@ impl Repository {
             file_count: 0,
             store,
             namespace,
+            git_remote,
             languages: HashMap::new(),
         }
     }
@@ -124,6 +132,7 @@ impl Repository {
         file_count: u64,
         store: VectorStore,
         namespace: Option<String>,
+        git_remote: Option<String>,
         languages: HashMap<String, LanguageStats>,
     ) -> Self {
         Self {
@@ -136,6 +145,7 @@ impl Repository {
             file_count,
             store,
             namespace,
+            git_remote,
             languages,
         }
     }
@@ -174,6 +184,14 @@ impl Repository {
 
     pub fn namespace(&self) -> Option<&str> {
         self.namespace.as_deref()
+    }
+
+    pub fn git_remote(&self) -> Option<&str> {
+        self.git_remote.as_deref()
+    }
+
+    pub fn set_git_remote(&mut self, git_remote: Option<String>) {
+        self.git_remote = git_remote;
     }
 
     pub fn languages(&self) -> &HashMap<String, LanguageStats> {

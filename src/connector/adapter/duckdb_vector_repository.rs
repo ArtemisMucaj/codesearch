@@ -212,6 +212,7 @@ impl DuckdbVectorRepository {
                 file_count BIGINT DEFAULT 0,
                 store TEXT DEFAULT 'duckdb',
                 namespace TEXT,
+                git_remote TEXT,
                 languages TEXT
             );
             CREATE TABLE IF NOT EXISTS namespace_config (

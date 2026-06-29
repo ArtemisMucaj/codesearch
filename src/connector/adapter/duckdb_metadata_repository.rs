@@ -87,6 +87,7 @@ impl DuckdbMetadataRepository {
                 file_count BIGINT DEFAULT 0,
                 store TEXT DEFAULT 'duckdb',
                 namespace TEXT,
+                git_remote TEXT,
                 languages TEXT
             );
             "#,
@@ -119,8 +120,8 @@ impl MetadataRepository for DuckdbMetadataRepository {
 
         conn.execute(
             r#"
-            INSERT INTO repositories (id, name, path, created_at, updated_at, chunk_count, file_count, store, namespace, languages)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            INSERT INTO repositories (id, name, path, created_at, updated_at, chunk_count, file_count, store, namespace, git_remote, languages)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
             ON CONFLICT (id) DO UPDATE SET
                 name = excluded.name,
                 path = excluded.path,
@@ -130,6 +131,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
                 file_count = excluded.file_count,
                 store = excluded.store,
                 namespace = excluded.namespace,
+                git_remote = excluded.git_remote,
                 languages = excluded.languages
             "#,
             params![
@@ -142,6 +144,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
                 repository.file_count() as i64,
                 repository.store().as_str(),
                 repository.namespace(),
+                repository.git_remote(),
                 languages_json,
             ],
         )
@@ -154,7 +157,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, path, created_at, updated_at, chunk_count, file_count, store, namespace, languages FROM repositories WHERE id = ?1",
+                "SELECT id, name, path, created_at, updated_at, chunk_count, file_count, store, namespace, git_remote, languages FROM repositories WHERE id = ?1",
             )
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
@@ -163,7 +166,8 @@ impl MetadataRepository for DuckdbMetadataRepository {
                 .get::<_, Option<String>>(7)?
                 .unwrap_or_else(|| "duckdb".to_string());
             let namespace: Option<String> = row.get(8)?;
-            let languages_json: Option<String> = row.get(9)?;
+            let git_remote: Option<String> = row.get(9)?;
+            let languages_json: Option<String> = row.get(10)?;
             Ok(Repository::reconstitute(
                 row.get(0)?,
                 row.get(1)?,
@@ -174,6 +178,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
                 row.get::<_, i64>(6)? as u64,
                 store_str.parse::<VectorStore>().unwrap(),
                 namespace,
+                git_remote,
                 Self::deserialize_languages(languages_json),
             ))
         }) {
@@ -190,7 +195,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, path, created_at, updated_at, chunk_count, file_count, store, namespace, languages FROM repositories WHERE path = ?1",
+                "SELECT id, name, path, created_at, updated_at, chunk_count, file_count, store, namespace, git_remote, languages FROM repositories WHERE path = ?1",
             )
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
@@ -199,7 +204,8 @@ impl MetadataRepository for DuckdbMetadataRepository {
                 .get::<_, Option<String>>(7)?
                 .unwrap_or_else(|| "duckdb".to_string());
             let namespace: Option<String> = row.get(8)?;
-            let languages_json: Option<String> = row.get(9)?;
+            let git_remote: Option<String> = row.get(9)?;
+            let languages_json: Option<String> = row.get(10)?;
             Ok(Repository::reconstitute(
                 row.get(0)?,
                 row.get(1)?,
@@ -210,6 +216,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
                 row.get::<_, i64>(6)? as u64,
                 store_str.parse::<VectorStore>().unwrap(),
                 namespace,
+                git_remote,
                 Self::deserialize_languages(languages_json),
             ))
         }) {
@@ -226,7 +233,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, path, created_at, updated_at, chunk_count, file_count, store, namespace, languages FROM repositories ORDER BY name",
+                "SELECT id, name, path, created_at, updated_at, chunk_count, file_count, store, namespace, git_remote, languages FROM repositories ORDER BY name",
             )
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
@@ -236,7 +243,8 @@ impl MetadataRepository for DuckdbMetadataRepository {
                     .get::<_, Option<String>>(7)?
                     .unwrap_or_else(|| "duckdb".to_string());
                 let namespace: Option<String> = row.get(8)?;
-                let languages_json: Option<String> = row.get(9)?;
+                let git_remote: Option<String> = row.get(9)?;
+                let languages_json: Option<String> = row.get(10)?;
                 Ok(Repository::reconstitute(
                     row.get(0)?,
                     row.get(1)?,
@@ -247,6 +255,7 @@ impl MetadataRepository for DuckdbMetadataRepository {
                     row.get::<_, i64>(6)? as u64,
                     store_str.parse::<VectorStore>().unwrap(),
                     namespace,
+                    git_remote,
                     Self::deserialize_languages(languages_json),
                 ))
             })
@@ -307,6 +316,28 @@ impl MetadataRepository for DuckdbMetadataRepository {
         )
         .map_err(|e| {
             DomainError::storage(format!("Failed to update repository languages: {}", e))
+        })?;
+
+        Ok(())
+    }
+
+    async fn update_git_remote(
+        &self,
+        id: &str,
+        git_remote: Option<&str>,
+    ) -> Result<(), DomainError> {
+        let conn = self.conn.lock().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        conn.execute(
+            "UPDATE repositories SET git_remote = ?1, updated_at = ?2 WHERE id = ?3",
+            params![git_remote, now, id],
+        )
+        .map_err(|e| {
+            DomainError::storage(format!("Failed to update repository git remote: {}", e))
         })?;
 
         Ok(())
