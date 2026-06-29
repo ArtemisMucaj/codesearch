@@ -474,8 +474,10 @@ fn local_moving_phase(graph: &Graph, partition: &mut Vec<usize>) {
     }
 
     let mut improved = true;
-    while improved {
+    let mut iters = 0usize;
+    while improved && iters < MAX_ITERATIONS {
         improved = false;
+        iters += 1;
         for u in 0..graph.n {
             let cu = partition[u];
             let ku = graph.degree[u];
