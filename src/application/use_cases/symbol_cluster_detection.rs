@@ -19,7 +19,10 @@ use uuid::Uuid;
 
 use super::cluster_detection::{kind_weight, leiden, slugify, split_identifier, Graph, STOP_WORDS};
 use crate::application::CallGraphUseCase;
-use crate::domain::{DomainError, SymbolCommunity, SymbolCommunityGraph};
+use crate::domain::{
+    CommunityMeta, DomainError, GraphEdge, GraphLevel, GraphNode, GraphView, SymbolCommunity,
+    SymbolCommunityGraph,
+};
 
 /// Maximum length of a generated community-name slug.
 const NAME_MAX_LENGTH: usize = 30;
@@ -41,9 +44,9 @@ struct SymbolGraph {
     graph: Graph,
     /// Dominant language per symbol (first seen wins).
     language_of: HashMap<String, String>,
-    /// Distinct undirected (lo, hi) node pairs that carry an edge — used both as
-    /// the edge count and to compute per-community cohesion.
-    edges: Vec<(usize, usize)>,
+    /// Distinct undirected (lo, hi, weight) edges — used as the edge count, to
+    /// compute per-community cohesion, and to drive the visualization view.
+    edges: Vec<(usize, usize, f64)>,
 }
 
 impl SymbolClusterDetectionUseCase {
@@ -84,7 +87,7 @@ impl SymbolClusterDetectionUseCase {
         // Internal / external edge counts per community for cohesion.
         let mut internal: Vec<usize> = vec![0; num_communities];
         let mut external: Vec<usize> = vec![0; num_communities];
-        for &(a, b) in &sg.edges {
+        for &(a, b, _w) in &sg.edges {
             let (ca, cb) = (partition[a], partition[b]);
             if ca == cb {
                 internal[ca] += 1;
@@ -143,6 +146,68 @@ impl SymbolClusterDetectionUseCase {
     ) -> Result<Option<SymbolCommunity>, DomainError> {
         let graph = self.detect_communities(repository_id).await?;
         Ok(find_symbol_community(graph.communities, symbol))
+    }
+
+    /// Build a render-ready [`GraphView`] of the symbol call graph, with each
+    /// symbol coloured by the Leiden community it belongs to.
+    ///
+    /// The community index of each node is the community's position in the
+    /// size-sorted [`SymbolCommunityGraph::communities`] list, so it matches the
+    /// `symbol-clusters` command's ordering, names, and cohesion.
+    pub async fn graph_view(&self, repository_id: &str) -> Result<GraphView, DomainError> {
+        let scg = self.detect_communities(repository_id).await?;
+        let sg = self.build_symbol_graph(repository_id).await?;
+
+        // Symbol FQN → community index (position in the size-sorted list).
+        let mut symbol_community: HashMap<&str, usize> = HashMap::new();
+        let mut communities: Vec<CommunityMeta> = Vec::with_capacity(scg.communities.len());
+        for (idx, c) in scg.communities.iter().enumerate() {
+            for member in &c.members {
+                symbol_community.insert(member.as_str(), idx);
+            }
+            communities.push(CommunityMeta {
+                index: idx,
+                name: c.name.clone(),
+                size: c.size,
+                cohesion: c.cohesion,
+            });
+        }
+
+        let mut nodes: Vec<GraphNode> = sg
+            .symbols
+            .iter()
+            .map(|fqn| GraphNode {
+                id: fqn.clone(),
+                label: short_symbol_name(fqn).to_string(),
+                community: symbol_community.get(fqn.as_str()).copied().unwrap_or(0),
+                degree: 0,
+                language: sg
+                    .language_of
+                    .get(fqn)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string()),
+            })
+            .collect();
+
+        let mut edges: Vec<GraphEdge> = Vec::with_capacity(sg.edges.len());
+        for &(u, v, weight) in &sg.edges {
+            nodes[u].degree += 1;
+            nodes[v].degree += 1;
+            edges.push(GraphEdge {
+                source: u,
+                target: v,
+                weight,
+                kind: None,
+            });
+        }
+
+        Ok(GraphView {
+            repository_id: repository_id.to_string(),
+            level: GraphLevel::Symbol,
+            nodes,
+            edges,
+            communities,
+        })
     }
 
     /// Build the undirected, weighted symbol graph from the repository's call
@@ -204,10 +269,10 @@ impl SymbolClusterDetectionUseCase {
         pairs.sort_unstable_by(|x, y| x.0.cmp(&y.0));
 
         let mut graph = Graph::new(symbols.len());
-        let mut edges: Vec<(usize, usize)> = Vec::with_capacity(pairs.len());
+        let mut edges: Vec<(usize, usize, f64)> = Vec::with_capacity(pairs.len());
         for ((lo, hi), w) in pairs {
             graph.add_edge(lo, hi, w);
-            edges.push((lo, hi));
+            edges.push((lo, hi, w));
         }
 
         Ok(SymbolGraph {

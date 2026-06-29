@@ -140,6 +140,28 @@ pub enum SymbolClustersSubcommand {
     },
 }
 
+/// Which graph level to visualize.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum VizLevel {
+    /// File-dependency graph — architectural modules (default).
+    #[default]
+    File,
+    /// Symbol call graph — behavioural communities.
+    Symbol,
+}
+
+/// Output artifact for the `visualize` command.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum VizFormat {
+    /// Self-contained interactive vis-network page (default).
+    #[default]
+    Html,
+    /// Static SVG image (embeds in Markdown/READMEs).
+    Svg,
+    /// Obsidian `.canvas` JSON.
+    Canvas,
+}
+
 /// Initial mode for the interactive TUI.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum TuiMode {
@@ -349,6 +371,35 @@ pub enum Commands {
     SymbolClusters {
         #[command(subcommand)]
         subcommand: SymbolClustersSubcommand,
+    },
+
+    /// Render a repository's Leiden communities as an interactive HTML graph,
+    /// a static SVG, GraphML (Gephi/yEd), or an Obsidian canvas.
+    Visualize {
+        /// Repository ID or name to visualize.
+        repository: String,
+
+        /// Which graph to render: the file-dependency graph or the symbol call graph.
+        #[arg(short, long, value_enum, default_value = "file")]
+        level: VizLevel,
+
+        /// Output artifact: html, svg, or canvas.
+        #[arg(short = 'F', long, value_enum, default_value = "html")]
+        format: VizFormat,
+
+        /// Path to write the artifact to. Defaults to
+        /// `./codesearch-graph.<ext>` for the chosen format.
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Collapse the graph into a community meta-graph (one node per
+        /// community). Forced automatically above `--node-limit` nodes.
+        #[arg(long)]
+        aggregate: bool,
+
+        /// Auto-aggregate when the graph has more than this many nodes.
+        #[arg(long, default_value_t = 5000)]
+        node_limit: usize,
     },
 
     /// Start MCP (Model Context Protocol) server for integration with AI tools

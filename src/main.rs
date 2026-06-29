@@ -167,6 +167,7 @@ async fn main() -> Result<()> {
                 | Commands::Explain { .. }
                 | Commands::Features { .. }
                 | Commands::Uses { .. }
+                | Commands::Visualize { .. }
                 | Commands::Tui { .. }
         );
 

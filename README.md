@@ -84,6 +84,9 @@ codesearch features list my-repo
 # Detect architectural clusters in the file dependency graph
 codesearch clusters list my-repo
 
+# Render the communities as an interactive HTML graph (or svg/canvas)
+codesearch visualize my-repo --output graph.html
+
 # List the files one repository uses from another
 codesearch uses web core
 
@@ -310,6 +313,31 @@ codesearch symbol-clusters get authenticate my-repo
 # JSON output (vimgrep is not supported for either subcommand)
 codesearch symbol-clusters list my-repo --format json
 ```
+
+### Visualize (`visualize`)
+
+Renders the Leiden communities — file-level or symbol-level — to a shareable
+file, coloured by community. Formats: an interactive **HTML** graph
+(vis-network; search, per-community filters, click-to-inspect), a static
+**SVG**, or an Obsidian **canvas**.
+
+```bash
+# Interactive HTML of the file-dependency graph (defaults)
+codesearch visualize my-repo --output graph.html
+
+# Symbol call graph instead of files
+codesearch visualize my-repo --level symbol --output symbols.html
+
+# Other formats
+codesearch visualize my-repo --format svg    --output graph.svg
+codesearch visualize my-repo --format canvas --output graph.canvas
+
+# One node per community (auto-applied above --node-limit, default 5000)
+codesearch visualize my-repo --aggregate --output overview.html
+```
+
+See [Architecture & Dependency Analysis](docs/features/architecture-analysis.md#visualizing-the-graph-codesearch-visualize)
+for the full option reference.
 
 ### Cross-repository Usage (`uses`)
 

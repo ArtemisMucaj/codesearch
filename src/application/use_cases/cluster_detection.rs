@@ -40,7 +40,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::application::FileRelationshipUseCase;
-use crate::domain::{Cluster, ClusterGraph, DomainError, FileEdge, Language};
+use crate::domain::{
+    Cluster, ClusterGraph, CommunityMeta, DomainError, FileEdge, GraphEdge, GraphLevel, GraphNode,
+    GraphView, Language,
+};
 
 // ── Edge-weight constants by reference kind ───────────────────────────────
 
@@ -773,6 +776,16 @@ fn name_cluster(members: &[String], symbol_map: &HashMap<String, String>) -> Str
     slugify(&combined, SLUG_MAX_LENGTH)
 }
 
+/// The trailing path component of a file path, used as a node's short display
+/// label (the full path stays the node id).
+fn basename(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path)
+        .to_string()
+}
+
 /// Split a camelCase or snake_case identifier into words.
 pub(crate) fn split_identifier(s: &str) -> Vec<&str> {
     // Try snake_case first.
@@ -1083,6 +1096,85 @@ impl ClusterDetectionUseCase {
     /// Detect clusters in the dependency graph of `repository_id`.
     pub async fn create_clusters(&self, repository_id: &str) -> Result<ClusterGraph, DomainError> {
         Ok(self.create_clusters_with_graph(repository_id).await?.0)
+    }
+
+    /// Build a render-ready [`GraphView`] of the file-dependency graph, with each
+    /// file coloured by the Leiden cluster it belongs to.
+    ///
+    /// Reuses [`Self::create_clusters_with_graph`] so the partition, cluster
+    /// names, and cohesion are identical to what the `clusters` command reports;
+    /// the community index of each node is the cluster's position in the
+    /// size-sorted [`ClusterGraph::clusters`] list.
+    pub async fn graph_view(&self, repository_id: &str) -> Result<GraphView, DomainError> {
+        let (cg, graph) = self.create_clusters_with_graph(repository_id).await?;
+
+        // Nodes: every cluster member, in (cluster, member) order so the layout
+        // is deterministic. Community index = position in the size-sorted list.
+        let mut node_index: HashMap<&str, usize> = HashMap::new();
+        let mut nodes: Vec<GraphNode> = Vec::with_capacity(cg.total_files);
+        let mut communities: Vec<CommunityMeta> = Vec::with_capacity(cg.clusters.len());
+        for (idx, cluster) in cg.clusters.iter().enumerate() {
+            communities.push(CommunityMeta {
+                index: idx,
+                name: cluster.name.clone(),
+                size: cluster.size,
+                cohesion: cluster.cohesion,
+            });
+            for member in &cluster.members {
+                if node_index.contains_key(member.as_str()) {
+                    continue;
+                }
+                node_index.insert(member.as_str(), nodes.len());
+                nodes.push(GraphNode {
+                    id: member.clone(),
+                    label: basename(member),
+                    community: idx,
+                    degree: 0,
+                    language: Language::from_path(Path::new(member)).as_str().to_string(),
+                });
+            }
+        }
+
+        // Edges: collapse parallel/directional file edges into undirected pairs,
+        // summing the composite weight and keeping the first reference kind seen.
+        let mut pair_weight: BTreeMap<(usize, usize), (f64, Option<String>)> = BTreeMap::new();
+        for edge in &graph.edges {
+            let (Some(&u), Some(&v)) = (
+                node_index.get(edge.from_file.as_str()),
+                node_index.get(edge.to_file.as_str()),
+            ) else {
+                continue;
+            };
+            if u == v {
+                continue;
+            }
+            let key = if u < v { (u, v) } else { (v, u) };
+            let entry = pair_weight.entry(key).or_insert((0.0, None));
+            entry.0 += composite_weight(edge);
+            if entry.1.is_none() {
+                entry.1 = edge.reference_kinds.first().map(|k| k.to_lowercase());
+            }
+        }
+
+        let mut edges: Vec<GraphEdge> = Vec::with_capacity(pair_weight.len());
+        for ((u, v), (weight, kind)) in pair_weight {
+            nodes[u].degree += 1;
+            nodes[v].degree += 1;
+            edges.push(GraphEdge {
+                source: u,
+                target: v,
+                weight,
+                kind,
+            });
+        }
+
+        Ok(GraphView {
+            repository_id: repository_id.to_string(),
+            level: GraphLevel::File,
+            nodes,
+            edges,
+            communities,
+        })
     }
 
     /// Return the cluster a given file belongs to.

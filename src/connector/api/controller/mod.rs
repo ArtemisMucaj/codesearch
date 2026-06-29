@@ -10,6 +10,7 @@ pub mod stats_controller;
 pub mod symbol_clusters_controller;
 pub mod symbol_context_controller;
 pub mod uses_controller;
+pub mod visualize_controller;
 
 pub use clusters_controller::ClustersController;
 pub use delete_controller::DeleteController;
@@ -23,3 +24,4 @@ pub use stats_controller::StatsController;
 pub use symbol_clusters_controller::SymbolClustersController;
 pub use symbol_context_controller::SymbolContextController;
 pub use uses_controller::UsesController;
+pub use visualize_controller::VisualizeController;

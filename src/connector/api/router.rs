@@ -8,6 +8,7 @@ use super::controller::{
     ClustersController, DeleteController, ExecutionFeaturesController, ExplainController,
     ImpactController, IndexController, ListRepositoriesController, SearchController,
     StatsController, SymbolClustersController, SymbolContextController, UsesController,
+    VisualizeController,
 };
 
 pub struct Router<'a> {
@@ -23,6 +24,7 @@ pub struct Router<'a> {
     execution_features_controller: ExecutionFeaturesController<'a>,
     clusters_controller: ClustersController<'a>,
     symbol_clusters_controller: SymbolClustersController<'a>,
+    visualize_controller: VisualizeController<'a>,
 }
 
 impl<'a> Router<'a> {
@@ -40,6 +42,7 @@ impl<'a> Router<'a> {
             execution_features_controller: ExecutionFeaturesController::new(container),
             clusters_controller: ClustersController::new(container),
             symbol_clusters_controller: SymbolClustersController::new(container),
+            visualize_controller: VisualizeController::new(container),
         }
     }
 
@@ -162,6 +165,18 @@ impl<'a> Router<'a> {
                         .await
                 }
             },
+            Commands::Visualize {
+                repository,
+                level,
+                format,
+                output,
+                aggregate,
+                node_limit,
+            } => {
+                self.visualize_controller
+                    .visualize(repository, level, format, output, aggregate, node_limit)
+                    .await
+            }
             Commands::Mcp { .. } => {
                 Err(anyhow::anyhow!("MCP command is handled separately in main"))
             }

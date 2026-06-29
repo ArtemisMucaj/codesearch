@@ -13,6 +13,7 @@ mod search_code;
 mod snippet_lookup;
 mod symbol_cluster_detection;
 mod symbol_context;
+mod visualize_graph;
 
 pub use call_graph::*;
 pub use cluster_detection::*;
@@ -28,3 +29,4 @@ pub use search_code::*;
 pub use snippet_lookup::*;
 pub use symbol_cluster_detection::*;
 pub use symbol_context::*;
+pub use visualize_graph::*;
