@@ -287,24 +287,29 @@ codesearch search "HandleRequest" # Use Grep for exact name matches
 3. **Use `Grep`** only for exact string searches when you know the identifier name
 4. **Use `codesearch search`** again with refined queries if initial results aren't specific enough
 
-## Automatic Namespace Resolution
+## Namespace Resolution Is Automatic
 
-You normally **do not** need to pass `--namespace` (or the embedding flags) when
-searching. At index time codesearch records the repository's git remote, and
-every later command run from inside that repository auto-resolves the namespace
-and embedding configuration it was indexed with — matched by git remote first
-(so it survives re-clones to a different path), then by on-disk path.
+**Do not pass `--namespace` or the embedding flags (`--embedding-target`,
+`--embedding-model`, `--embedding-dimensions`).** Run commands from inside the
+repository and codesearch selects the correct namespace and embedding
+configuration on its own.
+
+It works like this: indexing records the repository's git remote; every later
+command matches the current directory against it (by git remote first — so it
+holds across re-clones to a different path — then by on-disk path) and adopts
+that namespace and embedding config automatically.
 
 ```shell
-# Indexed under a custom namespace once…
+# Index once (under a custom namespace if you want).
 codesearch --namespace my-project index /path/to/repo
 
-# …then just search from inside the repo — the namespace is resolved for you.
+# From then on, just run commands inside the repo. No flags.
 cd /path/to/repo
 codesearch search "user authentication flow"
 ```
 
-Pass a flag explicitly to override resolution; it always takes precedence.
+Rely on this. Only set `--namespace` explicitly to **override** the resolved
+value — an explicit flag always wins.
 
 ## Advanced Configuration
 
