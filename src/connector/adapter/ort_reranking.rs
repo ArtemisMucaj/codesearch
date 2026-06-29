@@ -13,7 +13,7 @@ use tracing::{debug, info};
 use crate::application::RerankingService;
 use crate::domain::{DomainError, SearchResult};
 
-const DEFAULT_MODEL_ID: &str = "BAAI/bge-reranker-base";
+const DEFAULT_MODEL_ID: &str = "Qwen/Qwen3-Reranker-0.6B";
 const DEFAULT_MAX_SEQ_LENGTH: usize = 512;
 const BATCH_SIZE: usize = 32;
 

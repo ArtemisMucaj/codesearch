@@ -12,16 +12,17 @@ use tracing::debug;
 use crate::application::EmbeddingService;
 use crate::domain::{CodeChunk, DomainError, Embedding, EmbeddingConfig};
 
-const DEFAULT_MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
-const DEFAULT_DIMENSIONS: usize = 384;
+const DEFAULT_MODEL_ID: &str = "Qwen/Qwen3-Embedding-0.6B";
+const DEFAULT_DIMENSIONS: usize = 1024;
 const DEFAULT_MAX_SEQ_LENGTH: usize = 512;
 /// Number of chunks processed per ONNX inference call.
 ///
 /// Larger batches amortise per-call overhead and improve CPU utilisation
-/// via wider SIMD/matrix operations.  128 is a good default for the small
-/// all-MiniLM-L6-v2 model (22M params, 384-dim) without risking OOM even
-/// on machines with modest RAM.
-const BATCH_SIZE: usize = 128;
+/// via wider SIMD/matrix operations.  Qwen3-Embedding-0.6B (600M params,
+/// 1024-dim) is far heavier than the previous all-MiniLM-L6-v2 default, so
+/// 32 keeps peak memory bounded on machines with modest RAM while still
+/// amortising per-call overhead.
+const BATCH_SIZE: usize = 32;
 
 pub struct OrtEmbedding {
     session: Arc<Mutex<Session>>,

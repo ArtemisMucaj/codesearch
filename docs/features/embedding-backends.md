@@ -28,11 +28,11 @@ codesearch index . --embedding-model sentence-transformers/all-mpnet-base-v2 --e
 
 | Model | Dimensions | Download size |
 |-------|------------|---------------|
-| `sentence-transformers/all-MiniLM-L6-v2` | 384 | ~90 MB |
+| `Qwen/Qwen3-Embedding-0.6B` | 1024 | ~600 MB |
 
 ### Reranking (ONNX)
 
-When the ONNX backend is active, reranking uses `BAAI/bge-reranker-base` as a cross-encoder, downloaded automatically. Disable it with `--no-rerank`.
+When the ONNX backend is active, reranking uses `Qwen/Qwen3-Reranker-0.6B` as a cross-encoder, downloaded automatically. Disable it with `--no-rerank`.
 
 ---
 
@@ -61,7 +61,7 @@ All API-target traffic shares the same environment variables used by query expan
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `ANTHROPIC_BASE_URL` | `http://localhost:1234` | Base URL for embeddings (`/v1/embeddings`) and reranking (`/v1/messages`) |
-| `ANTHROPIC_MODEL` | `mistralai/ministral-3-3b` | Chat model used for reranking |
+| `ANTHROPIC_MODEL` | `qwen/qwen3.5-4b` | Chat model used for reranking |
 | `ANTHROPIC_API_KEY` | `""` | API key — not required for local servers |
 
 > LM Studio exposes both `/v1/embeddings` (OpenAI-compatible) and `/v1/messages` (Anthropic-compatible) on the same port, so one `ANTHROPIC_BASE_URL` covers everything.
@@ -92,8 +92,8 @@ The embedding configuration for a namespace is written to the `namespace_config`
 namespace_config
 ├── namespace        (e.g. "search")
 ├── embedding_target (e.g. "onnx" or "api")
-├── embedding_model  (e.g. "sentence-transformers/all-MiniLM-L6-v2")
-└── dimensions       (e.g. 384)
+├── embedding_model  (e.g. "Qwen/Qwen3-Embedding-0.6B")
+└── dimensions       (e.g. 1024)
 ```
 
 The `embeddings` table schema is created with `FLOAT[{dimensions}]`, so the column type is fixed at namespace creation time.
@@ -108,8 +108,8 @@ The `embeddings` table schema is created with `FLOAT[{dimensions}]`, so the colu
 Both errors include an actionable message:
 
 ```
-Namespace 'search' was indexed with 384-dimensional embeddings
-(model 'sentence-transformers/all-MiniLM-L6-v2', target 'onnx')
+Namespace 'search' was indexed with 1024-dimensional embeddings
+(model 'Qwen/Qwen3-Embedding-0.6B', target 'onnx')
 but you are now using 768-dimensional embeddings
 (model 'nomic-embed-text', target 'api').
 Re-index with `codesearch index --force` using the original model,
@@ -148,7 +148,7 @@ All embedding flags are global — they apply to `index`, `search`, `mcp`, and a
 ```
 --embedding-target <onnx|api>      Embedding backend (default: onnx)
 --embedding-model <name>           HuggingFace ID (onnx) or API model name
---embedding-dimensions <n>         Output dimensions (default: 384)
+--embedding-dimensions <n>         Output dimensions (default: 1024)
 ```
 
 These flags should be passed consistently across `index` and `search` — the namespace config validator will catch mismatches, but it's easiest to set them in a shell alias or wrapper script.
@@ -179,4 +179,4 @@ alias cs-lm='codesearch \
 | Indexing speed | Fast (local inference) | Depends on server |
 | Memory usage | ~200 MB (model in RAM) | Minimal |
 | Model flexibility | Any HuggingFace ONNX model | Any model LM Studio supports |
-| Reranking | Cross-encoder (BAAI/bge-reranker-base) | LLM-based (same chat model) |
+| Reranking | Cross-encoder (Qwen/Qwen3-Reranker-0.6B) | LLM-based (same chat model) |

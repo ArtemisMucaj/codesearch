@@ -126,7 +126,7 @@ flowchart TB
     D --> E[DuckDB]
 
     C -.- C1[TreeSitterParser<br/>Extract functions, classes, etc.]
-    D -.- D1[OrtEmbedding<br/>all-MiniLM-L6-v2]
+    D -.- D1[OrtEmbedding<br/>Qwen3-Embedding-0.6B]
     E -.- E1[DuckdbMetadataRepository<br/>+ DuckdbVectorRepository<br/>Metadata + Vectors]
 ```
 
