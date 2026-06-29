@@ -244,6 +244,19 @@ fn short_symbol_name(symbol: &str) -> &str {
         .unwrap_or(symbol)
 }
 
+/// The `Class#method` identifier portion of a symbol — everything after the last
+/// path separator, with trailing call decoration removed. This drops directory
+/// and package-path prefixes (e.g. `svc/`) so keyword-based naming keys on the
+/// type and member names that actually describe a community, not on the shared
+/// path every member happens to live under.
+fn symbol_identifier_part(symbol: &str) -> &str {
+    let trimmed = symbol.trim_end_matches(|c: char| matches!(c, '.' | '(' | ')'));
+    match trimmed.rsplit_once(|c: char| matches!(c, '/' | '\\')) {
+        Some((_, tail)) => tail,
+        None => trimmed,
+    }
+}
+
 /// Derive a human-readable community name from its members' symbol names: the
 /// dominant short name if one is shared by >40% of members, otherwise the most
 /// frequent meaningful keyword across all member names.
@@ -267,13 +280,17 @@ fn name_symbol_community(members: &[String]) -> String {
         }
     }
 
-    // Otherwise the most frequent meaningful keyword.
+    // Otherwise the most frequent meaningful keyword across the type and member
+    // names of each symbol (e.g. `Payment` from `PaymentService#charge`), so a
+    // shared concept beats any single method name.
     let mut kw_freq: BTreeMap<String, usize> = BTreeMap::new();
     for m in members {
-        for word in split_identifier(short_symbol_name(m)) {
-            let lower = word.to_lowercase();
-            if lower.len() >= MIN_KEYWORD_LEN && !STOP_WORDS.contains(&lower.as_str()) {
-                *kw_freq.entry(lower).or_insert(0) += 1;
+        for segment in symbol_identifier_part(m).split(|c: char| matches!(c, ':' | '#' | '.')) {
+            for word in split_identifier(segment) {
+                let lower = word.to_lowercase();
+                if lower.len() >= MIN_KEYWORD_LEN && !STOP_WORDS.contains(&lower.as_str()) {
+                    *kw_freq.entry(lower).or_insert(0) += 1;
+                }
             }
         }
     }

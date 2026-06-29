@@ -84,38 +84,36 @@ impl<'a> SymbolClustersController<'a> {
             ))?;
 
         let format: OutputFormat = format.into();
-        Ok(match (result, format) {
-            (None, OutputFormat::Json) => serde_json::to_string_pretty(
-                &serde_json::json!({ "symbol": symbol, "community": null, "repository": repository }),
-            )
-            .context("serializing not-found response")?,
-            (None, OutputFormat::Vimgrep) => {
+        Ok(match format {
+            // Always serialize the `Option<SymbolCommunity>` (the community on a
+            // hit, `null` on a miss) so `--format json` has one stable schema for
+            // both outcomes, matching the `get_symbol_cluster` MCP tool.
+            OutputFormat::Json => {
+                serde_json::to_string_pretty(&result).context("serializing community")?
+            }
+            OutputFormat::Vimgrep => {
                 anyhow::bail!("vimgrep output format is not supported for symbol-clusters get")
             }
-            (None, OutputFormat::Text) => format!(
-                "Symbol `{}` was not found in any community for repository `{}`.",
-                symbol, repository
-            ),
-            (Some(c), OutputFormat::Json) => {
-                serde_json::to_string_pretty(&c).context("serializing community")?
-            }
-            (Some(_), OutputFormat::Vimgrep) => {
-                anyhow::bail!("vimgrep output format is not supported for symbol-clusters get")
-            }
-            (Some(c), OutputFormat::Text) => {
-                let mut out = format!(
-                    "Symbol `{}` belongs to community `{}` \
-                     ({} symbols, {}, cohesion {:.2})\n",
-                    symbol, c.name, c.size, c.dominant_language, c.cohesion
-                );
-                for m in c.members.iter().take(20) {
-                    out.push_str(&format!("    {}\n", m));
+            OutputFormat::Text => match result {
+                None => format!(
+                    "Symbol `{}` was not found in any community for repository `{}`.",
+                    symbol, repository
+                ),
+                Some(c) => {
+                    let mut out = format!(
+                        "Symbol `{}` belongs to community `{}` \
+                         ({} symbols, {}, cohesion {:.2})\n",
+                        symbol, c.name, c.size, c.dominant_language, c.cohesion
+                    );
+                    for m in c.members.iter().take(20) {
+                        out.push_str(&format!("    {}\n", m));
+                    }
+                    if c.members.len() > 20 {
+                        out.push_str(&format!("    … and {} more\n", c.members.len() - 20));
+                    }
+                    out
                 }
-                if c.members.len() > 20 {
-                    out.push_str(&format!("    … and {} more\n", c.members.len() - 20));
-                }
-                out
-            }
+            },
         })
     }
 }
