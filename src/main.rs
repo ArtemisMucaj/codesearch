@@ -158,14 +158,18 @@ async fn main() -> Result<()> {
 
     // Auto-resolve the namespace and embedding configuration from the indexed
     // metadata so commands run from inside a repository "just work" without the
-    // user re-specifying the flags used at index time. Only kicks in when the
-    // user did not pin a namespace explicitly and is not using in-memory storage.
+    // user re-specifying the flags used at index time. We always resolve (unless
+    // in-memory) and adopt the namespace only when it was not pinned explicitly;
+    // the embedding settings are adopted only when the effective namespace
+    // matches the resolved one, so an explicit `--namespace <indexed-ns>` still
+    // picks up that namespace's embedding config (which `Container::new`
+    // validates) instead of silently falling back to the ONNX/384 defaults.
     let mut namespace = cli.namespace.clone();
     let mut embedding_target = cli.embedding_target;
     let mut embedding_model = cli.embedding_model.clone();
     let mut embedding_dimensions = cli.embedding_dimensions;
 
-    if !cli.memory_storage && !flag_set(&matches, "namespace") {
+    if !cli.memory_storage {
         let repo_root = match &cli.command {
             Commands::Index { path, .. } => std::fs::canonicalize(path).ok(),
             _ => std::env::current_dir().ok(),
@@ -173,31 +177,37 @@ async fn main() -> Result<()> {
         if let Some(root) = repo_root {
             let db_path = std::path::Path::new(&data_dir).join("codesearch.duckdb");
             if let Some(ctx) = codesearch::resolve_repo_context(&db_path, &root) {
-                namespace = ctx.namespace.clone();
-
-                if !flag_set(&matches, "embedding_target") {
-                    if let Some(target) = ctx.embedding_target.as_deref() {
-                        embedding_target = match target {
-                            "api" => EmbeddingTarget::Api,
-                            _ => EmbeddingTarget::Onnx,
-                        };
-                    }
-                }
-                if !flag_set(&matches, "embedding_model") && ctx.embedding_model.is_some() {
-                    embedding_model = ctx.embedding_model.clone();
-                }
-                if !flag_set(&matches, "embedding_dimensions") {
-                    if let Some(dims) = ctx.embedding_dimensions {
-                        embedding_dimensions = dims;
-                    }
+                if !flag_set(&matches, "namespace") {
+                    namespace = ctx.namespace.clone();
                 }
 
-                tracing::info!(
-                    "Auto-selected namespace '{}' (matched by {} for '{}') from indexed metadata",
-                    namespace,
-                    ctx.matched_by,
-                    ctx.repository_name
-                );
+                // Only adopt the resolved embedding config when it actually
+                // describes the namespace we are about to open.
+                if namespace == ctx.namespace {
+                    if !flag_set(&matches, "embedding_target") {
+                        if let Some(target) = ctx.embedding_target.as_deref() {
+                            embedding_target = match target {
+                                "api" => EmbeddingTarget::Api,
+                                _ => EmbeddingTarget::Onnx,
+                            };
+                        }
+                    }
+                    if !flag_set(&matches, "embedding_model") && ctx.embedding_model.is_some() {
+                        embedding_model = ctx.embedding_model.clone();
+                    }
+                    if !flag_set(&matches, "embedding_dimensions") {
+                        if let Some(dims) = ctx.embedding_dimensions {
+                            embedding_dimensions = dims;
+                        }
+                    }
+
+                    tracing::info!(
+                        "Using namespace '{}' (matched by {} for '{}') from indexed metadata",
+                        namespace,
+                        ctx.matched_by,
+                        ctx.repository_name
+                    );
+                }
             }
         }
     }

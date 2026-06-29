@@ -160,7 +160,7 @@ const READ_ONLY_LOCK_RETRY_INITIAL_MS: u64 = 500;
 
 /// Returns `true` when the error string looks like a DuckDB file-lock conflict
 /// produced by a concurrent writer process.
-fn is_lock_conflict(err: &str) -> bool {
+pub(crate) fn is_lock_conflict(err: &str) -> bool {
     err.contains("Could not set lock on file") || err.contains("Conflicting lock is held")
 }
 

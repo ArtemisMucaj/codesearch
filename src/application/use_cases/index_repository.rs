@@ -406,10 +406,11 @@ impl IndexRepositoryUseCase {
     ) -> Result<Repository, DomainError> {
         let start_time = Instant::now();
 
-        // Refresh the stored git remote if it has appeared or changed since the
-        // last index (e.g. a remote was added after the first index).
+        // Refresh the stored git remote whenever it has changed since the last
+        // index — including when it was removed (None), so a stale remote can't
+        // keep auto-resolving other clones to the wrong namespace.
         let detected_remote = detect_remote(absolute_path);
-        if detected_remote.is_some() && detected_remote.as_deref() != repository.git_remote() {
+        if detected_remote.as_deref() != repository.git_remote() {
             self.repository_repo
                 .update_git_remote(repository.id(), detected_remote.as_deref())
                 .await?;

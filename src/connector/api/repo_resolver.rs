@@ -10,11 +10,24 @@
 //! back to the canonical on-disk path.
 
 use std::path::{Path, PathBuf};
+use std::thread::sleep;
+use std::time::Duration;
 
 use duckdb::{params, AccessMode, Config, Connection};
 use tracing::debug;
 
 use crate::application::git_remote::detect_remote;
+use crate::connector::api::container::is_lock_conflict;
+
+/// Maximum number of retry attempts when the read-only open is blocked by a
+/// concurrent writer (e.g. an in-progress `codesearch index`). Mirrors the
+/// retry budget used when the container itself opens the database read-only, so
+/// resolution lands on the right namespace instead of silently falling back to
+/// the default once the writer releases the lock.
+const LOCK_RETRIES: u32 = 5;
+
+/// Initial backoff for lock-conflict retries; doubles each attempt.
+const LOCK_RETRY_INITIAL_MS: u64 = 500;
 
 /// The indexing context resolved for a working directory.
 #[derive(Debug, Clone)]
@@ -44,13 +57,7 @@ pub fn resolve(db_path: &Path, repo_root: &Path) -> Option<ResolvedContext> {
         return None;
     }
 
-    let conn = match open_read_only(db_path) {
-        Ok(conn) => conn,
-        Err(e) => {
-            debug!("repo resolver: could not open {}: {}", db_path.display(), e);
-            return None;
-        }
-    };
+    let conn = open_read_only_with_retry(db_path)?;
 
     // Prefer the git remote; fall back to the canonical path.
     let remote = detect_remote(repo_root);
@@ -79,6 +86,32 @@ pub fn resolve(db_path: &Path, repo_root: &Path) -> Option<ResolvedContext> {
 fn open_read_only(db_path: &Path) -> Result<Connection, duckdb::Error> {
     let config = Config::default().access_mode(AccessMode::ReadOnly)?;
     Connection::open_with_flags(db_path, config)
+}
+
+/// Open the database read-only, retrying with exponential backoff while a
+/// concurrent writer holds the lock. Non-lock failures (e.g. the database does
+/// not exist yet) return `None` immediately. A persistent lock after all
+/// retries also yields `None` — the container open that follows runs its own
+/// retry and will surface a clear error to the user.
+fn open_read_only_with_retry(db_path: &Path) -> Option<Connection> {
+    let mut delay_ms = LOCK_RETRY_INITIAL_MS;
+    for attempt in 0..=LOCK_RETRIES {
+        match open_read_only(db_path) {
+            Ok(conn) => return Some(conn),
+            Err(e) if attempt < LOCK_RETRIES && is_lock_conflict(&e.to_string()) => {
+                if attempt == 0 {
+                    debug!("repo resolver: database locked by another process; waiting…");
+                }
+                sleep(Duration::from_millis(delay_ms));
+                delay_ms *= 2;
+            }
+            Err(e) => {
+                debug!("repo resolver: could not open {}: {}", db_path.display(), e);
+                return None;
+            }
+        }
+    }
+    None
 }
 
 fn canonical(path: &Path) -> Option<PathBuf> {
