@@ -374,7 +374,7 @@ pub enum Commands {
     },
 
     /// Render a repository's Leiden communities as an interactive HTML graph,
-    /// a static SVG, GraphML (Gephi/yEd), or an Obsidian canvas.
+    /// a static SVG, or an Obsidian canvas.
     Visualize {
         /// Repository ID or name to visualize.
         repository: String,

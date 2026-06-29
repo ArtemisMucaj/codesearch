@@ -59,17 +59,31 @@ impl SymbolClusterDetectionUseCase {
         &self,
         repository_id: &str,
     ) -> Result<SymbolCommunityGraph, DomainError> {
+        let (scg, _sg) = self.detect_communities_with_graph(repository_id).await?;
+        Ok(scg)
+    }
+
+    /// Internal: Detect communities and return both the community graph and the
+    /// underlying symbol graph, so callers that need both (e.g. `graph_view()`)
+    /// can reuse the same snapshot without rebuilding.
+    async fn detect_communities_with_graph(
+        &self,
+        repository_id: &str,
+    ) -> Result<(SymbolCommunityGraph, SymbolGraph), DomainError> {
         let sg = self.build_symbol_graph(repository_id).await?;
         let total_symbols = sg.symbols.len();
         let total_edges = sg.edges.len();
 
         if total_symbols == 0 || total_edges == 0 {
-            return Ok(SymbolCommunityGraph {
-                communities: Vec::new(),
-                repository_id: repository_id.to_string(),
-                total_symbols,
-                total_edges,
-            });
+            return Ok((
+                SymbolCommunityGraph {
+                    communities: Vec::new(),
+                    repository_id: repository_id.to_string(),
+                    total_symbols,
+                    total_edges,
+                },
+                sg,
+            ));
         }
 
         let partition = leiden(&sg.graph);
@@ -125,12 +139,15 @@ impl SymbolClusterDetectionUseCase {
         // Largest first, then name for a stable order.
         communities.sort_by(|a, b| b.size.cmp(&a.size).then(a.name.cmp(&b.name)));
 
-        Ok(SymbolCommunityGraph {
-            communities,
-            repository_id: repository_id.to_string(),
-            total_symbols,
-            total_edges,
-        })
+        Ok((
+            SymbolCommunityGraph {
+                communities,
+                repository_id: repository_id.to_string(),
+                total_symbols,
+                total_edges,
+            },
+            sg,
+        ))
     }
 
     /// Return the community that `symbol` belongs to, or `None` if the symbol is
@@ -155,8 +172,7 @@ impl SymbolClusterDetectionUseCase {
     /// size-sorted [`SymbolCommunityGraph::communities`] list, so it matches the
     /// `symbol-clusters` command's ordering, names, and cohesion.
     pub async fn graph_view(&self, repository_id: &str) -> Result<GraphView, DomainError> {
-        let scg = self.detect_communities(repository_id).await?;
-        let sg = self.build_symbol_graph(repository_id).await?;
+        let (scg, sg) = self.detect_communities_with_graph(repository_id).await?;
 
         // Symbol FQN → community index (position in the size-sorted list).
         let mut symbol_community: HashMap<&str, usize> = HashMap::new();
