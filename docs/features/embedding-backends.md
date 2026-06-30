@@ -32,7 +32,7 @@ codesearch index . --embedding-model sentence-transformers/all-mpnet-base-v2 --e
 
 ### Reranking (ONNX)
 
-When the ONNX backend is active, reranking uses `Qwen/Qwen3-Reranker-0.6B` as a cross-encoder, downloaded automatically. Disable it with `--no-rerank`.
+When the ONNX backend is active, reranking uses `Qwen/Qwen3-Reranker-0.6B` — a causal (decoder-style) reranker scored from its yes/no token logits — downloaded automatically. BERT-style cross-encoders such as `BAAI/bge-reranker-base` are also supported and auto-detected. Disable reranking with `--no-rerank`.
 
 ---
 
@@ -179,4 +179,4 @@ alias cs-lm='codesearch \
 | Indexing speed | Fast (local inference) | Depends on server |
 | Memory usage | ~200 MB (model in RAM) | Minimal |
 | Model flexibility | Any HuggingFace ONNX model | Any model LM Studio supports |
-| Reranking | Cross-encoder (Qwen/Qwen3-Reranker-0.6B) | LLM-based (same chat model) |
+| Reranking | Causal reranker (Qwen/Qwen3-Reranker-0.6B) | LLM-based (same chat model) |

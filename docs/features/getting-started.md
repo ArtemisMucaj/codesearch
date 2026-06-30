@@ -171,7 +171,7 @@ Codesearch defaults to **hybrid search** — a semantic (vector) leg and a keywo
 1. Your query is converted to a 1024-dimensional embedding
 2. The DuckDB VSS extension finds semantically similar code using HNSW indexes
 3. In parallel, a keyword leg matches content and symbol names; the two ranked lists are fused with RRF (pass `--no-text-search` for semantic-only)
-4. A cross-encoder reranker (Qwen3-Reranker-0.6B) rescores candidates for higher relevance (enabled by default, disable with `--no-rerank`)
+4. A causal reranker (`Qwen/Qwen3-Reranker-0.6B`) rescores candidates for higher relevance (enabled by default, disable with `--no-rerank`)
 5. Results are ranked by fused RRF score (hybrid), cosine similarity (semantic-only), or reranking score
 6. Filters can be applied by language, node type, repository, or minimum score
 

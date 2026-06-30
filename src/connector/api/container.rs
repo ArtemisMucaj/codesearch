@@ -200,11 +200,11 @@ impl Container {
         let parser = Arc::new(TreeSitterParser::new());
 
         // Resolve the effective model name for the selected embedding target.
-        const ONNX_DEFAULT_MODEL: &str = "Qwen/Qwen3-Embedding-0.6B";
+        // The ONNX default lives on the adapter so metadata and indexing agree.
         let effective_model = match config.embedding_model.clone() {
             Some(m) => m,
             None => match config.embedding_target {
-                EmbeddingTarget::Onnx => ONNX_DEFAULT_MODEL.to_string(),
+                EmbeddingTarget::Onnx => OrtEmbedding::DEFAULT_MODEL_ID.to_string(),
                 EmbeddingTarget::Api => {
                     return Err(anyhow::anyhow!(
                         "--embedding-model is required when using --embedding-target=api"
@@ -224,7 +224,7 @@ impl Container {
                         "Initializing ONNX embedding service (model='{}')...",
                         effective_model
                     );
-                    let model_arg = if effective_model == ONNX_DEFAULT_MODEL {
+                    let model_arg = if effective_model == OrtEmbedding::DEFAULT_MODEL_ID {
                         None
                     } else {
                         Some(effective_model.as_str())

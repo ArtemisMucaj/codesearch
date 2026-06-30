@@ -244,7 +244,7 @@ Return Results
 
 | Backend | Reranking method | Model |
 |---------|-----------------|-------|
-| ONNX | Cross-encoder (ONNX) | `Qwen/Qwen3-Reranker-0.6B` (~600 MB, downloaded automatically) |
+| ONNX | Causal reranker (ONNX); auto-detects BERT-style cross-encoders too | `Qwen/Qwen3-Reranker-0.6B` (~600 MB, downloaded automatically) |
 | API | LLM-based (single prompt, JSON scores) | Chat model at `ANTHROPIC_BASE_URL` (`ANTHROPIC_MODEL`) |
 
 ### Usage

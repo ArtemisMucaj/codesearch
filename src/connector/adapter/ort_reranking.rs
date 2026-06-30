@@ -291,11 +291,15 @@ impl OrtReranking {
         };
         let (yes_id, no_id) = (yes_id as usize, no_id as usize);
 
-        let prompts: Vec<String> = documents
+        // Build the prompt body (everything except the trailing assistant
+        // suffix) separately so the suffix — which holds the position where the
+        // model emits its yes/no answer — always survives truncation of a long
+        // document rather than being dropped off the end.
+        let bodies: Vec<String> = documents
             .iter()
             .map(|doc| {
                 format!(
-                    "{QWEN_PREFIX}<Instruct>: {QWEN_INSTRUCTION}\n<Query>: {query}\n<Document>: {doc}{QWEN_SUFFIX}"
+                    "{QWEN_PREFIX}<Instruct>: {QWEN_INSTRUCTION}\n<Query>: {query}\n<Document>: {doc}"
                 )
             })
             .collect();
@@ -303,38 +307,52 @@ impl OrtReranking {
         // The chat-template markers (`<|im_start|>`, `<think>`, …) are added
         // tokens the tokenizer maps directly, so no extra special tokens are
         // injected here.
+        let suffix_ids: Vec<i64> = self
+            .tokenizer
+            .encode(QWEN_SUFFIX, false)
+            .map_err(|e| DomainError::internal(format!("Tokenization failed: {}", e)))?
+            .get_ids()
+            .iter()
+            .map(|&x| x as i64)
+            .collect();
+        let suffix_len = suffix_ids.len();
+        // Tokens left for the body once room for the suffix is reserved.
+        let body_budget = self.max_sequence_length.saturating_sub(suffix_len);
+
         let encodings = self
             .tokenizer
-            .encode_batch(prompts.iter().map(|s| s.as_str()).collect(), false)
+            .encode_batch(bodies.iter().map(|s| s.as_str()).collect(), false)
             .map_err(|e| DomainError::internal(format!("Tokenization failed: {}", e)))?;
 
-        let max_len = encodings
+        let max_body = encodings
             .iter()
-            .map(|e| e.get_ids().len())
+            .map(|e| e.get_ids().len().min(body_budget))
             .max()
-            .unwrap_or(0)
-            .min(self.max_sequence_length);
+            .unwrap_or(0);
+        let max_len = max_body + suffix_len;
 
         let mut input_ids: Vec<i64> = Vec::with_capacity(batch_size * max_len);
         let mut attention_mask: Vec<i64> = Vec::with_capacity(batch_size * max_len);
-        // Index of the last real (non-padded) token per sequence; this is where
-        // a causal LM emits its answer logits.
+        // Index of the last real (non-padded) token per sequence: the final
+        // suffix token, where the causal LM emits its yes/no answer logits.
         let mut last_idx: Vec<usize> = Vec::with_capacity(batch_size);
 
         for encoding in &encodings {
             let ids = encoding.get_ids();
-            let mask = encoding.get_attention_mask();
+            let body_len = ids.len().min(body_budget);
 
-            let len = ids.len().min(max_len);
+            // Truncated body followed by the full (always-present) suffix.
+            input_ids.extend(ids[..body_len].iter().map(|&x| x as i64));
+            input_ids.extend(suffix_ids.iter().copied());
 
-            input_ids.extend(ids[..len].iter().map(|&x| x as i64));
-            attention_mask.extend(mask[..len].iter().map(|&x| x as i64));
+            let real_len = body_len + suffix_len;
+            attention_mask.extend(std::iter::repeat_n(1i64, real_len));
 
-            let padding = max_len - len;
+            let padding = max_len - real_len;
             input_ids.extend(std::iter::repeat_n(0i64, padding));
             attention_mask.extend(std::iter::repeat_n(0i64, padding));
 
-            last_idx.push(len.saturating_sub(1));
+            last_idx.push(real_len.saturating_sub(1));
         }
 
         let shape = [batch_size, max_len];

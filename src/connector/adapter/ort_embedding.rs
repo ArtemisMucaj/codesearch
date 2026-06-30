@@ -12,7 +12,6 @@ use tracing::debug;
 use crate::application::EmbeddingService;
 use crate::domain::{CodeChunk, DomainError, Embedding, EmbeddingConfig};
 
-const DEFAULT_MODEL_ID: &str = "Qwen/Qwen3-Embedding-0.6B";
 const DEFAULT_DIMENSIONS: usize = 1024;
 const DEFAULT_MAX_SEQ_LENGTH: usize = 512;
 /// Number of chunks processed per ONNX inference call.
@@ -57,8 +56,13 @@ pub struct OrtEmbedding {
 }
 
 impl OrtEmbedding {
+    /// Default HuggingFace model id used when no `--embedding-model` is given.
+    /// Exposed so the DI container records the same model in namespace metadata
+    /// that indexing actually uses, avoiding drift between the two.
+    pub(crate) const DEFAULT_MODEL_ID: &'static str = "Qwen/Qwen3-Embedding-0.6B";
+
     pub fn new(model_id: Option<&str>) -> Result<Self, DomainError> {
-        let model_id = model_id.unwrap_or(DEFAULT_MODEL_ID);
+        let model_id = model_id.unwrap_or(Self::DEFAULT_MODEL_ID);
         debug!(
             "Initializing ORT embedding service with model: {}",
             model_id
