@@ -22,6 +22,18 @@
 * unit tests for `InMemoryVectorRepository` hybrid paths: cosine vs RRF score ranges, dual-leg ranking, post-fusion `min_score` filtering, no early pruning, empty-term fallback, and limit enforcement
 * integration tests for end-to-end hybrid search: results returned with positive scores, keyword-matched chunk surfaces, special SQL characters (`%`, `_`, `!`) do not cause errors, and semantic-only baseline confirms the flag gates the BM25 leg
 
+## [1.0.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.25.0...v1.0.0) (2026-07-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* the default embedding model and dimension count changed, so namespaces indexed with the previous defaults must be re-indexed (`codesearch index --force`) or pinned to the old model via --embedding-model / --embedding-dimensions.
+
+### Features
+
+* auto-resolve namespace from git remote metadata ([#157](https://github.com/ArtemisMucaj/codesearch/issues/157)) ([d36a36b](https://github.com/ArtemisMucaj/codesearch/commit/d36a36b9056ae177bba54d2eb4f21b806e2e8322))
+* default ONNX and LLM models to Qwen3 family ([#159](https://github.com/ArtemisMucaj/codesearch/issues/159)) ([90fa6d2](https://github.com/ArtemisMucaj/codesearch/commit/90fa6d22561c72591235f8589dddfa769979ff4d))
+
 ## [0.25.0](https://github.com/ArtemisMucaj/codesearch/compare/v0.24.0...v0.25.0) (2026-06-29)
 
 
