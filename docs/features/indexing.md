@@ -73,7 +73,7 @@ Two backends are available — see [Embedding Backends](./embedding-backends.md)
 
 | Backend | Flag | Default model | Dimensions |
 |---------|------|---------------|------------|
-| ONNX (local, default) | `--embedding-target=onnx` | `Qwen/Qwen3-Embedding-0.6B` | 1024 |
+| ONNX (local, default) | `--embedding-target=onnx` | `mixedbread-ai/mxbai-embed-large-v1` | 1024 |
 | API (OpenAI-compatible) | `--embedding-target=api` | Configured via `--embedding-model` | Configured via `--embedding-dimensions` |
 
 The model and dimension count are stored in the `namespace_config` DuckDB table on first index and validated on every subsequent open — mismatches are hard errors.
@@ -244,7 +244,7 @@ Return Results
 
 | Backend | Reranking method | Model |
 |---------|-----------------|-------|
-| ONNX | Causal reranker (ONNX); auto-detects BERT-style cross-encoders too | `Qwen/Qwen3-Reranker-0.6B` (~600 MB, downloaded automatically) |
+| ONNX | Causal reranker (ONNX); auto-detects BERT-style cross-encoders too | `BAAI/bge-reranker-base` (~440 MB, downloaded automatically) |
 | API | LLM-based (single prompt, JSON scores) | Chat model at `ANTHROPIC_BASE_URL` (`ANTHROPIC_MODEL`) |
 
 ### Usage

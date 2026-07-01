@@ -49,7 +49,7 @@ struct Cli {
     embedding_target: EmbeddingTarget,
 
     /// Embedding model identifier.
-    /// For 'onnx': HuggingFace model ID (default: Qwen/Qwen3-Embedding-0.6B).
+    /// For 'onnx': HuggingFace model ID (default: onnx-community/Qwen3-Embedding-0.6B-ONNX).
     /// For 'api': model name sent in the /v1/embeddings request body; must match
     /// the model loaded in the target server (set OPENAI_BASE_URL for non-default address).
     #[arg(long, global = true)]

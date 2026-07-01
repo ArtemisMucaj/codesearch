@@ -28,11 +28,11 @@ codesearch index . --embedding-model sentence-transformers/all-mpnet-base-v2 --e
 
 | Model | Dimensions | Download size |
 |-------|------------|---------------|
-| `Qwen/Qwen3-Embedding-0.6B` | 1024 | ~600 MB |
+| `onnx-community/Qwen3-Embedding-0.6B-ONNX` | 1024 | ~160 MB (quantized) |
 
 ### Reranking (ONNX)
 
-When the ONNX backend is active, reranking uses `Qwen/Qwen3-Reranker-0.6B` — a causal (decoder-style) reranker scored from its yes/no token logits — downloaded automatically. BERT-style cross-encoders such as `BAAI/bge-reranker-base` are also supported and auto-detected. Disable reranking with `--no-rerank`.
+When the ONNX backend is active, reranking uses `onnx-community/Qwen3-Reranker-0.6B-ONNX` — a causal (decoder-style) reranker scored from its yes/no token logits — downloaded automatically. BERT-style cross-encoders are also supported and auto-detected. Disable reranking with `--no-rerank`.
 
 ---
 
@@ -92,7 +92,7 @@ The embedding configuration for a namespace is written to the `namespace_config`
 namespace_config
 ├── namespace        (e.g. "search")
 ├── embedding_target (e.g. "onnx" or "api")
-├── embedding_model  (e.g. "Qwen/Qwen3-Embedding-0.6B")
+├── embedding_model  (e.g. "onnx-community/Qwen3-Embedding-0.6B-ONNX")
 └── dimensions       (e.g. 1024)
 ```
 
@@ -109,7 +109,7 @@ Both errors include an actionable message:
 
 ```
 Namespace 'search' was indexed with 1024-dimensional embeddings
-(model 'Qwen/Qwen3-Embedding-0.6B', target 'onnx')
+(model 'onnx-community/Qwen3-Embedding-0.6B-ONNX', target 'onnx')
 but you are now using 768-dimensional embeddings
 (model 'nomic-embed-text', target 'api').
 Re-index with `codesearch index --force` using the original model,
@@ -179,4 +179,4 @@ alias cs-lm='codesearch \
 | Indexing speed | Fast (local inference) | Depends on server |
 | Memory usage | ~200 MB (model in RAM) | Minimal |
 | Model flexibility | Any HuggingFace ONNX model | Any model LM Studio supports |
-| Reranking | Causal reranker (Qwen/Qwen3-Reranker-0.6B) | LLM-based (same chat model) |
+| Reranking | Qwen3-Reranker-0.6B (causal decoder) | LLM-based (same chat model) |

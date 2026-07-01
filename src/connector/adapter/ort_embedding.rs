@@ -2,9 +2,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use ndarray::Array4;
 use ort::{
     session::{builder::GraphOptimizationLevel, Session},
-    value::Tensor,
+    value::{Tensor, ValueType},
 };
 use tokenizers::Tokenizer;
 use tracing::debug;
@@ -53,13 +54,32 @@ pub struct OrtEmbedding {
     needs_token_type_ids: bool,
     /// Pooling strategy applied to `[batch, seq, hidden]` outputs.
     pooling: Pooling,
+    /// KV-cache model parameters, present when the ONNX export includes
+    /// `past_key_values.*` inputs (e.g. onnx-community Qwen3-Embedding exports).
+    /// For a single-pass embedding run, all past KV tensors are fed as empty
+    /// (shape `[batch, n_heads, 0, head_dim]`), signalling no prior context.
+    kv_cache: Option<KvCacheParams>,
+}
+
+/// Shape parameters for a decoder ONNX model's KV-cache inputs.
+#[derive(Clone, Debug)]
+struct KvCacheParams {
+    /// Number of `past_key_values.N.{key,value}` input pairs.
+    num_layers: usize,
+    /// Number of KV heads per layer (from the model's input shape metadata).
+    num_heads: usize,
+    /// Per-head dimension (from the model's input shape metadata).
+    head_dim: usize,
 }
 
 impl OrtEmbedding {
     /// Default HuggingFace model id used when no `--embedding-model` is given.
     /// Exposed so the DI container records the same model in namespace metadata
     /// that indexing actually uses, avoiding drift between the two.
-    pub(crate) const DEFAULT_MODEL_ID: &'static str = "Qwen/Qwen3-Embedding-0.6B";
+    /// The onnx-community export is used because the upstream Qwen/Qwen3-Embedding-0.6B
+    /// repo only ships model.safetensors — no ONNX export.
+    pub(crate) const DEFAULT_MODEL_ID: &'static str =
+        "onnx-community/Qwen3-Embedding-0.6B-ONNX";
 
     pub fn new(model_id: Option<&str>) -> Result<Self, DomainError> {
         let model_id = model_id.unwrap_or(Self::DEFAULT_MODEL_ID);
@@ -79,8 +99,12 @@ impl OrtEmbedding {
             .get("tokenizer.json")
             .map_err(|e| DomainError::internal(format!("Failed to download tokenizer: {}", e)))?;
 
+        // Prefer the self-contained quantized model (no .onnx_data sidecar).
+        // Fall back to the full-precision model for custom repos that don't
+        // ship a quantized variant.
         let model_path = repo
-            .get("model.onnx")
+            .get("onnx/model_quantized.onnx")
+            .or_else(|_| repo.get("model.onnx"))
             .or_else(|_| repo.get("onnx/model.onnx"))
             .map_err(|e| DomainError::internal(format!("Failed to download ONNX model: {}", e)))?;
 
@@ -120,6 +144,18 @@ impl OrtEmbedding {
         };
         debug!("Embedding pooling strategy: {:?}", pooling);
 
+        // Detect KV-cache decoder ONNX exports (e.g. onnx-community Qwen3-Embedding).
+        // These have `past_key_values.0.key` inputs; for a single embedding pass we
+        // feed all of them as empty tensors (seq_len=0), which tells the model there
+        // is no cached context and it should attend only to the current tokens.
+        let kv_cache = detect_kv_cache(&session);
+        if let Some(ref kv) = kv_cache {
+            debug!(
+                "KV-cache decoder embedding model detected: {} layers, {} heads, head_dim={}",
+                kv.num_layers, kv.num_heads, kv.head_dim
+            );
+        }
+
         let config = EmbeddingConfig::new(
             model_name.to_string(),
             DEFAULT_DIMENSIONS,
@@ -132,8 +168,39 @@ impl OrtEmbedding {
             config,
             needs_token_type_ids,
             pooling,
+            kv_cache,
         })
     }
+}
+
+/// Inspect an ONNX session's inputs and return KV-cache parameters if the model
+/// declares `past_key_values.0.key` / `past_key_values.0.value` inputs.
+/// Returns `None` for plain encoder models.
+fn detect_kv_cache(session: &Session) -> Option<KvCacheParams> {
+    let inputs = session.inputs();
+    let num_layers = inputs
+        .iter()
+        .filter(|i| i.name().starts_with("past_key_values.") && i.name().ends_with(".key"))
+        .count();
+    if num_layers == 0 {
+        return None;
+    }
+    // Read num_heads and head_dim from the first key input's shape annotation.
+    // Shape is [batch, num_heads, past_seq, head_dim]; static dims are > 0.
+    let (num_heads, head_dim) = inputs
+        .iter()
+        .find(|i| i.name() == "past_key_values.0.key")
+        .and_then(|inp| {
+            if let ValueType::Tensor { shape, .. } = inp.dtype() {
+                let nh = shape.get(1).copied().filter(|&x| x > 0).unwrap_or(8) as usize;
+                let hd = shape.get(3).copied().filter(|&x| x > 0).unwrap_or(128) as usize;
+                Some((nh, hd))
+            } else {
+                None
+            }
+        })
+        .unwrap_or((8, 128));
+    Some(KvCacheParams { num_layers, num_heads, head_dim })
 }
 
 /// Blocking (synchronous) embedding of a batch of texts.
@@ -147,6 +214,7 @@ fn embed_texts_impl(
     max_seq_length: usize,
     needs_token_type_ids: bool,
     pooling: Pooling,
+    kv_cache: Option<&KvCacheParams>,
     texts: &[String],
 ) -> Result<Vec<Vec<f32>>, DomainError> {
     if texts.is_empty() {
@@ -194,7 +262,45 @@ fn embed_texts_impl(
         .lock()
         .map_err(|e| DomainError::internal(format!("Failed to lock session: {}", e)))?;
 
-    let outputs = if needs_token_type_ids {
+    let outputs = if let Some(kv) = kv_cache {
+        // Decoder / KV-cache model (e.g. onnx-community Qwen3-Embedding).
+        // Supply position_ids = [0..max_len] and empty past_key_values so the
+        // model performs a full-context forward pass with no cached state.
+        // position_ids shape: [batch_size, max_len] — each row is [0, 1, ..., max_len-1].
+        let pos_ids: Vec<i64> = (0..max_len as i64)
+            .cycle()
+            .take(batch_size * max_len)
+            .collect();
+        let pos_ids_tensor = Tensor::from_array(([batch_size, max_len], pos_ids))
+            .map_err(|e| DomainError::internal(format!("Failed to create position_ids tensor: {}", e)))?;
+
+        // Build the inputs map dynamically — ort::inputs![] requires a fixed
+        // number of entries at compile time, so we use the HashMap path instead.
+        let mut inputs_map: std::collections::HashMap<String, ort::value::Value> =
+            std::collections::HashMap::new();
+        inputs_map.insert("input_ids".to_string(), input_ids_tensor.into());
+        inputs_map.insert("attention_mask".to_string(), attention_mask_tensor.into());
+        inputs_map.insert("position_ids".to_string(), pos_ids_tensor.into());
+        // Empty KV tensors: shape [batch, num_heads, 0, head_dim].  ndarray is
+        // needed because ort rejects zero-dim tensors constructed from raw Vec.
+        for layer in 0..kv.num_layers {
+            let empty_k: Array4<f32> = Array4::zeros([batch_size, kv.num_heads, 0, kv.head_dim]);
+            let empty_v: Array4<f32> = Array4::zeros([batch_size, kv.num_heads, 0, kv.head_dim]);
+            inputs_map.insert(
+                format!("past_key_values.{layer}.key"),
+                Tensor::from_array(empty_k)
+                    .map_err(|e| DomainError::internal(format!("Failed to create KV key {layer}: {e}")))?
+                    .into(),
+            );
+            inputs_map.insert(
+                format!("past_key_values.{layer}.value"),
+                Tensor::from_array(empty_v)
+                    .map_err(|e| DomainError::internal(format!("Failed to create KV value {layer}: {e}")))?
+                    .into(),
+            );
+        }
+        session_guard.run(inputs_map)
+    } else if needs_token_type_ids {
         let token_type_ids = vec![0i64; batch_size * max_len];
         let token_type_ids_tensor = Tensor::from_array((shape, token_type_ids)).map_err(|e| {
             DomainError::internal(format!("Failed to create token_type_ids tensor: {}", e))
@@ -316,11 +422,12 @@ impl EmbeddingService for OrtEmbedding {
         let max_seq = self.config.max_sequence_length();
         let needs_tti = self.needs_token_type_ids;
         let pooling = self.pooling;
+        let kv_cache = self.kv_cache.clone();
         let model_name = self.config.model_name().to_string();
         let chunk_id = chunk.id().to_string();
 
         let vectors = tokio::task::spawn_blocking(move || {
-            embed_texts_impl(&session, &tokenizer, max_seq, needs_tti, pooling, &[text])
+            embed_texts_impl(&session, &tokenizer, max_seq, needs_tti, pooling, kv_cache.as_ref(), &[text])
         })
         .await
         .map_err(|e| DomainError::internal(format!("Embedding task panicked: {e}")))??;
@@ -357,9 +464,10 @@ impl EmbeddingService for OrtEmbedding {
             let max_seq = self.config.max_sequence_length();
             let needs_tti = self.needs_token_type_ids;
             let pooling = self.pooling;
+            let kv_cache = self.kv_cache.clone();
 
             let vectors = tokio::task::spawn_blocking(move || {
-                embed_texts_impl(&session, &tokenizer, max_seq, needs_tti, pooling, &texts)
+                embed_texts_impl(&session, &tokenizer, max_seq, needs_tti, pooling, kv_cache.as_ref(), &texts)
             })
             .await
             .map_err(|e| DomainError::internal(format!("Embedding task panicked: {e}")))??;
@@ -398,9 +506,10 @@ impl EmbeddingService for OrtEmbedding {
         let max_seq = self.config.max_sequence_length();
         let needs_tti = self.needs_token_type_ids;
         let pooling = self.pooling;
+        let kv_cache = self.kv_cache.clone();
 
         let vectors = tokio::task::spawn_blocking(move || {
-            embed_texts_impl(&session, &tokenizer, max_seq, needs_tti, pooling, &[text])
+            embed_texts_impl(&session, &tokenizer, max_seq, needs_tti, pooling, kv_cache.as_ref(), &[text])
         })
         .await
         .map_err(|e| DomainError::internal(format!("Embedding task panicked: {e}")))??;

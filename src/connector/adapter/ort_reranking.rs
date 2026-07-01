@@ -1,11 +1,13 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
+use ndarray::Array4;
 use ort::{
     session::{builder::GraphOptimizationLevel, Session},
-    value::Tensor,
+    value::{Tensor, ValueType},
 };
 use tokenizers::Tokenizer;
 use tracing::{debug, info, warn};
@@ -13,7 +15,7 @@ use tracing::{debug, info, warn};
 use crate::application::RerankingService;
 use crate::domain::{DomainError, SearchResult};
 
-const DEFAULT_MODEL_ID: &str = "Qwen/Qwen3-Reranker-0.6B";
+const DEFAULT_MODEL_ID: &str = "onnx-community/Qwen3-Reranker-0.6B-ONNX";
 const DEFAULT_MAX_SEQ_LENGTH: usize = 512;
 const BATCH_SIZE: usize = 32;
 
@@ -25,6 +27,41 @@ const QWEN_INSTRUCTION: &str =
 const QWEN_PREFIX: &str = "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n";
 /// Chat-template suffix that closes the prompt and primes the assistant turn.
 const QWEN_SUFFIX: &str = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+
+struct KvCacheParams {
+    num_layers: usize,
+    num_heads: usize,
+    head_dim: usize,
+}
+
+fn detect_kv_cache(session: &Session) -> Option<KvCacheParams> {
+    let inputs = session.inputs();
+    let num_layers = inputs
+        .iter()
+        .filter(|i| i.name().starts_with("past_key_values.") && i.name().ends_with(".key"))
+        .count();
+    if num_layers == 0 {
+        return None;
+    }
+    let (num_heads, head_dim) = inputs
+        .iter()
+        .find(|i| i.name() == "past_key_values.0.key")
+        .and_then(|inp| {
+            if let ValueType::Tensor { shape, .. } = inp.dtype() {
+                let nh = shape.get(1).copied().filter(|&x| x > 0).unwrap_or(8) as usize;
+                let hd = shape.get(3).copied().filter(|&x| x > 0).unwrap_or(128) as usize;
+                Some((nh, hd))
+            } else {
+                None
+            }
+        })
+        .unwrap_or((8, 128));
+    Some(KvCacheParams {
+        num_layers,
+        num_heads,
+        head_dim,
+    })
+}
 
 /// Which scoring scheme the loaded ONNX reranker uses.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -52,6 +89,8 @@ pub struct OrtReranking {
     token_true_id: Option<u32>,
     /// Vocabulary id of the "no" token (Causal kind only).
     token_false_id: Option<u32>,
+    /// KV-cache decoder parameters (present for Qwen3-Reranker ONNX exports).
+    kv_cache: Option<KvCacheParams>,
 }
 
 impl OrtReranking {
@@ -73,8 +112,12 @@ impl OrtReranking {
             .get("tokenizer.json")
             .map_err(|e| DomainError::internal(format!("Failed to download tokenizer: {}", e)))?;
 
+        // Prefer the self-contained quantized model (no .onnx_data sidecar).
+        // Fall back to the full-precision model for custom repos that don't
+        // ship a quantized variant.
         let model_path = repo
-            .get("model.onnx")
+            .get("onnx/model_quantized.onnx")
+            .or_else(|_| repo.get("model.onnx"))
             .or_else(|_| repo.get("onnx/model.onnx"))
             .map_err(|e| DomainError::internal(format!("Failed to download ONNX model: {}", e)))?;
 
@@ -126,6 +169,10 @@ impl OrtReranking {
         } else {
             (None, None)
         };
+        let kv_cache = detect_kv_cache(&session);
+        if kv_cache.is_some() {
+            debug!("Reranker: KV-cache decoder detected ({} layers)", kv_cache.as_ref().unwrap().num_layers);
+        }
         debug!("Reranker kind: {:?}", kind);
 
         Ok(Self {
@@ -137,6 +184,7 @@ impl OrtReranking {
             kind,
             token_true_id,
             token_false_id,
+            kv_cache,
         })
     }
 
@@ -368,12 +416,44 @@ impl OrtReranking {
             .lock()
             .map_err(|e| DomainError::internal(format!("Failed to lock session: {}", e)))?;
 
-        let outputs = session
-            .run(ort::inputs![
+        let outputs = if let Some(kv) = &self.kv_cache {
+            let pos_ids: Vec<i64> = (0..max_len as i64)
+                .cycle()
+                .take(batch_size * max_len)
+                .collect();
+            let pos_ids_tensor = Tensor::from_array(([batch_size, max_len], pos_ids)).map_err(
+                |e| DomainError::internal(format!("Failed to create position_ids tensor: {}", e)),
+            )?;
+            let mut inputs_map: HashMap<String, ort::value::Value> = HashMap::new();
+            inputs_map.insert("input_ids".to_string(), input_ids_tensor.into());
+            inputs_map.insert("attention_mask".to_string(), attention_mask_tensor.into());
+            inputs_map.insert("position_ids".to_string(), pos_ids_tensor.into());
+            for layer in 0..kv.num_layers {
+                let empty_k: Array4<f32> =
+                    Array4::zeros([batch_size, kv.num_heads, 0, kv.head_dim]);
+                let empty_v: Array4<f32> =
+                    Array4::zeros([batch_size, kv.num_heads, 0, kv.head_dim]);
+                inputs_map.insert(
+                    format!("past_key_values.{layer}.key"),
+                    Tensor::from_array(empty_k)
+                        .map_err(|e| DomainError::internal(format!("KV tensor error: {}", e)))?
+                        .into(),
+                );
+                inputs_map.insert(
+                    format!("past_key_values.{layer}.value"),
+                    Tensor::from_array(empty_v)
+                        .map_err(|e| DomainError::internal(format!("KV tensor error: {}", e)))?
+                        .into(),
+                );
+            }
+            session.run(inputs_map)
+        } else {
+            session.run(ort::inputs![
                 "input_ids" => input_ids_tensor,
                 "attention_mask" => attention_mask_tensor,
             ])
-            .map_err(|e| DomainError::internal(format!("Inference failed: {}", e)))?;
+        }
+        .map_err(|e| DomainError::internal(format!("Inference failed: {}", e)))?;
 
         let output_value = outputs
             .iter()

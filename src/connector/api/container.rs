@@ -72,7 +72,7 @@ pub struct ContainerConfig {
     pub llm_target: LlmTarget,
     /// Embedding model identifier.
     ///
-    /// For `Onnx`: HuggingFace model ID (default: `Qwen/Qwen3-Embedding-0.6B`).
+    /// For `Onnx`: HuggingFace model ID (default: `onnx-community/Qwen3-Embedding-0.6B-ONNX`).
     /// For `Api`: model name sent in the `/v1/embeddings` request body (must match
     /// the model currently loaded in LM Studio or the target server).
     ///
@@ -80,7 +80,7 @@ pub struct ContainerConfig {
     pub embedding_model: Option<String>,
     /// Number of dimensions produced by the embedding model.
     ///
-    /// Defaults to 1024 (the dimension of `Qwen/Qwen3-Embedding-0.6B`).  Override with
+    /// Defaults to 1024 (the output dimension of `onnx-community/Qwen3-Embedding-0.6B-ONNX`).  Override with
     /// `--embedding-dimensions` when using a model with a different output size.
     /// The value is persisted in `namespace_config` and cannot change after the
     /// namespace has been indexed — use a different namespace or re-index with
