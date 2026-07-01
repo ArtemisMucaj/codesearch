@@ -14,7 +14,7 @@ pub const DEFAULT_BASE_URL: &str = "http://localhost:1234";
 const MESSAGES_PATH: &str = "/v1/messages";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 /// Default model matches the LM Studio local-first default.
-const DEFAULT_MODEL: &str = "mistralai/ministral-3-3b";
+const DEFAULT_MODEL: &str = "qwen/qwen3.5-4b";
 /// Budget is set high so that thinking-mode models (e.g. Qwen with extended
 /// thinking) can spend tokens on their `<think>` pass without exhausting the
 /// budget before the actual XML response is written.
@@ -159,7 +159,7 @@ impl AnthropicClient {
     /// | Variable             | Default                   | Purpose                   |
     /// |----------------------|---------------------------|---------------------------|
     /// | `ANTHROPIC_BASE_URL` | `http://localhost:1234`   | LM Studio / any server    |
-    /// | `ANTHROPIC_MODEL`    | `mistralai/ministral-3-3b` | Model in LM Studio       |
+    /// | `ANTHROPIC_MODEL`    | `qwen/qwen3.5-4b`          | Model in LM Studio       |
     /// | `ANTHROPIC_API_KEY`  | `""` (empty)              | Not required for local    |
     pub fn from_env() -> Self {
         let base =

@@ -39,7 +39,7 @@ Example output: [0.97, 0.02]";
 /// | Variable             | Default                    |
 /// |----------------------|----------------------------|
 /// | `ANTHROPIC_BASE_URL` | `http://localhost:1234`    |
-/// | `ANTHROPIC_MODEL`    | `mistralai/ministral-3-3b` |
+/// | `ANTHROPIC_MODEL`    | `qwen/qwen3.5-4b`          |
 /// | `ANTHROPIC_API_KEY`  | `""` (not required locally)|
 pub struct LmStudioReranking {
     client: Arc<dyn ChatClient>,

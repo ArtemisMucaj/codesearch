@@ -177,40 +177,33 @@ pub enum TuiMode {
 /// Embedding backend to use for indexing and search.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum EmbeddingTarget {
-    /// Bundled ONNX models downloaded from HuggingFace (default, offline-capable).
+    /// Bundled ONNX models from HuggingFace (offline-capable)
     #[default]
     Onnx,
-    /// OpenAI-compatible `/v1/embeddings` API (e.g. LM Studio running locally).
-    /// Set `OPENAI_BASE_URL` to override the default `http://localhost:1234`.
+    /// OpenAI-compatible /v1/embeddings endpoint (set OPENAI_BASE_URL to override)
     Api,
 }
 
 /// Provider to use for LLM calls (query expansion, explain, etc.).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum LlmTarget {
-    /// Anthropic-compatible `/v1/messages` endpoint (default). Controlled by
-    /// `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and `ANTHROPIC_API_KEY`.
+    /// Anthropic-compatible /v1/messages (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL)
     #[default]
     Anthropic,
-    /// OpenAI-compatible `/v1/chat/completions` endpoint. Controlled by
-    /// `OPENAI_BASE_URL`, `OPENAI_MODEL`, and `OPENAI_API_KEY`.
+    /// OpenAI-compatible /v1/chat/completions (OPENAI_BASE_URL, OPENAI_MODEL)
     OpenAi,
 }
 
 /// Reranking backend to use after retrieval.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum RerankingTarget {
-    /// Bundled ONNX cross-encoder model (default, offline-capable).
+    /// Bundled ONNX cross-encoder model (offline-capable)
     #[default]
     Onnx,
-    /// LLM reranker via Anthropic-compatible `/v1/messages` (e.g. LM Studio or
-    /// Anthropic cloud). Controlled by `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`,
-    /// and `ANTHROPIC_API_KEY`.
+    /// LLM reranker via Anthropic-compatible /v1/messages (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL)
     #[value(name = "api/anthropic")]
     ApiAnthropic,
-    /// LLM reranker via OpenAI-compatible `/v1/chat/completions` (e.g. LM
-    /// Studio). Controlled by `OPENAI_BASE_URL`, `OPENAI_MODEL`, and
-    /// `OPENAI_API_KEY`.
+    /// LLM reranker via OpenAI-compatible /v1/chat/completions (OPENAI_BASE_URL, OPENAI_MODEL)
     #[value(name = "api/openai")]
     ApiOpenAi,
 }
@@ -260,11 +253,9 @@ pub enum Commands {
 
     Stats,
 
-    /// Show the blast radius of changing a symbol (BFS over the call graph).
+    /// Show the blast radius of changing a symbol (BFS over the call graph)
     Impact {
-        /// Symbol name to analyse (e.g. "authenticate" or "MyStruct::new").
-        /// When --regex is set, treated as a POSIX regular expression matched
-        /// against all indexed fully-qualified symbol names.
+        /// Symbol name or regex pattern (see --regex)
         symbol: String,
 
         /// Restrict analysis to a specific repository ID
@@ -275,21 +266,14 @@ pub enum Commands {
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormat,
 
-        /// Use SYMBOL as an explicit regex pattern without auto-wrapping.
-        /// By default the symbol is automatically searched as `.*SYMBOL.*` so
-        /// that "load" matches any FQN containing "load".  Pass --regex when
-        /// you want to control anchoring yourself (e.g. "^MyNs/.*Service#get$").
+        /// Treat SYMBOL as a literal regex; by default it is auto-wrapped as .*SYMBOL.*
         #[arg(long)]
         regex: bool,
     },
 
-    /// Show full end-to-end call chain tree for a symbol: callers BFS (top-most
-    /// entry points → symbol) and callees BFS (symbol → deepest callees), merged
-    /// into one contiguous indented tree per caller chain.
+    /// Show callers (entry points → symbol) and callees (symbol → leaves) as an indented tree
     Context {
-        /// Symbol name to look up (e.g. "authenticate" or "MyStruct::new").
-        /// When --regex is set, treated as a POSIX regular expression matched
-        /// against all indexed fully-qualified symbol names.
+        /// Symbol name or regex pattern (see --regex)
         symbol: String,
 
         /// Restrict context to a specific repository ID
@@ -300,57 +284,40 @@ pub enum Commands {
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormat,
 
-        /// Use SYMBOL as an explicit regex pattern without auto-wrapping.
-        /// By default the symbol is automatically searched as `.*SYMBOL.*` so
-        /// that "load" matches any FQN containing "load".  Pass --regex when
-        /// you want to control anchoring yourself (e.g. "^MyNs/.*Service#get$").
+        /// Treat SYMBOL as a literal regex; by default it is auto-wrapped as .*SYMBOL.*
         #[arg(long)]
         regex: bool,
     },
 
-    /// LLM-driven explanation of a symbol's complete call flow, data flow, and
-    /// business purpose. Runs impact analysis then passes each affected symbol's
-    /// source code to the configured LLM and returns a structured description.
+    /// LLM-driven explanation of a symbol's call flow, data flow, and business purpose
     Explain {
-        /// Symbol name to explain (e.g. "authenticate" or "MyStruct::new").
-        /// When --regex is set, treated as a POSIX regular expression matched
-        /// against all indexed fully-qualified symbol names.
+        /// Symbol name or regex pattern (see --regex)
         symbol: String,
 
         /// Restrict analysis to a specific repository ID
         #[arg(short, long)]
         repository: Option<String>,
 
-        /// LLM backend to use for the explanation:
-        ///   'anthropic' — /v1/messages (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, default).
-        ///   'open-ai'   — /v1/chat/completions (OPENAI_BASE_URL, OPENAI_MODEL).
+        /// LLM provider: 'anthropic' (default) or 'open-ai'
         #[arg(long, value_enum, default_value = "anthropic")]
         llm: LlmTarget,
 
-        /// Print every analyzed symbol together with the source chunk that was
-        /// sent to the LLM, after the explanation.
+        /// Print each analyzed symbol and the source chunk sent to the LLM
         #[arg(long)]
         dump_symbols: bool,
 
-        /// Use SYMBOL as an explicit regex pattern without auto-wrapping.
-        /// By default the symbol is automatically searched as `.*SYMBOL.*` so
-        /// that "load" matches any FQN containing "load".  Pass --regex when
-        /// you want to control anchoring yourself (e.g. "^MyNs/.*Service#get$").
+        /// Treat SYMBOL as a literal regex; by default it is auto-wrapped as .*SYMBOL.*
         #[arg(long)]
         regex: bool,
     },
 
-    /// Discover and score execution features — forward call chains rooted at
-    /// entry-point symbols — and rank them by criticality.
+    /// Discover and score execution features rooted at entry-point symbols, ranked by criticality
     Features {
         #[command(subcommand)]
         subcommand: FeaturesSubcommand,
     },
 
-    /// List the files that repository X uses from repository Y.
-    ///
-    /// Prints every file in <from> that references symbols defined in <to>,
-    /// grouped by the target file they depend on.  Use repository names or IDs.
+    /// List files in <from> that reference symbols defined in <to>
     Uses {
         /// Repository that is doing the using (the caller side).
         from: String,
@@ -358,10 +325,7 @@ pub enum Commands {
         to: String,
     },
 
-    /// Detect and explore architectural clusters in a repository's file dependency graph.
-    ///
-    /// Uses the Leiden community-detection algorithm on the file-level call graph
-    /// to identify groups of tightly-coupled files (architectural modules).
+    /// Detect and explore architectural clusters in a repository's file dependency graph
     Clusters {
         #[command(subcommand)]
         subcommand: ClustersSubcommand,
@@ -373,8 +337,7 @@ pub enum Commands {
         subcommand: SymbolClustersSubcommand,
     },
 
-    /// Render a repository's Leiden communities as an interactive HTML graph,
-    /// a static SVG, or an Obsidian canvas.
+    /// Render a repository's Leiden communities as an HTML graph, SVG, or Obsidian canvas
     Visualize {
         /// Repository ID or name to visualize.
         repository: String,
@@ -387,13 +350,11 @@ pub enum Commands {
         #[arg(short = 'F', long, value_enum, default_value = "html")]
         format: VizFormat,
 
-        /// Path to write the artifact to. Defaults to
-        /// `./codesearch-graph.<ext>` for the chosen format.
+        /// Output path (defaults to ./codesearch-graph.<ext>)
         #[arg(short, long)]
         output: Option<String>,
 
-        /// Collapse the graph into a community meta-graph (one node per
-        /// community). Forced automatically above `--node-limit` nodes.
+        /// Collapse into a community meta-graph (one node per community); auto-applied above --node-limit
         #[arg(long)]
         aggregate: bool,
 
