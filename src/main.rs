@@ -9,6 +9,28 @@ use codesearch::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use codesearch::connector::adapter::mcp::CodesearchMcpServer;
 use codesearch::{Commands, Container, ContainerConfig, Router};
 
+/// Validates that a namespace contains only characters that are safe to use as
+/// a DuckDB schema identifier. DuckDB's FTS extension embeds the namespace into
+/// an unquoted schema name (e.g. `fts_<ns>_chunks`) and into the FTS PRAGMA
+/// table argument, so special characters like `+` cause SQL parse errors.
+///
+/// Allowed: ASCII alphanumerics, `-`, and `_`.
+fn validate_namespace(s: &str) -> Result<String, String> {
+    if s.is_empty() {
+        return Err("namespace must not be empty".to_string());
+    }
+    if let Some(bad) = s
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
+    {
+        return Err(format!(
+            "namespace '{s}' contains invalid character '{bad}'. \
+             Only ASCII letters, digits, '-', and '_' are allowed."
+        ));
+    }
+    Ok(s.to_string())
+}
+
 #[derive(Parser)]
 #[command(name = "codesearch")]
 #[command(author, version, about, long_about = None)]
@@ -22,7 +44,7 @@ struct Cli {
     #[arg(long, global = true)]
     mock_embeddings: bool,
 
-    #[arg(long, global = true, default_value = "search")]
+    #[arg(long, global = true, default_value = "search", value_parser = validate_namespace)]
     namespace: String,
 
     #[arg(long, global = true)]
