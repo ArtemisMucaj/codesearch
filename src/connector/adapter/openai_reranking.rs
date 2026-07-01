@@ -37,7 +37,7 @@ Example output: [0.97, 0.02]";
 /// | Variable          | Default                    |
 /// |-------------------|----------------------------|
 /// | `OPENAI_BASE_URL` | `http://localhost:1234`    |
-/// | `OPENAI_MODEL`    | `openai-chat`              |
+/// | `OPENAI_MODEL`    | `qwen/qwen3.5-4b`          |
 /// | `OPENAI_API_KEY`  | `""` (not required locally)|
 pub struct OpenAiReranking {
     client: Arc<dyn ChatClient>,
@@ -47,7 +47,7 @@ pub struct OpenAiReranking {
 impl OpenAiReranking {
     pub fn new(client: Arc<dyn ChatClient>) -> Self {
         let model_name =
-            std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "openai-chat".to_string());
+            std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "qwen/qwen3.5-4b".to_string());
         Self { client, model_name }
     }
 

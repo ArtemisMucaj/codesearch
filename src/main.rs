@@ -49,17 +49,17 @@ struct Cli {
     embedding_target: EmbeddingTarget,
 
     /// Embedding model identifier.
-    /// For 'onnx': HuggingFace model ID (default: sentence-transformers/all-MiniLM-L6-v2).
+    /// For 'onnx': HuggingFace model ID (default: onnx-community/Qwen3-Embedding-0.6B-ONNX).
     /// For 'api': model name sent in the /v1/embeddings request body; must match
     /// the model loaded in the target server (set OPENAI_BASE_URL for non-default address).
     #[arg(long, global = true)]
     embedding_model: Option<String>,
 
-    /// Number of dimensions produced by the embedding model (default: 384).
-    /// Override when using a model with a different output size (e.g. 768 or 1024).
+    /// Number of dimensions produced by the embedding model (default: 1024).
+    /// Override when using a model with a different output size (e.g. 384 or 768).
     /// This value is stored in namespace_config on first index and cannot be
     /// changed without re-indexing.
-    #[arg(long, global = true, default_value = "384")]
+    #[arg(long, global = true, default_value = "1024")]
     embedding_dimensions: usize,
 
     /// Reranking backend (used when --no-rerank is not set):
@@ -163,7 +163,7 @@ async fn main() -> Result<()> {
     // the embedding settings are adopted only when the effective namespace
     // matches the resolved one, so an explicit `--namespace <indexed-ns>` still
     // picks up that namespace's embedding config (which `Container::new`
-    // validates) instead of silently falling back to the ONNX/384 defaults.
+    // validates) instead of silently falling back to the ONNX/1024 defaults.
     let mut namespace = cli.namespace.clone();
     let mut embedding_target = cli.embedding_target;
     let mut embedding_model = cli.embedding_model.clone();

@@ -73,7 +73,7 @@ Two backends are available — see [Embedding Backends](./embedding-backends.md)
 
 | Backend | Flag | Default model | Dimensions |
 |---------|------|---------------|------------|
-| ONNX (local, default) | `--embedding-target=onnx` | `sentence-transformers/all-MiniLM-L6-v2` | 384 |
+| ONNX (local, default) | `--embedding-target=onnx` | `mixedbread-ai/mxbai-embed-large-v1` | 1024 |
 | API (OpenAI-compatible) | `--embedding-target=api` | Configured via `--embedding-model` | Configured via `--embedding-dimensions` |
 
 The model and dimension count are stored in the `namespace_config` DuckDB table on first index and validated on every subsequent open — mismatches are hard errors.
@@ -96,7 +96,7 @@ Data is stored using configurable backends:
 > The `repositories` and `namespace_config` tables are **global** (one per database file, not namespace-scoped), so each row records which namespace it belongs to. This is what makes [automatic namespace resolution](#automatic-namespace-resolution) a single cheap lookup.
 
 **Vectors** (via `DuckdbVectorRepository` with VSS):
-- Stores `FLOAT[{dimensions}]` embedding vectors directly in DuckDB — the column width is fixed at namespace creation time based on `--embedding-dimensions` (default 384)
+- Stores `FLOAT[{dimensions}]` embedding vectors directly in DuckDB — the column width is fixed at namespace creation time based on `--embedding-dimensions` (default 1024)
 - **VSS (Vector Similarity Search) acceleration**:
   - Uses HNSW (Hierarchical Navigable Small World) index
   - Cosine distance metric for similarity calculations
@@ -244,7 +244,7 @@ Return Results
 
 | Backend | Reranking method | Model |
 |---------|-----------------|-------|
-| ONNX | Cross-encoder (ONNX) | `BAAI/bge-reranker-base` (~220 MB, downloaded automatically) |
+| ONNX | Causal reranker (ONNX); auto-detects BERT-style cross-encoders too | `BAAI/bge-reranker-base` (~440 MB, downloaded automatically) |
 | API | LLM-based (single prompt, JSON scores) | Chat model at `ANTHROPIC_BASE_URL` (`ANTHROPIC_MODEL`) |
 
 ### Usage

@@ -72,7 +72,7 @@ pub struct ContainerConfig {
     pub llm_target: LlmTarget,
     /// Embedding model identifier.
     ///
-    /// For `Onnx`: HuggingFace model ID (default: `sentence-transformers/all-MiniLM-L6-v2`).
+    /// For `Onnx`: HuggingFace model ID (default: `onnx-community/Qwen3-Embedding-0.6B-ONNX`).
     /// For `Api`: model name sent in the `/v1/embeddings` request body (must match
     /// the model currently loaded in LM Studio or the target server).
     ///
@@ -80,7 +80,7 @@ pub struct ContainerConfig {
     pub embedding_model: Option<String>,
     /// Number of dimensions produced by the embedding model.
     ///
-    /// Defaults to 384 (the dimension of `all-MiniLM-L6-v2`).  Override with
+    /// Defaults to 1024 (the output dimension of `onnx-community/Qwen3-Embedding-0.6B-ONNX`).  Override with
     /// `--embedding-dimensions` when using a model with a different output size.
     /// The value is persisted in `namespace_config` and cannot change after the
     /// namespace has been indexed — use a different namespace or re-index with
@@ -200,11 +200,11 @@ impl Container {
         let parser = Arc::new(TreeSitterParser::new());
 
         // Resolve the effective model name for the selected embedding target.
-        const ONNX_DEFAULT_MODEL: &str = "sentence-transformers/all-MiniLM-L6-v2";
+        // The ONNX default lives on the adapter so metadata and indexing agree.
         let effective_model = match config.embedding_model.clone() {
             Some(m) => m,
             None => match config.embedding_target {
-                EmbeddingTarget::Onnx => ONNX_DEFAULT_MODEL.to_string(),
+                EmbeddingTarget::Onnx => OrtEmbedding::DEFAULT_MODEL_ID.to_string(),
                 EmbeddingTarget::Api => {
                     return Err(anyhow::anyhow!(
                         "--embedding-model is required when using --embedding-target=api"
@@ -224,7 +224,7 @@ impl Container {
                         "Initializing ONNX embedding service (model='{}')...",
                         effective_model
                     );
-                    let model_arg = if effective_model == ONNX_DEFAULT_MODEL {
+                    let model_arg = if effective_model == OrtEmbedding::DEFAULT_MODEL_ID {
                         None
                     } else {
                         Some(effective_model.as_str())
