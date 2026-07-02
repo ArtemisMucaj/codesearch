@@ -9,6 +9,7 @@ use tracing::{info, warn};
 /// uninformative and only add noise to the output.
 const MIN_RESULT_SCORE: f32 = 0.1;
 
+use crate::application::use_cases::graph_expansion::GraphExpansionUseCase;
 use crate::application::use_cases::rrf_fuse::rrf_fuse;
 use crate::application::{EmbeddingService, QueryExpander, RerankingService, VectorRepository};
 use crate::domain::{DomainError, SearchQuery, SearchResult};
@@ -18,6 +19,7 @@ pub struct SearchCodeUseCase {
     embedding_service: Arc<dyn EmbeddingService>,
     reranking_service: Option<Arc<dyn RerankingService>>,
     query_expander: Option<Arc<dyn QueryExpander>>,
+    graph_expansion: Option<Arc<GraphExpansionUseCase>>,
 }
 
 impl SearchCodeUseCase {
@@ -30,6 +32,7 @@ impl SearchCodeUseCase {
             embedding_service,
             reranking_service: None,
             query_expander: None,
+            graph_expansion: None,
         }
     }
 
@@ -40,6 +43,14 @@ impl SearchCodeUseCase {
 
     pub fn with_query_expansion(mut self, expander: Arc<dyn QueryExpander>) -> Self {
         self.query_expander = Some(expander);
+        self
+    }
+
+    /// Enable the call-graph expansion leg: top hits seed a walk over the
+    /// call graph and structurally connected chunks are fused into the
+    /// result list.
+    pub fn with_graph_expansion(mut self, expansion: Arc<GraphExpansionUseCase>) -> Self {
+        self.graph_expansion = Some(expansion);
         self
     }
 
@@ -133,13 +144,36 @@ impl SearchCodeUseCase {
                 .await?
         };
 
+        // Graph expansion leg: expand the top hits through the call graph and
+        // fuse structurally connected chunks into the list.  Failures degrade
+        // to the un-expanded results — the leg is additive, never required.
+        let mut graph_fused = false;
+        if let Some(ref expansion) = self.graph_expansion {
+            match expansion.expand(&results, &query).await {
+                Ok(graph_leg) if !graph_leg.is_empty() => {
+                    let graph_len = graph_leg.len();
+                    results = rrf_fuse(vec![results, graph_leg], fetch_limit);
+                    graph_fused = true;
+                    info!(
+                        "Graph expansion: fused {} structurally related chunks -> {} results",
+                        graph_len,
+                        results.len()
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!("Graph expansion failed (continuing without): {}", e);
+                }
+            }
+        }
+
         let mut reranked = false;
         if let Some(ref reranker) = self.reranking_service {
             // Filter out very low-scoring results before reranking — they are
             // unlikely to resurface and just slow down the cross-encoder.
             // Skip this filter for hybrid/RRF results: RRF scores are ~0.016–0.033
             // by design and would all be dropped by a hard >= 0.1 threshold.
-            if !search_query.is_text_search() && self.query_expander.is_none() {
+            if !search_query.is_text_search() && self.query_expander.is_none() && !graph_fused {
                 let before_filter = results.len();
                 results.retain(|r| r.score() >= MIN_RESULT_SCORE);
                 let filtered = before_filter - results.len();

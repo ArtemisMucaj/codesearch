@@ -156,6 +156,33 @@ impl VectorRepository for InMemoryVectorRepository {
         Ok(result)
     }
 
+    async fn find_chunk_by_symbol(
+        &self,
+        repository_id: &str,
+        symbol: &str,
+        class_hint: Option<&str>,
+    ) -> Result<Option<CodeChunk>, DomainError> {
+        let chunks = self.chunks.lock().await;
+        let mut matches: Vec<&CodeChunk> = chunks
+            .values()
+            .filter(|c| {
+                c.symbol_name() == Some(symbol)
+                    && (repository_id.is_empty() || c.repository_id() == repository_id)
+            })
+            .collect();
+        // Mirror the DuckDB adapter's ranking: prefer files matching the class
+        // hint, then the tightest scope (smallest line span).
+        matches.sort_by_key(|c| {
+            let hint_rank = match class_hint {
+                Some(hint) if c.file_path().contains(hint) => 0u32,
+                Some(_) => 1,
+                None => 0,
+            };
+            (hint_rank, c.end_line().saturating_sub(c.start_line()))
+        });
+        Ok(matches.first().map(|c| (*c).clone()))
+    }
+
     async fn get_symbol_to_file_map(
         &self,
         repository_id: &str,

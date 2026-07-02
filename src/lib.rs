@@ -8,8 +8,8 @@ pub use application::{
     CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase, ChatClient,
     ClusterDetectionUseCase, ContextNode, DeleteRepositoryUseCase, EmbeddingService,
     ExecutionFeaturesUseCase, ExplainResult, ExplainUseCase, FileHashRepository,
-    FileRelationshipUseCase, ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode,
-    IndexRepositoryUseCase, ListRepositoriesUseCase, MetadataRepository, ParserService,
+    FileRelationshipUseCase, GraphExpansionUseCase, ImpactAnalysis, ImpactAnalysisUseCase,
+    ImpactNode, IndexRepositoryUseCase, ListRepositoriesUseCase, MetadataRepository, ParserService,
     QueryExpander, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
     SymbolClusterDetectionUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
 };

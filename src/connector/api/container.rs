@@ -15,11 +15,11 @@ use crate::{
     AnthropicClient, AnthropicReranking, ClusterDetectionUseCase, DeleteRepositoryUseCase,
     DuckdbCallGraphRepository, DuckdbFileHashRepository, DuckdbMetadataRepository,
     DuckdbVectorRepository, EmbeddingService, ExecutionFeaturesUseCase, ExplainUseCase,
-    FileRelationshipUseCase, ImpactAnalysisUseCase, InMemoryVectorRepository,
-    IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding,
-    MockReranking, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking,
-    RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase, SymbolClusterDetectionUseCase,
-    SymbolContextUseCase, TreeSitterParser, VectorRepository,
+    FileRelationshipUseCase, GraphExpansionUseCase, ImpactAnalysisUseCase,
+    InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander,
+    MockEmbedding, MockReranking, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding,
+    OrtReranking, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
+    SymbolClusterDetectionUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -460,7 +460,11 @@ impl Container {
 
     pub fn search_use_case(&self) -> SearchCodeUseCase {
         let mut use_case =
-            SearchCodeUseCase::new(self.vector_repo.clone(), self.embedding_service.clone());
+            SearchCodeUseCase::new(self.vector_repo.clone(), self.embedding_service.clone())
+                .with_graph_expansion(Arc::new(GraphExpansionUseCase::new(
+                    self.call_graph_use_case.clone(),
+                    self.vector_repo.clone(),
+                )));
 
         if let Some(reranker) = self.reranking_service.clone() {
             use_case = use_case.with_reranking(reranker);
@@ -523,7 +527,9 @@ impl Container {
                     Err(e) => warn!("Repository auto-detection task panicked: {e}"),
                 }
             }
-            Err(e) => warn!("Could not determine current directory for repository auto-detection: {e}"),
+            Err(e) => {
+                warn!("Could not determine current directory for repository auto-detection: {e}")
+            }
         }
         String::new()
     }
