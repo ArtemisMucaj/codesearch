@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use duckdb::{params, AccessMode, Config, Connection, Row};
+use duckdb::{params, params_from_iter, AccessMode, Config, Connection, Row};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -14,6 +15,21 @@ use crate::domain::{CodeChunk, DomainError, Embedding, SearchQuery, SearchResult
 /// BM25 is exact keyword matching so a small pool is sufficient;
 /// the semantic leg handles broader recall.
 const BM25_FETCH_LIMIT: usize = 10;
+
+/// Over-fetch multiplier applied to the HNSW candidate pass when the query
+/// carries column filters (language / node_type / repository).  The index scan
+/// cannot apply those filters itself, so extra nearest neighbours are fetched
+/// and filtered afterwards.
+const HNSW_FILTER_OVERFETCH_MULTIPLIER: usize = 4;
+
+/// Additive head-room for the filtered HNSW candidate pass, so that small
+/// limits (e.g. the default 10) still survive aggressive filters.
+const HNSW_FILTER_OVERFETCH_FLOOR: usize = 64;
+
+/// Number of embeddings written per multi-row INSERT statement.  Each row
+/// carries its vector as an inline array literal, so one statement replaces
+/// what used to be one prepare + execute round-trip per embedding.
+const EMBEDDING_INSERT_BATCH: usize = 128;
 
 /// Embedding configuration that must remain consistent across all operations on
 /// a given namespace. Stored in the `namespace_config` table and validated on
@@ -389,14 +405,16 @@ impl DuckdbVectorRepository {
 
         let sanitized: String = namespace
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
 
-        let base = if sanitized
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_digit())
-        {
+        let base = if sanitized.chars().next().is_some_and(|c| c.is_ascii_digit()) {
             format!("ns_{sanitized}")
         } else {
             sanitized
@@ -487,6 +505,31 @@ impl DuckdbVectorRepository {
         Ok(s)
     }
 
+    /// SQL `c.<column> IN (...)` clauses for the optional query filters, with
+    /// values single-quote escaped.  Shared by the candidate and full-scan
+    /// semantic paths.
+    fn filter_clauses(query: &SearchQuery) -> Vec<String> {
+        let quote_list = |values: &[String]| {
+            values
+                .iter()
+                .map(|v| format!("'{}'", v.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+
+        let mut clauses = Vec::new();
+        if let Some(languages) = query.languages() {
+            clauses.push(format!("c.language IN ({})", quote_list(languages)));
+        }
+        if let Some(node_types) = query.node_types() {
+            clauses.push(format!("c.node_type IN ({})", quote_list(node_types)));
+        }
+        if let Some(repo_ids) = query.repository_ids() {
+            clauses.push(format!("c.repository_id IN ({})", quote_list(repo_ids)));
+        }
+        clauses
+    }
+
     fn row_to_chunk(row: &Row) -> Result<CodeChunk, duckdb::Error> {
         Ok(CodeChunk::reconstitute(
             row.get::<_, String>(0)?,
@@ -502,7 +545,174 @@ impl DuckdbVectorRepository {
         ))
     }
 
+    /// Two-stage semantic search that keeps the first stage in the exact shape
+    /// DuckDB's VSS extension rewrites into an HNSW index scan:
+    /// `ORDER BY array_cosine_distance(vector, <const>) LIMIT n` on the bare
+    /// embeddings table — no join, no filters, no derived expression in the
+    /// ORDER BY.  The second stage joins chunk metadata for the candidate ids
+    /// and applies the query filters.
+    ///
+    /// When filters are present the candidate pass over-fetches; if the
+    /// filters still consume too many candidates, the exhaustive scan runs as
+    /// a fallback so results are never worse than before.
     fn run_semantic(
+        conn: &Connection,
+        namespace: &str,
+        array_lit: &str,
+        query: &SearchQuery,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, DomainError> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+
+        let has_filters = query.languages().is_some()
+            || query.node_types().is_some()
+            || query.repository_ids().is_some();
+        let fetch = if has_filters {
+            limit * HNSW_FILTER_OVERFETCH_MULTIPLIER + HNSW_FILTER_OVERFETCH_FLOOR
+        } else {
+            limit
+        };
+
+        let candidates = Self::run_hnsw_candidates(conn, namespace, array_lit, fetch)?;
+        if candidates.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let exhausted_table = candidates.len() < fetch;
+        let results = Self::fetch_candidate_chunks(conn, namespace, &candidates, query, limit)?;
+
+        // Filters ate too much of the over-fetched pool and more rows exist:
+        // fall back to the exhaustive scan to preserve recall.
+        if has_filters && results.len() < limit && !exhausted_table {
+            debug!(
+                "HNSW candidate pass returned {}/{} results after filtering; \
+                 falling back to full scan",
+                results.len(),
+                limit
+            );
+            return Self::run_semantic_full_scan(conn, namespace, array_lit, query, limit);
+        }
+
+        Ok(results)
+    }
+
+    /// Stage 1: nearest-neighbour candidate ids via the HNSW index.
+    ///
+    /// `fetch` is inlined as a literal because a parameterised LIMIT prevents
+    /// the VSS optimizer from matching the index-scan pattern.
+    fn run_hnsw_candidates(
+        conn: &Connection,
+        namespace: &str,
+        array_lit: &str,
+        fetch: usize,
+    ) -> Result<Vec<(String, f32)>, DomainError> {
+        let sql = format!(
+            "SELECT chunk_id, array_cosine_distance(vector, {array_lit}) AS dist \
+             FROM \"{schema}\".embeddings \
+             ORDER BY array_cosine_distance(vector, {array_lit}) \
+             LIMIT {fetch}",
+            array_lit = array_lit,
+            schema = namespace,
+            fetch = fetch,
+        );
+
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            DomainError::storage(format!("Failed to prepare HNSW candidate query: {}", e))
+        })?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| DomainError::storage(format!("Failed to run HNSW candidates: {}", e)))?;
+
+        let mut candidates = Vec::with_capacity(fetch);
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| DomainError::storage(format!("Failed to read candidate row: {}", e)))?
+        {
+            let chunk_id: String = row
+                .get(0)
+                .map_err(|e| DomainError::storage(format!("Failed to read candidate id: {}", e)))?;
+            let dist: f32 = row.get(1).map_err(|e| {
+                DomainError::storage(format!("Failed to read candidate distance: {}", e))
+            })?;
+            candidates.push((chunk_id, dist));
+        }
+        Ok(candidates)
+    }
+
+    /// Stage 2: join chunk metadata for the candidate ids, apply query
+    /// filters, and re-attach the similarity scores from stage 1.
+    fn fetch_candidate_chunks(
+        conn: &Connection,
+        namespace: &str,
+        candidates: &[(String, f32)],
+        query: &SearchQuery,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, DomainError> {
+        let id_list = candidates
+            .iter()
+            .map(|(id, _)| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let mut sql = format!(
+            "SELECT \
+                c.id, c.file_path, c.content, c.start_line, c.end_line, c.language, c.node_type, \
+                c.symbol_name, c.parent_symbol, c.repository_id \
+             FROM \"{schema}\".chunks c \
+             WHERE c.id IN ({id_list})",
+            schema = namespace,
+            id_list = id_list,
+        );
+        for clause in Self::filter_clauses(query) {
+            sql.push_str(" AND ");
+            sql.push_str(&clause);
+        }
+
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            DomainError::storage(format!("Failed to prepare candidate chunk lookup: {}", e))
+        })?;
+        let mut rows = stmt.query([]).map_err(|e| {
+            DomainError::storage(format!("Failed to run candidate chunk lookup: {}", e))
+        })?;
+
+        let mut chunks_by_id: HashMap<String, CodeChunk> = HashMap::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| DomainError::storage(format!("Failed to read chunk row: {}", e)))?
+        {
+            let chunk = Self::row_to_chunk(row)
+                .map_err(|e| DomainError::storage(format!("Failed to parse chunk row: {}", e)))?;
+            chunks_by_id.insert(chunk.id().to_string(), chunk);
+        }
+
+        // Candidates are already ordered by ascending distance (descending
+        // similarity), so a single ordered pass assembles the final list.
+        let mut results = Vec::with_capacity(limit);
+        for (id, dist) in candidates {
+            let Some(chunk) = chunks_by_id.remove(id) else {
+                continue; // filtered out or orphaned embedding
+            };
+            let score = 1.0 - dist;
+            if !query.is_text_search() {
+                if let Some(min) = query.min_score() {
+                    if score < min {
+                        continue;
+                    }
+                }
+            }
+            results.push(SearchResult::new(chunk, score));
+            if results.len() >= limit {
+                break;
+            }
+        }
+        Ok(results)
+    }
+
+    /// Exhaustive fallback: the original join + sort over every embedding.
+    /// Only used when the filtered HNSW candidate pass cannot fill `limit`.
+    fn run_semantic_full_scan(
         conn: &Connection,
         namespace: &str,
         array_lit: &str,
@@ -520,31 +730,7 @@ impl DuckdbVectorRepository {
             schema = namespace,
         );
 
-        let mut where_clauses: Vec<String> = Vec::new();
-        if let Some(languages) = query.languages() {
-            let quoted = languages
-                .iter()
-                .map(|l| format!("'{}'", l.replace('\'', "''")))
-                .collect::<Vec<_>>()
-                .join(",");
-            where_clauses.push(format!("c.language IN ({})", quoted));
-        }
-        if let Some(node_types) = query.node_types() {
-            let quoted = node_types
-                .iter()
-                .map(|t| format!("'{}'", t.replace('\'', "''")))
-                .collect::<Vec<_>>()
-                .join(",");
-            where_clauses.push(format!("c.node_type IN ({})", quoted));
-        }
-        if let Some(repo_ids) = query.repository_ids() {
-            let quoted = repo_ids
-                .iter()
-                .map(|r| format!("'{}'", r.replace('\'', "''")))
-                .collect::<Vec<_>>()
-                .join(",");
-            where_clauses.push(format!("c.repository_id IN ({})", quoted));
-        }
+        let where_clauses = Self::filter_clauses(query);
         if !where_clauses.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&where_clauses.join(" AND "));
@@ -731,24 +917,36 @@ impl VectorRepository for DuckdbVectorRepository {
             }
         }
 
-        for embedding in embeddings {
-            let array_lit = self.vector_to_array_literal(embedding.vector())?;
-            // Note: The array literal must be part of the SQL statement (not parameterized)
-            // because DuckDB FLOAT[384] type doesn't support parameterization.
-            // This is safe since the array is constructed from our embedding data, not user input.
+        // Note: The array literals must be part of the SQL statement (not
+        // parameterized) because DuckDB FLOAT[N] doesn't support parameterization.
+        // This is safe since the arrays are constructed from our embedding data,
+        // not user input.
+        for batch in embeddings.chunks(EMBEDDING_INSERT_BATCH) {
+            let mut values = String::new();
+            let mut bind: Vec<&str> = Vec::with_capacity(batch.len() * 2);
+            for (i, embedding) in batch.iter().enumerate() {
+                let array_lit = self.vector_to_array_literal(embedding.vector())?;
+                if i > 0 {
+                    values.push(',');
+                }
+                values.push_str("(?, ");
+                values.push_str(&array_lit);
+                values.push_str(", ?)");
+                bind.push(embedding.chunk_id());
+                bind.push(embedding.model());
+            }
             let sql = format!(
                 "INSERT OR REPLACE INTO \"{}\".embeddings (chunk_id, vector, model) \
-                VALUES (?, {}, ?)",
-                self.namespace, array_lit
+                VALUES {}",
+                self.namespace, values
             );
-            tx.execute(&sql, params![embedding.chunk_id(), embedding.model()])
-                .map_err(|e| {
-                    DomainError::storage(format!(
-                        "Failed to insert embedding for chunk {}: {}",
-                        embedding.chunk_id(),
-                        e
-                    ))
-                })?;
+            tx.execute(&sql, params_from_iter(bind)).map_err(|e| {
+                DomainError::storage(format!(
+                    "Failed to insert batch of {} embeddings: {}",
+                    batch.len(),
+                    e
+                ))
+            })?;
         }
 
         tx.commit()
@@ -897,14 +1095,11 @@ impl VectorRepository for DuckdbVectorRepository {
         for path in file_paths {
             del_emb
                 .execute(params![repository_id, path])
-                .map_err(|e| {
-                    DomainError::storage(format!("Failed to delete embeddings: {}", e))
-                })?;
+                .map_err(|e| DomainError::storage(format!("Failed to delete embeddings: {}", e)))?;
             total += del_chunk
                 .execute(params![repository_id, path])
-                .map_err(|e| {
-                    DomainError::storage(format!("Failed to delete chunks: {}", e))
-                })? as u64;
+                .map_err(|e| DomainError::storage(format!("Failed to delete chunks: {}", e)))?
+                as u64;
         }
 
         drop(del_emb);
@@ -1171,9 +1366,9 @@ impl VectorRepository for DuckdbVectorRepository {
             self.namespace
         );
 
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| DomainError::storage(format!("Failed to prepare symbol map query: {e}")))?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            DomainError::storage(format!("Failed to prepare symbol map query: {e}"))
+        })?;
 
         let mut rows = stmt
             .query(params![repository_id])
