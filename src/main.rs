@@ -9,23 +9,19 @@ use codesearch::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use codesearch::connector::adapter::mcp::CodesearchMcpServer;
 use codesearch::{Commands, Container, ContainerConfig, Router};
 
-/// Validates that a namespace contains only characters that are safe to use as
-/// a DuckDB schema identifier. DuckDB's FTS extension embeds the namespace into
-/// an unquoted schema name (e.g. `fts_<ns>_chunks`) and into the FTS PRAGMA
-/// table argument, so special characters like `+` cause SQL parse errors.
+/// Validates a namespace for use as a DuckDB schema name.
 ///
-/// Allowed: ASCII alphanumerics, `-`, and `_`.
+/// Schema names are always double-quoted in generated SQL, so almost any
+/// character is safe. The one character that cannot appear is `"` itself,
+/// because it would break the quoting even after standard `""` escaping in
+/// the FTS PRAGMA argument (which is a SQL string, not a full SQL statement).
 fn validate_namespace(s: &str) -> Result<String, String> {
     if s.is_empty() {
         return Err("namespace must not be empty".to_string());
     }
-    if let Some(bad) = s
-        .chars()
-        .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
-    {
+    if s.contains('"') {
         return Err(format!(
-            "namespace '{s}' contains invalid character '{bad}'. \
-             Only ASCII letters, digits, '-', and '_' are allowed."
+            "namespace '{s}' contains '\"', which is not allowed in a namespace."
         ));
     }
     Ok(s.to_string())

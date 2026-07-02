@@ -46,7 +46,7 @@ fn render_status(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppStat
     let hints: &str = match state.mode {
         ActiveMode::Search => match state.search.focused_pane {
             SearchPane::List => {
-                " Enter: search  ↑↓: navigate  ←→: cursor  Ctrl+→: code  Ctrl+↑: impact  Ctrl+↓: context  Tab: switch  q: quit"
+                " Enter: search  ↑↓: navigate  ←→: cursor  Ctrl+→: code  Ctrl+↑: impact  Ctrl+↓: context  Tab: switch"
             }
             SearchPane::Code => {
                 " Ctrl+←: focus list  ↑↓/PgUp/Dn: scroll  ←→: cursor  Tab: switch  q: quit"
@@ -54,7 +54,7 @@ fn render_status(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppStat
         },
         ActiveMode::Impact => match state.impact.focused_pane {
             ImpactPane::EntryPoints => {
-                " Enter: analyse  ↑↓: navigate  ←→: cursor  Ctrl+→: focus chain  Tab: switch  q: quit"
+                " Enter: analyse  ↑↓: navigate  ←→: cursor  Ctrl+→: focus chain  Tab: switch"
             }
             ImpactPane::Chain => {
                 if state.impact.chain_snippet.is_some() {
@@ -66,7 +66,7 @@ fn render_status(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppStat
         },
         ActiveMode::Context => match state.context.focused_pane {
             ContextPane::EntryPoints => {
-                " Enter: analyse  ↑↓: navigate  ←→: cursor  Ctrl+→: focus tree  Tab: switch  q: quit"
+                " Enter: analyse  ↑↓: navigate  ←→: cursor  Ctrl+→: focus tree  Tab: switch"
             }
             ContextPane::Tree => {
                 if state.context.chain_snippet.is_some() {
