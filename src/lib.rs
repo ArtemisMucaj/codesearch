@@ -24,8 +24,9 @@ pub use cli::{
 pub use connector::{
     AnthropicClient, AnthropicReranking, DuckdbCallGraphRepository, DuckdbFileHashRepository,
     DuckdbMetadataRepository, DuckdbVectorRepository, InMemoryVectorRepository, LlmQueryExpander,
-    MockEmbedding, MockReranking, NamespaceEmbeddingConfig, OpenAiChatClient, OpenAiEmbedding,
-    OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterParser,
+    MockEmbedding, MockReranking, NamespaceEmbeddingConfig, NoEmbedding, OpenAiChatClient,
+    OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterParser,
+    NO_EMBEDDINGS_MODEL,
 };
 
 pub use domain::{

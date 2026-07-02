@@ -115,11 +115,17 @@ impl VectorRepository for InMemoryVectorRepository {
             query.limit()
         };
 
-        let semantic = self
-            .search_semantic(query_embedding, query, fetch_limit)
-            .await;
+        // An empty query embedding requests a text-only search (no embeddings
+        // indexed); the semantic leg is skipped entirely.
+        let text_only = query_embedding.is_empty();
+        let semantic = if text_only {
+            Vec::new()
+        } else {
+            self.search_semantic(query_embedding, query, fetch_limit)
+                .await
+        };
 
-        if !query.is_text_search() {
+        if !query.is_text_search() && !text_only {
             return Ok(semantic);
         }
 
@@ -131,6 +137,11 @@ impl VectorRepository for InMemoryVectorRepository {
             fused.retain(|r| r.score() >= min);
         }
         Ok(fused)
+    }
+
+    async fn has_embeddings(&self) -> Result<bool, DomainError> {
+        let embeddings = self.embeddings.lock().await;
+        Ok(!embeddings.is_empty())
     }
 
     async fn count(&self) -> Result<u64, DomainError> {

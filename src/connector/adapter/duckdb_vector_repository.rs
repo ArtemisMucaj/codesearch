@@ -31,6 +31,12 @@ const HNSW_FILTER_OVERFETCH_FLOOR: usize = 64;
 /// what used to be one prepare + execute round-trip per embedding.
 const EMBEDDING_INSERT_BATCH: usize = 128;
 
+/// Sentinel stored as `embedding_model` / `embedding_target` in
+/// `namespace_config` when a namespace is indexed with `--no-embeddings`.
+/// Namespaces carrying this sentinel skip the embedding-space mismatch
+/// validation — there are no vectors to protect.
+pub const NO_EMBEDDINGS_MODEL: &str = "none";
+
 /// Embedding configuration that must remain consistent across all operations on
 /// a given namespace. Stored in the `namespace_config` table and validated on
 /// every open; mismatches are hard errors with actionable messages.
@@ -318,6 +324,24 @@ impl DuckdbVectorRepository {
 
         match stored {
             Some((stored_target, stored_model, stored_dims)) => {
+                // A "none" model on either side means --no-embeddings mode:
+                // there is no embedding space to protect, so the mismatch
+                // checks below don't apply.  Warn on mixed usage — chunks
+                // indexed while embeddings were disabled simply have no
+                // vectors and only surface through the keyword and graph legs.
+                if stored_model == NO_EMBEDDINGS_MODEL || cfg.embedding_model == NO_EMBEDDINGS_MODEL
+                {
+                    if stored_model != cfg.embedding_model {
+                        warn!(
+                            "Namespace '{}' mixes no-embeddings and embedding modes \
+                             (stored model '{}', current '{}'). Chunks indexed without \
+                             embeddings are only found by keyword/graph search; \
+                             re-index with `codesearch index --force` for a uniform store.",
+                            namespace, stored_model, cfg.embedding_model
+                        );
+                    }
+                    return Ok(stored_dims);
+                }
                 // Hard error: dimension mismatch means the schema cannot be used.
                 if stored_dims != cfg.dimensions {
                     return Err(DomainError::invalid_input(format!(
@@ -875,7 +899,9 @@ impl VectorRepository for DuckdbVectorRepository {
         if chunks.is_empty() {
             return Ok(());
         }
-        if chunks.len() != embeddings.len() {
+        // An empty embeddings slice is a chunks-only save (--no-embeddings
+        // mode); any other length mismatch is a caller bug.
+        if !embeddings.is_empty() && chunks.len() != embeddings.len() {
             return Err(DomainError::invalid_input(
                 "Chunk and embedding count mismatch".to_string(),
             ));
@@ -1122,7 +1148,10 @@ impl VectorRepository for DuckdbVectorRepository {
         query_embedding: &[f32],
         query: &SearchQuery,
     ) -> Result<Vec<SearchResult>, DomainError> {
-        if query_embedding.len() != self.dimensions {
+        // An empty query embedding requests a text-only search (no embeddings
+        // indexed); the semantic leg is skipped entirely.
+        let text_only = query_embedding.is_empty();
+        if !text_only && query_embedding.len() != self.dimensions {
             return Err(DomainError::invalid_input(format!(
                 "Expected query embedding dimension {}, got {}",
                 self.dimensions,
@@ -1130,14 +1159,16 @@ impl VectorRepository for DuckdbVectorRepository {
             )));
         }
 
-        let array_lit = self.vector_to_array_literal(query_embedding)?;
-
         let conn = self.conn.lock().await;
 
-        let semantic =
-            Self::run_semantic(&conn, &self.namespace, &array_lit, query, query.limit())?;
+        let semantic = if text_only {
+            Vec::new()
+        } else {
+            let array_lit = self.vector_to_array_literal(query_embedding)?;
+            Self::run_semantic(&conn, &self.namespace, &array_lit, query, query.limit())?
+        };
 
-        if !query.is_text_search() {
+        if !query.is_text_search() && !text_only {
             return Ok(semantic);
         }
 
@@ -1172,7 +1203,15 @@ impl VectorRepository for DuckdbVectorRepository {
             }
         }
 
-        let text = match Self::run_text(&conn, &self.namespace, query, BM25_FETCH_LIMIT) {
+        // With no semantic candidates the BM25 leg is the only source of
+        // results, so it must honour the full requested limit instead of the
+        // small hybrid headroom.
+        let text_fetch_limit = if semantic.is_empty() {
+            query.limit().max(BM25_FETCH_LIMIT)
+        } else {
+            BM25_FETCH_LIMIT
+        };
+        let text = match Self::run_text(&conn, &self.namespace, query, text_fetch_limit) {
             Ok(results) => results,
             Err(e) => {
                 // If BM25 query fails (e.g. FTS schema missing in read-only DB),
@@ -1209,6 +1248,21 @@ impl VectorRepository for DuckdbVectorRepository {
         self.fts_dirty.store(false, Ordering::Release);
         info!("BM25 index built for namespace '{}'", self.namespace);
         Ok(())
+    }
+
+    async fn has_embeddings(&self) -> Result<bool, DomainError> {
+        let conn = self.conn.lock().await;
+        let exists: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM (SELECT 1 FROM \"{}\".embeddings LIMIT 1)",
+                    self.namespace
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| DomainError::storage(format!("Failed to probe embeddings: {}", e)))?;
+        Ok(exists > 0)
     }
 
     async fn count(&self) -> Result<u64, DomainError> {

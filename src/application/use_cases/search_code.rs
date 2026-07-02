@@ -91,15 +91,32 @@ impl SearchCodeUseCase {
             );
         }
 
-        let search_query = if fetch_limit != query.limit() {
+        let mut search_query = if fetch_limit != query.limit() {
             query.clone().with_limit(fetch_limit)
         } else {
             query.clone()
         };
 
+        // When the store holds no vectors (indexed with --no-embeddings),
+        // skip query embedding entirely and force the keyword leg so the
+        // BM25 + graph legs carry the search on their own.
+        let semantic_available = match self.vector_repo.has_embeddings().await {
+            Ok(available) => available,
+            Err(e) => {
+                warn!("Failed to probe for embeddings (assuming present): {}", e);
+                true
+            }
+        };
+        if !semantic_available {
+            info!("No embeddings indexed; searching with keyword + graph legs only");
+            search_query = search_query.with_text_search(true);
+        }
+
         // The repository fuses two legs — BM25 and semantic — using RRF when
         // query.is_text_search() is true.
-        let mut results = if let Some(ref expander) = self.query_expander {
+        let mut results = if let Some(expander) =
+            self.query_expander.as_ref().filter(|_| semantic_available)
+        {
             // --- Query expansion path ---
             // Expand the original query into multiple variants, embed each, search
             // for each independently, then fuse all result lists with RRF.
@@ -138,7 +155,13 @@ impl SearchCodeUseCase {
             fused
         } else {
             // --- Standard single-query path ---
-            let query_embedding = self.embedding_service.embed_query(query.query()).await?;
+            // An empty embedding tells the repository to skip the semantic
+            // leg (see VectorRepository::search).
+            let query_embedding = if semantic_available {
+                self.embedding_service.embed_query(query.query()).await?
+            } else {
+                Vec::new()
+            };
             self.vector_repo
                 .search(&query_embedding, &search_query)
                 .await?

@@ -10,7 +10,7 @@ use crate::application::{
 };
 use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::scip::ScipRunner;
-use crate::connector::adapter::NamespaceEmbeddingConfig;
+use crate::connector::adapter::{NamespaceEmbeddingConfig, NoEmbedding, NO_EMBEDDINGS_MODEL};
 use crate::{
     AnthropicClient, AnthropicReranking, ClusterDetectionUseCase, DeleteRepositoryUseCase,
     DuckdbCallGraphRepository, DuckdbFileHashRepository, DuckdbMetadataRepository,
@@ -28,6 +28,13 @@ pub struct ContainerConfig {
     pub namespace: String,
     pub memory_storage: bool,
     pub no_rerank: bool,
+    /// Disable embeddings entirely.
+    ///
+    /// Indexing skips the embed stage (typically its dominant cost) and stores
+    /// chunks, call-graph references, and the BM25 index only.  Search on such
+    /// a namespace runs the keyword and call-graph legs; queries with no
+    /// token overlap against identifiers/comments may return nothing.
+    pub no_embeddings: bool,
     /// Open the database in read-only mode.
     ///
     /// When `true`, DuckDB is opened with `AccessMode::ReadOnly`, which does not
@@ -201,20 +208,29 @@ impl Container {
 
         // Resolve the effective model name for the selected embedding target.
         const ONNX_DEFAULT_MODEL: &str = "sentence-transformers/all-MiniLM-L6-v2";
-        let effective_model = match config.embedding_model.clone() {
-            Some(m) => m,
-            None => match config.embedding_target {
-                EmbeddingTarget::Onnx => ONNX_DEFAULT_MODEL.to_string(),
-                EmbeddingTarget::Api => {
-                    return Err(anyhow::anyhow!(
-                        "--embedding-model is required when using --embedding-target=api"
-                    ));
-                }
-            },
+        let effective_model = if config.no_embeddings {
+            NO_EMBEDDINGS_MODEL.to_string()
+        } else {
+            match config.embedding_model.clone() {
+                Some(m) => m,
+                None => match config.embedding_target {
+                    EmbeddingTarget::Onnx => ONNX_DEFAULT_MODEL.to_string(),
+                    EmbeddingTarget::Api => {
+                        return Err(anyhow::anyhow!(
+                            "--embedding-model is required when using --embedding-target=api"
+                        ));
+                    }
+                },
+            }
         };
 
         // Initialize embedding service
-        let embedding_service: Arc<dyn EmbeddingService> = if config.mock_embeddings {
+        let embedding_service: Arc<dyn EmbeddingService> = if config.no_embeddings {
+            // No model is loaded or downloaded; indexing skips the embed stage
+            // and search skips query embedding for vector-less namespaces.
+            debug!("Embeddings disabled (--no-embeddings)");
+            Arc::new(NoEmbedding::new(config.embedding_dimensions))
+        } else if config.mock_embeddings {
             debug!("Using mock embedding service");
             Arc::new(MockEmbedding::new())
         } else {
@@ -283,9 +299,13 @@ impl Container {
 
         // Build the NamespaceEmbeddingConfig that is stored/validated per namespace.
         let ns_cfg = NamespaceEmbeddingConfig {
-            embedding_target: match config.embedding_target {
-                EmbeddingTarget::Onnx => "onnx".to_string(),
-                EmbeddingTarget::Api => "api".to_string(),
+            embedding_target: if config.no_embeddings {
+                NO_EMBEDDINGS_MODEL.to_string()
+            } else {
+                match config.embedding_target {
+                    EmbeddingTarget::Onnx => "onnx".to_string(),
+                    EmbeddingTarget::Api => "api".to_string(),
+                }
             },
             embedding_model: effective_model,
             dimensions: config.embedding_dimensions,
@@ -456,6 +476,7 @@ impl Container {
         )
         .with_scip(scip)
         .with_parse_concurrency(self.config.parse_concurrency)
+        .with_no_embeddings(self.config.no_embeddings)
     }
 
     pub fn search_use_case(&self) -> SearchCodeUseCase {

@@ -5,6 +5,11 @@ use crate::domain::{CodeChunk, DomainError, Embedding, SearchQuery, SearchResult
 /// Vector storage and similarity search operations.
 #[async_trait]
 pub trait VectorRepository: Send + Sync {
+    /// Persist chunks together with their embeddings.
+    ///
+    /// An **empty** `embeddings` slice with non-empty `chunks` is a
+    /// chunks-only save (no-embeddings mode); any other length mismatch is
+    /// an error.
     async fn save_batch(
         &self,
         chunks: &[CodeChunk],
@@ -44,11 +49,23 @@ pub trait VectorRepository: Send + Sync {
     /// additionally run keyword (BM25-style) matching and fuse both result lists via
     /// Reciprocal Rank Fusion before returning. Backends that cannot perform text
     /// search may silently fall back to semantic-only results.
+    ///
+    /// An **empty** `query_embedding` requests a text-only search: the
+    /// semantic leg is skipped regardless of `is_text_search()`.  Used when
+    /// the store carries no embeddings (see [`has_embeddings`]).
     async fn search(
         &self,
         query_embedding: &[f32],
         query: &SearchQuery,
     ) -> Result<Vec<SearchResult>, DomainError>;
+
+    /// `true` when the store holds at least one embedding vector.  Callers
+    /// use this to skip query embedding entirely for no-embeddings stores.
+    /// The default preserves existing behaviour for adapters that always
+    /// store vectors.
+    async fn has_embeddings(&self) -> Result<bool, DomainError> {
+        Ok(true)
+    }
 
     async fn count(&self) -> Result<u64, DomainError>;
 

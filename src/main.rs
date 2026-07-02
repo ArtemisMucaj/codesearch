@@ -49,6 +49,12 @@ struct Cli {
     #[arg(long, global = true)]
     no_rerank: bool,
 
+    /// Index without embeddings: skip the embed stage and store chunks,
+    /// call graph, and BM25 index only. Search on such a namespace uses the
+    /// keyword and call-graph legs (no semantic matching).
+    #[arg(long, global = true)]
+    no_embeddings: bool,
+
     /// Expand the query into variants before searching and fuse results via RRF
     #[arg(long, global = true)]
     expand_query: bool,
@@ -227,6 +233,7 @@ async fn main() -> Result<()> {
         namespace,
         memory_storage: cli.memory_storage,
         no_rerank: cli.no_rerank,
+        no_embeddings: cli.no_embeddings,
         expand_query: cli.expand_query,
         embedding_target,
         embedding_model,

@@ -1077,7 +1077,12 @@ async fn test_commonjs_shorthand_destructure_captured_without_alias() {
 /// Shared setup for the graph-expansion tests: two chunks where
 /// `apply_defaults` shares no vocabulary with any query but is a call-graph
 /// callee of `load_config`, plus the reference edge connecting them.
-async fn setup_graph_expansion_env() -> (TestEnv, Arc<codesearch::MockEmbedding>, Vec<CodeChunk>) {
+///
+/// With `with_embeddings: false` the chunks are stored without vectors
+/// (chunks-only save), mirroring a `--no-embeddings` index.
+async fn setup_graph_expansion_env(
+    with_embeddings: bool,
+) -> (TestEnv, Arc<codesearch::MockEmbedding>, Vec<CodeChunk>) {
     use codesearch::{EmbeddingService, VectorRepository};
 
     let env = setup_test_env().await;
@@ -1107,10 +1112,14 @@ async fn setup_graph_expansion_env() -> (TestEnv, Arc<codesearch::MockEmbedding>
 
     let embedding_service = Arc::new(MockEmbedding::new());
     let chunks = vec![seed_chunk, neighbor_chunk];
-    let embeddings = embedding_service
-        .embed_chunks(&chunks)
-        .await
-        .expect("embedding failed");
+    let embeddings = if with_embeddings {
+        embedding_service
+            .embed_chunks(&chunks)
+            .await
+            .expect("embedding failed")
+    } else {
+        vec![]
+    };
     env.vector_repo
         .save_batch(&chunks, &embeddings)
         .await
@@ -1141,7 +1150,7 @@ async fn setup_graph_expansion_env() -> (TestEnv, Arc<codesearch::MockEmbedding>
 async fn test_graph_expansion_resolves_neighbors_of_seed() {
     use codesearch::{GraphExpansionUseCase, SearchResult};
 
-    let (env, _embedding, chunks) = setup_graph_expansion_env().await;
+    let (env, _embedding, chunks) = setup_graph_expansion_env(true).await;
     let seed_chunk = chunks[0].clone();
 
     let expansion =
@@ -1164,7 +1173,7 @@ async fn test_graph_expansion_resolves_neighbors_of_seed() {
 async fn test_graph_expansion_respects_language_filter() {
     use codesearch::{GraphExpansionUseCase, SearchResult};
 
-    let (env, _embedding, chunks) = setup_graph_expansion_env().await;
+    let (env, _embedding, chunks) = setup_graph_expansion_env(true).await;
     let seed_chunk = chunks[0].clone();
 
     let expansion =
@@ -1189,7 +1198,7 @@ async fn test_graph_expansion_respects_language_filter() {
 async fn test_search_with_graph_expansion_fuses_connected_code() {
     use codesearch::GraphExpansionUseCase;
 
-    let (env, embedding_service, _chunks) = setup_graph_expansion_env().await;
+    let (env, embedding_service, _chunks) = setup_graph_expansion_env(true).await;
 
     let search = SearchCodeUseCase::new(env.vector_repo.clone(), embedding_service)
         .with_graph_expansion(Arc::new(GraphExpansionUseCase::new(
@@ -1213,5 +1222,45 @@ async fn test_search_with_graph_expansion_fuses_connected_code() {
             .iter()
             .any(|r| r.chunk().symbol_name() == Some("apply_defaults")),
         "graph expansion should surface the structurally connected chunk"
+    );
+}
+
+/// A namespace indexed without embeddings must still be searchable: the
+/// keyword leg carries retrieval and the graph leg expands it.  The search
+/// must never call the embedding service — `NoEmbedding` errors on any
+/// embed call, so this test doubles as a canary for accidental embedding.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_no_embeddings_search_uses_keyword_and_graph_legs() {
+    use codesearch::{GraphExpansionUseCase, NoEmbedding, VectorRepository};
+
+    let (env, _mock, _chunks) = setup_graph_expansion_env(false).await;
+
+    assert!(
+        !env.vector_repo.has_embeddings().await.unwrap(),
+        "chunks-only save must leave the store without vectors"
+    );
+
+    let search = SearchCodeUseCase::new(env.vector_repo.clone(), Arc::new(NoEmbedding::new(384)))
+        .with_graph_expansion(Arc::new(GraphExpansionUseCase::new(
+            env.call_graph_use_case.clone(),
+            env.vector_repo.clone(),
+        )));
+
+    // Deliberately not a text search: the use case must detect the missing
+    // vectors and force the keyword leg on its own.
+    let query = SearchQuery::new("load config").with_limit(10);
+    let results = search.execute(query).await.expect("search failed");
+
+    assert!(
+        results
+            .iter()
+            .any(|r| r.chunk().symbol_name() == Some("load_config")),
+        "keyword leg should match the seed chunk"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|r| r.chunk().symbol_name() == Some("apply_defaults")),
+        "graph leg should surface the connected chunk"
     );
 }
