@@ -24,9 +24,11 @@ use crate::domain::{
 const DEFAULT_PARSE_CONCURRENCY: usize = 4;
 
 /// Number of chunks accumulated across files before a single `embed_chunks`
-/// call is issued.  Larger values amortise per-call overhead, produce
-/// better-utilised inference batches, and reduce DuckDB transaction count.
-const CROSS_FILE_EMBED_BATCH: usize = 512;
+/// call is issued.  Smaller values produce more frequent flushes and smoother
+/// progress bar movement; the embedder receives well-sized batches either way
+/// since `embed_chunks` processes all chunks in one call regardless of count.
+const CROSS_FILE_EMBED_BATCH: usize = 128;
+
 
 /// Return type of [`do_flush`]: file count, chunk count, ref count, and per-
 /// language stats accumulated for the flushed batch.
@@ -122,22 +124,26 @@ impl IndexRepositoryUseCase {
         }
     }
 
-    /// Spawn a [`do_flush`] task, cloning the necessary [`Arc`] handles.
-    ///
-    /// Returns a [`JoinHandle`] that resolves to the flush statistics.  The
-    /// caller is responsible for awaiting the handle before accessing the
-    /// accumulated counters.
-    fn spawn_flush(
+    fn spawn_embed(
         &self,
         batch: Vec<ParseOnlyResult>,
         repository_id: String,
         scip_refs: &Arc<HashMap<String, Vec<SymbolReference>>>,
-    ) -> JoinHandle<Result<FlushStats, DomainError>> {
-        tokio::spawn(do_flush(
+    ) -> JoinHandle<Result<EmbedResult, DomainError>> {
+        tokio::spawn(do_embed(
             batch,
             repository_id,
             Arc::clone(scip_refs),
             Arc::clone(&self.embedding_service),
+        ))
+    }
+
+    fn spawn_write(
+        &self,
+        embed: EmbedResult,
+    ) -> JoinHandle<Result<FlushStats, DomainError>> {
+        tokio::spawn(do_write(
+            embed,
             Arc::clone(&self.vector_repo),
             Arc::clone(&self.file_hash_repo),
             Arc::clone(&self.call_graph_use_case),
@@ -303,7 +309,10 @@ impl IndexRepositoryUseCase {
 
         let mut pending: Vec<ParseOnlyResult> = Vec::new();
         let mut pending_chunk_count = 0usize;
-        let mut pending_flush: Option<JoinHandle<Result<FlushStats, DomainError>>> = None;
+        // Two-stage pipeline: embed task and write task run concurrently.
+        // While batch N is being written to DuckDB, batch N+1 is being embedded.
+        let mut embed_handle: Option<JoinHandle<Result<EmbedResult, DomainError>>> = None;
+        let mut write_handle: Option<JoinHandle<Result<FlushStats, DomainError>>> = None;
 
         while let Some(maybe_result) = parse_rx.recv().await {
             progress_bar.inc(1);
@@ -313,63 +322,70 @@ impl IndexRepositoryUseCase {
                 pending.push(result);
 
                 if pending_chunk_count >= CROSS_FILE_EMBED_BATCH {
-                    // Collect the previous flush result before spawning a new
-                    // one.  The previous flush ran concurrently with stream
-                    // consumption above, so it is often already finished.
-                    if let Some(task) = pending_flush.take() {
-                        let stats = task.await.map_err(|e| {
-                            DomainError::internal(format!("Flush task panicked: {e}"))
-                        })??;
-                        merge_stats(
-                            stats,
-                            &mut file_count,
-                            &mut chunk_count,
-                            &mut reference_count,
-                            &mut language_stats,
-                        );
+                    // Wait for the previous embed to finish, then immediately
+                    // spawn its write task (which overlaps with the next embed).
+                    if let Some(task) = embed_handle.take() {
+                        let embed = task
+                            .await
+                            .map_err(|e| DomainError::internal(format!("Embed task panicked: {e}")))?
+                            ?;
+                        // Drain the previous write before starting a new one.
+                        if let Some(wt) = write_handle.take() {
+                            let stats = wt
+                                .await
+                                .map_err(|e| DomainError::internal(format!("Write task panicked: {e}")))?
+                                ?;
+                            merge_stats(stats, &mut file_count, &mut chunk_count, &mut reference_count, &mut language_stats);
+                        }
+                        write_handle = Some(self.spawn_write(embed));
                     }
                     let batch = std::mem::take(&mut pending);
                     pending_chunk_count = 0;
-                    pending_flush =
-                        Some(self.spawn_flush(batch, repository.id().to_string(), &scip_refs));
+                    embed_handle = Some(self.spawn_embed(batch, repository.id().to_string(), &scip_refs));
                 }
             }
         }
 
-        // Collect the last spawned flush (if any).
-        if let Some(task) = pending_flush.take() {
-            let stats = task
+        // Drain the pipeline tail.
+        if let Some(task) = embed_handle.take() {
+            let embed = task
                 .await
-                .map_err(|e| DomainError::internal(format!("Flush task panicked: {e}")))?
+                .map_err(|e| DomainError::internal(format!("Embed task panicked: {e}")))?
                 ?;
-            merge_stats(
-                stats,
-                &mut file_count,
-                &mut chunk_count,
-                &mut reference_count,
-                &mut language_stats,
-            );
+            if let Some(wt) = write_handle.take() {
+                let stats = wt
+                    .await
+                    .map_err(|e| DomainError::internal(format!("Write task panicked: {e}")))?
+                    ?;
+                merge_stats(stats, &mut file_count, &mut chunk_count, &mut reference_count, &mut language_stats);
+            }
+            write_handle = Some(self.spawn_write(embed));
+        }
+        if let Some(wt) = write_handle.take() {
+            let stats = wt
+                .await
+                .map_err(|e| DomainError::internal(format!("Write task panicked: {e}")))?
+                ?;
+            merge_stats(stats, &mut file_count, &mut chunk_count, &mut reference_count, &mut language_stats);
         }
 
-        // Flush any remaining files that didn't fill a complete batch.
+        // Final batch: any files that didn't fill a complete batch.
         if !pending.is_empty() {
-            let stats = do_flush(
+            let embed = do_embed(
                 std::mem::take(&mut pending),
                 repository.id().to_string(),
                 Arc::clone(&scip_refs),
                 Arc::clone(&self.embedding_service),
+            )
+            .await?;
+            let stats = do_write(
+                embed,
                 Arc::clone(&self.vector_repo),
                 Arc::clone(&self.file_hash_repo),
                 Arc::clone(&self.call_graph_use_case),
             )
             .await?;
-            merge_stats(
-                stats,
-                &mut file_count,
-                &mut chunk_count,
-                &mut reference_count,
-                &mut language_stats,
-            );
+            merge_stats(stats, &mut file_count, &mut chunk_count, &mut reference_count, &mut language_stats);
         }
 
         progress_bar.finish_and_clear();
@@ -579,7 +595,8 @@ impl IndexRepositoryUseCase {
 
         let mut pending: Vec<ParseOnlyResult> = Vec::new();
         let mut pending_chunk_count = 0usize;
-        let mut pending_flush: Option<JoinHandle<Result<FlushStats, DomainError>>> = None;
+        let mut embed_handle: Option<JoinHandle<Result<EmbedResult, DomainError>>> = None;
+        let mut write_handle: Option<JoinHandle<Result<FlushStats, DomainError>>> = None;
 
         while let Some(maybe_result) = parse_rx.recv().await {
             progress_bar.inc(1);
@@ -604,64 +621,67 @@ impl IndexRepositoryUseCase {
                 pending.push(result);
 
                 if pending_chunk_count >= CROSS_FILE_EMBED_BATCH {
-                    if let Some(task) = pending_flush.take() {
-                        let stats = task.await.map_err(|e| {
-                            DomainError::internal(format!("Flush task panicked: {e}"))
-                        })??;
-                        let (fc, cc, rc, ld) = stats;
-                        processed_count += fc;
-                        new_chunk_count += cc;
-                        new_reference_count += rc;
-                        for (k, v) in ld {
-                            let s = language_stats.entry(k).or_default();
-                            s.file_count += v.file_count;
-                            s.chunk_count += v.chunk_count;
+                    if let Some(task) = embed_handle.take() {
+                        let embed = task
+                            .await
+                            .map_err(|e| DomainError::internal(format!("Embed task panicked: {e}")))?
+                            ?;
+                        if let Some(wt) = write_handle.take() {
+                            let stats = wt
+                                .await
+                                .map_err(|e| DomainError::internal(format!("Write task panicked: {e}")))?
+                                ?;
+                            merge_stats(stats, &mut processed_count, &mut new_chunk_count, &mut new_reference_count, &mut language_stats);
                         }
+                        write_handle = Some(self.spawn_write(embed));
                     }
                     let batch = std::mem::take(&mut pending);
                     pending_chunk_count = 0;
-                    pending_flush =
-                        Some(self.spawn_flush(batch, repository.id().to_string(), &scip_refs));
+                    embed_handle = Some(self.spawn_embed(batch, repository.id().to_string(), &scip_refs));
                 }
             }
         }
 
-        // Collect the last spawned flush (if any).
-        if let Some(task) = pending_flush.take() {
-            let (fc, cc, rc, ld) = task
+        // Drain the pipeline tail.
+        if let Some(task) = embed_handle.take() {
+            let embed = task
                 .await
-                .map_err(|e| DomainError::internal(format!("Flush task panicked: {e}")))?
+                .map_err(|e| DomainError::internal(format!("Embed task panicked: {e}")))?
                 ?;
-            processed_count += fc;
-            new_chunk_count += cc;
-            new_reference_count += rc;
-            for (k, v) in ld {
-                let s = language_stats.entry(k).or_default();
-                s.file_count += v.file_count;
-                s.chunk_count += v.chunk_count;
+            if let Some(wt) = write_handle.take() {
+                let stats = wt
+                    .await
+                    .map_err(|e| DomainError::internal(format!("Write task panicked: {e}")))?
+                    ?;
+                merge_stats(stats, &mut processed_count, &mut new_chunk_count, &mut new_reference_count, &mut language_stats);
             }
+            write_handle = Some(self.spawn_write(embed));
+        }
+        if let Some(wt) = write_handle.take() {
+            let stats = wt
+                .await
+                .map_err(|e| DomainError::internal(format!("Write task panicked: {e}")))?
+                ?;
+            merge_stats(stats, &mut processed_count, &mut new_chunk_count, &mut new_reference_count, &mut language_stats);
         }
 
-        // Flush remaining
+        // Final batch.
         if !pending.is_empty() {
-            let (fc, cc, rc, ld) = do_flush(
+            let embed = do_embed(
                 std::mem::take(&mut pending),
                 repository.id().to_string(),
                 Arc::clone(&scip_refs),
                 Arc::clone(&self.embedding_service),
+            )
+            .await?;
+            let stats = do_write(
+                embed,
                 Arc::clone(&self.vector_repo),
                 Arc::clone(&self.file_hash_repo),
                 Arc::clone(&self.call_graph_use_case),
             )
             .await?;
-            processed_count += fc;
-            new_chunk_count += cc;
-            new_reference_count += rc;
-            for (k, v) in ld {
-                let s = language_stats.entry(k).or_default();
-                s.file_count += v.file_count;
-                s.chunk_count += v.chunk_count;
-            }
+            merge_stats(stats, &mut processed_count, &mut new_chunk_count, &mut new_reference_count, &mut language_stats);
         }
 
         progress_bar.finish_and_clear();
@@ -732,6 +752,16 @@ struct ParseOnlyResult {
     chunks: Vec<crate::domain::CodeChunk>,
 }
 
+/// Parsed batch after embedding — ready to be written to the DB.
+struct EmbedResult {
+    batch: Vec<ParseOnlyResult>,
+    repository_id: String,
+    scip_refs: Arc<HashMap<String, Vec<SymbolReference>>>,
+    flat_chunks: Vec<crate::domain::CodeChunk>,
+    per_file_chunk_count: Vec<usize>,
+    per_file_embeddings: Vec<Option<Vec<Embedding>>>,
+}
+
 /// Accumulate the stats returned by a single [`do_flush`] call into the
 /// running totals held by the caller.
 fn merge_stats(
@@ -786,54 +816,42 @@ fn spawn_parse_stream(
     rx
 }
 
-/// Embed and persist one accumulated batch of pre-parsed files.
+/// Phase 1 of the two-stage flush pipeline: tokenise and embed a batch.
 ///
-/// This is a free function (not a method) so it can be passed directly to
-/// [`tokio::spawn`], enabling the parse stream to continue making forward
-/// progress while embedding and DB writes happen on a separate task.
-///
-/// All service references are passed as `Arc` clones; they are cheap to copy
-/// and do not require any additional locking beyond what each service already
-/// provides internally.
-///
-/// Returns `(file_count, chunk_count, ref_count, language_stats)`.
-async fn do_flush(
+/// Pure CPU work — no DB I/O.  Runs concurrently with the DB-write phase of
+/// the previous batch so that embedding and persistence overlap in time.
+async fn do_embed(
     batch: Vec<ParseOnlyResult>,
     repository_id: String,
     scip_refs: Arc<HashMap<String, Vec<SymbolReference>>>,
     embedding_service: Arc<dyn EmbeddingService>,
-    vector_repo: Arc<dyn VectorRepository>,
-    file_hash_repo: Arc<dyn FileHashRepository>,
-    call_graph_use_case: Arc<CallGraphUseCase>,
-) -> Result<FlushStats, DomainError> {
-    if batch.is_empty() {
-        return Ok((0, 0, 0, HashMap::new()));
-    }
-
-    // ── Phase 1: flatten chunks for a single embed_chunks call ───────────────
+) -> Result<EmbedResult, DomainError> {
+    // Flatten chunks while preserving per-file counts for later re-splitting.
     let mut flat_chunks: Vec<crate::domain::CodeChunk> = Vec::new();
     let mut per_file_chunk_count: Vec<usize> = Vec::with_capacity(batch.len());
-
-    for result in &batch {
-        per_file_chunk_count.push(result.chunks.len());
-    }
-    // Move chunks out of the batch without cloning.
     let batch: Vec<ParseOnlyResult> = batch
         .into_iter()
         .map(|mut r| {
+            per_file_chunk_count.push(r.chunks.len());
             flat_chunks.append(&mut r.chunks);
             r
         })
         .collect();
 
-    // ── Phase 2: embed all chunks in one call ─────────────────────────────────
-    // On failure fall back to per-file calls so a single bad file cannot
-    // discard the whole batch.
+    // Embed all chunks in one call; fall back to per-file on failure so a
+    // single bad file cannot discard the whole batch.
     let per_file_embeddings: Vec<Option<Vec<Embedding>>> = if flat_chunks.is_empty() {
         per_file_chunk_count.iter().map(|_| Some(vec![])).collect()
     } else {
         match embedding_service.embed_chunks(&flat_chunks).await {
             Ok(all) => {
+                if all.len() != flat_chunks.len() {
+                    return Err(DomainError::internal(format!(
+                        "Embedding count mismatch: got {} embeddings for {} chunks",
+                        all.len(),
+                        flat_chunks.len()
+                    )));
+                }
                 let mut drain = all.into_iter();
                 per_file_chunk_count
                     .iter()
@@ -873,11 +891,35 @@ async fn do_flush(
         }
     };
 
-    // ── Phase 3: batch-delete stale data, then batch-write new data ──────────
-    //
-    // One delete transaction covers all files.
-    // One save_batch transaction covers all valid chunks + embeddings.
-    // One save_batch transaction covers all file hashes.
+    Ok(EmbedResult {
+        batch,
+        repository_id,
+        scip_refs,
+        flat_chunks,
+        per_file_chunk_count,
+        per_file_embeddings,
+    })
+}
+
+/// Phase 2 of the two-stage flush pipeline: persist an already-embedded batch.
+///
+/// All DB writes — delete stale, save chunks+embeddings, save call-graph refs,
+/// save file hashes.  Runs concurrently with the embedding phase of the next
+/// batch so that I/O and CPU work overlap.
+async fn do_write(
+    embed: EmbedResult,
+    vector_repo: Arc<dyn VectorRepository>,
+    file_hash_repo: Arc<dyn FileHashRepository>,
+    call_graph_use_case: Arc<CallGraphUseCase>,
+) -> Result<FlushStats, DomainError> {
+    let EmbedResult {
+        batch,
+        repository_id,
+        scip_refs,
+        flat_chunks,
+        per_file_chunk_count,
+        per_file_embeddings,
+    } = embed;
 
     let all_paths: Vec<&str> = batch.iter().map(|r| r.relative_path.as_str()).collect();
     vector_repo
@@ -900,7 +942,7 @@ async fn do_flush(
 
         let file_embeddings = match per_file_embeddings[i].as_deref() {
             Some(e) => e,
-            None => continue, // embedding failed for this file; skip it
+            None => continue,
         };
 
         valid_chunks.extend_from_slice(file_chunks);
@@ -927,9 +969,11 @@ async fn do_flush(
             .await?;
     }
 
-    // Call-graph refs: per-file, only present for SCIP-indexed files.
     let mut ref_count = 0u64;
-    for result in &batch {
+    for (i, result) in batch.iter().enumerate() {
+        if per_file_embeddings[i].is_none() {
+            continue;
+        }
         let refs_count = if let Some(scip_file_refs) = scip_refs.get(&result.relative_path) {
             debug!(
                 "Using {} SCIP references for {}",

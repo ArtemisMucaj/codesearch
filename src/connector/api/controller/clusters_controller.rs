@@ -16,12 +16,13 @@ impl<'a> ClustersController<'a> {
     /// List all clusters for the given repository.
     pub async fn list(
         &self,
-        repository: String,
+        repository: Option<String>,
         format: OutputFormatTextJson,
     ) -> Result<String> {
+        let repository_id = self.container.resolve_repository_id(repository.as_deref()).await;
         let use_case = self.container.cluster_detection_use_case();
         let cg = use_case
-            .create_clusters(&repository)
+            .create_clusters(&repository_id)
             .await
             .context("detecting clusters for repository")?;
 
@@ -37,13 +38,13 @@ impl<'a> ClustersController<'a> {
                     return Ok(format!(
                         "No clusters detected for repository `{}` \
                          (graph may be too small or have no edges).",
-                        repository
+                        repository_id
                     ));
                 }
                 let mut out = format!(
                     "Clusters for `{}` — {} clusters, {} files, {} edges\n\
                      ────────────────────────────────────────────────────\n",
-                    repository,
+                    repository_id,
                     cg.clusters.len(),
                     cg.total_files,
                     cg.total_edges,
@@ -76,22 +77,23 @@ impl<'a> ClustersController<'a> {
     pub async fn get(
         &self,
         file_path: String,
-        repository: String,
+        repository: Option<String>,
         format: OutputFormatTextJson,
     ) -> Result<String> {
+        let repository_id = self.container.resolve_repository_id(repository.as_deref()).await;
         let use_case = self.container.cluster_detection_use_case();
         let result = use_case
-            .cluster_for_file(&file_path, &repository)
+            .cluster_for_file(&file_path, &repository_id)
             .await
             .context(format!(
                 "finding cluster for file {} in repository {}",
-                file_path, repository
+                file_path, repository_id
             ))?;
 
         let format: OutputFormat = format.into();
         Ok(match (result, format) {
             (None, OutputFormat::Json) => serde_json::to_string_pretty(
-                &serde_json::json!({ "file": file_path, "cluster": null, "repository": repository }),
+                &serde_json::json!({ "file": file_path, "cluster": null, "repository": repository_id }),
             )
             .context("serializing not-found response")?,
             (None, OutputFormat::Vimgrep) => {
@@ -99,7 +101,7 @@ impl<'a> ClustersController<'a> {
             }
             (None, OutputFormat::Text) => format!(
                 "File `{}` was not found in any cluster for repository `{}`.",
-                file_path, repository
+                file_path, repository_id
             ),
             (Some(c), OutputFormat::Json) => {
                 serde_json::to_string_pretty(&c).context("serializing cluster")?
@@ -116,10 +118,11 @@ impl<'a> ClustersController<'a> {
     }
 
     /// Print a Markdown architecture overview table.
-    pub async fn overview(&self, repository: String) -> Result<String> {
+    pub async fn overview(&self, repository: Option<String>) -> Result<String> {
+        let repository_id = self.container.resolve_repository_id(repository.as_deref()).await;
         let use_case = self.container.cluster_detection_use_case();
         Ok(use_case
-            .architecture_overview(&repository)
+            .architecture_overview(&repository_id)
             .await
             .context("generating architecture overview")?)
     }

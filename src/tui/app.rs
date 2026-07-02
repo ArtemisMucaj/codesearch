@@ -170,7 +170,7 @@ impl TuiApp {
 
     fn handle_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => {
+            KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE && self.state.detail_pane_focused() => {
                 self.state.should_quit = true;
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {

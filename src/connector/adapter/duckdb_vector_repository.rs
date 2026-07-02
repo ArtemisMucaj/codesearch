@@ -370,10 +370,47 @@ impl DuckdbVectorRepository {
 
     // ── FTS helpers ──────────────────────────────────────────────────────────
 
+    /// Converts a namespace into a bare SQL identifier safe for FTS use.
+    ///
+    /// DuckDB's FTS PRAGMA parses the table-name argument with a simplified
+    /// parser that does not support quoted identifiers, so the schema name must
+    /// be a plain token.  We replace every character that isn't alphanumeric or
+    /// `_` with `_`, prepend `ns_` when the first character would otherwise be
+    /// a digit, and append a 6-hex-character FNV-1a digest of the original
+    /// namespace so that distinct inputs that sanitize to the same string
+    /// (e.g. `my-lib` vs `my_lib`) always map to different identifiers.
+    fn fts_safe_name(namespace: &str) -> String {
+        // FNV-1a 32-bit hash for a short, stable disambiguator.
+        let mut hash: u32 = 2_166_136_261;
+        for b in namespace.bytes() {
+            hash ^= b as u32;
+            hash = hash.wrapping_mul(16_777_619);
+        }
+
+        let sanitized: String = namespace
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+            .collect();
+
+        let base = if sanitized
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit())
+        {
+            format!("ns_{sanitized}")
+        } else {
+            sanitized
+        };
+
+        format!("{base}_{hash:06x}")
+    }
+
     /// Returns the DuckDB schema name that the FTS extension creates for our
-    /// chunks table, e.g. `fts_main_chunks` for namespace `main`.
+    /// chunks table.  The FTS extension derives this as `fts_main_<view>` where
+    /// `<view>` is the sanitized view name we pass to the PRAGMA.
     fn fts_schema_name(namespace: &str) -> String {
-        format!("fts_{}_chunks", namespace)
+        let safe = Self::fts_safe_name(namespace);
+        format!("fts_main_{safe}_chunks_fts_src")
     }
 
     /// Returns `true` if the FTS index for this namespace already exists in
@@ -398,16 +435,32 @@ impl DuckdbVectorRepository {
 
     /// Rebuilds the FTS index from scratch for the given namespace.
     ///
+    /// Creates a view with a sanitized name (no special characters) in the
+    /// default schema that mirrors the namespaced chunks table, then points
+    /// the FTS PRAGMA at that view.  This avoids the PRAGMA's simplified
+    /// parser choking on characters like `-` in the schema name.
+    ///
     /// Uses `stemmer='none'` so that code identifiers are not stemmed — exact
     /// token matching is more appropriate for source code than natural-language
     /// stemming. The `overwrite=1` flag drops any existing index and recreates it.
     fn rebuild_fts_index(conn: &Connection, namespace: &str) -> Result<(), DomainError> {
-        let sql = format!(
-            "PRAGMA create_fts_index('{ns}.chunks', 'id', 'content', 'symbol_name', \
-             stemmer='none', overwrite=1);",
-            ns = namespace
+        let safe = Self::fts_safe_name(namespace);
+        // Temporary view with a clean identifier pointing at the real table.
+        let view_sql = format!(
+            "CREATE OR REPLACE VIEW {safe}_chunks_fts_src AS \
+             SELECT * FROM \"{ns}\".chunks;",
+            safe = safe,
+            ns = namespace.replace('"', "\"\""),
         );
-        conn.execute_batch(&sql)
+        conn.execute_batch(&view_sql)
+            .map_err(|e| DomainError::storage(format!("Failed to create FTS source view: {e}")))?;
+
+        let pragma_sql = format!(
+            "PRAGMA create_fts_index('{safe}_chunks_fts_src', 'id', 'content', 'symbol_name', \
+             stemmer='none', overwrite=1);",
+            safe = safe,
+        );
+        conn.execute_batch(&pragma_sql)
             .map_err(|e| DomainError::storage(format!("Failed to rebuild FTS index: {e}")))
     }
 
@@ -564,12 +617,12 @@ impl DuckdbVectorRepository {
              FROM ( \
                  SELECT c.id, c.file_path, c.content, c.start_line, c.end_line, \
                         c.language, c.node_type, c.symbol_name, c.parent_symbol, c.repository_id, \
-                        {fts}.match_bm25(c.id, ?) AS score \
+                        \"{fts}\".match_bm25(c.id, ?) AS score \
                  FROM \"{ns}\".chunks c \
              ) sq \
              WHERE sq.score IS NOT NULL",
-            fts = fts,
-            ns = namespace,
+            fts = fts.replace('"', "\"\""),
+            ns = namespace.replace('"', "\"\""),
         );
 
         let mut extra: Vec<String> = Vec::new();

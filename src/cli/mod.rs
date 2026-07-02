@@ -5,8 +5,9 @@ use clap::{Subcommand, ValueEnum};
 pub enum FeaturesSubcommand {
     /// List all entry-point features for a repository, sorted by criticality.
     List {
-        /// Repository ID to analyse.
-        repository: String,
+        /// Repository ID or name. Omit to auto-detect from the current directory.
+        #[arg(short, long)]
+        repository: Option<String>,
 
         /// Maximum number of features to return.
         #[arg(short, long, default_value = "20")]
@@ -83,8 +84,9 @@ impl From<OutputFormatTextJson> for OutputFormat {
 pub enum ClustersSubcommand {
     /// List all clusters detected in the repository.
     List {
-        /// Repository ID or name to analyse.
-        repository: String,
+        /// Repository ID or name. Omit to auto-detect from the current directory.
+        #[arg(short, long)]
+        repository: Option<String>,
 
         /// Output format: text or json.
         #[arg(short = 'F', long, value_enum, default_value = "text")]
@@ -96,8 +98,9 @@ pub enum ClustersSubcommand {
         /// File path to look up (as indexed — relative to the repository root).
         file: String,
 
-        /// Repository ID or name.
-        repository: String,
+        /// Repository ID or name. Omit to auto-detect from the current directory.
+        #[arg(short, long)]
+        repository: Option<String>,
 
         /// Output format: text or json.
         #[arg(short = 'F', long, value_enum, default_value = "text")]
@@ -106,8 +109,9 @@ pub enum ClustersSubcommand {
 
     /// Print a high-level Markdown architecture overview table.
     Overview {
-        /// Repository ID or name.
-        repository: String,
+        /// Repository ID or name. Omit to auto-detect from the current directory.
+        #[arg(short, long)]
+        repository: Option<String>,
     },
 }
 
@@ -117,8 +121,9 @@ pub enum ClustersSubcommand {
 pub enum SymbolClustersSubcommand {
     /// List all symbol communities detected in the repository.
     List {
-        /// Repository ID or name to analyse.
-        repository: String,
+        /// Repository ID or name. Omit to auto-detect from the current directory.
+        #[arg(short, long)]
+        repository: Option<String>,
 
         /// Output format: text or json.
         #[arg(short = 'F', long, value_enum, default_value = "text")]
@@ -131,8 +136,9 @@ pub enum SymbolClustersSubcommand {
         /// (e.g. `authenticate` or `pkg/Auth#authenticate().`).
         symbol: String,
 
-        /// Repository ID or name.
-        repository: String,
+        /// Repository ID or name. Omit to auto-detect from the current directory.
+        #[arg(short, long)]
+        repository: Option<String>,
 
         /// Output format: text or json.
         #[arg(short = 'F', long, value_enum, default_value = "text")]
@@ -339,8 +345,9 @@ pub enum Commands {
 
     /// Render a repository's Leiden communities as an HTML graph, SVG, or Obsidian canvas
     Visualize {
-        /// Repository ID or name to visualize.
-        repository: String,
+        /// Repository ID or name. Omit to auto-detect from the current directory.
+        #[arg(short, long)]
+        repository: Option<String>,
 
         /// Which graph to render: the file-dependency graph or the symbol call graph.
         #[arg(short, long, value_enum, default_value = "file")]
