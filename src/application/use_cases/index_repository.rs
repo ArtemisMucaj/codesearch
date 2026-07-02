@@ -71,9 +71,6 @@ pub struct IndexRepositoryUseCase {
     scip: Option<Arc<dyn Scip>>,
     /// Maximum number of concurrent `parse_only` calls.
     parse_concurrency: usize,
-    /// When `true`, the embed stage is skipped and chunks are stored without
-    /// vectors.  Search then relies on the keyword (BM25) and call-graph legs.
-    no_embeddings: bool,
 }
 
 impl IndexRepositoryUseCase {
@@ -94,7 +91,6 @@ impl IndexRepositoryUseCase {
             embedding_service,
             scip: None,
             parse_concurrency: DEFAULT_PARSE_CONCURRENCY,
-            no_embeddings: false,
         }
     }
 
@@ -107,12 +103,6 @@ impl IndexRepositoryUseCase {
     /// Set the maximum number of concurrent parse tasks.
     pub fn with_parse_concurrency(mut self, n: usize) -> Self {
         self.parse_concurrency = n.max(1);
-        self
-    }
-
-    /// Skip the embed stage; chunks are stored without vectors.
-    pub fn with_no_embeddings(mut self, no_embeddings: bool) -> Self {
-        self.no_embeddings = no_embeddings;
         self
     }
 
@@ -144,7 +134,6 @@ impl IndexRepositoryUseCase {
             repository_id,
             Arc::clone(scip_refs),
             Arc::clone(&self.embedding_service),
-            self.no_embeddings,
         ))
     }
 
@@ -397,7 +386,6 @@ impl IndexRepositoryUseCase {
                 repository.id().to_string(),
                 Arc::clone(&scip_refs),
                 Arc::clone(&self.embedding_service),
-                self.no_embeddings,
             )
             .await?;
             let stats = do_write(
@@ -714,7 +702,6 @@ impl IndexRepositoryUseCase {
                 repository.id().to_string(),
                 Arc::clone(&scip_refs),
                 Arc::clone(&self.embedding_service),
-                self.no_embeddings,
             )
             .await?;
             let stats = do_write(
@@ -874,7 +861,6 @@ async fn do_embed(
     repository_id: String,
     scip_refs: Arc<HashMap<String, Vec<SymbolReference>>>,
     embedding_service: Arc<dyn EmbeddingService>,
-    no_embeddings: bool,
 ) -> Result<EmbedResult, DomainError> {
     // Flatten chunks while preserving per-file counts for later re-splitting.
     let mut flat_chunks: Vec<crate::domain::CodeChunk> = Vec::new();
@@ -890,10 +876,11 @@ async fn do_embed(
 
     // Embed all chunks in one call; fall back to per-file on failure so a
     // single bad file cannot discard the whole batch.
-    // In no-embeddings mode every file is marked successfully "embedded" with
-    // zero vectors so the write phase stores its chunks without embeddings.
+    // When the service has embeddings disabled (--no-embeddings) every file is
+    // marked successfully "embedded" with zero vectors so the write phase
+    // stores its chunks without embeddings.
     let per_file_embeddings: Vec<Option<Vec<Embedding>>> =
-        if no_embeddings || flat_chunks.is_empty() {
+        if !embedding_service.embeddings_enabled() || flat_chunks.is_empty() {
             per_file_chunk_count.iter().map(|_| Some(vec![])).collect()
         } else {
             match embedding_service.embed_chunks(&flat_chunks).await {

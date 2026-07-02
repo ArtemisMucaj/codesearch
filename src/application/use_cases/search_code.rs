@@ -133,7 +133,7 @@ impl SearchCodeUseCase {
                 let search_query = search_query.clone();
                 set.spawn(async move {
                     let embedding = embedding_service.embed_query(&variant).await?;
-                    vector_repo.search(&embedding, &search_query).await
+                    vector_repo.search(Some(&embedding), &search_query).await
                 });
             }
 
@@ -155,15 +155,15 @@ impl SearchCodeUseCase {
             fused
         } else {
             // --- Standard single-query path ---
-            // An empty embedding tells the repository to skip the semantic
-            // leg (see VectorRepository::search).
+            // `None` tells the repository to skip the semantic leg
+            // (see VectorRepository::search).
             let query_embedding = if semantic_available {
-                self.embedding_service.embed_query(query.query()).await?
+                Some(self.embedding_service.embed_query(query.query()).await?)
             } else {
-                Vec::new()
+                None
             };
             self.vector_repo
-                .search(&query_embedding, &search_query)
+                .search(query_embedding.as_deref(), &search_query)
                 .await?
         };
 

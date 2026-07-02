@@ -51,6 +51,10 @@ impl EmbeddingService for NoEmbedding {
         ))
     }
 
+    fn embeddings_enabled(&self) -> bool {
+        false
+    }
+
     fn config(&self) -> &EmbeddingConfig {
         &self.config
     }

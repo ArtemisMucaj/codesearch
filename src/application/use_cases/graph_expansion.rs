@@ -3,8 +3,9 @@ use std::sync::Arc;
 
 use tracing::debug;
 
+use crate::application::use_cases::pattern_utils::parse_fqn;
 use crate::application::{CallGraphQuery, CallGraphUseCase, VectorRepository};
-use crate::domain::{DomainError, SearchQuery, SearchResult};
+use crate::domain::{CodeChunk, DomainError, SearchQuery, SearchResult};
 
 /// Number of top-ranked results whose symbols seed the call-graph expansion.
 const GRAPH_SEED_COUNT: usize = 5;
@@ -113,31 +114,76 @@ impl GraphExpansionUseCase {
                 .then(a_sym.cmp(b_sym))
         });
 
+        // Resolve neighbour symbols to definition chunks with one batched
+        // lookup per repository, then disambiguate per symbol in memory
+        // (chunks.symbol_name has no index, so per-symbol point queries each
+        // cost a table scan).
+        let parsed: Vec<(&str, Option<&str>)> =
+            ranked.iter().map(|(symbol, _)| parse_fqn(symbol)).collect();
+
+        let mut short_names_by_repo: HashMap<&str, Vec<&str>> = HashMap::new();
+        for ((_, score), (short_name, _)) in ranked.iter().zip(&parsed) {
+            if !short_name.is_empty() {
+                short_names_by_repo
+                    .entry(score.repository_id.as_str())
+                    .or_default()
+                    .push(short_name);
+            }
+        }
+
+        let mut chunks_by_symbol: HashMap<(String, String), Vec<CodeChunk>> = HashMap::new();
+        for (repo_id, symbols) in &short_names_by_repo {
+            for chunk in self
+                .vector_repo
+                .find_chunks_by_symbols(repo_id, symbols)
+                .await?
+            {
+                let Some(symbol_name) = chunk.symbol_name() else {
+                    continue;
+                };
+                chunks_by_symbol
+                    .entry((repo_id.to_string(), symbol_name.to_string()))
+                    .or_default()
+                    .push(chunk);
+            }
+        }
+
         let mut results: Vec<SearchResult> = Vec::new();
         let mut seen_chunks: HashSet<String> = HashSet::new();
 
-        for (symbol, score) in &ranked {
+        for ((_, score), (short_name, class_hint)) in ranked.iter().zip(&parsed) {
             if results.len() >= GRAPH_LEG_LIMIT {
                 break;
             }
 
-            let (short_name, class_hint) = Self::split_symbol(symbol);
-            let chunk = self
-                .vector_repo
-                .find_chunk_by_symbol(&score.repository_id, short_name, class_hint)
-                .await?;
-            let Some(chunk) = chunk else {
+            let key = (score.repository_id.clone(), short_name.to_string());
+            let Some(candidates) = chunks_by_symbol.get(&key) else {
                 continue; // symbol has no indexed definition chunk
             };
 
-            if !Self::passes_filters(query, &chunk) || !seen_chunks.insert(chunk.id().to_string()) {
+            // Pick the definition chunk the same way find_chunk_by_symbol
+            // ranks: prefer files matching the class hint, then the tightest
+            // scope (smallest line span).
+            let best = candidates.iter().min_by_key(|c| {
+                let hint_rank = match class_hint {
+                    Some(hint) if c.file_path().contains(hint) => 0u32,
+                    Some(_) => 1,
+                    None => 0,
+                };
+                (hint_rank, c.end_line().saturating_sub(c.start_line()))
+            });
+            let Some(chunk) = best else {
+                continue;
+            };
+
+            if !query.matches(chunk) || !seen_chunks.insert(chunk.id().to_string()) {
                 continue;
             }
 
             // Placeholder rank-derived score: RRF fusion re-scores purely by
             // list position, so only the relative order matters here.
             let rank_score = 1.0 / (results.len() as f32 + 1.0);
-            results.push(SearchResult::new(chunk, rank_score));
+            results.push(SearchResult::new(chunk.clone(), rank_score));
         }
 
         debug!(
@@ -179,117 +225,25 @@ impl GraphExpansionUseCase {
         if neighbor.is_empty() || seed_set.contains(neighbor) {
             return;
         }
-        let entry = neighbors
-            .entry(neighbor.to_string())
-            .or_insert_with(|| NeighborScore {
-                seed_count: 0,
-                edge_count: 0,
-                repository_id: repository_id.to_string(),
-            });
+        // Membership checks before the inserts so repeat edges (the common
+        // case) allocate no keys.
+        if !neighbors.contains_key(neighbor) {
+            neighbors.insert(
+                neighbor.to_string(),
+                NeighborScore {
+                    seed_count: 0,
+                    edge_count: 0,
+                    repository_id: repository_id.to_string(),
+                },
+            );
+        }
+        let Some(entry) = neighbors.get_mut(neighbor) else {
+            return;
+        };
         entry.edge_count += 1;
-        if connected.insert(neighbor.to_string()) {
+        if !connected.contains(neighbor) {
+            connected.insert(neighbor.to_string());
             entry.seed_count += 1;
         }
-    }
-
-    /// Split a possibly qualified call-graph symbol into the bare name that
-    /// chunk `symbol_name` columns store, plus an optional class hint.
-    ///
-    /// Handles the qualification styles found in the call graph:
-    /// tree-sitter bare names (`foo`), `Class#method`, path-qualified SCIP
-    /// symbols (`src/foo/Bar#baz().`), and dotted/namespaced names
-    /// (`module.foo`, `Ns::foo`).
-    fn split_symbol(symbol: &str) -> (&str, Option<&str>) {
-        let trimmed = symbol.trim_end_matches(['(', ')', '.']);
-
-        let (scope, name) = match trimmed.rsplit_once('#') {
-            Some((scope, name)) => (Some(scope), name),
-            None => (None, trimmed),
-        };
-
-        // Strip any remaining path / namespace qualification from the name.
-        let name_start = name.rfind(['/', '.', ':']).map(|i| i + 1).unwrap_or(0);
-        let short_name = &name[name_start..];
-
-        // The class hint is the last path segment of the scope, if any.
-        let class_hint = scope.map(|s| {
-            let start = s.rfind(['/', '.', ':']).map(|i| i + 1).unwrap_or(0);
-            &s[start..]
-        });
-
-        (
-            if short_name.is_empty() {
-                trimmed
-            } else {
-                short_name
-            },
-            class_hint.filter(|h| !h.is_empty()),
-        )
-    }
-
-    /// Apply the search query's optional column filters to an expanded chunk,
-    /// mirroring the SQL filters of the other legs.
-    fn passes_filters(query: &SearchQuery, chunk: &crate::domain::CodeChunk) -> bool {
-        if let Some(languages) = query.languages() {
-            if !languages.iter().any(|l| l == chunk.language().as_str()) {
-                return false;
-            }
-        }
-        if let Some(node_types) = query.node_types() {
-            if !node_types.iter().any(|t| t == chunk.node_type().as_str()) {
-                return false;
-            }
-        }
-        if let Some(repo_ids) = query.repository_ids() {
-            if !repo_ids.iter().any(|r| r == chunk.repository_id()) {
-                return false;
-            }
-        }
-        true
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn split_symbol_bare_name() {
-        assert_eq!(
-            GraphExpansionUseCase::split_symbol("process_file"),
-            ("process_file", None)
-        );
-    }
-
-    #[test]
-    fn split_symbol_class_method() {
-        assert_eq!(
-            GraphExpansionUseCase::split_symbol("Autoloader#load"),
-            ("load", Some("Autoloader"))
-        );
-    }
-
-    #[test]
-    fn split_symbol_scip_style() {
-        assert_eq!(
-            GraphExpansionUseCase::split_symbol("src/foo/Bar#baz()."),
-            ("baz", Some("Bar"))
-        );
-    }
-
-    #[test]
-    fn split_symbol_dotted() {
-        assert_eq!(
-            GraphExpansionUseCase::split_symbol("module.helper"),
-            ("helper", None)
-        );
-    }
-
-    #[test]
-    fn split_symbol_rust_path() {
-        assert_eq!(
-            GraphExpansionUseCase::split_symbol("crate::search::run"),
-            ("run", None)
-        );
     }
 }

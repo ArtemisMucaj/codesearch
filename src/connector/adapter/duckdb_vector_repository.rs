@@ -31,11 +31,7 @@ const HNSW_FILTER_OVERFETCH_FLOOR: usize = 64;
 /// what used to be one prepare + execute round-trip per embedding.
 const EMBEDDING_INSERT_BATCH: usize = 128;
 
-/// Sentinel stored as `embedding_model` / `embedding_target` in
-/// `namespace_config` when a namespace is indexed with `--no-embeddings`.
-/// Namespaces carrying this sentinel skip the embedding-space mismatch
-/// validation — there are no vectors to protect.
-pub const NO_EMBEDDINGS_MODEL: &str = "none";
+use super::NO_EMBEDDINGS_MODEL;
 
 /// Embedding configuration that must remain consistent across all operations on
 /// a given namespace. Stored in the `namespace_config` table and validated on
@@ -65,6 +61,11 @@ pub struct DuckdbVectorRepository {
     /// In this mode DDL (including `PRAGMA create_fts_index`) is forbidden,
     /// so we never attempt a rebuild and degrade silently when the index is absent.
     read_only: bool,
+    /// Memoized "store holds at least one embedding" fact.  Once vectors are
+    /// observed they are never all removed mid-process by the search path, so
+    /// a `true` result is cached and later `has_embeddings` calls skip the
+    /// probe query.  `false` is re-probed (an indexing run may add vectors).
+    has_vectors: AtomicBool,
 }
 
 impl DuckdbVectorRepository {
@@ -99,6 +100,7 @@ impl DuckdbVectorRepository {
             dimensions,
             fts_dirty: AtomicBool::new(!fts_already_exists),
             read_only: false,
+            has_vectors: AtomicBool::new(false),
         })
     }
 
@@ -121,6 +123,7 @@ impl DuckdbVectorRepository {
             dimensions,
             fts_dirty: AtomicBool::new(true),
             read_only: false,
+            has_vectors: AtomicBool::new(false),
         })
     }
 
@@ -171,6 +174,7 @@ impl DuckdbVectorRepository {
             dimensions,
             fts_dirty: AtomicBool::new(!fts_already_exists),
             read_only: true,
+            has_vectors: AtomicBool::new(false),
         })
     }
 
@@ -719,12 +723,8 @@ impl DuckdbVectorRepository {
                 continue; // filtered out or orphaned embedding
             };
             let score = 1.0 - dist;
-            if !query.is_text_search() {
-                if let Some(min) = query.min_score() {
-                    if score < min {
-                        continue;
-                    }
-                }
+            if !query.is_text_search() && query.min_score().is_some_and(|min| score < min) {
+                continue;
             }
             results.push(SearchResult::new(chunk, score));
             if results.len() >= limit {
@@ -778,12 +778,8 @@ impl DuckdbVectorRepository {
                 .map_err(|e| DomainError::storage(format!("Failed to read score: {}", e)))?;
             // In hybrid mode the full candidate pool feeds rrf_fuse; apply
             // min_score after fusion instead of dropping candidates here.
-            if !query.is_text_search() {
-                if let Some(min) = query.min_score() {
-                    if score < min {
-                        continue;
-                    }
-                }
+            if !query.is_text_search() && query.min_score().is_some_and(|min| score < min) {
+                continue;
             }
             let chunk = Self::row_to_chunk(row)
                 .map_err(|e| DomainError::storage(format!("Failed to parse chunk row: {}", e)))?;
@@ -978,6 +974,9 @@ impl VectorRepository for DuckdbVectorRepository {
         tx.commit()
             .map_err(|e| DomainError::storage(format!("Failed to commit: {}", e)))?;
 
+        if !embeddings.is_empty() {
+            self.has_vectors.store(true, Ordering::Release);
+        }
         // Mark the FTS index as stale; it will be rebuilt lazily on the next BM25 search.
         self.fts_dirty.store(true, Ordering::Release);
 
@@ -1145,30 +1144,32 @@ impl VectorRepository for DuckdbVectorRepository {
 
     async fn search(
         &self,
-        query_embedding: &[f32],
+        query_embedding: Option<&[f32]>,
         query: &SearchQuery,
     ) -> Result<Vec<SearchResult>, DomainError> {
-        // An empty query embedding requests a text-only search (no embeddings
-        // indexed); the semantic leg is skipped entirely.
-        let text_only = query_embedding.is_empty();
-        if !text_only && query_embedding.len() != self.dimensions {
-            return Err(DomainError::invalid_input(format!(
-                "Expected query embedding dimension {}, got {}",
-                self.dimensions,
-                query_embedding.len()
-            )));
+        if let Some(embedding) = query_embedding {
+            if embedding.len() != self.dimensions {
+                return Err(DomainError::invalid_input(format!(
+                    "Expected query embedding dimension {}, got {}",
+                    self.dimensions,
+                    embedding.len()
+                )));
+            }
         }
 
         let conn = self.conn.lock().await;
 
-        let semantic = if text_only {
-            Vec::new()
-        } else {
-            let array_lit = self.vector_to_array_literal(query_embedding)?;
-            Self::run_semantic(&conn, &self.namespace, &array_lit, query, query.limit())?
+        // `None` requests a text-only search (no embeddings indexed); the
+        // semantic leg is skipped entirely.
+        let semantic = match query_embedding {
+            None => Vec::new(),
+            Some(embedding) => {
+                let array_lit = self.vector_to_array_literal(embedding)?;
+                Self::run_semantic(&conn, &self.namespace, &array_lit, query, query.limit())?
+            }
         };
 
-        if !query.is_text_search() && !text_only {
+        if !query.is_text_search() && query_embedding.is_some() {
             return Ok(semantic);
         }
 
@@ -1251,18 +1252,26 @@ impl VectorRepository for DuckdbVectorRepository {
     }
 
     async fn has_embeddings(&self) -> Result<bool, DomainError> {
+        // Vectors are only ever added mid-process, so a `true` answer is
+        // stable and skips the probe on every subsequent search.
+        if self.has_vectors.load(Ordering::Acquire) {
+            return Ok(true);
+        }
         let conn = self.conn.lock().await;
-        let exists: i64 = conn
+        let exists: bool = conn
             .query_row(
                 &format!(
-                    "SELECT COUNT(*) FROM (SELECT 1 FROM \"{}\".embeddings LIMIT 1)",
+                    "SELECT EXISTS(SELECT 1 FROM \"{}\".embeddings)",
                     self.namespace
                 ),
                 [],
                 |row| row.get(0),
             )
             .map_err(|e| DomainError::storage(format!("Failed to probe embeddings: {}", e)))?;
-        Ok(exists > 0)
+        if exists {
+            self.has_vectors.store(true, Ordering::Release);
+        }
+        Ok(exists)
     }
 
     async fn count(&self) -> Result<u64, DomainError> {
@@ -1405,6 +1414,56 @@ impl VectorRepository for DuckdbVectorRepository {
             })?;
 
         Ok(chunk)
+    }
+
+    async fn find_chunks_by_symbols(
+        &self,
+        repository_id: &str,
+        symbols: &[&str],
+    ) -> Result<Vec<CodeChunk>, DomainError> {
+        if symbols.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Single scan for every symbol instead of one point query per symbol
+        // (chunks.symbol_name is unindexed, so each point query is a scan).
+        let symbol_list = symbols
+            .iter()
+            .map(|s| format!("'{}'", s.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let mut sql = format!(
+            "SELECT id, file_path, content, start_line, end_line, language, node_type, \
+             symbol_name, parent_symbol, repository_id \
+             FROM \"{}\".chunks WHERE symbol_name IN ({})",
+            self.namespace, symbol_list
+        );
+        if !repository_id.is_empty() {
+            sql.push_str(" AND repository_id = ?");
+        }
+
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            DomainError::storage(format!("Failed to prepare batch symbol lookup: {e}"))
+        })?;
+        let mut rows = if repository_id.is_empty() {
+            stmt.query([])
+        } else {
+            stmt.query(params![repository_id])
+        }
+        .map_err(|e| DomainError::storage(format!("Failed to run batch symbol lookup: {e}")))?;
+
+        let mut chunks = Vec::new();
+        while let Some(row) = rows.next().map_err(|e| {
+            DomainError::storage(format!("Failed to read batch symbol lookup row: {e}"))
+        })? {
+            let chunk = Self::row_to_chunk(row).map_err(|e| {
+                DomainError::storage(format!("Failed to parse batch symbol lookup chunk: {e}"))
+            })?;
+            chunks.push(chunk);
+        }
+        Ok(chunks)
     }
 
     async fn get_symbol_to_file_map(

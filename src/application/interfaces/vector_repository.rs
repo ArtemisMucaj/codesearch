@@ -50,12 +50,12 @@ pub trait VectorRepository: Send + Sync {
     /// Reciprocal Rank Fusion before returning. Backends that cannot perform text
     /// search may silently fall back to semantic-only results.
     ///
-    /// An **empty** `query_embedding` requests a text-only search: the
-    /// semantic leg is skipped regardless of `is_text_search()`.  Used when
-    /// the store carries no embeddings (see [`has_embeddings`]).
+    /// `query_embedding: None` requests a text-only search: the semantic leg
+    /// is skipped regardless of `is_text_search()`.  Used when the store
+    /// carries no embeddings (see [`has_embeddings`]).
     async fn search(
         &self,
-        query_embedding: &[f32],
+        query_embedding: Option<&[f32]>,
         query: &SearchQuery,
     ) -> Result<Vec<SearchResult>, DomainError>;
 
@@ -100,6 +100,28 @@ pub trait VectorRepository: Send + Sync {
     ) -> Result<Option<CodeChunk>, DomainError> {
         let _ = (repository_id, symbol, class_hint);
         Ok(None)
+    }
+
+    /// Return **every** chunk whose `symbol_name` matches one of `symbols`
+    /// within `repository_id` (empty string = all repositories).  Callers do
+    /// their own per-symbol disambiguation; adapters should batch this into a
+    /// single query.  The default delegates to [`find_chunk_by_symbol`] per
+    /// symbol so existing adapters keep working.
+    async fn find_chunks_by_symbols(
+        &self,
+        repository_id: &str,
+        symbols: &[&str],
+    ) -> Result<Vec<CodeChunk>, DomainError> {
+        let mut chunks = Vec::new();
+        for symbol in symbols {
+            if let Some(chunk) = self
+                .find_chunk_by_symbol(repository_id, symbol, None)
+                .await?
+            {
+                chunks.push(chunk);
+            }
+        }
+        Ok(chunks)
     }
 
     /// Return `(symbol_name, file_path)` pairs for every chunk in `repository_id`

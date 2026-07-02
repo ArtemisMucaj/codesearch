@@ -476,7 +476,6 @@ impl Container {
         )
         .with_scip(scip)
         .with_parse_concurrency(self.config.parse_concurrency)
-        .with_no_embeddings(self.config.no_embeddings)
     }
 
     pub fn search_use_case(&self) -> SearchCodeUseCase {
