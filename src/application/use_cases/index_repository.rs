@@ -321,14 +321,10 @@ impl IndexRepositoryUseCase {
                     // Wait for the previous embed to finish, then immediately
                     // spawn its write task (which overlaps with the next embed).
                     if let Some(task) = embed_handle.take() {
-                        let embed = task.await.map_err(|e| {
-                            DomainError::internal(format!("Embed task panicked: {e}"))
-                        })??;
+                        let embed = join_flatten(task, "Embed").await?;
                         // Drain the previous write before starting a new one.
                         if let Some(wt) = write_handle.take() {
-                            let stats = wt.await.map_err(|e| {
-                                DomainError::internal(format!("Write task panicked: {e}"))
-                            })??;
+                            let stats = join_flatten(wt, "Write").await?;
                             merge_stats(
                                 stats,
                                 &mut file_count,
@@ -349,13 +345,9 @@ impl IndexRepositoryUseCase {
 
         // Drain the pipeline tail.
         if let Some(task) = embed_handle.take() {
-            let embed = task
-                .await
-                .map_err(|e| DomainError::internal(format!("Embed task panicked: {e}")))??;
+            let embed = join_flatten(task, "Embed").await?;
             if let Some(wt) = write_handle.take() {
-                let stats = wt
-                    .await
-                    .map_err(|e| DomainError::internal(format!("Write task panicked: {e}")))??;
+                let stats = join_flatten(wt, "Write").await?;
                 merge_stats(
                     stats,
                     &mut file_count,
@@ -367,9 +359,7 @@ impl IndexRepositoryUseCase {
             write_handle = Some(self.spawn_write(embed));
         }
         if let Some(wt) = write_handle.take() {
-            let stats = wt
-                .await
-                .map_err(|e| DomainError::internal(format!("Write task panicked: {e}")))??;
+            let stats = join_flatten(wt, "Write").await?;
             merge_stats(
                 stats,
                 &mut file_count,
@@ -638,13 +628,9 @@ impl IndexRepositoryUseCase {
 
                 if pending_chunk_count >= CROSS_FILE_EMBED_BATCH {
                     if let Some(task) = embed_handle.take() {
-                        let embed = task.await.map_err(|e| {
-                            DomainError::internal(format!("Embed task panicked: {e}"))
-                        })??;
+                        let embed = join_flatten(task, "Embed").await?;
                         if let Some(wt) = write_handle.take() {
-                            let stats = wt.await.map_err(|e| {
-                                DomainError::internal(format!("Write task panicked: {e}"))
-                            })??;
+                            let stats = join_flatten(wt, "Write").await?;
                             merge_stats(
                                 stats,
                                 &mut processed_count,
@@ -665,13 +651,9 @@ impl IndexRepositoryUseCase {
 
         // Drain the pipeline tail.
         if let Some(task) = embed_handle.take() {
-            let embed = task
-                .await
-                .map_err(|e| DomainError::internal(format!("Embed task panicked: {e}")))??;
+            let embed = join_flatten(task, "Embed").await?;
             if let Some(wt) = write_handle.take() {
-                let stats = wt
-                    .await
-                    .map_err(|e| DomainError::internal(format!("Write task panicked: {e}")))??;
+                let stats = join_flatten(wt, "Write").await?;
                 merge_stats(
                     stats,
                     &mut processed_count,
@@ -683,9 +665,7 @@ impl IndexRepositoryUseCase {
             write_handle = Some(self.spawn_write(embed));
         }
         if let Some(wt) = write_handle.take() {
-            let stats = wt
-                .await
-                .map_err(|e| DomainError::internal(format!("Write task panicked: {e}")))??;
+            let stats = join_flatten(wt, "Write").await?;
             merge_stats(
                 stats,
                 &mut processed_count,
@@ -815,6 +795,17 @@ fn merge_stats(
         s.file_count += v.file_count;
         s.chunk_count += v.chunk_count;
     }
+}
+
+/// Await a spawned pipeline task, flattening the `JoinError` (panic) and the
+/// task's own `DomainError` into a single result.
+async fn join_flatten<T>(
+    handle: JoinHandle<Result<T, DomainError>>,
+    label: &str,
+) -> Result<T, DomainError> {
+    handle
+        .await
+        .map_err(|e| DomainError::internal(format!("{label} task panicked: {e}")))?
 }
 
 /// Spawn the parse stream as an independent tokio task and return the

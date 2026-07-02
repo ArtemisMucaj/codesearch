@@ -52,6 +52,7 @@ impl GraphExpansionUseCase {
     /// Expand `seeds` (a ranked result list) into a list of structurally
     /// related chunks, ordered by connectivity.  Returns an empty list when
     /// no seed carries a symbol name or the call graph has no edges for them.
+    #[tracing::instrument(skip_all, fields(seeds = seeds.len()))]
     pub async fn expand(
         &self,
         seeds: &[SearchResult],
@@ -62,7 +63,12 @@ impl GraphExpansionUseCase {
             return Ok(vec![]);
         }
 
-        let seed_set: HashSet<&str> = seed_symbols.iter().map(|(s, _)| s.as_str()).collect();
+        // Keyed by (symbol, repository) so a neighbour in another repository
+        // that merely shares a seed's name is not excluded.
+        let seed_set: HashSet<(&str, &str)> = seed_symbols
+            .iter()
+            .map(|(s, r)| (s.as_str(), r.as_str()))
+            .collect();
         let mut neighbors: HashMap<String, NeighborScore> = HashMap::new();
 
         for (symbol, repo_id) in &seed_symbols {
@@ -218,11 +224,11 @@ impl GraphExpansionUseCase {
     fn tally(
         neighbors: &mut HashMap<String, NeighborScore>,
         connected: &mut HashSet<String>,
-        seed_set: &HashSet<&str>,
+        seed_set: &HashSet<(&str, &str)>,
         neighbor: &str,
         repository_id: &str,
     ) {
-        if neighbor.is_empty() || seed_set.contains(neighbor) {
+        if neighbor.is_empty() || seed_set.contains(&(neighbor, repository_id)) {
             return;
         }
         // Membership checks before the inserts so repeat edges (the common
