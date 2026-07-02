@@ -1,5 +1,23 @@
 use clap::{Subcommand, ValueEnum};
 
+/// Validates a namespace for use as a DuckDB schema name.
+///
+/// Schema names are always double-quoted in generated SQL, so almost any
+/// character is safe. The one character that cannot appear is `"` itself,
+/// because it would break the quoting even after standard `""` escaping in
+/// the FTS PRAGMA argument (which is a SQL string, not a full SQL statement).
+pub fn validate_namespace(s: &str) -> Result<String, String> {
+    if s.is_empty() {
+        return Err("namespace must not be empty".to_string());
+    }
+    if s.contains('"') {
+        return Err(format!(
+            "namespace '{s}' contains '\"', which is not allowed in a namespace."
+        ));
+    }
+    Ok(s.to_string())
+}
+
 /// Subcommands for the `features` command.
 #[derive(Subcommand)]
 pub enum FeaturesSubcommand {
@@ -216,6 +234,44 @@ pub enum RerankingTarget {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Create a namespace with a fixed embedding configuration.
+    ///
+    /// A namespace's embedding setup is decided once, at creation, and
+    /// inherited by every later `index` and `search` run against it — those
+    /// commands read the stored configuration and never need embedding flags.
+    /// Indexing into a namespace that was never created configures it with
+    /// the defaults (ONNX, all-MiniLM-L6-v2, 384 dimensions).
+    Create {
+        /// Namespace to create (defaults to the global --namespace value)
+        #[arg(value_parser = validate_namespace)]
+        name: Option<String>,
+
+        /// Embedding backend: 'onnx' (bundled, offline) or 'api' (OpenAI-compatible endpoint)
+        #[arg(
+            long,
+            value_enum,
+            default_value = "onnx",
+            conflicts_with = "no_embeddings"
+        )]
+        embedding_target: EmbeddingTarget,
+
+        /// Embedding model — HuggingFace ID for 'onnx', model name for 'api'
+        /// (required for 'api'; defaults to all-MiniLM-L6-v2 for 'onnx')
+        #[arg(long, conflicts_with = "no_embeddings")]
+        embedding_model: Option<String>,
+
+        /// Output dimensions of the embedding model
+        #[arg(long, default_value = "384", conflicts_with = "no_embeddings")]
+        embedding_dimensions: usize,
+
+        /// Create the namespace without embeddings: indexing skips the embed
+        /// stage (no model download or inference) and stores chunks, call
+        /// graph, and BM25 index only; search uses the keyword and call-graph
+        /// legs
+        #[arg(long)]
+        no_embeddings: bool,
+    },
+
     Index {
         path: String,
 

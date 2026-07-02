@@ -26,7 +26,7 @@ pub use connector::{
     DuckdbMetadataRepository, DuckdbVectorRepository, InMemoryVectorRepository, LlmQueryExpander,
     MockEmbedding, MockReranking, NamespaceEmbeddingConfig, NoEmbedding, OpenAiChatClient,
     OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterParser,
-    NO_EMBEDDINGS_MODEL,
+    DEFAULT_ONNX_EMBEDDING_MODEL, NO_EMBEDDINGS_MODEL,
 };
 
 pub use domain::{
@@ -39,5 +39,6 @@ pub use domain::{
 pub use domain::{CommunityMeta, GraphEdge, GraphLevel, GraphNode, GraphView};
 
 pub use connector::api::{
-    resolve_repo_context, Container, ContainerConfig, ResolvedContext, Router,
+    namespace_embedding_config, resolve_repo_context, Container, ContainerConfig, ResolvedContext,
+    Router,
 };

@@ -12,7 +12,8 @@ use tracing::debug;
 use crate::application::EmbeddingService;
 use crate::domain::{CodeChunk, DomainError, Embedding, EmbeddingConfig};
 
-const DEFAULT_MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
+use crate::connector::adapter::DEFAULT_ONNX_EMBEDDING_MODEL as DEFAULT_MODEL_ID;
+
 const DEFAULT_DIMENSIONS: usize = 384;
 const DEFAULT_MAX_SEQ_LENGTH: usize = 512;
 /// Number of chunks processed per ONNX inference call.

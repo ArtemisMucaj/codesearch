@@ -218,38 +218,7 @@ impl DuckdbVectorRepository {
             return Self::read_and_validate_namespace_config(conn, schema_name, cfg, read_only);
         }
 
-        // Install and load VSS + FTS.
-        conn.execute_batch(
-            "INSTALL vss; LOAD vss; SET hnsw_enable_experimental_persistence = true; \
-             INSTALL fts; LOAD fts;",
-        )
-        .map_err(|e| DomainError::storage(format!("Failed to initialize extensions: {}", e)))?;
-
-        // Global tables (not namespace-scoped).
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS repositories (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                path TEXT NOT NULL UNIQUE,
-                created_at BIGINT NOT NULL,
-                updated_at BIGINT NOT NULL,
-                chunk_count BIGINT DEFAULT 0,
-                file_count BIGINT DEFAULT 0,
-                store TEXT DEFAULT 'duckdb',
-                namespace TEXT,
-                git_remote TEXT,
-                languages TEXT
-            );
-            CREATE TABLE IF NOT EXISTS namespace_config (
-                namespace TEXT PRIMARY KEY,
-                embedding_target TEXT NOT NULL,
-                embedding_model TEXT NOT NULL,
-                dimensions INTEGER NOT NULL
-            );
-            "#,
-        )
-        .map_err(|e| DomainError::storage(format!("Failed to create global tables: {}", e)))?;
+        Self::init_extensions_and_global_tables(conn)?;
 
         // Read or save namespace_config, obtain effective dimensions.
         let dims = Self::read_and_validate_namespace_config(conn, schema_name, cfg, read_only)?;
@@ -292,6 +261,81 @@ impl DuckdbVectorRepository {
 
         debug!("DuckDB schema initialised (namespace={schema_name}, dims={dims})");
         Ok(dims)
+    }
+
+    /// Install/load the VSS + FTS extensions and create the global
+    /// (non-namespace-scoped) tables.  Idempotent.
+    fn init_extensions_and_global_tables(conn: &Connection) -> Result<(), DomainError> {
+        conn.execute_batch(
+            "INSTALL vss; LOAD vss; SET hnsw_enable_experimental_persistence = true; \
+             INSTALL fts; LOAD fts;",
+        )
+        .map_err(|e| DomainError::storage(format!("Failed to initialize extensions: {}", e)))?;
+
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS repositories (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                created_at BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL,
+                chunk_count BIGINT DEFAULT 0,
+                file_count BIGINT DEFAULT 0,
+                store TEXT DEFAULT 'duckdb',
+                namespace TEXT,
+                git_remote TEXT,
+                languages TEXT
+            );
+            CREATE TABLE IF NOT EXISTS namespace_config (
+                namespace TEXT PRIMARY KEY,
+                embedding_target TEXT NOT NULL,
+                embedding_model TEXT NOT NULL,
+                dimensions INTEGER NOT NULL
+            );
+            "#,
+        )
+        .map_err(|e| DomainError::storage(format!("Failed to create global tables: {}", e)))
+    }
+
+    /// Create `namespace` with a fixed embedding configuration, failing when
+    /// it already exists — a namespace's embedding setup is decided once, at
+    /// creation, and inherited by every later index/search run against it.
+    ///
+    /// Only writes configuration and empty schema; no embedding model is
+    /// loaded or downloaded.
+    pub fn create_namespace(
+        path: &Path,
+        namespace: &str,
+        cfg: &NamespaceEmbeddingConfig,
+    ) -> Result<(), DomainError> {
+        let conn = Connection::open(path)
+            .map_err(|e| DomainError::storage(format!("Failed to open DuckDB database: {}", e)))?;
+
+        let schema = namespace.trim();
+        let schema_name = if schema.is_empty() { "main" } else { schema };
+
+        // Global tables must exist before the existence probe on a fresh database.
+        Self::init_extensions_and_global_tables(&conn)?;
+
+        let existing_model: Option<String> = conn
+            .query_row(
+                "SELECT embedding_model FROM namespace_config WHERE namespace = ?",
+                params![schema_name],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(model) = existing_model {
+            return Err(DomainError::invalid_input(format!(
+                "Namespace '{}' already exists (embedding model '{}'). \
+                 A namespace's embedding configuration is fixed at creation — \
+                 choose a different name.",
+                schema_name, model
+            )));
+        }
+
+        Self::initialize(&conn, schema_name, cfg, false)?;
+        Ok(())
     }
 
     /// Read the stored `namespace_config` row, validate it against `cfg`, and

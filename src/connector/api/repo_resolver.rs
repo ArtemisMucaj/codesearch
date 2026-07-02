@@ -17,6 +17,7 @@ use duckdb::{params, AccessMode, Config, Connection};
 use tracing::debug;
 
 use crate::application::git_remote::detect_remote;
+use crate::connector::adapter::NamespaceEmbeddingConfig;
 use crate::connector::api::container::is_lock_conflict;
 
 /// Maximum number of retry attempts when the read-only open is blocked by a
@@ -65,9 +66,7 @@ pub fn resolve(db_path: &Path, repo_root: &Path) -> Option<ResolvedContext> {
     let remote = detect_remote(repo_root);
     let (namespace, repository_name, repository_id, matched_by) = remote
         .as_deref()
-        .and_then(|r| {
-            find_by_remote(&conn, r).map(|(ns, name, id)| (ns, name, id, "git remote"))
-        })
+        .and_then(|r| find_by_remote(&conn, r).map(|(ns, name, id)| (ns, name, id, "git remote")))
         .or_else(|| {
             canonical(repo_root)
                 .and_then(|p| find_by_path(&conn, &p))
@@ -86,6 +85,34 @@ pub fn resolve(db_path: &Path, repo_root: &Path) -> Option<ResolvedContext> {
         repository_id,
         matched_by,
     })
+}
+
+/// Read the stored embedding configuration for `namespace`, if it exists.
+///
+/// This is the source of truth written by `codesearch create` (or by the
+/// first index run into an uncreated namespace); commands consult it so the
+/// embedding setup never has to be re-specified on the command line.  All
+/// failures degrade to `None` and the caller falls back to defaults.
+pub fn namespace_embedding_config(
+    db_path: &Path,
+    namespace: &str,
+) -> Option<NamespaceEmbeddingConfig> {
+    if !db_path.exists() {
+        return None;
+    }
+    let conn = open_read_only_with_retry(db_path)?;
+    let schema = namespace.trim();
+    let schema_name = if schema.is_empty() { "main" } else { schema };
+    match find_namespace_config(&conn, schema_name)? {
+        (Some(embedding_target), Some(embedding_model), Some(dimensions)) => {
+            Some(NamespaceEmbeddingConfig {
+                embedding_target,
+                embedding_model,
+                dimensions,
+            })
+        }
+        _ => None,
+    }
 }
 
 fn open_read_only(db_path: &Path) -> Result<Connection, duckdb::Error> {
