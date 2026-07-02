@@ -42,6 +42,8 @@ pub struct ResolvedContext {
     pub embedding_dimensions: Option<usize>,
     /// Human-readable repository name (for log messages).
     pub repository_name: String,
+    /// UUID primary key of the repository row.
+    pub repository_id: String,
     /// How the repository was matched: `"git remote"` or `"path"`.
     pub matched_by: &'static str,
 }
@@ -61,13 +63,15 @@ pub fn resolve(db_path: &Path, repo_root: &Path) -> Option<ResolvedContext> {
 
     // Prefer the git remote; fall back to the canonical path.
     let remote = detect_remote(repo_root);
-    let (namespace, repository_name, matched_by) = remote
+    let (namespace, repository_name, repository_id, matched_by) = remote
         .as_deref()
-        .and_then(|r| find_by_remote(&conn, r).map(|(ns, name)| (ns, name, "git remote")))
+        .and_then(|r| {
+            find_by_remote(&conn, r).map(|(ns, name, id)| (ns, name, id, "git remote"))
+        })
         .or_else(|| {
             canonical(repo_root)
                 .and_then(|p| find_by_path(&conn, &p))
-                .map(|(ns, name)| (ns, name, "path"))
+                .map(|(ns, name, id)| (ns, name, id, "path"))
         })?;
 
     let (embedding_target, embedding_model, embedding_dimensions) =
@@ -79,6 +83,7 @@ pub fn resolve(db_path: &Path, repo_root: &Path) -> Option<ResolvedContext> {
         embedding_model,
         embedding_dimensions,
         repository_name,
+        repository_id,
         matched_by,
     })
 }
@@ -118,32 +123,36 @@ fn canonical(path: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(path).ok()
 }
 
-/// Find the namespace + name for a repository by its normalised git remote.
+/// Find the namespace + name + id for a repository by its normalised git remote.
 /// When several repositories share a remote, the most recently updated wins.
-fn find_by_remote(conn: &Connection, remote: &str) -> Option<(String, String)> {
+fn find_by_remote(conn: &Connection, remote: &str) -> Option<(String, String, String)> {
     query_repo(
         conn,
-        "SELECT namespace, name FROM repositories \
+        "SELECT namespace, name, id FROM repositories \
          WHERE git_remote = ?1 AND namespace IS NOT NULL \
          ORDER BY updated_at DESC LIMIT 1",
         remote,
     )
 }
 
-/// Find the namespace + name for a repository by its canonical path.
-fn find_by_path(conn: &Connection, path: &Path) -> Option<(String, String)> {
+/// Find the namespace + name + id for a repository by its canonical path.
+fn find_by_path(conn: &Connection, path: &Path) -> Option<(String, String, String)> {
     query_repo(
         conn,
-        "SELECT namespace, name FROM repositories \
+        "SELECT namespace, name, id FROM repositories \
          WHERE path = ?1 AND namespace IS NOT NULL LIMIT 1",
         &path.to_string_lossy(),
     )
 }
 
-fn query_repo(conn: &Connection, sql: &str, key: &str) -> Option<(String, String)> {
+fn query_repo(conn: &Connection, sql: &str, key: &str) -> Option<(String, String, String)> {
     let mut stmt = conn.prepare(sql).ok()?;
     stmt.query_row(params![key], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
     })
     .ok()
 }

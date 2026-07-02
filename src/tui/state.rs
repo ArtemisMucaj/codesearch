@@ -183,6 +183,16 @@ impl AppState {
         state
     }
 
+    /// Returns `true` when the code/detail pane has focus (not the input pane).
+    /// Used to gate quit-on-`q` so typing a query starting with 'q' never exits.
+    pub fn detail_pane_focused(&self) -> bool {
+        match self.mode {
+            ActiveMode::Search => self.search.focused_pane == SearchPane::Code,
+            ActiveMode::Impact => self.impact.focused_pane == ImpactPane::Chain,
+            ActiveMode::Context => self.context.focused_pane == ContextPane::Tree,
+        }
+    }
+
     /// The text currently typed in the active mode's input box.
     pub fn active_input(&self) -> &str {
         match self.mode {

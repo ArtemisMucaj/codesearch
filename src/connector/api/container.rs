@@ -6,7 +6,7 @@ use anyhow::Result;
 use tracing::{debug, warn};
 
 use crate::application::{
-    CallGraphRepository, CallGraphUseCase, FileHashRepository, QueryExpander,
+    CallGraphRepository, CallGraphUseCase, FileHashRepository, MetadataRepository, QueryExpander,
 };
 use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::scip::ScipRunner;
@@ -479,6 +479,36 @@ impl Container {
 
     pub fn metadata_repository(&self) -> Arc<dyn crate::application::MetadataRepository> {
         self.repo_adapter.clone()
+    }
+
+    /// Resolve a repository name or UUID to the UUID stored in the metadata DB.
+    ///
+    /// When `name_or_id` is `None`, auto-detects from the current working
+    /// directory via git remote (mirrors the namespace auto-detection in
+    /// `main.rs`).  When it is `Some`, the value is matched first by name and
+    /// then returned as-is (for callers that already have a UUID).  Falls back
+    /// to an empty string when detection fails entirely.
+    pub async fn resolve_repository_id(&self, name_or_id: Option<&str>) -> String {
+        if let Some(key) = name_or_id {
+            // Name → UUID lookup.
+            if let Ok(repos) = self.repo_adapter.list().await {
+                if let Some(repo) = repos.iter().find(|r| r.name() == key) {
+                    return repo.id().to_string();
+                }
+            }
+            return key.to_string();
+        }
+
+        // Auto-detect from the current working directory.
+        let db_path = PathBuf::from(&self.config.data_dir).join("codesearch.duckdb");
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Some(ctx) =
+                crate::connector::api::repo_resolver::resolve(&db_path, &cwd)
+            {
+                return ctx.repository_id;
+            }
+        }
+        String::new()
     }
 
     pub fn delete_use_case(&self) -> DeleteRepositoryUseCase {

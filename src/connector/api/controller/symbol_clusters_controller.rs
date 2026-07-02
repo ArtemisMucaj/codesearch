@@ -15,10 +15,11 @@ impl<'a> SymbolClustersController<'a> {
     }
 
     /// List all symbol communities for the given repository.
-    pub async fn list(&self, repository: String, format: OutputFormatTextJson) -> Result<String> {
+    pub async fn list(&self, repository: Option<String>, format: OutputFormatTextJson) -> Result<String> {
+        let repository_id = self.container.resolve_repository_id(repository.as_deref()).await;
         let use_case = self.container.symbol_cluster_detection_use_case();
         let graph = use_case
-            .detect_communities(&repository)
+            .detect_communities(&repository_id)
             .await
             .context("detecting symbol communities for repository")?;
 
@@ -35,13 +36,13 @@ impl<'a> SymbolClustersController<'a> {
                     return Ok(format!(
                         "No symbol communities detected for repository `{}` \
                          (the call graph may be empty — index with SCIP first).",
-                        repository
+                        repository_id
                     ));
                 }
                 let mut out = format!(
                     "Symbol communities for `{}` — {} communities, {} symbols, {} edges\n\
                      ────────────────────────────────────────────────────────────\n",
-                    repository,
+                    repository_id,
                     graph.communities.len(),
                     graph.total_symbols,
                     graph.total_edges,
@@ -71,16 +72,17 @@ impl<'a> SymbolClustersController<'a> {
     pub async fn get(
         &self,
         symbol: String,
-        repository: String,
+        repository: Option<String>,
         format: OutputFormatTextJson,
     ) -> Result<String> {
+        let repository_id = self.container.resolve_repository_id(repository.as_deref()).await;
         let use_case = self.container.symbol_cluster_detection_use_case();
         let result = use_case
-            .community_for_symbol(&symbol, &repository)
+            .community_for_symbol(&symbol, &repository_id)
             .await
             .context(format!(
                 "finding community for symbol {} in repository {}",
-                symbol, repository
+                symbol, repository_id
             ))?;
 
         let format: OutputFormat = format.into();
@@ -97,7 +99,7 @@ impl<'a> SymbolClustersController<'a> {
             OutputFormat::Text => match result {
                 None => format!(
                     "Symbol `{}` was not found in any community for repository `{}`.",
-                    symbol, repository
+                    symbol, repository_id
                 ),
                 Some(c) => {
                     let mut out = format!(

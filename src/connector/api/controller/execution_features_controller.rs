@@ -17,12 +17,13 @@ impl<'a> ExecutionFeaturesController<'a> {
     /// List entry-point features for `repository_id`, sorted by descending criticality.
     pub async fn list(
         &self,
-        repository: String,
+        repository: Option<String>,
         limit: usize,
         format: OutputFormat,
     ) -> Result<String> {
+        let repository_id = self.container.resolve_repository_id(repository.as_deref()).await;
         let use_case = self.container.execution_features_use_case();
-        let features = use_case.list_features(&repository, limit).await?;
+        let features = use_case.list_features(&repository_id, limit).await?;
 
         Ok(match format {
             OutputFormat::Json => serde_json::to_string_pretty(&features)?,
