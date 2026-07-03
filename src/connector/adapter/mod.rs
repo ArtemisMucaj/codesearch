@@ -30,6 +30,7 @@ mod openai_reranking;
 mod ort_embedding;
 mod ort_reranking;
 pub mod scip;
+mod tree_sitter_channels;
 mod treesitter_parser;
 
 pub use anthropic_client::*;
@@ -50,4 +51,5 @@ pub use openai_embedding::*;
 pub use openai_reranking::*;
 pub use ort_embedding::*;
 pub use ort_reranking::*;
+pub use tree_sitter_channels::*;
 pub use treesitter_parser::*;
