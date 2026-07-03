@@ -12,7 +12,8 @@ use tracing::debug;
 use crate::application::EmbeddingService;
 use crate::domain::{CodeChunk, DomainError, Embedding, EmbeddingConfig};
 
-const DEFAULT_MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
+use crate::connector::adapter::DEFAULT_ONNX_EMBEDDING_MODEL as DEFAULT_MODEL_ID;
+
 const DEFAULT_DIMENSIONS: usize = 384;
 const DEFAULT_MAX_SEQ_LENGTH: usize = 512;
 /// Number of chunks processed per ONNX inference call.
@@ -22,6 +23,15 @@ const DEFAULT_MAX_SEQ_LENGTH: usize = 512;
 /// all-MiniLM-L6-v2 model (22M params, 384-dim) without risking OOM even
 /// on machines with modest RAM.
 const BATCH_SIZE: usize = 128;
+/// Maximum number of `max_seq_length`-token windows embedded per text.
+///
+/// Texts longer than the model's context are split into consecutive token
+/// windows whose vectors are combined (token-count-weighted mean, then L2
+/// normalised) so that content past the context limit still contributes to
+/// the embedding instead of being silently truncated.  The cap bounds
+/// inference cost on pathological inputs (~4x context = 2048 tokens for the
+/// default model); anything beyond it is truncated as before.
+const MAX_EMBED_WINDOWS: usize = 4;
 
 pub struct OrtEmbedding {
     session: Arc<Mutex<Session>>,
@@ -97,11 +107,25 @@ impl OrtEmbedding {
     }
 }
 
+/// A contiguous token range of one input text, embedded as its own batch row.
+struct TokenWindow {
+    /// Index of the source text in the input slice.
+    owner: usize,
+    /// Offset of the first token of this window.
+    start: usize,
+    /// Number of tokens in this window (<= max_seq_length).
+    len: usize,
+}
+
 /// Blocking (synchronous) embedding of a batch of texts.
 ///
 /// Tokenisation and ONNX inference are both CPU-bound and blocking.
 /// This function must only be called from a `tokio::task::spawn_blocking`
 /// closure so that the tokio thread pool is not starved.
+///
+/// Texts longer than `max_seq_length` are embedded as up to
+/// [`MAX_EMBED_WINDOWS`] consecutive token windows whose pooled vectors are
+/// combined by a token-count-weighted mean before the final L2 normalisation.
 fn embed_texts_impl(
     session: &Mutex<Session>,
     tokenizer: &Tokenizer,
@@ -118,35 +142,50 @@ fn embed_texts_impl(
         .encode_batch(text_refs, true)
         .map_err(|e| DomainError::internal(format!("Tokenization failed: {}", e)))?;
 
-    let batch_size = encodings.len();
-    let max_len = encodings
-        .iter()
-        .map(|e| e.get_ids().len())
-        .max()
-        .unwrap_or(0)
-        .min(max_seq_length);
+    let mut windows: Vec<TokenWindow> = Vec::with_capacity(encodings.len());
+    for (owner, encoding) in encodings.iter().enumerate() {
+        let total = encoding.get_ids().len();
+        if total == 0 {
+            // Keep an all-padding row so every text still yields a vector.
+            windows.push(TokenWindow {
+                owner,
+                start: 0,
+                len: 0,
+            });
+            continue;
+        }
+        let mut start = 0;
+        let mut window_count = 0;
+        while start < total && window_count < MAX_EMBED_WINDOWS {
+            let len = (total - start).min(max_seq_length);
+            windows.push(TokenWindow { owner, start, len });
+            start += len;
+            window_count += 1;
+        }
+    }
+
+    let batch_size = windows.len();
+    let max_len = windows.iter().map(|w| w.len).max().unwrap_or(0).max(1);
 
     let mut input_ids: Vec<i64> = Vec::with_capacity(batch_size * max_len);
     let mut attention_mask: Vec<i64> = Vec::with_capacity(batch_size * max_len);
 
-    for encoding in &encodings {
-        let ids = encoding.get_ids();
-        let mask = encoding.get_attention_mask();
+    for window in &windows {
+        let encoding = &encodings[window.owner];
+        let ids = &encoding.get_ids()[window.start..window.start + window.len];
+        let mask = &encoding.get_attention_mask()[window.start..window.start + window.len];
 
-        let len = ids.len().min(max_len);
+        input_ids.extend(ids.iter().map(|&x| x as i64));
+        attention_mask.extend(mask.iter().map(|&x| x as i64));
 
-        input_ids.extend(ids[..len].iter().map(|&x| x as i64));
-        attention_mask.extend(mask[..len].iter().map(|&x| x as i64));
-
-        let padding = max_len - len;
+        let padding = max_len - window.len;
         input_ids.extend(std::iter::repeat_n(0i64, padding));
         attention_mask.extend(std::iter::repeat_n(0i64, padding));
     }
 
     let shape = [batch_size, max_len];
-    let input_ids_tensor = Tensor::from_array((shape, input_ids)).map_err(|e| {
-        DomainError::internal(format!("Failed to create input_ids tensor: {}", e))
-    })?;
+    let input_ids_tensor = Tensor::from_array((shape, input_ids))
+        .map_err(|e| DomainError::internal(format!("Failed to create input_ids tensor: {}", e)))?;
     let attention_mask_tensor = Tensor::from_array((shape, attention_mask)).map_err(|e| {
         DomainError::internal(format!("Failed to create attention_mask tensor: {}", e))
     })?;
@@ -157,13 +196,9 @@ fn embed_texts_impl(
 
     let outputs = if needs_token_type_ids {
         let token_type_ids = vec![0i64; batch_size * max_len];
-        let token_type_ids_tensor =
-            Tensor::from_array((shape, token_type_ids)).map_err(|e| {
-                DomainError::internal(format!(
-                    "Failed to create token_type_ids tensor: {}",
-                    e
-                ))
-            })?;
+        let token_type_ids_tensor = Tensor::from_array((shape, token_type_ids)).map_err(|e| {
+            DomainError::internal(format!("Failed to create token_type_ids tensor: {}", e))
+        })?;
         session_guard.run(ort::inputs![
             "input_ids" => input_ids_tensor,
             "attention_mask" => attention_mask_tensor,
@@ -182,25 +217,30 @@ fn embed_texts_impl(
         .next()
         .ok_or_else(|| DomainError::internal("No output tensor found"))?;
 
-    let (shape, data) = output_value.try_extract_tensor::<f32>().map_err(|e| {
-        DomainError::internal(format!("Failed to extract output tensor: {}", e))
-    })?;
+    let (shape, data) = output_value
+        .try_extract_tensor::<f32>()
+        .map_err(|e| DomainError::internal(format!("Failed to extract output tensor: {}", e)))?;
 
     let shape: Vec<usize> = shape.iter().map(|&x| x as usize).collect();
     debug!("Output tensor shape: {:?}", shape);
 
-    let embeddings = if shape.len() == 3 {
+    // Pool each window row into an (unnormalised) vector plus the number of
+    // attended tokens it covers, which serves as the combination weight.
+    let (row_vectors, row_weights): (Vec<Vec<f32>>, Vec<f32>) = if shape.len() == 3 {
         let hidden_size = shape[2];
         let seq_len = shape[1];
 
-        (0..batch_size)
-            .map(|i| {
+        windows
+            .iter()
+            .enumerate()
+            .map(|(i, window)| {
                 let mut embedding = vec![0.0f32; hidden_size];
                 let mut count = 0.0f32;
 
-                let mask = encodings[i].get_attention_mask();
-                for j in 0..seq_len.min(max_len) {
-                    let mask_val = if j < mask.len() { mask[j] as f32 } else { 0.0 };
+                let encoding = &encodings[window.owner];
+                let mask = &encoding.get_attention_mask()[window.start..window.start + window.len];
+                for (j, &mask_raw) in mask.iter().take(seq_len).enumerate() {
+                    let mask_val = mask_raw as f32;
                     if mask_val > 0.0 {
                         for (k, emb_k) in embedding.iter_mut().enumerate().take(hidden_size) {
                             let idx = i * seq_len * hidden_size + j * hidden_size + k;
@@ -216,41 +256,67 @@ fn embed_texts_impl(
                     }
                 }
 
-                let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
-                if norm > 0.0 {
-                    for v in &mut embedding {
-                        *v /= norm;
-                    }
-                }
-
-                embedding
+                (embedding, count)
             })
-            .collect()
+            .unzip()
     } else if shape.len() == 2 {
+        // The model pools internally: one vector per row.
         let hidden_size = shape[1];
 
-        (0..batch_size)
-            .map(|i| {
-                let mut embedding: Vec<f32> = (0..hidden_size)
+        windows
+            .iter()
+            .enumerate()
+            .map(|(i, window)| {
+                let embedding: Vec<f32> = (0..hidden_size)
                     .map(|j| data[i * hidden_size + j])
                     .collect();
-
-                let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
-                if norm > 0.0 {
-                    for v in &mut embedding {
-                        *v /= norm;
-                    }
-                }
-
-                embedding
+                let encoding = &encodings[window.owner];
+                let attended: u32 = encoding.get_attention_mask()
+                    [window.start..window.start + window.len]
+                    .iter()
+                    .sum();
+                (embedding, attended as f32)
             })
-            .collect()
+            .unzip()
     } else {
         return Err(DomainError::internal(format!(
             "Unexpected output tensor shape: {:?}",
             shape
         )));
     };
+
+    // Combine window vectors per source text (token-count-weighted mean),
+    // then L2 normalise once.  For the common single-window case this is
+    // exactly the previous mean-pool + normalise behaviour.
+    let hidden_size = row_vectors.first().map(|v| v.len()).unwrap_or(0);
+    let mut embeddings: Vec<Vec<f32>> = vec![vec![0.0f32; hidden_size]; encodings.len()];
+    let mut weights: Vec<f32> = vec![0.0f32; encodings.len()];
+
+    for (row, window) in windows.iter().enumerate() {
+        let weight = row_weights[row];
+        if weight <= 0.0 {
+            continue;
+        }
+        let acc = &mut embeddings[window.owner];
+        for (a, v) in acc.iter_mut().zip(&row_vectors[row]) {
+            *a += v * weight;
+        }
+        weights[window.owner] += weight;
+    }
+
+    for (embedding, weight) in embeddings.iter_mut().zip(&weights) {
+        if *weight > 0.0 {
+            for v in embedding.iter_mut() {
+                *v /= *weight;
+            }
+        }
+        let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for v in embedding.iter_mut() {
+                *v /= norm;
+            }
+        }
+    }
 
     Ok(embeddings)
 }
@@ -289,18 +355,30 @@ impl EmbeddingService for OrtEmbedding {
         }
 
         let model_name = self.config.model_name().to_string();
-        let mut all_embeddings = Vec::with_capacity(chunks.len());
 
-        for batch in chunks.chunks(BATCH_SIZE) {
-            let texts: Vec<String> = batch
+        // Each inference batch is padded to its longest member, so mixing
+        // short and long chunks wastes compute on padding tokens.  Process
+        // batches in ascending text-length order (byte length is a good token
+        // proxy) and scatter results back into the original chunk order.
+        let mut texts: Vec<String> = chunks
+            .iter()
+            .map(|c| {
+                format!(
+                    "{} {}",
+                    c.qualified_name().as_deref().unwrap_or(""),
+                    c.content()
+                )
+            })
+            .collect();
+        let mut order: Vec<usize> = (0..texts.len()).collect();
+        order.sort_by_key(|&i| texts[i].len());
+
+        let mut vectors: Vec<Option<Vec<f32>>> = vec![None; chunks.len()];
+
+        for batch_indices in order.chunks(BATCH_SIZE) {
+            let batch_texts: Vec<String> = batch_indices
                 .iter()
-                .map(|c| {
-                    format!(
-                        "{} {}",
-                        c.qualified_name().as_deref().unwrap_or(""),
-                        c.content()
-                    )
-                })
+                .map(|&i| std::mem::take(&mut texts[i]))
                 .collect();
 
             let session = Arc::clone(&self.session);
@@ -308,28 +386,36 @@ impl EmbeddingService for OrtEmbedding {
             let max_seq = self.config.max_sequence_length();
             let needs_tti = self.needs_token_type_ids;
 
-            let vectors = tokio::task::spawn_blocking(move || {
-                embed_texts_impl(&session, &tokenizer, max_seq, needs_tti, &texts)
+            let batch_vectors = tokio::task::spawn_blocking(move || {
+                embed_texts_impl(&session, &tokenizer, max_seq, needs_tti, &batch_texts)
             })
             .await
             .map_err(|e| DomainError::internal(format!("Embedding task panicked: {e}")))??;
 
-            if vectors.len() != batch.len() {
+            if batch_vectors.len() != batch_indices.len() {
                 return Err(DomainError::internal(format!(
                     "embed_texts_impl returned {} vectors for {} chunks (model: {})",
-                    vectors.len(),
-                    batch.len(),
+                    batch_vectors.len(),
+                    batch_indices.len(),
                     model_name,
                 )));
             }
 
-            for (chunk, vector) in batch.iter().zip(vectors) {
-                all_embeddings.push(Embedding::new(
-                    chunk.id().to_string(),
-                    vector,
-                    model_name.clone(),
-                ));
+            for (&i, vector) in batch_indices.iter().zip(batch_vectors) {
+                vectors[i] = Some(vector);
             }
+        }
+
+        let mut all_embeddings = Vec::with_capacity(chunks.len());
+        for (chunk, vector) in chunks.iter().zip(vectors) {
+            let vector = vector.ok_or_else(|| {
+                DomainError::internal(format!("Missing embedding for chunk {}", chunk.id()))
+            })?;
+            all_embeddings.push(Embedding::new(
+                chunk.id().to_string(),
+                vector,
+                model_name.clone(),
+            ));
         }
 
         Ok(all_embeddings)

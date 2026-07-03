@@ -8,8 +8,8 @@ pub use application::{
     CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase, ChatClient,
     ClusterDetectionUseCase, ContextNode, DeleteRepositoryUseCase, EmbeddingService,
     ExecutionFeaturesUseCase, ExplainResult, ExplainUseCase, FileHashRepository,
-    FileRelationshipUseCase, ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode,
-    IndexRepositoryUseCase, ListRepositoriesUseCase, MetadataRepository, ParserService,
+    FileRelationshipUseCase, GraphExpansionUseCase, ImpactAnalysis, ImpactAnalysisUseCase,
+    ImpactNode, IndexRepositoryUseCase, ListRepositoriesUseCase, MetadataRepository, ParserService,
     QueryExpander, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
     SymbolClusterDetectionUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
 };
@@ -24,8 +24,9 @@ pub use cli::{
 pub use connector::{
     AnthropicClient, AnthropicReranking, DuckdbCallGraphRepository, DuckdbFileHashRepository,
     DuckdbMetadataRepository, DuckdbVectorRepository, InMemoryVectorRepository, LlmQueryExpander,
-    MockEmbedding, MockReranking, NamespaceEmbeddingConfig, OpenAiChatClient, OpenAiEmbedding,
-    OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterParser,
+    MockEmbedding, MockReranking, NamespaceEmbeddingConfig, NoEmbedding, OpenAiChatClient,
+    OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterParser,
+    DEFAULT_ONNX_EMBEDDING_MODEL, NO_EMBEDDINGS_MODEL,
 };
 
 pub use domain::{
@@ -38,5 +39,6 @@ pub use domain::{
 pub use domain::{CommunityMeta, GraphEdge, GraphLevel, GraphNode, GraphView};
 
 pub use connector::api::{
-    resolve_repo_context, Container, ContainerConfig, ResolvedContext, Router,
+    namespace_embedding_config, resolve_repo_context, Container, ContainerConfig, ResolvedContext,
+    Router,
 };

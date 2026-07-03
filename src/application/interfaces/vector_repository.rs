@@ -5,6 +5,11 @@ use crate::domain::{CodeChunk, DomainError, Embedding, SearchQuery, SearchResult
 /// Vector storage and similarity search operations.
 #[async_trait]
 pub trait VectorRepository: Send + Sync {
+    /// Persist chunks together with their embeddings.
+    ///
+    /// An **empty** `embeddings` slice with non-empty `chunks` is a
+    /// chunks-only save (no-embeddings mode); any other length mismatch is
+    /// an error.
     async fn save_batch(
         &self,
         chunks: &[CodeChunk],
@@ -44,11 +49,23 @@ pub trait VectorRepository: Send + Sync {
     /// additionally run keyword (BM25-style) matching and fuse both result lists via
     /// Reciprocal Rank Fusion before returning. Backends that cannot perform text
     /// search may silently fall back to semantic-only results.
+    ///
+    /// `query_embedding: None` requests a text-only search: the semantic leg
+    /// is skipped regardless of `is_text_search()`.  Used when the store
+    /// carries no embeddings (see [`has_embeddings`]).
     async fn search(
         &self,
-        query_embedding: &[f32],
+        query_embedding: Option<&[f32]>,
         query: &SearchQuery,
     ) -> Result<Vec<SearchResult>, DomainError>;
+
+    /// `true` when the store holds at least one embedding vector.  Callers
+    /// use this to skip query embedding entirely for no-embeddings stores.
+    /// The default preserves existing behaviour for adapters that always
+    /// store vectors.
+    async fn has_embeddings(&self) -> Result<bool, DomainError> {
+        Ok(true)
+    }
 
     async fn count(&self) -> Result<u64, DomainError>;
 
@@ -83,6 +100,28 @@ pub trait VectorRepository: Send + Sync {
     ) -> Result<Option<CodeChunk>, DomainError> {
         let _ = (repository_id, symbol, class_hint);
         Ok(None)
+    }
+
+    /// Return **every** chunk whose `symbol_name` matches one of `symbols`
+    /// within `repository_id` (empty string = all repositories).  Callers do
+    /// their own per-symbol disambiguation; adapters should batch this into a
+    /// single query.  The default delegates to [`find_chunk_by_symbol`] per
+    /// symbol so existing adapters keep working.
+    async fn find_chunks_by_symbols(
+        &self,
+        repository_id: &str,
+        symbols: &[&str],
+    ) -> Result<Vec<CodeChunk>, DomainError> {
+        let mut chunks = Vec::new();
+        for symbol in symbols {
+            if let Some(chunk) = self
+                .find_chunk_by_symbol(repository_id, symbol, None)
+                .await?
+            {
+                chunks.push(chunk);
+            }
+        }
+        Ok(chunks)
     }
 
     /// Return `(symbol_name, file_path)` pairs for every chunk in `repository_id`

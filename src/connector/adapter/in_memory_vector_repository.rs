@@ -106,7 +106,7 @@ impl VectorRepository for InMemoryVectorRepository {
 
     async fn search(
         &self,
-        query_embedding: &[f32],
+        query_embedding: Option<&[f32]>,
         query: &SearchQuery,
     ) -> Result<Vec<SearchResult>, DomainError> {
         let fetch_limit = if query.is_text_search() {
@@ -115,11 +115,14 @@ impl VectorRepository for InMemoryVectorRepository {
             query.limit()
         };
 
-        let semantic = self
-            .search_semantic(query_embedding, query, fetch_limit)
-            .await;
+        // `None` requests a text-only search (no embeddings indexed); the
+        // semantic leg is skipped entirely.
+        let semantic = match query_embedding {
+            None => Vec::new(),
+            Some(embedding) => self.search_semantic(embedding, query, fetch_limit).await,
+        };
 
-        if !query.is_text_search() {
+        if !query.is_text_search() && query_embedding.is_some() {
             return Ok(semantic);
         }
 
@@ -131,6 +134,27 @@ impl VectorRepository for InMemoryVectorRepository {
             fused.retain(|r| r.score() >= min);
         }
         Ok(fused)
+    }
+
+    async fn has_embeddings(&self) -> Result<bool, DomainError> {
+        let embeddings = self.embeddings.lock().await;
+        Ok(!embeddings.is_empty())
+    }
+
+    async fn find_chunks_by_symbols(
+        &self,
+        repository_id: &str,
+        symbols: &[&str],
+    ) -> Result<Vec<CodeChunk>, DomainError> {
+        let chunks = self.chunks.lock().await;
+        Ok(chunks
+            .values()
+            .filter(|c| {
+                c.symbol_name().is_some_and(|s| symbols.contains(&s))
+                    && (repository_id.is_empty() || c.repository_id() == repository_id)
+            })
+            .cloned()
+            .collect())
     }
 
     async fn count(&self) -> Result<u64, DomainError> {
@@ -154,6 +178,33 @@ impl VectorRepository for InMemoryVectorRepository {
             .collect();
         result.sort_by_key(|c| c.start_line());
         Ok(result)
+    }
+
+    async fn find_chunk_by_symbol(
+        &self,
+        repository_id: &str,
+        symbol: &str,
+        class_hint: Option<&str>,
+    ) -> Result<Option<CodeChunk>, DomainError> {
+        let chunks = self.chunks.lock().await;
+        let mut matches: Vec<&CodeChunk> = chunks
+            .values()
+            .filter(|c| {
+                c.symbol_name() == Some(symbol)
+                    && (repository_id.is_empty() || c.repository_id() == repository_id)
+            })
+            .collect();
+        // Mirror the DuckDB adapter's ranking: prefer files matching the class
+        // hint, then the tightest scope (smallest line span).
+        matches.sort_by_key(|c| {
+            let hint_rank = match class_hint {
+                Some(hint) if c.file_path().contains(hint) => 0u32,
+                Some(_) => 1,
+                None => 0,
+            };
+            (hint_rank, c.end_line().saturating_sub(c.start_line()))
+        });
+        Ok(matches.first().map(|c| (*c).clone()))
     }
 
     async fn get_symbol_to_file_map(
@@ -213,20 +264,8 @@ impl InMemoryVectorRepository {
                 Some(c) => c.clone(),
                 None => continue,
             };
-            if let Some(languages) = query.languages() {
-                if !languages.iter().any(|l| l == chunk.language().as_str()) {
-                    continue;
-                }
-            }
-            if let Some(node_types) = query.node_types() {
-                if !node_types.iter().any(|t| t == chunk.node_type().as_str()) {
-                    continue;
-                }
-            }
-            if let Some(repo_ids) = query.repository_ids() {
-                if !repo_ids.contains(&chunk.repository_id().to_string()) {
-                    continue;
-                }
+            if !query.matches(&chunk) {
+                continue;
             }
             results.push(SearchResult::new(chunk, score));
         }
@@ -275,23 +314,8 @@ impl InMemoryVectorRepository {
                     .sum::<f32>()
                     / max_score;
 
-                if score == 0.0 {
+                if score == 0.0 || !query.matches(chunk) {
                     return None;
-                }
-                if let Some(langs) = query.languages() {
-                    if !langs.iter().any(|l| l == chunk.language().as_str()) {
-                        return None;
-                    }
-                }
-                if let Some(node_types) = query.node_types() {
-                    if !node_types.iter().any(|nt| nt == chunk.node_type().as_str()) {
-                        return None;
-                    }
-                }
-                if let Some(repos) = query.repository_ids() {
-                    if !repos.contains(&chunk.repository_id().to_string()) {
-                        return None;
-                    }
                 }
                 Some(SearchResult::new(chunk.clone(), score))
             })
@@ -393,7 +417,7 @@ mod tests {
         // text_search is false by default
         assert!(!query.is_text_search());
 
-        let results = repo.search(&query_embedding, &query).await.unwrap();
+        let results = repo.search(Some(&query_embedding), &query).await.unwrap();
 
         assert!(!results.is_empty());
         assert_eq!(results[0].chunk().id(), "chunk-alpha");
@@ -409,7 +433,7 @@ mod tests {
             .with_limit(5)
             .with_text_search(true);
 
-        let results = repo.search(&query_embedding, &query).await.unwrap();
+        let results = repo.search(Some(&query_embedding), &query).await.unwrap();
 
         assert!(!results.is_empty());
         // RRF scores are always < 1/(RRF_K+1) * 2 ≈ 0.033
@@ -430,7 +454,7 @@ mod tests {
             .with_limit(5)
             .with_text_search(true);
 
-        let results = repo.search(&query_embedding, &query).await.unwrap();
+        let results = repo.search(Some(&query_embedding), &query).await.unwrap();
 
         assert_eq!(
             results[0].chunk().id(),
@@ -449,7 +473,7 @@ mod tests {
             .with_text_search(true)
             .with_min_score(0.5);
 
-        let results = repo.search(&query_embedding, &query).await.unwrap();
+        let results = repo.search(Some(&query_embedding), &query).await.unwrap();
 
         assert!(
             results.is_empty(),
@@ -472,7 +496,7 @@ mod tests {
             .with_text_search(true)
             .with_min_score(0.001); // below all RRF scores
 
-        let results = repo.search(&query_embedding, &query).await.unwrap();
+        let results = repo.search(Some(&query_embedding), &query).await.unwrap();
 
         let ids: Vec<&str> = results.iter().map(|r| r.chunk().id()).collect();
         assert!(ids.contains(&"chunk-alpha"), "alpha should survive fusion");
@@ -487,7 +511,7 @@ mod tests {
         let query_embedding = unit_vec(4, 0);
         let query = SearchQuery::new("   ").with_limit(5).with_text_search(true);
 
-        let results = repo.search(&query_embedding, &query).await.unwrap();
+        let results = repo.search(Some(&query_embedding), &query).await.unwrap();
 
         // Should still return results from the semantic leg via rrf_fuse
         assert!(
@@ -504,7 +528,7 @@ mod tests {
             .with_limit(1)
             .with_text_search(true);
 
-        let results = repo.search(&query_embedding, &query).await.unwrap();
+        let results = repo.search(Some(&query_embedding), &query).await.unwrap();
 
         assert!(results.len() <= 1, "limit should cap fused results");
     }

@@ -177,6 +177,9 @@ impl<'a> Router<'a> {
                     .visualize(repository, level, format, output, aggregate, node_limit)
                     .await
             }
+            Commands::Create { .. } => Err(anyhow::anyhow!(
+                "create command is handled separately in main"
+            )),
             Commands::Mcp { .. } => {
                 Err(anyhow::anyhow!("MCP command is handled separately in main"))
             }

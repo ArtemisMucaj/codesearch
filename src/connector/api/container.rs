@@ -10,16 +10,16 @@ use crate::application::{
 };
 use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::scip::ScipRunner;
-use crate::connector::adapter::NamespaceEmbeddingConfig;
+use crate::connector::adapter::{NamespaceEmbeddingConfig, NoEmbedding, NO_EMBEDDINGS_MODEL};
 use crate::{
     AnthropicClient, AnthropicReranking, ClusterDetectionUseCase, DeleteRepositoryUseCase,
     DuckdbCallGraphRepository, DuckdbFileHashRepository, DuckdbMetadataRepository,
     DuckdbVectorRepository, EmbeddingService, ExecutionFeaturesUseCase, ExplainUseCase,
-    FileRelationshipUseCase, ImpactAnalysisUseCase, InMemoryVectorRepository,
-    IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding,
-    MockReranking, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking,
-    RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase, SymbolClusterDetectionUseCase,
-    SymbolContextUseCase, TreeSitterParser, VectorRepository,
+    FileRelationshipUseCase, GraphExpansionUseCase, ImpactAnalysisUseCase,
+    InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander,
+    MockEmbedding, MockReranking, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding,
+    OrtReranking, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
+    SymbolClusterDetectionUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -28,6 +28,13 @@ pub struct ContainerConfig {
     pub namespace: String,
     pub memory_storage: bool,
     pub no_rerank: bool,
+    /// Disable embeddings entirely.
+    ///
+    /// Indexing skips the embed stage (typically its dominant cost) and stores
+    /// chunks, call-graph references, and the BM25 index only.  Search on such
+    /// a namespace runs the keyword and call-graph legs; queries with no
+    /// token overlap against identifiers/comments may return nothing.
+    pub no_embeddings: bool,
     /// Open the database in read-only mode.
     ///
     /// When `true`, DuckDB is opened with `AccessMode::ReadOnly`, which does not
@@ -201,20 +208,29 @@ impl Container {
 
         // Resolve the effective model name for the selected embedding target.
         const ONNX_DEFAULT_MODEL: &str = "sentence-transformers/all-MiniLM-L6-v2";
-        let effective_model = match config.embedding_model.clone() {
-            Some(m) => m,
-            None => match config.embedding_target {
-                EmbeddingTarget::Onnx => ONNX_DEFAULT_MODEL.to_string(),
-                EmbeddingTarget::Api => {
-                    return Err(anyhow::anyhow!(
-                        "--embedding-model is required when using --embedding-target=api"
-                    ));
-                }
-            },
+        let effective_model = if config.no_embeddings {
+            NO_EMBEDDINGS_MODEL.to_string()
+        } else {
+            match config.embedding_model.clone() {
+                Some(m) => m,
+                None => match config.embedding_target {
+                    EmbeddingTarget::Onnx => ONNX_DEFAULT_MODEL.to_string(),
+                    EmbeddingTarget::Api => {
+                        return Err(anyhow::anyhow!(
+                            "--embedding-model is required when using --embedding-target=api"
+                        ));
+                    }
+                },
+            }
         };
 
         // Initialize embedding service
-        let embedding_service: Arc<dyn EmbeddingService> = if config.mock_embeddings {
+        let embedding_service: Arc<dyn EmbeddingService> = if config.no_embeddings {
+            // No model is loaded or downloaded; indexing skips the embed stage
+            // and search skips query embedding for vector-less namespaces.
+            debug!("Embeddings disabled (--no-embeddings)");
+            Arc::new(NoEmbedding::new(config.embedding_dimensions))
+        } else if config.mock_embeddings {
             debug!("Using mock embedding service");
             Arc::new(MockEmbedding::new())
         } else {
@@ -283,9 +299,13 @@ impl Container {
 
         // Build the NamespaceEmbeddingConfig that is stored/validated per namespace.
         let ns_cfg = NamespaceEmbeddingConfig {
-            embedding_target: match config.embedding_target {
-                EmbeddingTarget::Onnx => "onnx".to_string(),
-                EmbeddingTarget::Api => "api".to_string(),
+            embedding_target: if config.no_embeddings {
+                NO_EMBEDDINGS_MODEL.to_string()
+            } else {
+                match config.embedding_target {
+                    EmbeddingTarget::Onnx => "onnx".to_string(),
+                    EmbeddingTarget::Api => "api".to_string(),
+                }
             },
             embedding_model: effective_model,
             dimensions: config.embedding_dimensions,
@@ -460,7 +480,11 @@ impl Container {
 
     pub fn search_use_case(&self) -> SearchCodeUseCase {
         let mut use_case =
-            SearchCodeUseCase::new(self.vector_repo.clone(), self.embedding_service.clone());
+            SearchCodeUseCase::new(self.vector_repo.clone(), self.embedding_service.clone())
+                .with_graph_expansion(Arc::new(GraphExpansionUseCase::new(
+                    self.call_graph_use_case.clone(),
+                    self.vector_repo.clone(),
+                )));
 
         if let Some(reranker) = self.reranking_service.clone() {
             use_case = use_case.with_reranking(reranker);
@@ -523,7 +547,9 @@ impl Container {
                     Err(e) => warn!("Repository auto-detection task panicked: {e}"),
                 }
             }
-            Err(e) => warn!("Could not determine current directory for repository auto-detection: {e}"),
+            Err(e) => {
+                warn!("Could not determine current directory for repository auto-detection: {e}")
+            }
         }
         String::new()
     }

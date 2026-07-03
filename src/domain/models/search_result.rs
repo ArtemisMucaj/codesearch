@@ -135,6 +135,23 @@ impl SearchQuery {
         self.languages.is_some() || self.repository_ids.is_some() || self.node_types.is_some()
     }
 
+    /// `true` when `chunk` passes every optional column filter on this query
+    /// (an absent filter passes everything).  The single in-memory counterpart
+    /// of the SQL `IN (...)` filters applied by DB-backed search legs.
+    pub fn matches(&self, chunk: &CodeChunk) -> bool {
+        self.languages
+            .as_ref()
+            .is_none_or(|langs| langs.iter().any(|l| l == chunk.language().as_str()))
+            && self
+                .node_types
+                .as_ref()
+                .is_none_or(|types| types.iter().any(|t| t == chunk.node_type().as_str()))
+            && self
+                .repository_ids
+                .as_ref()
+                .is_none_or(|ids| ids.iter().any(|r| r == chunk.repository_id()))
+    }
+
     pub fn filters_by_language(&self, language: &str) -> bool {
         self.languages
             .as_ref()

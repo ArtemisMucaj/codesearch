@@ -29,7 +29,6 @@ const DEFAULT_PARSE_CONCURRENCY: usize = 4;
 /// since `embed_chunks` processes all chunks in one call regardless of count.
 const CROSS_FILE_EMBED_BATCH: usize = 128;
 
-
 /// Return type of [`do_flush`]: file count, chunk count, ref count, and per-
 /// language stats accumulated for the flushed batch.
 type FlushStats = (u64, u64, u64, HashMap<String, LanguageStats>);
@@ -138,10 +137,7 @@ impl IndexRepositoryUseCase {
         ))
     }
 
-    fn spawn_write(
-        &self,
-        embed: EmbedResult,
-    ) -> JoinHandle<Result<FlushStats, DomainError>> {
+    fn spawn_write(&self, embed: EmbedResult) -> JoinHandle<Result<FlushStats, DomainError>> {
         tokio::spawn(do_write(
             embed,
             Arc::clone(&self.vector_repo),
@@ -325,48 +321,52 @@ impl IndexRepositoryUseCase {
                     // Wait for the previous embed to finish, then immediately
                     // spawn its write task (which overlaps with the next embed).
                     if let Some(task) = embed_handle.take() {
-                        let embed = task
-                            .await
-                            .map_err(|e| DomainError::internal(format!("Embed task panicked: {e}")))?
-                            ?;
+                        let embed = join_flatten(task, "Embed").await?;
                         // Drain the previous write before starting a new one.
                         if let Some(wt) = write_handle.take() {
-                            let stats = wt
-                                .await
-                                .map_err(|e| DomainError::internal(format!("Write task panicked: {e}")))?
-                                ?;
-                            merge_stats(stats, &mut file_count, &mut chunk_count, &mut reference_count, &mut language_stats);
+                            let stats = join_flatten(wt, "Write").await?;
+                            merge_stats(
+                                stats,
+                                &mut file_count,
+                                &mut chunk_count,
+                                &mut reference_count,
+                                &mut language_stats,
+                            );
                         }
                         write_handle = Some(self.spawn_write(embed));
                     }
                     let batch = std::mem::take(&mut pending);
                     pending_chunk_count = 0;
-                    embed_handle = Some(self.spawn_embed(batch, repository.id().to_string(), &scip_refs));
+                    embed_handle =
+                        Some(self.spawn_embed(batch, repository.id().to_string(), &scip_refs));
                 }
             }
         }
 
         // Drain the pipeline tail.
         if let Some(task) = embed_handle.take() {
-            let embed = task
-                .await
-                .map_err(|e| DomainError::internal(format!("Embed task panicked: {e}")))?
-                ?;
+            let embed = join_flatten(task, "Embed").await?;
             if let Some(wt) = write_handle.take() {
-                let stats = wt
-                    .await
-                    .map_err(|e| DomainError::internal(format!("Write task panicked: {e}")))?
-                    ?;
-                merge_stats(stats, &mut file_count, &mut chunk_count, &mut reference_count, &mut language_stats);
+                let stats = join_flatten(wt, "Write").await?;
+                merge_stats(
+                    stats,
+                    &mut file_count,
+                    &mut chunk_count,
+                    &mut reference_count,
+                    &mut language_stats,
+                );
             }
             write_handle = Some(self.spawn_write(embed));
         }
         if let Some(wt) = write_handle.take() {
-            let stats = wt
-                .await
-                .map_err(|e| DomainError::internal(format!("Write task panicked: {e}")))?
-                ?;
-            merge_stats(stats, &mut file_count, &mut chunk_count, &mut reference_count, &mut language_stats);
+            let stats = join_flatten(wt, "Write").await?;
+            merge_stats(
+                stats,
+                &mut file_count,
+                &mut chunk_count,
+                &mut reference_count,
+                &mut language_stats,
+            );
         }
 
         // Final batch: any files that didn't fill a complete batch.
@@ -385,7 +385,13 @@ impl IndexRepositoryUseCase {
                 Arc::clone(&self.call_graph_use_case),
             )
             .await?;
-            merge_stats(stats, &mut file_count, &mut chunk_count, &mut reference_count, &mut language_stats);
+            merge_stats(
+                stats,
+                &mut file_count,
+                &mut chunk_count,
+                &mut reference_count,
+                &mut language_stats,
+            );
         }
 
         progress_bar.finish_and_clear();
@@ -622,47 +628,51 @@ impl IndexRepositoryUseCase {
 
                 if pending_chunk_count >= CROSS_FILE_EMBED_BATCH {
                     if let Some(task) = embed_handle.take() {
-                        let embed = task
-                            .await
-                            .map_err(|e| DomainError::internal(format!("Embed task panicked: {e}")))?
-                            ?;
+                        let embed = join_flatten(task, "Embed").await?;
                         if let Some(wt) = write_handle.take() {
-                            let stats = wt
-                                .await
-                                .map_err(|e| DomainError::internal(format!("Write task panicked: {e}")))?
-                                ?;
-                            merge_stats(stats, &mut processed_count, &mut new_chunk_count, &mut new_reference_count, &mut language_stats);
+                            let stats = join_flatten(wt, "Write").await?;
+                            merge_stats(
+                                stats,
+                                &mut processed_count,
+                                &mut new_chunk_count,
+                                &mut new_reference_count,
+                                &mut language_stats,
+                            );
                         }
                         write_handle = Some(self.spawn_write(embed));
                     }
                     let batch = std::mem::take(&mut pending);
                     pending_chunk_count = 0;
-                    embed_handle = Some(self.spawn_embed(batch, repository.id().to_string(), &scip_refs));
+                    embed_handle =
+                        Some(self.spawn_embed(batch, repository.id().to_string(), &scip_refs));
                 }
             }
         }
 
         // Drain the pipeline tail.
         if let Some(task) = embed_handle.take() {
-            let embed = task
-                .await
-                .map_err(|e| DomainError::internal(format!("Embed task panicked: {e}")))?
-                ?;
+            let embed = join_flatten(task, "Embed").await?;
             if let Some(wt) = write_handle.take() {
-                let stats = wt
-                    .await
-                    .map_err(|e| DomainError::internal(format!("Write task panicked: {e}")))?
-                    ?;
-                merge_stats(stats, &mut processed_count, &mut new_chunk_count, &mut new_reference_count, &mut language_stats);
+                let stats = join_flatten(wt, "Write").await?;
+                merge_stats(
+                    stats,
+                    &mut processed_count,
+                    &mut new_chunk_count,
+                    &mut new_reference_count,
+                    &mut language_stats,
+                );
             }
             write_handle = Some(self.spawn_write(embed));
         }
         if let Some(wt) = write_handle.take() {
-            let stats = wt
-                .await
-                .map_err(|e| DomainError::internal(format!("Write task panicked: {e}")))?
-                ?;
-            merge_stats(stats, &mut processed_count, &mut new_chunk_count, &mut new_reference_count, &mut language_stats);
+            let stats = join_flatten(wt, "Write").await?;
+            merge_stats(
+                stats,
+                &mut processed_count,
+                &mut new_chunk_count,
+                &mut new_reference_count,
+                &mut language_stats,
+            );
         }
 
         // Final batch.
@@ -681,7 +691,13 @@ impl IndexRepositoryUseCase {
                 Arc::clone(&self.call_graph_use_case),
             )
             .await?;
-            merge_stats(stats, &mut processed_count, &mut new_chunk_count, &mut new_reference_count, &mut language_stats);
+            merge_stats(
+                stats,
+                &mut processed_count,
+                &mut new_chunk_count,
+                &mut new_reference_count,
+                &mut language_stats,
+            );
         }
 
         progress_bar.finish_and_clear();
@@ -781,6 +797,17 @@ fn merge_stats(
     }
 }
 
+/// Await a spawned pipeline task, flattening the `JoinError` (panic) and the
+/// task's own `DomainError` into a single result.
+async fn join_flatten<T>(
+    handle: JoinHandle<Result<T, DomainError>>,
+    label: &str,
+) -> Result<T, DomainError> {
+    handle
+        .await
+        .map_err(|e| DomainError::internal(format!("{label} task panicked: {e}")))?
+}
+
 /// Spawn the parse stream as an independent tokio task and return the
 /// receiving end of an [`mpsc`] channel.
 ///
@@ -840,56 +867,60 @@ async fn do_embed(
 
     // Embed all chunks in one call; fall back to per-file on failure so a
     // single bad file cannot discard the whole batch.
-    let per_file_embeddings: Vec<Option<Vec<Embedding>>> = if flat_chunks.is_empty() {
-        per_file_chunk_count.iter().map(|_| Some(vec![])).collect()
-    } else {
-        match embedding_service.embed_chunks(&flat_chunks).await {
-            Ok(all) => {
-                if all.len() != flat_chunks.len() {
-                    return Err(DomainError::internal(format!(
-                        "Embedding count mismatch: got {} embeddings for {} chunks",
-                        all.len(),
-                        flat_chunks.len()
-                    )));
-                }
-                let mut drain = all.into_iter();
-                per_file_chunk_count
-                    .iter()
-                    .map(|&n| Some(drain.by_ref().take(n).collect::<Vec<_>>()))
-                    .collect()
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to embed batch of {} chunks across {} files, \
-                     retrying per-file: {}",
-                    flat_chunks.len(),
-                    batch.len(),
-                    e
-                );
-                let mut offset = 0;
-                let mut results = Vec::with_capacity(batch.len());
-                for (i, &n) in per_file_chunk_count.iter().enumerate() {
-                    let file_chunks = &flat_chunks[offset..offset + n];
-                    offset += n;
-                    if file_chunks.is_empty() {
-                        results.push(Some(vec![]));
-                        continue;
+    // When the service has embeddings disabled (--no-embeddings) every file is
+    // marked successfully "embedded" with zero vectors so the write phase
+    // stores its chunks without embeddings.
+    let per_file_embeddings: Vec<Option<Vec<Embedding>>> =
+        if !embedding_service.embeddings_enabled() || flat_chunks.is_empty() {
+            per_file_chunk_count.iter().map(|_| Some(vec![])).collect()
+        } else {
+            match embedding_service.embed_chunks(&flat_chunks).await {
+                Ok(all) => {
+                    if all.len() != flat_chunks.len() {
+                        return Err(DomainError::internal(format!(
+                            "Embedding count mismatch: got {} embeddings for {} chunks",
+                            all.len(),
+                            flat_chunks.len()
+                        )));
                     }
-                    match embedding_service.embed_chunks(file_chunks).await {
-                        Ok(embeds) => results.push(Some(embeds)),
-                        Err(file_err) => {
-                            warn!(
-                                "Per-file embedding failed for {}: {}",
-                                batch[i].relative_path, file_err
-                            );
-                            results.push(None);
+                    let mut drain = all.into_iter();
+                    per_file_chunk_count
+                        .iter()
+                        .map(|&n| Some(drain.by_ref().take(n).collect::<Vec<_>>()))
+                        .collect()
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to embed batch of {} chunks across {} files, \
+                     retrying per-file: {}",
+                        flat_chunks.len(),
+                        batch.len(),
+                        e
+                    );
+                    let mut offset = 0;
+                    let mut results = Vec::with_capacity(batch.len());
+                    for (i, &n) in per_file_chunk_count.iter().enumerate() {
+                        let file_chunks = &flat_chunks[offset..offset + n];
+                        offset += n;
+                        if file_chunks.is_empty() {
+                            results.push(Some(vec![]));
+                            continue;
+                        }
+                        match embedding_service.embed_chunks(file_chunks).await {
+                            Ok(embeds) => results.push(Some(embeds)),
+                            Err(file_err) => {
+                                warn!(
+                                    "Per-file embedding failed for {}: {}",
+                                    batch[i].relative_path, file_err
+                                );
+                                results.push(None);
+                            }
                         }
                     }
+                    results
                 }
-                results
             }
-        }
-    };
+        };
 
     Ok(EmbedResult {
         batch,

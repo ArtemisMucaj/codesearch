@@ -5,26 +5,71 @@ use clap::{CommandFactory, FromArgMatches, Parser};
 use rmcp::ServiceExt;
 use tracing_subscriber::EnvFilter;
 
-use codesearch::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
+use codesearch::cli::{validate_namespace, EmbeddingTarget, LlmTarget, RerankingTarget};
 use codesearch::connector::adapter::mcp::CodesearchMcpServer;
-use codesearch::{Commands, Container, ContainerConfig, Router};
+use codesearch::{
+    Commands, Container, ContainerConfig, DuckdbVectorRepository, NamespaceEmbeddingConfig, Router,
+    DEFAULT_ONNX_EMBEDDING_MODEL, NO_EMBEDDINGS_MODEL,
+};
 
-/// Validates a namespace for use as a DuckDB schema name.
-///
-/// Schema names are always double-quoted in generated SQL, so almost any
-/// character is safe. The one character that cannot appear is `"` itself,
-/// because it would break the quoting even after standard `""` escaping in
-/// the FTS PRAGMA argument (which is a SQL string, not a full SQL statement).
-fn validate_namespace(s: &str) -> Result<String, String> {
-    if s.is_empty() {
-        return Err("namespace must not be empty".to_string());
+/// Default embedding dimensionality for namespaces created (or first indexed)
+/// without an explicit `--embedding-dimensions` (matches all-MiniLM-L6-v2).
+const DEFAULT_EMBEDDING_DIMENSIONS: usize = 384;
+
+/// Handle `codesearch create`: persist the namespace's embedding
+/// configuration without loading any embedding model.
+fn create_namespace(
+    db_path: &std::path::Path,
+    namespace: &str,
+    target: EmbeddingTarget,
+    model: Option<&str>,
+    dimensions: usize,
+    no_embeddings: bool,
+) -> Result<String> {
+    if dimensions == 0 {
+        anyhow::bail!("--embedding-dimensions must be greater than 0");
     }
-    if s.contains('"') {
-        return Err(format!(
-            "namespace '{s}' contains '\"', which is not allowed in a namespace."
-        ));
-    }
-    Ok(s.to_string())
+
+    let (embedding_target, embedding_model) = if no_embeddings {
+        (
+            NO_EMBEDDINGS_MODEL.to_string(),
+            NO_EMBEDDINGS_MODEL.to_string(),
+        )
+    } else {
+        match target {
+            EmbeddingTarget::Onnx => (
+                "onnx".to_string(),
+                model.unwrap_or(DEFAULT_ONNX_EMBEDDING_MODEL).to_string(),
+            ),
+            EmbeddingTarget::Api => {
+                let model = model.ok_or_else(|| {
+                    anyhow::anyhow!("--embedding-model is required with --embedding-target=api")
+                })?;
+                ("api".to_string(), model.to_string())
+            }
+        }
+    };
+
+    let description = if no_embeddings {
+        "no embeddings — keyword + call-graph search only".to_string()
+    } else {
+        format!(
+            "target '{}', model '{}', {} dimensions",
+            embedding_target, embedding_model, dimensions
+        )
+    };
+
+    let cfg = NamespaceEmbeddingConfig {
+        embedding_target,
+        embedding_model,
+        dimensions,
+    };
+    DuckdbVectorRepository::create_namespace(db_path, namespace, &cfg)?;
+
+    Ok(format!(
+        "Created namespace '{}' ({}).\nIndex into it with: codesearch index <path> --namespace {}",
+        namespace, description, namespace
+    ))
 }
 
 #[derive(Parser)]
@@ -52,18 +97,6 @@ struct Cli {
     /// Expand the query into variants before searching and fuse results via RRF
     #[arg(long, global = true)]
     expand_query: bool,
-
-    /// Embedding backend: 'onnx' (bundled, offline) or 'api' (OpenAI-compatible endpoint)
-    #[arg(long, global = true, value_enum, default_value = "onnx")]
-    embedding_target: EmbeddingTarget,
-
-    /// Embedding model — HuggingFace ID for 'onnx', model name for 'api'
-    #[arg(long, global = true)]
-    embedding_model: Option<String>,
-
-    /// Output dimensions of the embedding model
-    #[arg(long, global = true, default_value = "384")]
-    embedding_dimensions: usize,
 
     /// Reranking backend: 'onnx' (default), 'api/anthropic', or 'api/openai'
     #[arg(long, global = true, value_enum, default_value = "onnx")]
@@ -135,10 +168,6 @@ async fn main() -> Result<()> {
             .init();
     }
 
-    if cli.embedding_dimensions == 0 {
-        eprintln!("error: --embedding-dimensions must be greater than 0");
-        std::process::exit(1);
-    }
     if cli.embedding_requests == 0 {
         eprintln!("error: --embedding-requests must be greater than 0");
         std::process::exit(1);
@@ -146,60 +175,76 @@ async fn main() -> Result<()> {
 
     let data_dir = expand_tilde(&cli.data_dir);
     std::fs::create_dir_all(&data_dir)?;
+    let db_path = std::path::Path::new(&data_dir).join("codesearch.duckdb");
 
-    // Auto-resolve the namespace and embedding configuration from the indexed
-    // metadata so commands run from inside a repository "just work" without the
-    // user re-specifying the flags used at index time. We always resolve (unless
-    // in-memory) and adopt the namespace only when it was not pinned explicitly;
-    // the embedding settings are adopted only when the effective namespace
-    // matches the resolved one, so an explicit `--namespace <indexed-ns>` still
-    // picks up that namespace's embedding config (which `Container::new`
-    // validates) instead of silently falling back to the ONNX/384 defaults.
+    // `create` only writes namespace configuration — handle it before the
+    // container is built so no embedding model is loaded or downloaded.
+    if let Commands::Create {
+        name,
+        embedding_target,
+        embedding_model,
+        embedding_dimensions,
+        no_embeddings,
+    } = &cli.command
+    {
+        let namespace = name.as_deref().unwrap_or(&cli.namespace);
+        let output = create_namespace(
+            &db_path,
+            namespace,
+            *embedding_target,
+            embedding_model.as_deref(),
+            *embedding_dimensions,
+            *no_embeddings,
+        )?;
+        println!("{output}");
+        return Ok(());
+    }
+
+    // Auto-resolve the namespace from the indexed metadata so commands run
+    // from inside a repository "just work", then adopt that namespace's
+    // stored embedding configuration — written by `codesearch create` or by
+    // the first index run — as the source of truth. Embedding settings are
+    // never taken from the command line outside `codesearch create`.
     let mut namespace = cli.namespace.clone();
-    let mut embedding_target = cli.embedding_target;
-    let mut embedding_model = cli.embedding_model.clone();
-    let mut embedding_dimensions = cli.embedding_dimensions;
+    let mut embedding_target = EmbeddingTarget::Onnx;
+    let mut embedding_model: Option<String> = None;
+    let mut embedding_dimensions = DEFAULT_EMBEDDING_DIMENSIONS;
+    let mut no_embeddings = false;
 
     if !cli.memory_storage {
-        let repo_root = match &cli.command {
-            Commands::Index { path, .. } => std::fs::canonicalize(path).ok(),
-            _ => std::env::current_dir().ok(),
-        };
-        if let Some(root) = repo_root {
-            let db_path = std::path::Path::new(&data_dir).join("codesearch.duckdb");
-            if let Some(ctx) = codesearch::resolve_repo_context(&db_path, &root) {
-                if !flag_set(&matches, "namespace") {
-                    namespace = ctx.namespace.clone();
-                }
-
-                // Only adopt the resolved embedding config when it actually
-                // describes the namespace we are about to open.
-                if namespace == ctx.namespace {
-                    if !flag_set(&matches, "embedding_target") {
-                        if let Some(target) = ctx.embedding_target.as_deref() {
-                            embedding_target = match target {
-                                "api" => EmbeddingTarget::Api,
-                                _ => EmbeddingTarget::Onnx,
-                            };
-                        }
-                    }
-                    if !flag_set(&matches, "embedding_model") && ctx.embedding_model.is_some() {
-                        embedding_model = ctx.embedding_model.clone();
-                    }
-                    if !flag_set(&matches, "embedding_dimensions") {
-                        if let Some(dims) = ctx.embedding_dimensions {
-                            embedding_dimensions = dims;
-                        }
-                    }
-
-                    tracing::info!(
-                        "Using namespace '{}' (matched by {} for '{}') from indexed metadata",
-                        namespace,
-                        ctx.matched_by,
-                        ctx.repository_name
-                    );
-                }
+        if !flag_set(&matches, "namespace") {
+            let repo_root = match &cli.command {
+                Commands::Index { path, .. } => std::fs::canonicalize(path).ok(),
+                _ => std::env::current_dir().ok(),
+            };
+            if let Some(ctx) =
+                repo_root.and_then(|root| codesearch::resolve_repo_context(&db_path, &root))
+            {
+                namespace = ctx.namespace.clone();
+                tracing::info!(
+                    "Using namespace '{}' (matched by {} for '{}') from indexed metadata",
+                    namespace,
+                    ctx.matched_by,
+                    ctx.repository_name
+                );
             }
+        }
+
+        if let Some(ns_cfg) = codesearch::namespace_embedding_config(&db_path, &namespace) {
+            no_embeddings = ns_cfg.embedding_model == codesearch::NO_EMBEDDINGS_MODEL
+                || ns_cfg.embedding_target == codesearch::NO_EMBEDDINGS_MODEL;
+            embedding_dimensions = ns_cfg.dimensions;
+            if !no_embeddings {
+                embedding_target = match ns_cfg.embedding_target.as_str() {
+                    "api" => EmbeddingTarget::Api,
+                    _ => EmbeddingTarget::Onnx,
+                };
+                embedding_model = Some(ns_cfg.embedding_model);
+            }
+            tracing::info!(
+                "Using embedding configuration stored for namespace '{}'",
+                namespace
+            );
         }
     }
 
@@ -227,6 +272,7 @@ async fn main() -> Result<()> {
         namespace,
         memory_storage: cli.memory_storage,
         no_rerank: cli.no_rerank,
+        no_embeddings,
         expand_query: cli.expand_query,
         embedding_target,
         embedding_model,

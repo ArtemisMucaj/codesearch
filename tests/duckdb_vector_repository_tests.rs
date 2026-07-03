@@ -74,7 +74,10 @@ async fn duckdb_vector_repository_can_save_and_search() {
         .expect("save_batch");
 
     let query = SearchQuery::new("add numbers").with_limit(3);
-    let results: Vec<_> = repo.search(&embedding_vec, &query).await.expect("search");
+    let results: Vec<_> = repo
+        .search(Some(&embedding_vec), &query)
+        .await
+        .expect("search");
 
     assert!(!results.is_empty(), "expected at least one result");
     assert_eq!(results[0].chunk().id(), chunk.id());
@@ -183,7 +186,10 @@ async fn duckdb_vector_repository_bm25_text_search_finds_matching_chunks() {
         .with_limit(5)
         .with_text_search(true);
 
-    let results: Vec<_> = repo.search(&query_vec, &query).await.expect("BM25 search");
+    let results: Vec<_> = repo
+        .search(Some(&query_vec), &query)
+        .await
+        .expect("BM25 search");
 
     assert!(!results.is_empty(), "BM25 search should return results");
     assert!(
@@ -217,7 +223,7 @@ async fn duckdb_vector_repository_bm25_handles_empty_query() {
     // An empty query string should not panic or error.
     let query = SearchQuery::new("   ").with_limit(5).with_text_search(true);
     let results: Vec<_> = repo
-        .search(&unit_vector(384, 0), &query)
+        .search(Some(&unit_vector(384, 0)), &query)
         .await
         .expect("search with empty query");
     // Empty query produces no BM25 hits; result comes from semantic leg only.
@@ -268,14 +274,83 @@ async fn duckdb_vector_repository_schema_namespaces_tables() {
 
     let query = SearchQuery::new("add numbers").with_limit(3);
     let results_a: Vec<_> = repo_a
-        .search(&embedding_vec, &query)
+        .search(Some(&embedding_vec), &query)
         .await
         .expect("search a");
     let results_b: Vec<_> = repo_b
-        .search(&embedding_vec, &query)
+        .search(Some(&embedding_vec), &query)
         .await
         .expect("search b");
 
     assert_eq!(results_a.len(), 1);
     assert!(results_b.is_empty(), "expected no results from schema_b");
+}
+
+/// `create_namespace` persists the configuration, later reads resolve it, and
+/// creating the same namespace twice is rejected.
+#[test]
+fn test_create_namespace_round_trip_and_duplicate() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("codesearch.duckdb");
+
+    let cfg = NamespaceEmbeddingConfig {
+        embedding_target: "api".to_string(),
+        embedding_model: "my-custom-model".to_string(),
+        dimensions: 768,
+    };
+
+    if let Err(e) = DuckdbVectorRepository::create_namespace(&db_path, "team-a", &cfg) {
+        // vss extension unavailable in network-restricted environments
+        eprintln!("SKIP: create_namespace unavailable ({e}). Skipping test.");
+        return;
+    }
+
+    // The stored config is resolvable by namespace — this is what index/search
+    // use to inherit the embedding setup without flags.
+    let stored = codesearch::namespace_embedding_config(&db_path, "team-a")
+        .expect("stored namespace config should resolve");
+    assert_eq!(stored.embedding_target, "api");
+    assert_eq!(stored.embedding_model, "my-custom-model");
+    assert_eq!(stored.dimensions, 768);
+
+    // Unknown namespaces resolve to nothing (callers fall back to defaults).
+    assert!(codesearch::namespace_embedding_config(&db_path, "unknown").is_none());
+
+    // A namespace's configuration is fixed at creation: re-creating errors.
+    let err = DuckdbVectorRepository::create_namespace(&db_path, "team-a", &cfg)
+        .expect_err("duplicate create should fail");
+    assert!(
+        err.to_string().contains("already exists"),
+        "unexpected error: {err}"
+    );
+
+    // Opening the namespace with the stored config validates cleanly.
+    assert!(try_with_namespace(&db_path, "team-a", &cfg).is_some());
+}
+
+/// A namespace created with the no-embeddings sentinel is resolvable and
+/// opens with any embedding config (nothing to validate against).
+#[test]
+fn test_create_no_embeddings_namespace() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("codesearch.duckdb");
+
+    let cfg = NamespaceEmbeddingConfig {
+        embedding_target: codesearch::NO_EMBEDDINGS_MODEL.to_string(),
+        embedding_model: codesearch::NO_EMBEDDINGS_MODEL.to_string(),
+        dimensions: 384,
+    };
+
+    if let Err(e) = DuckdbVectorRepository::create_namespace(&db_path, "fast", &cfg) {
+        eprintln!("SKIP: create_namespace unavailable ({e}). Skipping test.");
+        return;
+    }
+
+    let stored = codesearch::namespace_embedding_config(&db_path, "fast")
+        .expect("stored namespace config should resolve");
+    assert_eq!(stored.embedding_model, codesearch::NO_EMBEDDINGS_MODEL);
+
+    // Opening with a default (embedding-enabled) config must not hard-error:
+    // the sentinel skips embedding-space validation.
+    assert!(try_with_namespace(&db_path, "fast", &default_cfg()).is_some());
 }
