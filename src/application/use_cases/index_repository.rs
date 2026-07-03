@@ -12,12 +12,12 @@ use tracing::{debug, info, warn};
 
 use crate::application::git_remote::detect_remote;
 use crate::application::{
-    CallGraphUseCase, EmbeddingService, FileHashRepository, MetadataRepository, ParserService,
-    VectorRepository,
+    CallGraphUseCase, ChannelEndpointRepository, ChannelExtractor, EmbeddingService,
+    FileHashRepository, MetadataRepository, ParserService, VectorRepository,
 };
 use crate::domain::{
-    compute_file_hash, DomainError, Embedding, FileHash, Language, LanguageStats, Repository,
-    SymbolReference, VectorStore,
+    compute_file_hash, ChannelEndpoint, DomainError, Embedding, FileHash, Language, LanguageStats,
+    Repository, SymbolReference, VectorStore,
 };
 
 /// Default number of concurrent `parse_only` calls during the parse phase.
@@ -69,6 +69,11 @@ pub struct IndexRepositoryUseCase {
     /// Optional SCIP indexer.  When present, JS/TS/PHP files use SCIP-derived
     /// symbol references instead of (or as a fallback from) tree-sitter.
     scip: Option<Arc<dyn Scip>>,
+    /// Optional channel-endpoint extraction (cross-service linking).  When
+    /// both are present, every parsed file also runs the channel extractor
+    /// and the endpoints are persisted alongside chunks and references.
+    channel_extractor: Option<Arc<dyn ChannelExtractor>>,
+    channel_endpoint_repo: Option<Arc<dyn ChannelEndpointRepository>>,
     /// Maximum number of concurrent `parse_only` calls.
     parse_concurrency: usize,
 }
@@ -90,6 +95,8 @@ impl IndexRepositoryUseCase {
             parser_service,
             embedding_service,
             scip: None,
+            channel_extractor: None,
+            channel_endpoint_repo: None,
             parse_concurrency: DEFAULT_PARSE_CONCURRENCY,
         }
     }
@@ -97,6 +104,17 @@ impl IndexRepositoryUseCase {
     /// Attach an optional SCIP indexer.
     pub fn with_scip(mut self, scip: Arc<dyn Scip>) -> Self {
         self.scip = Some(scip);
+        self
+    }
+
+    /// Attach channel-endpoint extraction (cross-service linking).
+    pub fn with_channel_extraction(
+        mut self,
+        extractor: Arc<dyn ChannelExtractor>,
+        repository: Arc<dyn ChannelEndpointRepository>,
+    ) -> Self {
+        self.channel_extractor = Some(extractor);
+        self.channel_endpoint_repo = Some(repository);
         self
     }
 
@@ -143,6 +161,7 @@ impl IndexRepositoryUseCase {
             Arc::clone(&self.vector_repo),
             Arc::clone(&self.file_hash_repo),
             Arc::clone(&self.call_graph_use_case),
+            self.channel_endpoint_repo.clone(),
         ))
     }
 
@@ -178,6 +197,9 @@ impl IndexRepositoryUseCase {
                 self.call_graph_use_case
                     .delete_by_repository(existing.id())
                     .await?;
+                if let Some(channel_repo) = &self.channel_endpoint_repo {
+                    channel_repo.delete_by_repository(existing.id()).await?;
+                }
                 self.repository_repo.delete(existing.id()).await?;
             }
             return self
@@ -300,6 +322,7 @@ impl IndexRepositoryUseCase {
             absolute_path.to_path_buf(),
             repository.id().to_string(),
             self.parser_service.clone(),
+            self.channel_extractor.clone(),
             parse_concurrency,
         );
 
@@ -383,6 +406,7 @@ impl IndexRepositoryUseCase {
                 Arc::clone(&self.vector_repo),
                 Arc::clone(&self.file_hash_repo),
                 Arc::clone(&self.call_graph_use_case),
+                self.channel_endpoint_repo.clone(),
             )
             .await?;
             merge_stats(
@@ -518,7 +542,7 @@ impl IndexRepositoryUseCase {
         // Track total chunks deleted
         let mut deleted_chunk_count = 0u64;
 
-        // Process deleted files (remove chunks and references)
+        // Process deleted files (remove chunks, references, and endpoints)
         for path in &deleted {
             debug!("Removing deleted file: {}", path);
             deleted_chunk_count += self
@@ -528,6 +552,11 @@ impl IndexRepositoryUseCase {
             self.call_graph_use_case
                 .delete_by_file(repository.id(), path)
                 .await?;
+            if let Some(channel_repo) = &self.channel_endpoint_repo {
+                channel_repo
+                    .delete_by_file_path(repository.id(), path)
+                    .await?;
+            }
         }
         if !deleted.is_empty() {
             let deleted_paths: Vec<String> = deleted.iter().map(|s| s.to_string()).collect();
@@ -536,7 +565,8 @@ impl IndexRepositoryUseCase {
                 .await?;
         }
 
-        // Process modified files (delete old chunks and references, then re-index)
+        // Process modified files (delete old chunks, references, and
+        // endpoints, then re-index)
         for path in &modified {
             debug!("Re-indexing modified file: {}", path);
             deleted_chunk_count += self
@@ -546,6 +576,11 @@ impl IndexRepositoryUseCase {
             self.call_graph_use_case
                 .delete_by_file(repository.id(), path)
                 .await?;
+            if let Some(channel_repo) = &self.channel_endpoint_repo {
+                channel_repo
+                    .delete_by_file_path(repository.id(), path)
+                    .await?;
+            }
         }
 
         // SCIP: same as the full-index path.
@@ -596,6 +631,7 @@ impl IndexRepositoryUseCase {
             absolute_path.to_path_buf(),
             repository.id().to_string(),
             self.parser_service.clone(),
+            self.channel_extractor.clone(),
             parse_concurrency,
         );
 
@@ -689,6 +725,7 @@ impl IndexRepositoryUseCase {
                 Arc::clone(&self.vector_repo),
                 Arc::clone(&self.file_hash_repo),
                 Arc::clone(&self.call_graph_use_case),
+                self.channel_endpoint_repo.clone(),
             )
             .await?;
             merge_stats(
@@ -766,6 +803,9 @@ struct ParseOnlyResult {
     content_hash: String,
     language: Language,
     chunks: Vec<crate::domain::CodeChunk>,
+    /// Channel endpoints extracted from the file (empty when no channel
+    /// extractor is configured or the language has no detectors).
+    endpoints: Vec<ChannelEndpoint>,
 }
 
 /// Parsed batch after embedding — ready to be written to the DB.
@@ -820,6 +860,7 @@ fn spawn_parse_stream(
     abs_path: PathBuf,
     repo_id: String,
     parser_service: Arc<dyn ParserService>,
+    channel_extractor: Option<Arc<dyn ChannelExtractor>>,
     concurrency: usize,
 ) -> mpsc::Receiver<Option<ParseOnlyResult>> {
     // Buffer enough results to absorb a full flush cycle without stalling.
@@ -828,9 +869,19 @@ fn spawn_parse_stream(
         let mut stream = futures_util::stream::iter(files)
             .map(move |entry_path| {
                 let parser_service = parser_service.clone();
+                let channel_extractor = channel_extractor.clone();
                 let abs_path = abs_path.clone();
                 let repo_id = repo_id.clone();
-                async move { parse_only(entry_path, &abs_path, &repo_id, &*parser_service).await }
+                async move {
+                    parse_only(
+                        entry_path,
+                        &abs_path,
+                        &repo_id,
+                        &*parser_service,
+                        channel_extractor.as_deref(),
+                    )
+                    .await
+                }
             })
             .buffer_unordered(concurrency);
 
@@ -942,6 +993,7 @@ async fn do_write(
     vector_repo: Arc<dyn VectorRepository>,
     file_hash_repo: Arc<dyn FileHashRepository>,
     call_graph_use_case: Arc<CallGraphUseCase>,
+    channel_endpoint_repo: Option<Arc<dyn ChannelEndpointRepository>>,
 ) -> Result<FlushStats, DomainError> {
     let EmbedResult {
         batch,
@@ -1024,6 +1076,20 @@ async fn do_write(
         ref_count += refs_count;
     }
 
+    // Channel endpoints: delete-then-save per file mirrors the call-graph
+    // lifecycle and keeps re-indexing idempotent.
+    if let Some(channel_repo) = &channel_endpoint_repo {
+        for (i, result) in batch.iter().enumerate() {
+            if per_file_embeddings[i].is_none() {
+                continue;
+            }
+            channel_repo
+                .delete_by_file_path(&repository_id, &result.relative_path)
+                .await?;
+            channel_repo.save_batch(&result.endpoints).await?;
+        }
+    }
+
     if !file_hashes.is_empty() {
         file_hash_repo.save_batch(&file_hashes).await?;
     }
@@ -1045,6 +1111,7 @@ async fn parse_only(
     absolute_path: &Path,
     repo_id: &str,
     parser_service: &dyn ParserService,
+    channel_extractor: Option<&dyn ChannelExtractor>,
 ) -> Option<ParseOnlyResult> {
     let language = Language::from_path(&entry_path);
     let relative_path = entry_path
@@ -1074,10 +1141,32 @@ async fn parse_only(
         }
     };
 
+    // Channel extraction failures must not fail chunk indexing — log and
+    // continue with no endpoints for the file.
+    let endpoints = match channel_extractor {
+        Some(extractor) if extractor.supports_language(language) => {
+            match extractor
+                .extract(&content, &relative_path, language, repo_id)
+                .await
+            {
+                Ok(endpoints) => endpoints,
+                Err(e) => {
+                    warn!(
+                        "Failed to extract channel endpoints from {}: {}",
+                        relative_path, e
+                    );
+                    Vec::new()
+                }
+            }
+        }
+        _ => Vec::new(),
+    };
+
     Some(ParseOnlyResult {
         relative_path,
         content_hash,
         language,
         chunks,
+        endpoints,
     })
 }

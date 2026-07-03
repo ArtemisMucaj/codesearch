@@ -4,7 +4,8 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::application::{
-    CallGraphUseCase, FileHashRepository, MetadataRepository, VectorRepository,
+    CallGraphUseCase, ChannelEndpointRepository, FileHashRepository, MetadataRepository,
+    VectorRepository,
 };
 use crate::domain::DomainError;
 
@@ -13,6 +14,7 @@ pub struct DeleteRepositoryUseCase {
     vector_repo: Arc<dyn VectorRepository>,
     file_hash_repo: Arc<dyn FileHashRepository>,
     call_graph_use_case: Arc<CallGraphUseCase>,
+    channel_endpoint_repo: Option<Arc<dyn ChannelEndpointRepository>>,
 }
 
 impl DeleteRepositoryUseCase {
@@ -27,7 +29,17 @@ impl DeleteRepositoryUseCase {
             vector_repo,
             file_hash_repo,
             call_graph_use_case,
+            channel_endpoint_repo: None,
         }
+    }
+
+    /// Also delete stored channel endpoints when removing a repository.
+    pub fn with_channel_endpoints(
+        mut self,
+        channel_endpoint_repo: Arc<dyn ChannelEndpointRepository>,
+    ) -> Self {
+        self.channel_endpoint_repo = Some(channel_endpoint_repo);
+        self
     }
 
     pub async fn execute(&self, id: &str) -> Result<(), DomainError> {
@@ -42,6 +54,9 @@ impl DeleteRepositoryUseCase {
         self.vector_repo.delete_by_repository(id).await?;
         self.file_hash_repo.delete_by_repository(id).await?;
         self.call_graph_use_case.delete_by_repository(id).await?;
+        if let Some(channel_repo) = &self.channel_endpoint_repo {
+            channel_repo.delete_by_repository(id).await?;
+        }
         self.repository_repo.delete(id).await?;
 
         info!("Repository deleted successfully");
