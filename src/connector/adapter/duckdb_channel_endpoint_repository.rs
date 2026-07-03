@@ -90,21 +90,39 @@ impl DuckdbChannelEndpointRepository {
         let role_str: String = row.get(6)?;
         let source_str: String = row.get(13)?;
 
+        // A stored string that no longer maps onto a known variant means the
+        // row is corrupt or was written by an incompatible schema. Fail the
+        // conversion so the problem surfaces instead of silently relabeling the
+        // endpoint (e.g. an MQTT topic reported as HTTP).
+        let enum_error = |col: usize, kind: &str, value: &str| {
+            duckdb::Error::FromSqlConversionFailure(
+                col,
+                duckdb::types::Type::Text,
+                format!("invalid {kind}: {value}").into(),
+            )
+        };
+
+        let protocol = Protocol::parse(&protocol_str)
+            .ok_or_else(|| enum_error(5, "protocol", &protocol_str))?;
+        let role = ChannelRole::parse(&role_str).ok_or_else(|| enum_error(6, "role", &role_str))?;
+        let source = EndpointSource::parse(&source_str)
+            .ok_or_else(|| enum_error(13, "source", &source_str))?;
+
         Ok(ChannelEndpoint::reconstitute(
             row.get::<_, String>(0)?,         // id
             row.get::<_, String>(1)?,         // repository_id
             row.get::<_, String>(2)?,         // file_path
             row.get::<_, Option<String>>(3)?, // enclosing_symbol
             row.get::<_, i32>(4)? as u32,     // line
-            Protocol::parse(&protocol_str).unwrap_or(Protocol::Http),
-            ChannelRole::parse(&role_str).unwrap_or(ChannelRole::Producer),
+            protocol,
+            role,
             row.get::<_, String>(7)?,         // channel_raw
             row.get::<_, String>(8)?,         // channel_normalized
             row.get::<_, Option<String>>(9)?, // host
             row.get::<_, bool>(10)?,          // is_pattern
             row.get::<_, bool>(11)?,          // resolved
             row.get::<_, f32>(12)?,           // confidence
-            EndpointSource::parse(&source_str).unwrap_or(EndpointSource::TreeSitter),
+            source,
         ))
     }
 
@@ -484,5 +502,31 @@ mod tests {
         assert!(repo.find_all().await.unwrap().is_empty());
         let stats = repo.get_stats("repo-a").await.unwrap();
         assert_eq!(stats.total_endpoints, 0);
+    }
+
+    #[tokio::test]
+    async fn test_corrupt_enum_value_surfaces_error() {
+        let repo = create_test_repo().await;
+
+        // Write a row directly with an unknown protocol string, bypassing the
+        // domain constructors, to simulate corruption or a forward-incompatible
+        // schema. Reading it back must fail rather than relabel it as `http`.
+        {
+            let conn = repo.conn.lock().await;
+            conn.execute(
+                "INSERT INTO channel_endpoints (id, repository_id, file_path, line, \
+                 protocol, role, channel_raw, channel_normalized, confidence, source) \
+                 VALUES ('bad', 'repo-a', 'src/a.py', 1, 'smtp', 'producer', \
+                 't', 't', 0.9, 'tree_sitter')",
+                params![],
+            )
+            .unwrap();
+        }
+
+        let err = repo.find_by_repository("repo-a").await.unwrap_err();
+        assert!(
+            err.to_string().contains("smtp"),
+            "error should name the offending value, got: {err}"
+        );
     }
 }

@@ -80,6 +80,13 @@ impl<'a> ChannelsController<'a> {
 
         match format {
             OutputFormatTextJson::Json => {
+                let mut report = report;
+                // Mirror the text path: `--unmatched` drops matched edges and
+                // fan-out noise so JSON output stays consistent with the flag.
+                if unmatched_only {
+                    report.edges.clear();
+                    report.noisy_channels.clear();
+                }
                 serde_json::to_string_pretty(&report).context("Failed to serialize report")
             }
             OutputFormatTextJson::Text => Ok(render_text(&report, &repo_names, unmatched_only)),

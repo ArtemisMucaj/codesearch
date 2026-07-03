@@ -204,7 +204,7 @@ impl ChannelEndpoint {
             host: None,
             is_pattern: false,
             resolved: true,
-            confidence,
+            confidence: confidence.clamp(0.0, 1.0),
             source,
         }
     }
@@ -240,7 +240,7 @@ impl ChannelEndpoint {
             host,
             is_pattern,
             resolved,
-            confidence,
+            confidence: confidence.clamp(0.0, 1.0),
             source,
         }
     }
@@ -420,6 +420,40 @@ mod tests {
         ] {
             assert_eq!(EndpointSource::parse(s.as_str()), Some(s));
         }
+    }
+
+    #[test]
+    fn test_confidence_is_clamped() {
+        let over = ChannelEndpoint::new(
+            "repo-a".to_string(),
+            "src/app.py".to_string(),
+            1,
+            Protocol::Kafka,
+            ChannelRole::Producer,
+            "orders.created".to_string(),
+            "orders.created".to_string(),
+            1.5,
+            EndpointSource::TreeSitter,
+        );
+        assert_eq!(over.confidence(), 1.0);
+
+        let under = ChannelEndpoint::reconstitute(
+            "id-1".to_string(),
+            "repo-a".to_string(),
+            "src/app.py".to_string(),
+            None,
+            1,
+            Protocol::Kafka,
+            ChannelRole::Producer,
+            "orders.created".to_string(),
+            "orders.created".to_string(),
+            None,
+            false,
+            true,
+            -0.3,
+            EndpointSource::TreeSitter,
+        );
+        assert_eq!(under.confidence(), 0.0);
     }
 
     #[test]
