@@ -1,4 +1,6 @@
 mod call_graph_repository;
+mod channel_endpoint_repository;
+mod channel_extractor;
 mod chat_client;
 mod embedding_service;
 mod file_hash_repository;
@@ -9,6 +11,8 @@ mod reranking_service;
 mod vector_repository;
 
 pub use call_graph_repository::*;
+pub use channel_endpoint_repository::*;
+pub use channel_extractor::*;
 pub use chat_client::*;
 pub use embedding_service::*;
 pub use file_hash_repository::*;

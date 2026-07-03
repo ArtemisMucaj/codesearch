@@ -1,3 +1,4 @@
+mod channel_endpoint;
 mod cluster;
 mod code_chunk;
 mod embedding;
@@ -10,6 +11,7 @@ mod repository;
 mod search_result;
 mod symbol_reference;
 
+pub use channel_endpoint::*;
 pub use cluster::*;
 pub use code_chunk::*;
 pub use embedding::*;
