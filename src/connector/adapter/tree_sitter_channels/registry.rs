@@ -33,11 +33,9 @@ const HTTP_SERVER_METHODS: &[&str] = &["get", "post", "put", "delete", "patch", 
 /// name, decorator, `reqwest::` path) get higher confidence than bare method
 /// names.
 pub(super) fn detectors() -> Vec<Detector> {
-    let mut all = Vec::new();
-
     // ── Python ────────────────────────────────────────────────────────────
     // kafka-python producer: producer.send("topic", payload)
-    all.push(Detector {
+    let mut all = vec![Detector {
         language: Language::Python,
         protocol: Protocol::Kafka,
         role: ChannelRole::Producer,
@@ -46,7 +44,7 @@ pub(super) fn detectors() -> Vec<Detector> {
             arguments: (argument_list . [(string) (identifier)] @channel))"#,
         filters: &[("method", &["send"])],
         confidence: 0.6,
-    });
+    }];
     // kafka-python consumer: KafkaConsumer("topic-a", "topic-b", …)
     all.push(Detector {
         language: Language::Python,

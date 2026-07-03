@@ -15,9 +15,9 @@ use rmcp::ServerHandler;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::application::CallGraphQuery;
+use crate::application::{CallGraphQuery, ChannelLinkOptions};
 use crate::connector::api::Container;
-use crate::domain::{FileEdge, SearchQuery};
+use crate::domain::{FileEdge, Protocol, SearchQuery};
 
 use super::tools::SearchResultOutput;
 
@@ -245,6 +245,25 @@ pub struct GetFileClusterInput {
 pub struct ArchitectureOverviewInput {
     /// Repository ID to summarise as a Markdown architecture table.
     pub repository_id: String,
+}
+
+/// Input parameters for the channels tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ChannelsInput {
+    /// Restrict matching to these repository IDs. Omit to match across every
+    /// repository in the namespace.
+    pub repository_ids: Option<Vec<String>>,
+
+    /// Filter by protocol: "kafka", "http", "mqtt", "amqp", or "grpc".
+    pub protocol: Option<String>,
+
+    /// Drop edges whose confidence is below this threshold (0.0 to 1.0).
+    pub min_confidence: Option<f32>,
+
+    /// Glob patterns (`*`, `?`) excluding channels from matching and output,
+    /// e.g. ["/health*"].
+    #[serde(default)]
+    pub exclude_channels: Vec<String>,
 }
 
 /// Input parameters for the list_symbol_clusters tool
@@ -874,6 +893,51 @@ impl CodesearchMcpServer {
         Ok(CallToolResult::success(vec![Content::text(overview)]))
     }
 
+    /// Show cross-service channel links between indexed repositories:
+    /// producer/consumer call sites (Kafka topics, HTTP routes, MQTT topics)
+    /// joined on their channel identifier. Returns matched producer→consumer
+    /// edges plus dangling and unresolved endpoints, so you can answer "what
+    /// connects these services" even when they share no symbols.
+    /// Requires the repositories to have been indexed since channel
+    /// extraction was introduced.
+    #[tool(name = "channels")]
+    async fn channels(
+        &self,
+        params: Parameters<ChannelsInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = params.0;
+
+        let protocol = match &input.protocol {
+            Some(p) => Some(Protocol::parse(p).ok_or_else(|| {
+                McpError::invalid_params(
+                    format!("Unknown protocol '{p}' (expected kafka, http, mqtt, amqp, or grpc)"),
+                    None,
+                )
+            })?),
+            None => None,
+        };
+
+        let options = ChannelLinkOptions {
+            protocol,
+            min_confidence: input.min_confidence,
+            exclude_channels: input.exclude_channels,
+        };
+        let report = self
+            .container
+            .channel_link_use_case()
+            .link(input.repository_ids.as_deref(), &options)
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Channel linking failed: {}", e), None)
+            })?;
+
+        let json = serde_json::to_string_pretty(&report).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize channel report: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
     /// Detect symbol communities in a repository by running Leiden community
     /// detection over its symbol call graph (one level finer than `list_clusters`,
     /// which works on files). Returns the communities with their names, dominant
@@ -949,6 +1013,7 @@ impl ServerHandler for CodesearchMcpServer {
                  • get_feature — a single execution feature by entry-point symbol\n\
                  • get_impacted_features — features whose call chain includes changed symbols\n\
                  • file_uses — which files in one repository depend on files in another\n\
+                 • channels — cross-service producer→consumer links over Kafka/HTTP/MQTT channels\n\
                  • list_clusters — architectural (file-level) clusters via Leiden community detection\n\
                  • get_file_cluster — the cluster a given file belongs to\n\
                  • architecture_overview — Markdown table summarising clusters and dependencies\n\

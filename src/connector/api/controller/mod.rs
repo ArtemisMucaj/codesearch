@@ -1,3 +1,4 @@
+pub mod channels_controller;
 pub mod clusters_controller;
 pub mod delete_controller;
 pub mod execution_features_controller;
@@ -12,6 +13,7 @@ pub mod symbol_context_controller;
 pub mod uses_controller;
 pub mod visualize_controller;
 
+pub use channels_controller::ChannelsController;
 pub use clusters_controller::ClustersController;
 pub use delete_controller::DeleteController;
 pub use execution_features_controller::ExecutionFeaturesController;

@@ -6,20 +6,22 @@ use anyhow::Result;
 use tracing::{debug, warn};
 
 use crate::application::{
-    CallGraphRepository, CallGraphUseCase, FileHashRepository, MetadataRepository, QueryExpander,
+    CallGraphRepository, CallGraphUseCase, ChannelEndpointRepository, ChannelLinkUseCase,
+    FileHashRepository, MetadataRepository, QueryExpander,
 };
 use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::scip::ScipRunner;
 use crate::connector::adapter::{NamespaceEmbeddingConfig, NoEmbedding, NO_EMBEDDINGS_MODEL};
 use crate::{
     AnthropicClient, AnthropicReranking, ClusterDetectionUseCase, DeleteRepositoryUseCase,
-    DuckdbCallGraphRepository, DuckdbFileHashRepository, DuckdbMetadataRepository,
-    DuckdbVectorRepository, EmbeddingService, ExecutionFeaturesUseCase, ExplainUseCase,
-    FileRelationshipUseCase, GraphExpansionUseCase, ImpactAnalysisUseCase,
+    DuckdbCallGraphRepository, DuckdbChannelEndpointRepository, DuckdbFileHashRepository,
+    DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService, ExecutionFeaturesUseCase,
+    ExplainUseCase, FileRelationshipUseCase, GraphExpansionUseCase, ImpactAnalysisUseCase,
     InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander,
     MockEmbedding, MockReranking, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding,
     OrtReranking, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
-    SymbolClusterDetectionUseCase, SymbolContextUseCase, TreeSitterParser, VectorRepository,
+    SymbolClusterDetectionUseCase, SymbolContextUseCase, TreeSitterChannelExtractor,
+    TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -117,15 +119,27 @@ pub struct Container {
     repo_adapter: Arc<DuckdbMetadataRepository>,
     file_hash_repo: Arc<dyn FileHashRepository>,
     call_graph_use_case: Arc<CallGraphUseCase>,
+    channel_endpoint_repo: Arc<dyn ChannelEndpointRepository>,
     config: ContainerConfig,
 }
 
-/// Initialise the three DuckDB-backed metadata repositories shared across all storage paths.
+/// The vector store plus the DuckDB-backed repositories every storage path
+/// must produce, in the order `Container::new` destructures them.
+type StorageRepos = (
+    Arc<dyn VectorRepository>,
+    Arc<DuckdbMetadataRepository>,
+    Arc<dyn FileHashRepository>,
+    Arc<dyn CallGraphRepository>,
+    Arc<dyn ChannelEndpointRepository>,
+);
+
+/// Initialise the DuckDB-backed metadata repositories shared across all storage paths.
 ///
 /// When `read_only` is `true`, the metadata database is opened with
-/// `AccessMode::ReadOnly` (no exclusive write lock), and the file-hash / call-graph
-/// repositories are created without running `CREATE TABLE` DDL (forbidden in
-/// read-only mode).  When `false`, the normal writable constructors are used.
+/// `AccessMode::ReadOnly` (no exclusive write lock), and the file-hash /
+/// call-graph / channel-endpoint repositories are created without running
+/// `CREATE TABLE` DDL (forbidden in read-only mode).  When `false`, the normal
+/// writable constructors are used.
 async fn init_duckdb_metadata_repos(
     db_path: &std::path::Path,
     read_only: bool,
@@ -133,6 +147,7 @@ async fn init_duckdb_metadata_repos(
     Arc<DuckdbMetadataRepository>,
     Arc<dyn FileHashRepository>,
     Arc<dyn CallGraphRepository>,
+    Arc<dyn ChannelEndpointRepository>,
 )> {
     let repo_adapter = if read_only {
         Arc::new(DuckdbMetadataRepository::new_read_only(db_path)?)
@@ -147,6 +162,13 @@ async fn init_duckdb_metadata_repos(
     } else {
         Arc::new(DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn)).await?)
     };
+    let channel_endpoint_repo: Arc<dyn ChannelEndpointRepository> = if read_only {
+        Arc::new(DuckdbChannelEndpointRepository::with_connection_no_init(
+            Arc::clone(&shared_conn),
+        ))
+    } else {
+        Arc::new(DuckdbChannelEndpointRepository::with_connection(Arc::clone(&shared_conn)).await?)
+    };
     let call_graph_repo: Arc<dyn CallGraphRepository> = if read_only {
         Arc::new(DuckdbCallGraphRepository::with_connection_no_init(
             shared_conn,
@@ -154,7 +176,12 @@ async fn init_duckdb_metadata_repos(
     } else {
         Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?)
     };
-    Ok((repo_adapter, file_hash_repo, call_graph_repo))
+    Ok((
+        repo_adapter,
+        file_hash_repo,
+        call_graph_repo,
+        channel_endpoint_repo,
+    ))
 }
 
 /// Maximum number of retry attempts when a read-only DuckDB open fails due to a
@@ -311,18 +338,21 @@ impl Container {
             dimensions: config.embedding_dimensions,
         };
 
-        // Create vector repository, metadata adapter, file hash repository, and call graph repository
-        let (vector_repo, repo_adapter, file_hash_repo, call_graph_repo): (
-            Arc<dyn VectorRepository>,
-            Arc<DuckdbMetadataRepository>,
-            Arc<dyn FileHashRepository>,
-            Arc<dyn CallGraphRepository>,
-        ) = if config.memory_storage {
+        // Create vector repository, metadata adapter, file hash repository,
+        // call graph repository, and channel endpoint repository
+        let (vector_repo, repo_adapter, file_hash_repo, call_graph_repo, channel_endpoint_repo): StorageRepos =
+            if config.memory_storage {
             debug!("Using in-memory vector storage");
             let vector = Arc::new(InMemoryVectorRepository::new());
-            let (repo_adapter, file_hash_repo, call_graph_repo) =
+            let (repo_adapter, file_hash_repo, call_graph_repo, channel_endpoint_repo) =
                 init_duckdb_metadata_repos(&db_path, config.read_only).await?;
-            (vector, repo_adapter, file_hash_repo, call_graph_repo)
+            (
+                vector,
+                repo_adapter,
+                file_hash_repo,
+                call_graph_repo,
+                channel_endpoint_repo,
+            )
         } else if config.read_only {
             // Read-only DuckDB path: no exclusive write lock → concurrent searches work.
             // Retry with exponential backoff when the database is temporarily locked by a
@@ -340,6 +370,10 @@ impl Container {
                     let file_hash_repo = Arc::new(
                         DuckdbFileHashRepository::with_connection_no_init(Arc::clone(&shared_conn)),
                     );
+                    let channel_endpoint_repo =
+                        Arc::new(DuckdbChannelEndpointRepository::with_connection_no_init(
+                            Arc::clone(&shared_conn),
+                        ));
                     let call_graph_repo = Arc::new(
                         DuckdbCallGraphRepository::with_connection_no_init(shared_conn),
                     );
@@ -348,6 +382,7 @@ impl Container {
                         repo_adapter,
                         file_hash_repo,
                         call_graph_repo,
+                        channel_endpoint_repo,
                     )
                 }
                 Err(e) => {
@@ -374,9 +409,15 @@ impl Container {
                         msg
                     );
                     let vector = Arc::new(InMemoryVectorRepository::new());
-                    let (repo_adapter, file_hash_repo, call_graph_repo) =
+                    let (repo_adapter, file_hash_repo, call_graph_repo, channel_endpoint_repo) =
                         init_duckdb_metadata_repos(&db_path, false).await?;
-                    (vector, repo_adapter, file_hash_repo, call_graph_repo)
+                    (
+                        vector,
+                        repo_adapter,
+                        file_hash_repo,
+                        call_graph_repo,
+                        channel_endpoint_repo,
+                    )
                 }
             }
         } else {
@@ -395,6 +436,10 @@ impl Container {
                     let file_hash_repo = Arc::new(
                         DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn)).await?,
                     );
+                    let channel_endpoint_repo = Arc::new(
+                        DuckdbChannelEndpointRepository::with_connection(Arc::clone(&shared_conn))
+                            .await?,
+                    );
                     let call_graph_repo =
                         Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?);
                     (
@@ -402,6 +447,7 @@ impl Container {
                         repo_adapter,
                         file_hash_repo,
                         call_graph_repo,
+                        channel_endpoint_repo,
                     )
                 }
                 Err(e) => {
@@ -416,9 +462,19 @@ impl Container {
                     let file_hash_repo = Arc::new(
                         DuckdbFileHashRepository::with_connection(Arc::clone(&shared_conn)).await?,
                     );
+                    let channel_endpoint_repo = Arc::new(
+                        DuckdbChannelEndpointRepository::with_connection(Arc::clone(&shared_conn))
+                            .await?,
+                    );
                     let call_graph_repo =
                         Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?);
-                    (vector, repo_adapter, file_hash_repo, call_graph_repo)
+                    (
+                        vector,
+                        repo_adapter,
+                        file_hash_repo,
+                        call_graph_repo,
+                        channel_endpoint_repo,
+                    )
                 }
             }
         };
@@ -460,6 +516,7 @@ impl Container {
             repo_adapter,
             file_hash_repo,
             call_graph_use_case,
+            channel_endpoint_repo,
             config,
         })
     }
@@ -475,6 +532,10 @@ impl Container {
             self.embedding_service.clone(),
         )
         .with_scip(scip)
+        .with_channel_extraction(
+            Arc::new(TreeSitterChannelExtractor::new()),
+            self.channel_endpoint_repo.clone(),
+        )
         .with_parse_concurrency(self.config.parse_concurrency)
     }
 
@@ -561,6 +622,11 @@ impl Container {
             self.file_hash_repo.clone(),
             self.call_graph_use_case.clone(),
         )
+        .with_channel_endpoints(self.channel_endpoint_repo.clone())
+    }
+
+    pub fn channel_link_use_case(&self) -> ChannelLinkUseCase {
+        ChannelLinkUseCase::new(self.channel_endpoint_repo.clone())
     }
 
     /// Get the call graph use case for direct access to call graph functionality.
