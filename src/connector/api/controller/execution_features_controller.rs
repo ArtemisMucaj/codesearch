@@ -104,9 +104,10 @@ impl<'a> ExecutionFeaturesController<'a> {
 
         for feature in features {
             out.push_str(&format!(
-                "{name}  criticality={crit:.2}  depth={depth}  files={files}\n  entry: {ep}\n\n",
+                "{name}  criticality={crit:.2}  reach={reach}  depth={depth}  files={files}\n  entry: {ep}\n\n",
                 name = feature.name,
                 crit = feature.criticality,
+                reach = feature.reach,
                 depth = feature.depth,
                 files = feature.file_count,
                 ep = feature.entry_point,
@@ -132,6 +133,7 @@ impl<'a> ExecutionFeaturesController<'a> {
              Entry point : {ep}\n\
              Repository  : {repo}\n\
              Criticality : {crit:.2}\n\
+             Reach       : {reach}\n\
              Depth       : {depth}\n\
              Files       : {files}\n\
              \n\
@@ -140,6 +142,7 @@ impl<'a> ExecutionFeaturesController<'a> {
             ep = feature.entry_point,
             repo = feature.repository_id,
             crit = feature.criticality,
+            reach = feature.reach,
             depth = feature.depth,
             files = feature.file_count,
         );

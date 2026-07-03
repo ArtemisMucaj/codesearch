@@ -34,7 +34,13 @@ pub struct ExecutionFeature {
     pub depth: usize,
     /// Number of distinct source files touched by the call chain.
     pub file_count: usize,
+    /// Number of distinct symbols transitively reachable from the entry point
+    /// (including the entry point itself) over real call edges. This is the
+    /// primary measure of "how much of a flow" the feature is — deep, widely
+    /// connected features reach many symbols; leaf methods reach only a few.
+    pub reach: usize,
     /// Composite criticality score in the range 0.0–1.0.  Higher values indicate
     /// paths that are more important to understand before making changes.
+    /// Dominated by transitive reachability and call-chain depth.
     pub criticality: f32,
 }

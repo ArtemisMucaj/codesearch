@@ -36,6 +36,38 @@ fn call_ref(caller: &str, callee: &str, file: &str, line: u32, repo: &str) -> Sy
     )
 }
 
+/// A reference edge of an explicit kind — used to seed non-call (structural)
+/// references such as imports or type references.
+fn ref_of_kind(caller: &str, callee: &str, kind: ReferenceKind, repo: &str) -> SymbolReference {
+    SymbolReference::new(
+        Some(caller.to_string()),
+        callee.to_string(),
+        "src/x.rs".to_string(),
+        "src/x.rs".to_string(),
+        1,
+        0,
+        kind,
+        Language::Rust,
+        repo.to_string(),
+    )
+}
+
+/// A call edge whose caller is unattributed (`None`) — models a top-level /
+/// module-scope invocation that SCIP could not tie to an enclosing symbol.
+fn nullcaller_call(callee: &str, repo: &str) -> SymbolReference {
+    SymbolReference::new(
+        None,
+        callee.to_string(),
+        "src/main.rs".to_string(),
+        "src/main.rs".to_string(),
+        1,
+        0,
+        ReferenceKind::MethodCall,
+        Language::Rust,
+        repo.to_string(),
+    )
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Entry-point detection
 // ──────────────────────────────────────────────────────────────────────────────
@@ -87,6 +119,86 @@ async fn test_pure_callee_is_not_entry_point() {
         !entry_points.contains(&"leaf"),
         "'leaf' must not be an entry point; got: {:?}",
         entry_points
+    );
+}
+
+/// A NULL-caller call edge (top-level / module-scope invocation, e.g.
+/// `app.start()` in an entry file) must NOT disqualify its callee from being an
+/// entry point. Regression: previously such edges added the callee to the
+/// "is called" set, hiding the codebase's largest real feature.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_null_caller_call_does_not_disqualify_entry_point() {
+    let cg = make_call_graph_use_case().await;
+    // `run` is invoked only from top-level code (NULL caller) and itself calls
+    // `work` — it is a genuine entry point despite the incoming edge.
+    let refs = vec![
+        nullcaller_call("run", "repo1"),
+        call_ref("run", "work", "src/app.rs", 3, "repo1"),
+    ];
+    cg.save_references(&refs).await.expect("seed failed");
+
+    let uc = ExecutionFeaturesUseCase::new(cg);
+    let features = uc
+        .list_features("repo1", 100)
+        .await
+        .expect("list_features failed");
+
+    let entry_points: Vec<&str> = features.iter().map(|f| f.entry_point.as_str()).collect();
+    assert!(
+        entry_points.contains(&"run"),
+        "'run' must be an entry point despite a NULL-caller incoming call; got: {:?}",
+        entry_points
+    );
+}
+
+/// Non-call references (imports, type references) must not form call-graph
+/// edges: a symbol reached only by such references is neither a callee that
+/// disqualifies an entry point, nor a traversable BFS hop.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_non_call_references_are_ignored() {
+    let cg = make_call_graph_use_case().await;
+    // `boot` really calls `init`; `boot` also *type-references* `Config`, and
+    // `Config` is *imported* by `helper`. Only `boot → init` is an execution edge.
+    let refs = vec![
+        call_ref("boot", "init", "src/boot.rs", 1, "repo1"),
+        ref_of_kind("boot", "Config", ReferenceKind::TypeReference, "repo1"),
+        ref_of_kind("helper", "Config", ReferenceKind::Import, "repo1"),
+    ];
+    cg.save_references(&refs).await.expect("seed failed");
+
+    let uc = ExecutionFeaturesUseCase::new(cg);
+    let features = uc
+        .list_features("repo1", 100)
+        .await
+        .expect("list_features failed");
+
+    let entry_points: Vec<&str> = features.iter().map(|f| f.entry_point.as_str()).collect();
+    // `boot` is the only real entry point (it calls `init`).
+    assert!(
+        entry_points.contains(&"boot"),
+        "'boot' should be an entry point; got: {:?}",
+        entry_points
+    );
+    // `helper` only *imports* Config — no call edge — so it is not a feature.
+    assert!(
+        !entry_points.contains(&"helper"),
+        "'helper' has only a non-call reference and must not be an entry point; got: {:?}",
+        entry_points
+    );
+    // The `boot` feature's path must not include the type-referenced `Config`.
+    let boot = features
+        .iter()
+        .find(|f| f.entry_point == "boot")
+        .expect("boot feature present");
+    let syms: Vec<&str> = boot.path.iter().map(|n| n.symbol.as_str()).collect();
+    assert!(
+        syms.contains(&"init"),
+        "path should contain the called 'init'"
+    );
+    assert!(
+        !syms.contains(&"Config"),
+        "path must not contain the type-referenced 'Config'; got: {:?}",
+        syms
     );
 }
 
