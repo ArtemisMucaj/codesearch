@@ -1,4 +1,5 @@
 mod call_graph;
+mod channel_link;
 mod cluster_detection;
 mod delete_repository;
 mod execution_features;
@@ -17,6 +18,7 @@ mod symbol_context;
 mod visualize_graph;
 
 pub use call_graph::*;
+pub use channel_link::*;
 pub use cluster_detection::*;
 pub use delete_repository::*;
 pub use execution_features::*;
