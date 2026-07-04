@@ -12,8 +12,8 @@ use tracing::{debug, info, warn};
 
 use crate::application::git_remote::detect_remote;
 use crate::application::{
-    CallGraphUseCase, ChannelEndpointRepository, ChannelExtractor, ChannelResolver,
-    EmbeddingService, FileHashRepository, MetadataRepository, ParserService,
+    AnalysisRepository, CallGraphUseCase, ChannelEndpointRepository, ChannelExtractor,
+    ChannelResolver, EmbeddingService, FileHashRepository, MetadataRepository, ParserService,
     ResolveChannelsUseCase, VectorRepository,
 };
 use crate::domain::{
@@ -79,6 +79,10 @@ pub struct IndexRepositoryUseCase {
     /// value resolution). Runs once after extraction, using the SCIP refs and
     /// the repo's config modules.
     channel_resolver: Option<Arc<dyn ChannelResolver>>,
+    /// Optional store of derived analyses (Leiden clusters, symbol communities,
+    /// execution features).  Stored analyses are invalidated whenever indexing
+    /// changes the call graph they were computed from.
+    analysis_repo: Option<Arc<dyn AnalysisRepository>>,
     /// Maximum number of concurrent `parse_only` calls.
     parse_concurrency: usize,
 }
@@ -103,6 +107,7 @@ impl IndexRepositoryUseCase {
             channel_extractor: None,
             channel_endpoint_repo: None,
             channel_resolver: None,
+            analysis_repo: None,
             parse_concurrency: DEFAULT_PARSE_CONCURRENCY,
         }
     }
@@ -128,6 +133,22 @@ impl IndexRepositoryUseCase {
     pub fn with_channel_resolution(mut self, resolver: Arc<dyn ChannelResolver>) -> Self {
         self.channel_resolver = Some(resolver);
         self
+    }
+
+    /// Attach the analysis store so stored analyses (clusters, communities,
+    /// features) are invalidated when indexing changes the call graph.
+    pub fn with_analysis_repo(mut self, analysis_repo: Arc<dyn AnalysisRepository>) -> Self {
+        self.analysis_repo = Some(analysis_repo);
+        self
+    }
+
+    /// Drop every stored analysis for `repository_id`.  Called after indexing
+    /// changes the call graph, since stored analyses derive entirely from it.
+    async fn invalidate_analyses(&self, repository_id: &str) -> Result<(), DomainError> {
+        if let Some(analysis_repo) = &self.analysis_repo {
+            analysis_repo.delete_by_repository(repository_id).await?;
+        }
+        Ok(())
     }
 
     /// Set the maximum number of concurrent parse tasks.
@@ -212,6 +233,7 @@ impl IndexRepositoryUseCase {
                 if let Some(channel_repo) = &self.channel_endpoint_repo {
                     channel_repo.delete_by_repository(existing.id()).await?;
                 }
+                self.invalidate_analyses(existing.id()).await?;
                 self.repository_repo.delete(existing.id()).await?;
             }
             return self
@@ -596,6 +618,10 @@ impl IndexRepositoryUseCase {
             unchanged_count
         );
 
+        // Any file change rewrites part of the call graph, so analyses derived
+        // from it (clusters, communities, features) become stale.
+        let call_graph_changed = !added.is_empty() || !modified.is_empty() || !deleted.is_empty();
+
         // Track total chunks deleted
         let mut deleted_chunk_count = 0u64;
 
@@ -840,6 +866,10 @@ impl IndexRepositoryUseCase {
         // confirmation can span changed and unchanged files).
         self.resolve_channels(repository.id(), absolute_path, &scip_refs)
             .await?;
+
+        if call_graph_changed {
+            self.invalidate_analyses(repository.id()).await?;
+        }
 
         let duration = start_time.elapsed();
         info!(

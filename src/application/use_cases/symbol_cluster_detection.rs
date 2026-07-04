@@ -15,10 +15,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::cluster_detection::{kind_weight, leiden, slugify, split_identifier, Graph, STOP_WORDS};
-use crate::application::CallGraphUseCase;
+use crate::application::{AnalysisRepository, CallGraphUseCase};
 use crate::domain::{
     CommunityMeta, DomainError, GraphEdge, GraphLevel, GraphNode, GraphView, SymbolCommunity,
     SymbolCommunityGraph,
@@ -33,6 +34,10 @@ const MIN_KEYWORD_LEN: usize = 3;
 /// call graph and answer membership queries against them.
 pub struct SymbolClusterDetectionUseCase {
     call_graph: Arc<CallGraphUseCase>,
+    /// Optional persistence for detected communities. When present, detection
+    /// becomes a read-through cache: stored results are served directly and
+    /// fresh results are written back after computing.
+    storage: Option<Arc<dyn AnalysisRepository>>,
 }
 
 /// The intermediate symbol graph plus the bookkeeping needed to turn a Leiden
@@ -51,39 +56,71 @@ struct SymbolGraph {
 
 impl SymbolClusterDetectionUseCase {
     pub fn new(call_graph: Arc<CallGraphUseCase>) -> Self {
-        Self { call_graph }
+        Self {
+            call_graph,
+            storage: None,
+        }
     }
 
-    /// Detect all symbol communities in `repository_id`.
+    /// Attach persistent storage so detected communities are cached in the
+    /// database instead of being recomputed on every query.
+    pub fn with_storage(mut self, storage: Arc<dyn AnalysisRepository>) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
+    /// Detect all symbol communities in `repository_id`, serving stored results
+    /// when available and persisting freshly computed ones.
     pub async fn detect_communities(
         &self,
         repository_id: &str,
     ) -> Result<SymbolCommunityGraph, DomainError> {
-        let (scg, _sg) = self.detect_communities_with_graph(repository_id).await?;
+        if let Some(stored) = self.load_stored(repository_id).await {
+            return Ok(stored);
+        }
+        let sg = self.build_symbol_graph(repository_id).await?;
+        let scg = self.compute_communities(repository_id, &sg);
+        self.store(&scg).await;
         Ok(scg)
     }
 
-    /// Internal: Detect communities and return both the community graph and the
-    /// underlying symbol graph, so callers that need both (e.g. `graph_view()`)
-    /// can reuse the same snapshot without rebuilding.
-    async fn detect_communities_with_graph(
-        &self,
-        repository_id: &str,
-    ) -> Result<(SymbolCommunityGraph, SymbolGraph), DomainError> {
-        let sg = self.build_symbol_graph(repository_id).await?;
+    /// Load the stored community graph, if storage is attached and has one.
+    /// Storage read failures degrade to a recompute rather than failing the
+    /// query.
+    async fn load_stored(&self, repository_id: &str) -> Option<SymbolCommunityGraph> {
+        let storage = self.storage.as_ref()?;
+        match storage.load_symbol_community_graph(repository_id).await {
+            Ok(stored) => stored,
+            Err(e) => {
+                warn!("Failed to load stored symbol communities, recomputing: {e}");
+                None
+            }
+        }
+    }
+
+    /// Persist a freshly computed community graph, best-effort. Failures are
+    /// expected on read-only database connections and only cost the cache.
+    async fn store(&self, graph: &SymbolCommunityGraph) {
+        if let Some(storage) = &self.storage {
+            if let Err(e) = storage.save_symbol_community_graph(graph).await {
+                debug!("Skipping symbol-community persistence: {e}");
+            }
+        }
+    }
+
+    /// Run Leiden over a prebuilt symbol graph and shape the partition into
+    /// named, scored communities.
+    fn compute_communities(&self, repository_id: &str, sg: &SymbolGraph) -> SymbolCommunityGraph {
         let total_symbols = sg.symbols.len();
         let total_edges = sg.edges.len();
 
         if total_symbols == 0 || total_edges == 0 {
-            return Ok((
-                SymbolCommunityGraph {
-                    communities: Vec::new(),
-                    repository_id: repository_id.to_string(),
-                    total_symbols,
-                    total_edges,
-                },
-                sg,
-            ));
+            return SymbolCommunityGraph {
+                communities: Vec::new(),
+                repository_id: repository_id.to_string(),
+                total_symbols,
+                total_edges,
+            };
         }
 
         let partition = leiden(&sg.graph);
@@ -139,15 +176,12 @@ impl SymbolClusterDetectionUseCase {
         // Largest first, then name for a stable order.
         communities.sort_by(|a, b| b.size.cmp(&a.size).then(a.name.cmp(&b.name)));
 
-        Ok((
-            SymbolCommunityGraph {
-                communities,
-                repository_id: repository_id.to_string(),
-                total_symbols,
-                total_edges,
-            },
-            sg,
-        ))
+        SymbolCommunityGraph {
+            communities,
+            repository_id: repository_id.to_string(),
+            total_symbols,
+            total_edges,
+        }
     }
 
     /// Return the community that `symbol` belongs to, or `None` if the symbol is
@@ -172,7 +206,19 @@ impl SymbolClusterDetectionUseCase {
     /// size-sorted [`SymbolCommunityGraph::communities`] list, so it matches the
     /// `symbol-clusters` command's ordering, names, and cohesion.
     pub async fn graph_view(&self, repository_id: &str) -> Result<GraphView, DomainError> {
-        let (scg, sg) = self.detect_communities_with_graph(repository_id).await?;
+        // The node/edge view always needs the symbol graph; the community
+        // assignment can come from storage. Both derive deterministically from
+        // the same call-graph snapshot (stored analyses are invalidated on
+        // re-index), so a stored partition stays consistent with a fresh graph.
+        let sg = self.build_symbol_graph(repository_id).await?;
+        let scg = match self.load_stored(repository_id).await {
+            Some(stored) => stored,
+            None => {
+                let scg = self.compute_communities(repository_id, &sg);
+                self.store(&scg).await;
+                scg
+            }
+        };
 
         // Symbol FQN → community index (position in the size-sorted list).
         let mut symbol_community: HashMap<&str, usize> = HashMap::new();

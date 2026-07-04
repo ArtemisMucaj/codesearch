@@ -37,9 +37,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crate::application::FileRelationshipUseCase;
+use crate::application::{AnalysisRepository, FileRelationshipUseCase};
 use crate::domain::{
     Cluster, ClusterGraph, CommunityMeta, DomainError, FileEdge, GraphEdge, GraphLevel, GraphNode,
     GraphView, Language,
@@ -880,20 +881,58 @@ const MIN_NODES_FOR_CLUSTERING: usize = 10;
 
 pub struct ClusterDetectionUseCase {
     file_graph: Arc<FileRelationshipUseCase>,
+    /// Optional persistence for detected clusters. When present, detection
+    /// becomes a read-through cache: stored results are served directly and
+    /// fresh results are written back after computing.
+    storage: Option<Arc<dyn AnalysisRepository>>,
 }
 
 impl ClusterDetectionUseCase {
     pub fn new(file_graph: Arc<FileRelationshipUseCase>) -> Self {
-        Self { file_graph }
+        Self {
+            file_graph,
+            storage: None,
+        }
     }
 
-    /// Build the dependency graph, run the Leiden algorithm, and return the
-    /// resulting clusters together with the raw [`crate::domain::FileGraph`].
+    /// Attach persistent storage so detected clusters are cached in the
+    /// database instead of being recomputed on every query.
+    pub fn with_storage(mut self, storage: Arc<dyn AnalysisRepository>) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
+    /// Load the stored cluster graph, if storage is attached and has one.
+    /// Storage read failures degrade to a recompute rather than failing the
+    /// query.
+    async fn load_stored(&self, repository_id: &str) -> Option<ClusterGraph> {
+        let storage = self.storage.as_ref()?;
+        match storage.load_cluster_graph(repository_id).await {
+            Ok(stored) => stored,
+            Err(e) => {
+                warn!("Failed to load stored clusters, recomputing: {e}");
+                None
+            }
+        }
+    }
+
+    /// Persist a freshly computed cluster graph, best-effort. Failures are
+    /// expected on read-only database connections and only cost the cache.
+    async fn store(&self, graph: &ClusterGraph) {
+        if let Some(storage) = &self.storage {
+            if let Err(e) = storage.save_cluster_graph(graph).await {
+                debug!("Skipping cluster persistence: {e}");
+            }
+        }
+    }
+
+    /// Return the cluster graph together with the raw file-dependency graph.
     ///
-    /// Callers that only need the [`ClusterGraph`] should use [`Self::create_clusters`].
-    /// The graph is exposed here so `architecture_overview` can reuse it for
-    /// inter-cluster edge aggregation without a second `build_graph` call.
-    async fn create_clusters_with_graph(
+    /// The dependency graph is always rebuilt (callers need it for edge-level
+    /// detail); the Leiden partition is served from storage when available.
+    /// Both derive deterministically from the same call-graph snapshot (stored
+    /// analyses are invalidated on re-index), so they stay consistent.
+    async fn clusters_and_graph(
         &self,
         repository_id: &str,
     ) -> Result<(ClusterGraph, crate::domain::FileGraph), DomainError> {
@@ -901,7 +940,24 @@ impl ClusterDetectionUseCase {
             .file_graph
             .build_graph(Some(&[repository_id.to_string()]), 1, false)
             .await?;
+        let cg = match self.load_stored(repository_id).await {
+            Some(stored) => stored,
+            None => {
+                let cg = self.compute_clusters(repository_id, &graph);
+                self.store(&cg).await;
+                cg
+            }
+        };
+        Ok((cg, graph))
+    }
 
+    /// Run Leiden on a prebuilt file-dependency graph and shape the partition
+    /// into named, scored clusters.
+    fn compute_clusters(
+        &self,
+        repository_id: &str,
+        graph: &crate::domain::FileGraph,
+    ) -> ClusterGraph {
         let files: Vec<String> = {
             let mut v: Vec<String> = graph.files.iter().cloned().collect();
             v.sort();
@@ -955,15 +1011,12 @@ impl ClusterDetectionUseCase {
                     }
                 })
                 .collect();
-            return Ok((
-                ClusterGraph {
-                    clusters,
-                    repository_id: repository_id.to_string(),
-                    total_files: n,
-                    total_edges,
-                },
-                graph,
-            ));
+            return ClusterGraph {
+                clusters,
+                repository_id: repository_id.to_string(),
+                total_files: n,
+                total_edges,
+            };
         }
 
         // Build index: file path → node index.
@@ -1082,20 +1135,27 @@ impl ClusterDetectionUseCase {
         // Sort by descending size, then name for stability.
         clusters.sort_by(|a, b| b.size.cmp(&a.size).then(a.name.cmp(&b.name)));
 
-        Ok((
-            ClusterGraph {
-                clusters,
-                repository_id: repository_id.to_string(),
-                total_files: n,
-                total_edges,
-            },
-            graph,
-        ))
+        ClusterGraph {
+            clusters,
+            repository_id: repository_id.to_string(),
+            total_files: n,
+            total_edges,
+        }
     }
 
-    /// Detect clusters in the dependency graph of `repository_id`.
+    /// Detect clusters in the dependency graph of `repository_id`, serving
+    /// stored results when available and persisting freshly computed ones.
     pub async fn create_clusters(&self, repository_id: &str) -> Result<ClusterGraph, DomainError> {
-        Ok(self.create_clusters_with_graph(repository_id).await?.0)
+        if let Some(stored) = self.load_stored(repository_id).await {
+            return Ok(stored);
+        }
+        let graph = self
+            .file_graph
+            .build_graph(Some(&[repository_id.to_string()]), 1, false)
+            .await?;
+        let cg = self.compute_clusters(repository_id, &graph);
+        self.store(&cg).await;
+        Ok(cg)
     }
 
     /// Build a render-ready [`GraphView`] of the file-dependency graph, with each
@@ -1106,7 +1166,7 @@ impl ClusterDetectionUseCase {
     /// the community index of each node is the cluster's position in the
     /// size-sorted [`ClusterGraph::clusters`] list.
     pub async fn graph_view(&self, repository_id: &str) -> Result<GraphView, DomainError> {
-        let (cg, graph) = self.create_clusters_with_graph(repository_id).await?;
+        let (cg, graph) = self.clusters_and_graph(repository_id).await?;
 
         // Nodes: every cluster member, in (cluster, member) order so the layout
         // is deterministic. Community index = position in the size-sorted list.
@@ -1183,7 +1243,7 @@ impl ClusterDetectionUseCase {
         file_path: &str,
         repository_id: &str,
     ) -> Result<Option<Cluster>, DomainError> {
-        let (mut cg, _) = self.create_clusters_with_graph(repository_id).await?;
+        let mut cg = self.create_clusters(repository_id).await?;
         // Build a file → cluster index for O(1) lookup instead of scanning all members.
         let cluster_idx: Option<usize> = cg
             .clusters
@@ -1198,7 +1258,7 @@ impl ClusterDetectionUseCase {
     /// One row per cluster: name, file count, dominant language, and the top 3
     /// outgoing inter-cluster dependencies by summed edge weight.
     pub async fn architecture_overview(&self, repository_id: &str) -> Result<String, DomainError> {
-        let (cg, graph) = self.create_clusters_with_graph(repository_id).await?;
+        let (cg, graph) = self.clusters_and_graph(repository_id).await?;
 
         if cg.clusters.is_empty() {
             return Ok(format!(

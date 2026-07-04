@@ -241,6 +241,10 @@ duckdb ~/.codesearch/codesearch.duckdb "SELECT callee_symbol, COUNT(*) as cnt FR
 
 # Check which caller→callee pairs exist for a symbol
 duckdb ~/.codesearch/codesearch.duckdb "SELECT caller_symbol, callee_symbol, reference_kind FROM symbol_references WHERE callee_symbol LIKE '%Autoloader%'"
+
+# Inspect cached analysis results (Leiden clusters, symbol communities, execution features)
+duckdb ~/.codesearch/codesearch.duckdb "SELECT repository_id, kind, total_nodes, total_edges, computed_at FROM analysis_runs"
+duckdb ~/.codesearch/codesearch.duckdb "SELECT name, level, size, cohesion FROM clusters ORDER BY size DESC LIMIT 10"
 ```
 
 ### Lint & Format

@@ -5,7 +5,7 @@ pub mod domain;
 pub mod tui;
 
 pub use application::{
-    CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase,
+    AnalysisRepository, CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase,
     ChannelEndpointRepository, ChannelExtractor, ChannelLinkOptions, ChannelLinkReport,
     ChannelLinkUseCase, ChannelResolver, ChatClient, ClusterDetectionUseCase, ContextNode,
     DeleteRepositoryUseCase, EmbeddingService, ExecutionFeaturesUseCase, ExplainResult,
@@ -24,7 +24,7 @@ pub use cli::{
 };
 
 pub use connector::{
-    AnthropicClient, AnthropicReranking, DuckdbCallGraphRepository,
+    AnthropicClient, AnthropicReranking, DuckdbAnalysisRepository, DuckdbCallGraphRepository,
     DuckdbChannelEndpointRepository, DuckdbFileHashRepository, DuckdbMetadataRepository,
     DuckdbVectorRepository, InMemoryVectorRepository, LlmQueryExpander, MockEmbedding,
     MockReranking, NamespaceEmbeddingConfig, NoEmbedding, OpenAiChatClient, OpenAiEmbedding,
