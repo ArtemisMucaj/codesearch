@@ -357,16 +357,24 @@ fn render_text(
         first = false;
         out.push_str(&format!("{}:\n", section.title));
 
+        // Rows are pre-sorted by channel, so same-channel sites are adjacent.
+        // Print the channel label once as a header, then each call site (and
+        // its matched counterparts) indented beneath it.
+        let mut current_channel: Option<String> = None;
         for row in rows {
+            let label = channel_label(row.endpoint);
+            if current_channel.as_deref() != Some(label.as_str()) {
+                out.push_str(&format!("  {label}\n"));
+                current_channel = Some(label);
+            }
             out.push_str(&format!(
-                "  {} ← {}\n",
-                channel_label(row.endpoint),
+                "    ← {}\n",
                 endpoint_line(row.endpoint, repo_names),
             ));
             if !unmatched_only {
                 for counterpart in &row.matches {
                     out.push_str(&format!(
-                        "      └── {} {}\n",
+                        "        └── {} {}\n",
                         section.link_verb,
                         endpoint_line(counterpart, repo_names),
                     ));
@@ -539,16 +547,18 @@ mod tests {
         let producers = out.find("Messaging producers:").unwrap();
         assert!(servers < clients && clients < consumers && consumers < producers);
 
-        // HTTP verb prefixes the route (no `http:` prefix); mirrored arrows.
+        // Channel is a header line; each call site is indented beneath it.
         // Server links upstream ("from"), client links downstream ("by").
-        assert!(out.contains("POST /v1/read/{} ← engine: router.ts:23 (controllerRouter)"));
+        assert!(out.contains("POST /v1/read/{}\n"));
+        assert!(out.contains("← engine: router.ts:23 (controllerRouter)"));
         assert!(out.contains("└── from gateway: client.ts:10 (readNode)"));
-        assert!(out.contains("GET /v1/read/{} ← gateway: client.ts:10 (readNode)"));
+        assert!(out.contains("← gateway: client.ts:10 (readNode)"));
         assert!(out.contains("└── by engine: router.ts:23 (controllerRouter)"));
 
         // Messaging uses the protocol name as the prefix.
-        assert!(out.contains("Kafka orders.created ← svc-a: checkout.ts:12 (checkout)"));
-        assert!(out.contains("Kafka orders.created ← svc-b: worker.ts:30 (onOrder)"));
+        assert!(out.contains("Kafka orders.created\n"));
+        assert!(out.contains("← svc-a: checkout.ts:12 (checkout)"));
+        assert!(out.contains("← svc-b: worker.ts:30 (onOrder)"));
         assert!(out.contains("└── by svc-b: worker.ts:30 (onOrder)"));
         assert!(out.contains("└── from svc-a: checkout.ts:12 (checkout)"));
     }
@@ -577,9 +587,11 @@ mod tests {
 
         let full = render_text(&report, &HashMap::new(), false);
         assert!(full.contains("Messaging producers:"));
-        assert!(full.contains(
-            "MQTT requestTopic ← engine: broker.ts:102 (publish) [conf 0.80] [unresolved]"
-        ));
+        // Channel header, then the indented call site.
+        assert!(full.contains("MQTT requestTopic\n"));
+        assert!(
+            full.contains("← engine: broker.ts:102 (publish) [conf 0.80] [unresolved]")
+        );
         assert!(!full.contains("└──"), "dangling endpoint must have no arrow");
 
         // `--unmatched` keeps it (no counterpart) and still draws no arrow.
@@ -600,5 +612,44 @@ mod tests {
             render_text(&report, &HashMap::new(), false),
             "No channel endpoints found."
         );
+    }
+
+    /// Two call sites on the same channel share one header, listed beneath it.
+    #[test]
+    fn same_channel_sites_are_grouped_under_one_header() {
+        let site_a = endpoint(
+            "engine",
+            "broker.ts",
+            102,
+            Protocol::Mqtt,
+            ChannelRole::Producer,
+            "+/request",
+        )
+        .with_enclosing_symbol("publish")
+        .as_pattern();
+        let site_b = endpoint(
+            "engine",
+            "interaction-model.ts",
+            27,
+            Protocol::Mqtt,
+            ChannelRole::Producer,
+            "+/request",
+        )
+        .with_enclosing_symbol("request")
+        .as_pattern();
+
+        let report = ChannelLinkReport {
+            edges: vec![],
+            unmatched_producers: vec![site_a, site_b],
+            unmatched_consumers: vec![],
+            noisy_channels: vec![],
+        };
+        let out = render_text(&report, &HashMap::new(), false);
+
+        // The channel label appears exactly once as a header…
+        assert_eq!(out.matches("MQTT +/request [pattern]").count(), 1);
+        // …with both call sites listed beneath it.
+        assert!(out.contains("← engine: broker.ts:102 (publish)"));
+        assert!(out.contains("← engine: interaction-model.ts:27 (request)"));
     }
 }
