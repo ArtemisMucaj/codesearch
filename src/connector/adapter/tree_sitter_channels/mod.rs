@@ -17,7 +17,7 @@ use tracing::{debug, warn};
 use tree_sitter::{Node, Parser, Query, QueryCursor};
 
 use crate::application::{
-    normalize_http_route, split_http_url, ChannelExtractor, ChannelResolver, ResolvedConfigValue,
+    normalize_channel, ChannelExtractor, ChannelResolver, ResolvedConfigValue,
 };
 use crate::domain::{ChannelEndpoint, DomainError, EndpointSource, Language, Protocol};
 
@@ -313,24 +313,6 @@ impl ChannelResolver for TreeSitterChannelExtractor {
         config_resolver::infer_topic_pattern(expression, call_site_source).or_else(|| {
             config_resolver::resolve_via_interface(call_site_source, call_line, &borrowed)
         })
-    }
-}
-
-/// Per-protocol channel normalization at extraction time.
-///
-/// Returns `(host, normalized, is_pattern)`.
-fn normalize_channel(protocol: Protocol, raw: &str) -> (Option<String>, String, bool) {
-    match protocol {
-        Protocol::Http => {
-            let (host, path) = split_http_url(raw);
-            (host, normalize_http_route(&path), false)
-        }
-        Protocol::Mqtt => {
-            let trimmed = raw.trim().to_string();
-            let is_pattern = trimmed.contains('+') || trimmed.contains('#');
-            (None, trimmed, is_pattern)
-        }
-        Protocol::Kafka | Protocol::Amqp | Protocol::Grpc => (None, raw.trim().to_string(), false),
     }
 }
 

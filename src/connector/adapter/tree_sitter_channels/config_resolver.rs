@@ -14,7 +14,20 @@
 //! on anything it does not understand, leaving the endpoint unresolved rather
 //! than guessing.
 
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
+
+/// Parse a TypeScript/JavaScript source string into a syntax tree.
+///
+/// Every resolver helper below works over the same grammar, so this centralises
+/// the parser setup they all share. Returns `None` if the grammar fails to load
+/// or the source cannot be parsed.
+fn parse_ts(source: &str) -> Option<Tree> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        .ok()?;
+    parser.parse(source, None)
+}
 
 /// A channel value recovered from config.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,11 +123,7 @@ pub(super) fn infer_topic_pattern(expression: &str, source: &str) -> Option<Stri
 
     // Case 2: a plain identifier bound to `this.getX(...)`; follow the getter.
     if is_plain_identifier(expr) {
-        let mut parser = Parser::new();
-        parser
-            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-            .ok()?;
-        let tree = parser.parse(source, None)?;
+        let tree = parse_ts(source)?;
         let getter = variable_getter_method(tree.root_node(), source, expr)?;
         let template = method_returns_template(tree.root_node(), source, &getter)?;
         return template_to_pattern_str(&template);
@@ -228,12 +237,8 @@ fn find_return_template(node: Node<'_>, source: &str) -> Option<String> {
 /// mapping `${…}` → `+`. Returns `None` if there are no interpolations (a plain
 /// literal is not a pattern — it should resolve as an exact channel elsewhere).
 fn template_to_pattern_str(template: &str) -> Option<String> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-        .ok()?;
     // Parse as an expression statement.
-    let tree = parser.parse(template, None)?;
+    let tree = parse_ts(template)?;
     let ts = find_first(tree.root_node(), "template_string")?;
     template_node_to_pattern(ts, template)
 }
@@ -311,11 +316,7 @@ pub(super) fn resolve_via_interface(
 
 /// The `(field, method)` of a `this.<field>.<method>(…)` call at `line`.
 fn call_receiver_and_method(source: &str, line: u32) -> Option<(String, String)> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-        .ok()?;
-    let tree = parser.parse(source, None)?;
+    let tree = parse_ts(source)?;
 
     let mut result = None;
     find_this_field_call_at(tree.root_node(), source, line, &mut result);
@@ -367,11 +368,7 @@ fn find_this_field_call_at(
 /// The declared type of constructor parameter `field` anywhere in `source`
 /// (`private broker: Publisher` → `Publisher`).
 fn field_type_in_source(source: &str, field: &str) -> Option<String> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-        .ok()?;
-    let tree = parser.parse(source, None)?;
+    let tree = parse_ts(source)?;
     let mut result = None;
     find_param_type(tree.root_node(), source, field, &mut result);
     result
@@ -402,11 +399,7 @@ fn find_param_type(node: Node<'_>, source: &str, field: &str, out: &mut Option<S
 
 /// The name of the class in `source` that `implements <interface>`.
 fn class_implementing(source: &str, interface: &str) -> Option<String> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-        .ok()?;
-    let tree = parser.parse(source, None)?;
+    let tree = parse_ts(source)?;
     let mut result = None;
     find_implementing_class(tree.root_node(), source, interface, &mut result);
     result
@@ -444,11 +437,7 @@ fn find_implementing_class(
 /// Inside `class_name.method_name`, the first argument text of a
 /// `this.<client>.<method_name>(<arg>, …)` call — the client-level topic.
 fn method_client_topic_arg(source: &str, class_name: &str, method_name: &str) -> Option<String> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-        .ok()?;
-    let tree = parser.parse(source, None)?;
+    let tree = parse_ts(source)?;
     let class = find_class(tree.root_node(), source, class_name)?;
     let method = class_method(class, source, method_name)?;
 
@@ -512,11 +501,7 @@ fn find_inner_client_call_arg(
 
 /// The zero-based position of parameter `param` in `class_name`'s constructor.
 fn constructor_param_index(source: &str, class_name: &str, param: &str) -> Option<usize> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-        .ok()?;
-    let tree = parser.parse(source, None)?;
+    let tree = parse_ts(source)?;
 
     let class = find_class(tree.root_node(), source, class_name)?;
     let ctor = find_constructor(class, source)?;
@@ -545,11 +530,7 @@ fn constructor_arg_object_entry(
     arg_index: usize,
     key: &str,
 ) -> Option<String> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-        .ok()?;
-    let tree = parser.parse(source, None)?;
+    let tree = parse_ts(source)?;
 
     let mut result = None;
     find_new_expression(tree.root_node(), source, class_name, &mut |args| {
@@ -595,13 +576,9 @@ pub(super) fn resolve_in_config(
         return None;
     }
 
-    let mut parser = Parser::new();
     // TS is a superset of the JS object syntax we read; parsing config as TS
     // handles both `.ts` and `.js` config modules.
-    parser
-        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-        .ok()?;
-    let tree = parser.parse(config_source, None)?;
+    let tree = parse_ts(config_source)?;
 
     let object = find_named_object(tree.root_node(), config_source, config_object)?;
     let leaf = walk_object_path(object, config_source, path)?;

@@ -480,7 +480,15 @@ impl IndexRepositoryUseCase {
             return Ok(());
         }
 
-        let (config_candidates, sources_by_file) = discover_config_candidates(absolute_path).await;
+        // Config-candidate discovery walks and reads every JS/TS file in the
+        // repo — only worth it when something is actually unresolved. When every
+        // endpoint is already a resolved literal, skip the walk; library
+        // confirmation (which needs no candidates) still runs below.
+        let (config_candidates, sources_by_file) = if endpoints.iter().any(|e| !e.is_resolved()) {
+            discover_config_candidates(absolute_path).await
+        } else {
+            (Vec::new(), HashMap::new())
+        };
 
         let use_case = ResolveChannelsUseCase::new(resolver.clone());
         let resolved = use_case.resolve(endpoints, scip_refs, &config_candidates, &sources_by_file);

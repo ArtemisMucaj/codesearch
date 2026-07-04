@@ -1,5 +1,3 @@
-use async_trait::async_trait;
-
 /// A channel value recovered from a config module (`process.env.X ||
 /// 'default'`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,7 +16,6 @@ pub struct ResolvedConfigValue {
 /// of the candidate config modules, an implementation walks the object literal
 /// and returns the resolved value. Implementations live in the connector layer
 /// (tree-sitter); the use case supplies the candidate sources it discovered.
-#[async_trait]
 pub trait ChannelResolver: Send + Sync {
     /// Resolve `expression` (e.g. `this.config.broker.topics.orders`) against
     /// the given `(object_name, module_source)` candidates. Returns `None` when

@@ -37,22 +37,4 @@ pub trait ChannelEndpointRepository: Send + Sync {
 
     /// Delete all endpoints for a repository.
     async fn delete_by_repository(&self, repository_id: &str) -> Result<(), DomainError>;
-
-    /// Get statistics about the stored endpoints for a repository.
-    async fn get_stats(&self, repository_id: &str) -> Result<ChannelStats, DomainError>;
-}
-
-/// Statistics about the channel endpoints stored for a repository.
-#[derive(Debug, Clone, Default)]
-pub struct ChannelStats {
-    /// Total number of endpoints.
-    pub total_endpoints: u64,
-    /// Number of producer-side endpoints.
-    pub producers: u64,
-    /// Number of consumer-side endpoints.
-    pub consumers: u64,
-    /// Number of unresolved endpoints (identifier instead of literal).
-    pub unresolved: u64,
-    /// Breakdown by protocol.
-    pub by_protocol: Vec<(String, u64)>,
 }

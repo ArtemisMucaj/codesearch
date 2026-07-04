@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::application::ChannelResolver;
+use crate::application::{normalize_channel, ChannelResolver};
 use crate::domain::{ChannelEndpoint, Protocol, SymbolReference};
 
 /// Confidence assigned to an endpoint once its library is confirmed via SCIP —
@@ -108,7 +108,7 @@ impl ResolveChannelsUseCase {
                 class.as_deref(),
                 config_candidates,
             ) {
-                let (_, normalized, _) = normalize(endpoint.protocol(), &resolved.value);
+                let (_, normalized, _) = normalize_channel(endpoint.protocol(), &resolved.value);
                 endpoint = endpoint.resolve_channel(resolved.value, normalized);
                 if let Some(env) = resolved.env_var {
                     endpoint = endpoint.with_env_var(env);
@@ -127,7 +127,7 @@ impl ResolveChannelsUseCase {
                     endpoint.line(),
                     config_candidates,
                 ) {
-                    let (_, normalized, _) = normalize(endpoint.protocol(), &pattern);
+                    let (_, normalized, _) = normalize_channel(endpoint.protocol(), &pattern);
                     endpoint = endpoint.resolve_channel(pattern, normalized).as_pattern();
                 }
             }
@@ -148,24 +148,6 @@ fn enclosing_class_at(
     refs.iter()
         .filter(|r| r.reference_line().abs_diff(line) <= CALL_SITE_LINE_WINDOW)
         .find_map(|r| r.enclosing_scope().map(str::to_string))
-}
-
-/// Per-protocol normalization mirroring the extractor's, so a config-resolved
-/// value joins the same way an inline literal would.
-fn normalize(protocol: Protocol, raw: &str) -> (Option<String>, String, bool) {
-    use crate::application::{normalize_http_route, split_http_url};
-    match protocol {
-        Protocol::Http => {
-            let (host, path) = split_http_url(raw);
-            (host, normalize_http_route(&path), false)
-        }
-        Protocol::Mqtt => {
-            let trimmed = raw.trim().to_string();
-            let is_pattern = trimmed.contains('+') || trimmed.contains('#');
-            (None, trimmed, is_pattern)
-        }
-        Protocol::Kafka | Protocol::Amqp | Protocol::Grpc => (None, raw.trim().to_string(), false),
-    }
 }
 
 /// How far above/below the endpoint's line a SCIP reference may sit and still

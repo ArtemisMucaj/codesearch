@@ -5,7 +5,7 @@ use duckdb::{params, Connection};
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::application::{ChannelEndpointRepository, ChannelStats};
+use crate::application::ChannelEndpointRepository;
 use crate::domain::{ChannelEndpoint, ChannelRole, DomainError, EndpointSource, Protocol};
 
 pub struct DuckdbChannelEndpointRepository {
@@ -318,65 +318,6 @@ impl ChannelEndpointRepository for DuckdbChannelEndpointRepository {
         );
         Ok(())
     }
-
-    async fn get_stats(&self, repository_id: &str) -> Result<ChannelStats, DomainError> {
-        let conn = self.conn.lock().await;
-
-        let totals = conn.query_row(
-            "SELECT COUNT(*), \
-                    COUNT(*) FILTER (WHERE role = 'producer'), \
-                    COUNT(*) FILTER (WHERE role = 'consumer'), \
-                    COUNT(*) FILTER (WHERE NOT resolved) \
-             FROM channel_endpoints WHERE repository_id = ?",
-            params![repository_id],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            },
-        );
-        let (total, producers, consumers, unresolved) = match totals {
-            Ok(t) => t,
-            Err(ref e) if Self::is_missing_table(e) => return Ok(ChannelStats::default()),
-            Err(e) => {
-                return Err(DomainError::storage(format!(
-                    "Failed to count endpoints: {}",
-                    e
-                )))
-            }
-        };
-
-        let mut stmt = conn
-            .prepare(
-                "SELECT protocol, COUNT(*) FROM channel_endpoints \
-                 WHERE repository_id = ? GROUP BY protocol ORDER BY COUNT(*) DESC",
-            )
-            .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
-
-        let rows = stmt
-            .query_map(params![repository_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })
-            .map_err(|e| DomainError::storage(format!("Failed to query by protocol: {}", e)))?;
-
-        let mut by_protocol = Vec::new();
-        for row in rows {
-            let (protocol, count) =
-                row.map_err(|e| DomainError::storage(format!("Failed to read row: {}", e)))?;
-            by_protocol.push((protocol, count as u64));
-        }
-
-        Ok(ChannelStats {
-            total_endpoints: total as u64,
-            producers: producers as u64,
-            consumers: consumers as u64,
-            unresolved: unresolved as u64,
-            by_protocol,
-        })
-    }
 }
 
 #[cfg(test)]
@@ -492,26 +433,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_stats() {
-        let repo = create_test_repo().await;
-
-        repo.save_batch(&[
-            endpoint("repo-a", "src/a.py", 1, ChannelRole::Producer),
-            endpoint("repo-a", "src/b.py", 2, ChannelRole::Consumer),
-            endpoint("repo-a", "src/c.py", 3, ChannelRole::Consumer).unresolved(),
-        ])
-        .await
-        .unwrap();
-
-        let stats = repo.get_stats("repo-a").await.unwrap();
-        assert_eq!(stats.total_endpoints, 3);
-        assert_eq!(stats.producers, 1);
-        assert_eq!(stats.consumers, 2);
-        assert_eq!(stats.unresolved, 1);
-        assert_eq!(stats.by_protocol, vec![("kafka".to_string(), 3)]);
-    }
-
-    #[tokio::test]
     async fn test_missing_table_reads_as_empty() {
         // no-init constructor over a fresh connection: table does not exist.
         let conn = Connection::open_in_memory().unwrap();
@@ -520,8 +441,6 @@ mod tests {
 
         assert!(repo.find_by_repository("repo-a").await.unwrap().is_empty());
         assert!(repo.find_all().await.unwrap().is_empty());
-        let stats = repo.get_stats("repo-a").await.unwrap();
-        assert_eq!(stats.total_endpoints, 0);
     }
 
     #[tokio::test]

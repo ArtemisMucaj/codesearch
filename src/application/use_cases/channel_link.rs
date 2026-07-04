@@ -321,6 +321,27 @@ pub fn normalize_http_route(path: &str) -> String {
     }
 }
 
+/// Per-protocol channel normalization: turns a raw channel string into the
+/// `(host, normalized, is_pattern)` triple used for producer↔consumer joins.
+///
+/// Both the extraction pass (inline literals) and the resolution pass
+/// (config-resolved values) run channels through this so they join the same
+/// way regardless of where the value came from.
+pub fn normalize_channel(protocol: Protocol, raw: &str) -> (Option<String>, String, bool) {
+    match protocol {
+        Protocol::Http => {
+            let (host, path) = split_http_url(raw);
+            (host, normalize_http_route(&path), false)
+        }
+        Protocol::Mqtt => {
+            let trimmed = raw.trim().to_string();
+            let is_pattern = trimmed.contains('+') || trimmed.contains('#');
+            (None, trimmed, is_pattern)
+        }
+        Protocol::Kafka | Protocol::Amqp | Protocol::Grpc => (None, raw.trim().to_string(), false),
+    }
+}
+
 /// Segment-wise HTTP template match: `{}` on either side matches any single
 /// concrete segment (`/users/123` client ↔ `/users/{}` server).
 pub fn http_route_matches(client_path: &str, server_template: &str) -> bool {
