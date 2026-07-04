@@ -391,10 +391,6 @@ pub enum Commands {
         #[arg(short, long)]
         protocol: Option<String>,
 
-        /// Show only unmatched (dangling and unresolved) endpoints.
-        #[arg(long)]
-        unmatched: bool,
-
         /// Drop edges whose confidence is below this threshold (0.0–1.0).
         #[arg(long)]
         min_confidence: Option<f32>,

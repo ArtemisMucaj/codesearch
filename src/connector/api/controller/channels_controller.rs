@@ -21,7 +21,6 @@ impl<'a> ChannelsController<'a> {
         &self,
         repositories: Option<Vec<String>>,
         protocol: Option<String>,
-        unmatched_only: bool,
         min_confidence: Option<f32>,
         exclude_channels: Vec<String>,
         include_tests: bool,
@@ -82,16 +81,9 @@ impl<'a> ChannelsController<'a> {
 
         match format {
             OutputFormatTextJson::Json => {
-                let mut report = report;
-                // Mirror the text path: `--unmatched` drops matched edges and
-                // fan-out noise so JSON output stays consistent with the flag.
-                if unmatched_only {
-                    report.edges.clear();
-                    report.noisy_channels.clear();
-                }
                 serde_json::to_string_pretty(&report).context("Failed to serialize report")
             }
-            OutputFormatTextJson::Text => Ok(render_text(&report, &repo_names, unmatched_only)),
+            OutputFormatTextJson::Text => Ok(render_text(&report, &repo_names)),
         }
     }
 }
@@ -331,23 +323,13 @@ impl<'a> RowSet<'a> {
     }
 }
 
-fn render_text(
-    report: &ChannelLinkReport,
-    repo_names: &HashMap<String, String>,
-    unmatched_only: bool,
-) -> String {
+fn render_text(report: &ChannelLinkReport, repo_names: &HashMap<String, String>) -> String {
     let sections = build_sections(report);
     let mut out = String::new();
     let mut first = true;
 
     for section in &sections {
-        // With `--unmatched`, keep only dangling endpoints (no counterpart).
-        let rows: Vec<&Row> = section
-            .rows
-            .iter()
-            .filter(|r| !unmatched_only || r.matches.is_empty())
-            .collect();
-        if rows.is_empty() {
+        if section.rows.is_empty() {
             continue;
         }
 
@@ -361,7 +343,7 @@ fn render_text(
         // Print the channel label once as a header, then each call site (and
         // its matched counterparts) indented beneath it.
         let mut current_channel: Option<String> = None;
-        for row in rows {
+        for row in &section.rows {
             let label = channel_label(row.endpoint);
             if current_channel.as_deref() != Some(label.as_str()) {
                 out.push_str(&format!("  {label}\n"));
@@ -371,14 +353,12 @@ fn render_text(
                 "    ← {}\n",
                 endpoint_line(row.endpoint, repo_names),
             ));
-            if !unmatched_only {
-                for counterpart in &row.matches {
-                    out.push_str(&format!(
-                        "        └── {} {}\n",
-                        section.link_verb,
-                        endpoint_line(counterpart, repo_names),
-                    ));
-                }
+            for counterpart in &row.matches {
+                out.push_str(&format!(
+                    "        └── {} {}\n",
+                    section.link_verb,
+                    endpoint_line(counterpart, repo_names),
+                ));
             }
         }
     }
@@ -454,7 +434,7 @@ mod tests {
             unmatched_consumers: vec![resolved],
             noisy_channels: vec![],
         };
-        let out = render_text(&report, &HashMap::new(), false);
+        let out = render_text(&report, &HashMap::new());
         assert!(
             out.contains("Kafka shipment_event  (env: KAFKA_SHIPMENT_EVENT_TOPIC, via kafkajs)")
         );
@@ -480,7 +460,7 @@ mod tests {
             unmatched_consumers: vec![unresolved],
             noisy_channels: vec![],
         };
-        let out = render_text(&report, &HashMap::new(), false);
+        let out = render_text(&report, &HashMap::new());
         assert!(out.contains("Kafka shipmentEvent"));
         assert!(!out.contains("this.config.broker"));
     }
@@ -538,7 +518,7 @@ mod tests {
             noisy_channels: vec![],
         };
 
-        let out = render_text(&report, &HashMap::new(), false);
+        let out = render_text(&report, &HashMap::new());
 
         // All four sections present, in order.
         let servers = out.find("HTTP servers:").unwrap();
@@ -563,10 +543,9 @@ mod tests {
         assert!(out.contains("└── from svc-a: checkout.ts:12 (checkout)"));
     }
 
-    /// A dangling unresolved producer renders as a plain line with no arrow,
-    /// and `--unmatched` keeps only such danglers.
+    /// A dangling unresolved producer renders as a plain line with no arrow.
     #[test]
-    fn dangling_endpoints_render_plainly_and_survive_unmatched_filter() {
+    fn dangling_endpoints_render_plainly() {
         let dangling = endpoint(
             "orders",
             "broker.ts",
@@ -585,7 +564,7 @@ mod tests {
             noisy_channels: vec![],
         };
 
-        let full = render_text(&report, &HashMap::new(), false);
+        let full = render_text(&report, &HashMap::new());
         assert!(full.contains("Messaging producers:"));
         // Channel header, then the indented call site.
         assert!(full.contains("MQTT requestTopic\n"));
@@ -594,11 +573,6 @@ mod tests {
             !full.contains("└──"),
             "dangling endpoint must have no arrow"
         );
-
-        // `--unmatched` keeps it (no counterpart) and still draws no arrow.
-        let unmatched = render_text(&report, &HashMap::new(), true);
-        assert!(unmatched.contains("MQTT requestTopic"));
-        assert!(!unmatched.contains("└──"));
     }
 
     #[test]
@@ -610,7 +584,7 @@ mod tests {
             noisy_channels: vec![],
         };
         assert_eq!(
-            render_text(&report, &HashMap::new(), false),
+            render_text(&report, &HashMap::new()),
             "No channel endpoints found."
         );
     }
@@ -645,7 +619,7 @@ mod tests {
             unmatched_consumers: vec![],
             noisy_channels: vec![],
         };
-        let out = render_text(&report, &HashMap::new(), false);
+        let out = render_text(&report, &HashMap::new());
 
         // The channel label appears exactly once as a header…
         assert_eq!(out.matches("MQTT +/request [pattern]").count(), 1);

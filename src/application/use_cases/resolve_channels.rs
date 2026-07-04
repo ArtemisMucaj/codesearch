@@ -108,8 +108,18 @@ impl ResolveChannelsUseCase {
                 class.as_deref(),
                 config_candidates,
             ) {
-                let (_, normalized, _) = normalize_channel(endpoint.protocol(), &resolved.value);
+                let (host, normalized, is_pattern) =
+                    normalize_channel(endpoint.protocol(), &resolved.value);
                 endpoint = endpoint.resolve_channel(resolved.value, normalized);
+                // Carry the metadata normalization recovered: an HTTP host from a
+                // config-driven URL, and MQTT wildcard state so the join treats
+                // it as a pattern (both are dropped otherwise).
+                if let Some(host) = host {
+                    endpoint = endpoint.with_host(host);
+                }
+                if is_pattern {
+                    endpoint = endpoint.as_pattern();
+                }
                 if let Some(env) = resolved.env_var {
                     endpoint = endpoint.with_env_var(env);
                 }

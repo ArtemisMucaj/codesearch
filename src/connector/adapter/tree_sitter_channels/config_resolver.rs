@@ -418,7 +418,10 @@ fn find_implementing_class(
         let implements = find_first(node, "implements_clause")
             .map(|c| {
                 let text = &source[c.byte_range()];
-                text.split_whitespace().any(|t| t == interface)
+                // `implements A, B` tokenizes as `A,` `B` — trim the comma so a
+                // multi-interface clause still matches each interface name.
+                text.split_whitespace()
+                    .any(|t| t.trim_end_matches(',') == interface)
             })
             .unwrap_or(false);
         if implements {

@@ -140,7 +140,6 @@ impl<'a> Router<'a> {
             Commands::Channels {
                 repository,
                 protocol,
-                unmatched,
                 min_confidence,
                 exclude_channel,
                 include_tests,
@@ -150,7 +149,6 @@ impl<'a> Router<'a> {
                     .channels(
                         repository,
                         protocol,
-                        unmatched,
                         min_confidence,
                         exclude_channel,
                         include_tests,

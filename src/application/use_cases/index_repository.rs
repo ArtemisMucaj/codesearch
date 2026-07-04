@@ -1252,7 +1252,17 @@ async fn discover_config_candidates(
         // Repo-relative path → source, so a call site can be re-read for
         // template/interface pattern inference (keys match endpoint file paths).
         let mut sources_by_file: HashMap<String, String> = HashMap::new();
-        for entry in WalkBuilder::new(&root).build().flatten() {
+        // Mirror the main indexing walker's filters so resolver discovery sees
+        // exactly the files the indexer indexed — no hidden/gitignored/generated
+        // files (e.g. `node_modules`, `target`) that would slow the scan and
+        // match config candidates from sources the indexer never chunked.
+        let walker = WalkBuilder::new(&root)
+            .hidden(true)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .build();
+        for entry in walker.flatten() {
             let path = entry.path();
             if !matches!(
                 Language::from_path(path),
