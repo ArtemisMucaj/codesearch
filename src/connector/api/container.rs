@@ -6,12 +6,14 @@ use anyhow::Result;
 use tracing::{debug, warn};
 
 use crate::application::{
-    CallGraphRepository, CallGraphUseCase, ChannelEndpointRepository, ChannelLinkUseCase,
-    FileHashRepository, MetadataRepository, QueryExpander,
+    AnalysisRepository, CallGraphRepository, CallGraphUseCase, ChannelEndpointRepository,
+    ChannelLinkUseCase, FileHashRepository, MetadataRepository, QueryExpander,
 };
 use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::scip::ScipRunner;
-use crate::connector::adapter::{NamespaceEmbeddingConfig, NoEmbedding, NO_EMBEDDINGS_MODEL};
+use crate::connector::adapter::{
+    DuckdbAnalysisRepository, NamespaceEmbeddingConfig, NoEmbedding, NO_EMBEDDINGS_MODEL,
+};
 use crate::{
     AnthropicClient, AnthropicReranking, ClusterDetectionUseCase, DeleteRepositoryUseCase,
     DuckdbCallGraphRepository, DuckdbChannelEndpointRepository, DuckdbFileHashRepository,
@@ -120,6 +122,7 @@ pub struct Container {
     file_hash_repo: Arc<dyn FileHashRepository>,
     call_graph_use_case: Arc<CallGraphUseCase>,
     channel_endpoint_repo: Arc<dyn ChannelEndpointRepository>,
+    analysis_repo: Arc<dyn AnalysisRepository>,
     config: ContainerConfig,
 }
 
@@ -131,15 +134,16 @@ type StorageRepos = (
     Arc<dyn FileHashRepository>,
     Arc<dyn CallGraphRepository>,
     Arc<dyn ChannelEndpointRepository>,
+    Arc<dyn AnalysisRepository>,
 );
 
 /// Initialise the DuckDB-backed metadata repositories shared across all storage paths.
 ///
 /// When `read_only` is `true`, the metadata database is opened with
 /// `AccessMode::ReadOnly` (no exclusive write lock), and the file-hash /
-/// call-graph / channel-endpoint repositories are created without running
-/// `CREATE TABLE` DDL (forbidden in read-only mode).  When `false`, the normal
-/// writable constructors are used.
+/// call-graph / channel-endpoint / analysis repositories are created without
+/// running `CREATE TABLE` DDL (forbidden in read-only mode).  When `false`,
+/// the normal writable constructors are used.
 async fn init_duckdb_metadata_repos(
     db_path: &std::path::Path,
     read_only: bool,
@@ -148,6 +152,7 @@ async fn init_duckdb_metadata_repos(
     Arc<dyn FileHashRepository>,
     Arc<dyn CallGraphRepository>,
     Arc<dyn ChannelEndpointRepository>,
+    Arc<dyn AnalysisRepository>,
 )> {
     let repo_adapter = if read_only {
         Arc::new(DuckdbMetadataRepository::new_read_only(db_path)?)
@@ -171,16 +176,28 @@ async fn init_duckdb_metadata_repos(
     };
     let call_graph_repo: Arc<dyn CallGraphRepository> = if read_only {
         Arc::new(DuckdbCallGraphRepository::with_connection_no_init(
-            shared_conn,
+            Arc::clone(&shared_conn),
         ))
     } else {
-        Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?)
+        Arc::new(DuckdbCallGraphRepository::with_connection(Arc::clone(&shared_conn)).await?)
+    };
+    let analysis_repo: Arc<dyn AnalysisRepository> = if read_only {
+        // Loads use the shared read-only connection; saves are persisted via a
+        // short-lived writable connection (deferred write-back) so read commands
+        // keep filling the analysis cache without holding the write lock.
+        Arc::new(DuckdbAnalysisRepository::with_read_only_write_back(
+            shared_conn,
+            db_path,
+        ))
+    } else {
+        Arc::new(DuckdbAnalysisRepository::with_connection(shared_conn).await?)
     };
     Ok((
         repo_adapter,
         file_hash_repo,
         call_graph_repo,
         channel_endpoint_repo,
+        analysis_repo,
     ))
 }
 
@@ -339,19 +356,31 @@ impl Container {
         };
 
         // Create vector repository, metadata adapter, file hash repository,
-        // call graph repository, and channel endpoint repository
-        let (vector_repo, repo_adapter, file_hash_repo, call_graph_repo, channel_endpoint_repo): StorageRepos =
-            if config.memory_storage {
+        // call graph repository, channel endpoint repository, and analysis repository
+        let (
+            vector_repo,
+            repo_adapter,
+            file_hash_repo,
+            call_graph_repo,
+            channel_endpoint_repo,
+            analysis_repo,
+        ): StorageRepos = if config.memory_storage {
             debug!("Using in-memory vector storage");
             let vector = Arc::new(InMemoryVectorRepository::new());
-            let (repo_adapter, file_hash_repo, call_graph_repo, channel_endpoint_repo) =
-                init_duckdb_metadata_repos(&db_path, config.read_only).await?;
+            let (
+                repo_adapter,
+                file_hash_repo,
+                call_graph_repo,
+                channel_endpoint_repo,
+                analysis_repo,
+            ) = init_duckdb_metadata_repos(&db_path, config.read_only).await?;
             (
                 vector,
                 repo_adapter,
                 file_hash_repo,
                 call_graph_repo,
                 channel_endpoint_repo,
+                analysis_repo,
             )
         } else if config.read_only {
             // Read-only DuckDB path: no exclusive write lock → concurrent searches work.
@@ -374,8 +403,16 @@ impl Container {
                         Arc::new(DuckdbChannelEndpointRepository::with_connection_no_init(
                             Arc::clone(&shared_conn),
                         ));
-                    let call_graph_repo = Arc::new(
-                        DuckdbCallGraphRepository::with_connection_no_init(shared_conn),
+                    let call_graph_repo =
+                        Arc::new(DuckdbCallGraphRepository::with_connection_no_init(
+                            Arc::clone(&shared_conn),
+                        ));
+                    // Loads use the shared read-only connection; saves persist
+                    // via a short-lived writable connection (deferred
+                    // write-back) so read commands still fill the analysis cache
+                    // without holding the exclusive write lock.
+                    let analysis_repo = Arc::new(
+                        DuckdbAnalysisRepository::with_read_only_write_back(shared_conn, &db_path),
                     );
                     (
                         Arc::new(duckdb),
@@ -383,6 +420,7 @@ impl Container {
                         file_hash_repo,
                         call_graph_repo,
                         channel_endpoint_repo,
+                        analysis_repo,
                     )
                 }
                 Err(e) => {
@@ -409,14 +447,20 @@ impl Container {
                         msg
                     );
                     let vector = Arc::new(InMemoryVectorRepository::new());
-                    let (repo_adapter, file_hash_repo, call_graph_repo, channel_endpoint_repo) =
-                        init_duckdb_metadata_repos(&db_path, false).await?;
+                    let (
+                        repo_adapter,
+                        file_hash_repo,
+                        call_graph_repo,
+                        channel_endpoint_repo,
+                        analysis_repo,
+                    ) = init_duckdb_metadata_repos(&db_path, false).await?;
                     (
                         vector,
                         repo_adapter,
                         file_hash_repo,
                         call_graph_repo,
                         channel_endpoint_repo,
+                        analysis_repo,
                     )
                 }
             }
@@ -440,14 +484,19 @@ impl Container {
                         DuckdbChannelEndpointRepository::with_connection(Arc::clone(&shared_conn))
                             .await?,
                     );
-                    let call_graph_repo =
-                        Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?);
+                    let call_graph_repo = Arc::new(
+                        DuckdbCallGraphRepository::with_connection(Arc::clone(&shared_conn))
+                            .await?,
+                    );
+                    let analysis_repo =
+                        Arc::new(DuckdbAnalysisRepository::with_connection(shared_conn).await?);
                     (
                         Arc::new(duckdb),
                         repo_adapter,
                         file_hash_repo,
                         call_graph_repo,
                         channel_endpoint_repo,
+                        analysis_repo,
                     )
                 }
                 Err(e) => {
@@ -466,14 +515,19 @@ impl Container {
                         DuckdbChannelEndpointRepository::with_connection(Arc::clone(&shared_conn))
                             .await?,
                     );
-                    let call_graph_repo =
-                        Arc::new(DuckdbCallGraphRepository::with_connection(shared_conn).await?);
+                    let call_graph_repo = Arc::new(
+                        DuckdbCallGraphRepository::with_connection(Arc::clone(&shared_conn))
+                            .await?,
+                    );
+                    let analysis_repo =
+                        Arc::new(DuckdbAnalysisRepository::with_connection(shared_conn).await?);
                     (
                         vector,
                         repo_adapter,
                         file_hash_repo,
                         call_graph_repo,
                         channel_endpoint_repo,
+                        analysis_repo,
                     )
                 }
             }
@@ -517,6 +571,7 @@ impl Container {
             file_hash_repo,
             call_graph_use_case,
             channel_endpoint_repo,
+            analysis_repo,
             config,
         })
     }
@@ -540,6 +595,7 @@ impl Container {
             self.channel_endpoint_repo.clone(),
         )
         .with_channel_resolution(channel_extractor)
+        .with_analysis_repo(self.analysis_repo.clone())
         .with_parse_concurrency(self.config.parse_concurrency)
     }
 
@@ -627,6 +683,7 @@ impl Container {
             self.call_graph_use_case.clone(),
         )
         .with_channel_endpoints(self.channel_endpoint_repo.clone())
+        .with_analysis_repo(self.analysis_repo.clone())
     }
 
     pub fn channel_link_use_case(&self) -> ChannelLinkUseCase {
@@ -667,14 +724,17 @@ impl Container {
 
     pub fn execution_features_use_case(&self) -> ExecutionFeaturesUseCase {
         ExecutionFeaturesUseCase::new(self.call_graph_use_case.clone())
+            .with_storage(self.analysis_repo.clone())
     }
 
     pub fn cluster_detection_use_case(&self) -> ClusterDetectionUseCase {
         ClusterDetectionUseCase::new(Arc::new(self.file_graph_use_case()))
+            .with_storage(self.analysis_repo.clone())
     }
 
     pub fn symbol_cluster_detection_use_case(&self) -> SymbolClusterDetectionUseCase {
         SymbolClusterDetectionUseCase::new(self.call_graph_use_case.clone())
+            .with_storage(self.analysis_repo.clone())
     }
 
     pub fn data_dir(&self) -> &str {

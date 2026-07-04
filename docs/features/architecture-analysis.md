@@ -8,6 +8,28 @@ repository-level** dependency graph built during indexing. These commands answer
 All three commands derive from the same `SymbolReference` edges populated during
 `codesearch index`, so re-index after code changes to keep the analysis current.
 
+## Result caching
+
+Detected clusters, symbol communities, and execution features are persisted in
+the DuckDB database (`analysis_runs`, `clusters`, `cluster_members`,
+`execution_features`, `execution_feature_nodes` tables) the first time they are
+computed. Subsequent queries are served from storage instead of re-running graph
+construction and Leiden detection.
+
+Read-only commands (`features`, `visualize`) open the database without holding
+the exclusive write lock so multiple processes can run concurrently. They still
+fill the cache via a short-lived **deferred write-back** connection opened only
+for the flush: the freshly computed result is persisted for the *next*
+invocation while the current run keeps serving from what it just computed. A
+write-back that can't get the lock (e.g. a concurrent `index` holds it) is
+skipped — it only costs the next run its warm start, never correctness.
+Writable contexts (`clusters`, `symbol-clusters`, the MCP server) persist
+in-place through their existing write connection.
+
+The stored results are invalidated automatically whenever `codesearch index`
+changes the call graph they were computed from, and removed by
+`codesearch delete`.
+
 ## Execution Features (`codesearch features`)
 
 An **execution feature** is a forward call chain rooted at an entry-point symbol — a

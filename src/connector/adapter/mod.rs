@@ -13,6 +13,7 @@ pub const DEFAULT_ONNX_EMBEDDING_MODEL: &str = "sentence-transformers/all-MiniLM
 mod anthropic_client;
 mod anthropic_reranking;
 mod chat_client;
+mod duckdb_analysis_repository;
 mod duckdb_call_graph_repository;
 mod duckdb_channel_endpoint_repository;
 mod duckdb_file_hash_repository;
@@ -36,6 +37,7 @@ mod treesitter_parser;
 pub use anthropic_client::*;
 pub use anthropic_reranking::*;
 pub use chat_client::*;
+pub use duckdb_analysis_repository::*;
 pub use duckdb_call_graph_repository::*;
 pub use duckdb_channel_endpoint_repository::*;
 pub use duckdb_file_hash_repository::*;

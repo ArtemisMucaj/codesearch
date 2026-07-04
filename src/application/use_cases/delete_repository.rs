@@ -4,8 +4,8 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::application::{
-    CallGraphUseCase, ChannelEndpointRepository, FileHashRepository, MetadataRepository,
-    VectorRepository,
+    AnalysisRepository, CallGraphUseCase, ChannelEndpointRepository, FileHashRepository,
+    MetadataRepository, VectorRepository,
 };
 use crate::domain::DomainError;
 
@@ -15,6 +15,9 @@ pub struct DeleteRepositoryUseCase {
     file_hash_repo: Arc<dyn FileHashRepository>,
     call_graph_use_case: Arc<CallGraphUseCase>,
     channel_endpoint_repo: Option<Arc<dyn ChannelEndpointRepository>>,
+    /// Optional store of derived analyses (clusters, communities, features)
+    /// that must be removed together with the repository.
+    analysis_repo: Option<Arc<dyn AnalysisRepository>>,
 }
 
 impl DeleteRepositoryUseCase {
@@ -30,6 +33,7 @@ impl DeleteRepositoryUseCase {
             file_hash_repo,
             call_graph_use_case,
             channel_endpoint_repo: None,
+            analysis_repo: None,
         }
     }
 
@@ -39,6 +43,13 @@ impl DeleteRepositoryUseCase {
         channel_endpoint_repo: Arc<dyn ChannelEndpointRepository>,
     ) -> Self {
         self.channel_endpoint_repo = Some(channel_endpoint_repo);
+        self
+    }
+
+    /// Attach the analysis store so stored analyses are deleted with the
+    /// repository.
+    pub fn with_analysis_repo(mut self, analysis_repo: Arc<dyn AnalysisRepository>) -> Self {
+        self.analysis_repo = Some(analysis_repo);
         self
     }
 
@@ -56,6 +67,9 @@ impl DeleteRepositoryUseCase {
         self.call_graph_use_case.delete_by_repository(id).await?;
         if let Some(channel_repo) = &self.channel_endpoint_repo {
             channel_repo.delete_by_repository(id).await?;
+        }
+        if let Some(analysis_repo) = &self.analysis_repo {
+            analysis_repo.delete_by_repository(id).await?;
         }
         self.repository_repo.delete(id).await?;
 

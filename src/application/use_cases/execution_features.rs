@@ -1,8 +1,10 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
+use tracing::{debug, warn};
+
 use super::execution_features_naming::short_name;
-use crate::application::{CallGraphQuery, CallGraphUseCase};
+use crate::application::{AnalysisRepository, CallGraphQuery, CallGraphUseCase};
 use crate::domain::{DomainError, ExecutionFeature, FeatureNode, ReferenceKind, SymbolReference};
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -50,11 +52,25 @@ fn is_execution_edge(reference: &SymbolReference) -> bool {
 /// rooted at entry-point symbols — and scores each one for criticality.
 pub struct ExecutionFeaturesUseCase {
     call_graph: Arc<CallGraphUseCase>,
+    /// Optional persistence for computed features. When present, the complete
+    /// feature set of a repository is cached in the database and served from
+    /// there until the call graph is re-indexed.
+    storage: Option<Arc<dyn AnalysisRepository>>,
 }
 
 impl ExecutionFeaturesUseCase {
     pub fn new(call_graph: Arc<CallGraphUseCase>) -> Self {
-        Self { call_graph }
+        Self {
+            call_graph,
+            storage: None,
+        }
+    }
+
+    /// Attach persistent storage so computed features are cached in the
+    /// database instead of being recomputed on every query.
+    pub fn with_storage(mut self, storage: Arc<dyn AnalysisRepository>) -> Self {
+        self.storage = Some(storage);
+        self
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -63,13 +79,36 @@ impl ExecutionFeaturesUseCase {
 
     /// Detect all entry points for `repository_id` and compute their features,
     /// returning up to `limit` results sorted by descending criticality.
+    ///
+    /// The complete (untruncated) set is served from storage when available
+    /// and persisted after a fresh computation, so `limit` only shapes the
+    /// returned page, never what is cached.
     pub async fn list_features(
         &self,
         repository_id: &str,
         limit: usize,
     ) -> Result<Vec<ExecutionFeature>, DomainError> {
+        let mut features = match self.load_stored(repository_id).await {
+            Some(stored) => stored,
+            None => {
+                let features = self.compute_all_features(repository_id).await?;
+                self.store(repository_id, &features).await;
+                features
+            }
+        };
+
+        features.truncate(limit);
+        Ok(features)
+    }
+
+    /// Compute every entry-point feature for `repository_id`, sorted by
+    /// descending criticality.
+    async fn compute_all_features(
+        &self,
+        repository_id: &str,
+    ) -> Result<Vec<ExecutionFeature>, DomainError> {
         let entry_points = self.find_entry_points(repository_id).await?;
-        let mut features = Vec::with_capacity(entry_points.len().min(limit));
+        let mut features = Vec::with_capacity(entry_points.len());
 
         for ep in entry_points {
             let feature = self.build_feature(&ep, repository_id).await?;
@@ -77,8 +116,34 @@ impl ExecutionFeaturesUseCase {
         }
 
         features.sort_by(|a, b| b.criticality.total_cmp(&a.criticality));
-        features.truncate(limit);
         Ok(features)
+    }
+
+    /// Load the stored feature set, if storage is attached and has one.
+    /// Storage read failures degrade to a recompute rather than failing the
+    /// query.
+    async fn load_stored(&self, repository_id: &str) -> Option<Vec<ExecutionFeature>> {
+        let storage = self.storage.as_ref()?;
+        match storage.load_execution_features(repository_id).await {
+            Ok(stored) => stored,
+            Err(e) => {
+                warn!("Failed to load stored execution features, recomputing: {e}");
+                None
+            }
+        }
+    }
+
+    /// Persist a freshly computed feature set, best-effort. Failures are
+    /// expected on read-only database connections and only cost the cache.
+    async fn store(&self, repository_id: &str, features: &[ExecutionFeature]) {
+        if let Some(storage) = &self.storage {
+            if let Err(e) = storage
+                .save_execution_features(repository_id, features)
+                .await
+            {
+                debug!("Skipping execution-feature persistence: {e}");
+            }
+        }
     }
 
     /// Retrieve a single feature by entry-point symbol name (exact or substring).
@@ -93,6 +158,19 @@ impl ExecutionFeaturesUseCase {
         let mut query = CallGraphQuery::new();
         if let Some(repo) = repository_id {
             query = query.with_repository(repo);
+        }
+
+        // Cache-first fast path: when the repository is known and its feature
+        // set is cached, an exact entry-point match can be served without
+        // touching the live call graph at all. Exact match is unambiguous, so
+        // this never returns a different result than the graph path would;
+        // substring names still fall through to `resolve_symbols` below.
+        if let Some(repo) = repository_id {
+            if let Some(stored) = self.load_stored(repo).await {
+                if let Some(feature) = stored.into_iter().find(|f| f.entry_point == symbol) {
+                    return Ok(Some(feature));
+                }
+            }
         }
 
         // Resolve the symbol to a fully-qualified name.
@@ -139,6 +217,14 @@ impl ExecutionFeaturesUseCase {
             .any(|r| is_execution_edge(r) && r.caller_symbol().is_some())
         {
             return Ok(None);
+        }
+
+        // Serve the stored feature when the repository's set has been cached;
+        // fall back to a fresh BFS otherwise.
+        if let Some(stored) = self.load_stored(&effective_repo).await {
+            if let Some(feature) = stored.into_iter().find(|f| f.entry_point == fqn) {
+                return Ok(Some(feature));
+            }
         }
 
         let feature = self.build_feature(&fqn, &effective_repo).await?;

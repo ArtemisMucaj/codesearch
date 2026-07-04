@@ -1,3 +1,4 @@
+mod analysis_repository;
 mod call_graph_repository;
 mod channel_endpoint_repository;
 mod channel_extractor;
@@ -11,6 +12,7 @@ mod query_expander;
 mod reranking_service;
 mod vector_repository;
 
+pub use analysis_repository::*;
 pub use call_graph_repository::*;
 pub use channel_endpoint_repository::*;
 pub use channel_extractor::*;
