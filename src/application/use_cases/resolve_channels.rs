@@ -92,11 +92,15 @@ impl ResolveChannelsUseCase {
         }
 
         // 2. Config value resolution for unresolved property-access channels.
+        // The enclosing class lets the resolver trace a `this.<param>.<key>`
+        // access through the class constructor to the config it is wired from.
         if !endpoint.is_resolved() {
-            if let Some(resolved) = self
-                .resolver
-                .resolve_config_expression(endpoint.channel_raw(), config_candidates)
-            {
+            let class = enclosing_class_at(endpoint.file_path(), endpoint.line(), refs_by_file);
+            if let Some(resolved) = self.resolver.resolve_config_expression(
+                endpoint.channel_raw(),
+                class.as_deref(),
+                config_candidates,
+            ) {
                 let (_, normalized, _) = normalize(endpoint.protocol(), &resolved.value);
                 endpoint = endpoint.resolve_channel(resolved.value, normalized);
                 if let Some(env) = resolved.env_var {
@@ -107,6 +111,19 @@ impl ResolveChannelsUseCase {
 
         endpoint
     }
+}
+
+/// The enclosing class/scope of the call at `file:line`, from the SCIP
+/// references there. Used to trace constructor-parameter channels.
+fn enclosing_class_at(
+    file_path: &str,
+    line: u32,
+    refs_by_file: &HashMap<String, Vec<SymbolReference>>,
+) -> Option<String> {
+    let refs = refs_by_file.get(file_path)?;
+    refs.iter()
+        .filter(|r| r.reference_line().abs_diff(line) <= CALL_SITE_LINE_WINDOW)
+        .find_map(|r| r.enclosing_scope().map(str::to_string))
 }
 
 /// Per-protocol normalization mirroring the extractor's, so a config-resolved
@@ -173,6 +190,7 @@ mod tests {
         fn resolve_config_expression(
             &self,
             _expression: &str,
+            _enclosing_class: Option<&str>,
             _candidates: &[(String, String)],
         ) -> Option<ResolvedConfigValue> {
             self.value.clone()

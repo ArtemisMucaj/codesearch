@@ -271,17 +271,27 @@ impl ChannelResolver for TreeSitterChannelExtractor {
     fn resolve_config_expression(
         &self,
         expression: &str,
+        enclosing_class: Option<&str>,
         candidates: &[(String, String)],
     ) -> Option<ResolvedConfigValue> {
         let borrowed: Vec<(&str, &str)> = candidates
             .iter()
             .map(|(name, source)| (name.as_str(), source.as_str()))
             .collect();
-        config_resolver::resolve_channel_expression(expression, &borrowed).map(|r| {
-            ResolvedConfigValue {
-                value: r.value,
-                env_var: r.env_var,
-            }
+
+        // Direct config access (`this.config.broker.topics.X`) resolves in one
+        // pass; a constructor-param access (`this.topics.X` inside a class)
+        // needs the extra hop through the `new Class(…)` site.
+        let resolved = config_resolver::resolve_channel_expression(expression, &borrowed)
+            .or_else(|| {
+                enclosing_class.and_then(|class| {
+                    config_resolver::resolve_via_constructor_param(expression, class, &borrowed)
+                })
+            })?;
+
+        Some(ResolvedConfigValue {
+            value: resolved.value,
+            env_var: resolved.env_var,
         })
     }
 }

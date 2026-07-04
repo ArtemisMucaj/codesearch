@@ -1226,27 +1226,44 @@ async fn parse_only(
     })
 }
 
-/// Discover config modules the channel resolver can search: JS/TS files whose
-/// path names them as config, paired with the object names they export.
+/// Discover the JS/TS sources the channel resolver may search: config modules
+/// (for direct `this.config…` access) plus files that define or instantiate a
+/// class (for the `this.<param>.<key>` constructor-parameter indirection).
 ///
-/// Returns `(object_name, source)` pairs. A file exporting `const config = {…}`
-/// yields `("config", <source>)`. Sources are read once here and handed to the
-/// resolver so it never touches the filesystem itself. Kept intentionally
-/// cheap: only config-named files are read, not the whole tree.
+/// Returns `(name, source)` pairs. For a config file the name is the exported
+/// object (`config`); for a class file it is the class name. The resolver only
+/// uses the name to look up config objects — constructor tracing scans every
+/// source for `class`/`new` — so extra names are harmless. Sources are read
+/// once here so the resolver never touches the filesystem.
 async fn discover_config_candidates(absolute_path: &Path) -> Vec<(String, String)> {
     let root = absolute_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut candidates = Vec::new();
         for entry in WalkBuilder::new(&root).build().flatten() {
             let path = entry.path();
-            if !is_config_module(path) {
+            if !matches!(
+                Language::from_path(path),
+                Language::JavaScript | Language::TypeScript
+            ) {
                 continue;
             }
             let Ok(source) = std::fs::read_to_string(path) else {
                 continue;
             };
-            for name in exported_object_names(&source) {
-                candidates.push((name, source.clone()));
+            // Only files that carry a config object, a class definition, or a
+            // `new` are useful to the resolver — skip the rest to keep the
+            // candidate set (and re-parsing cost) small.
+            let names = candidate_names(&source);
+            if names.is_empty() && !source.contains("new ") {
+                continue;
+            }
+            if names.is_empty() {
+                // Instantiation-only file: keep the source, name is unused.
+                candidates.push((String::new(), source));
+            } else {
+                for name in names {
+                    candidates.push((name, source.clone()));
+                }
             }
         }
         candidates
@@ -1255,42 +1272,32 @@ async fn discover_config_candidates(absolute_path: &Path) -> Vec<(String, String
     .unwrap_or_default()
 }
 
-/// True for a JS/TS file that looks like a config module (`config.ts`,
-/// `config.js`, or a file under a `config/` directory).
-fn is_config_module(path: &Path) -> bool {
-    let is_js_ts = matches!(
-        Language::from_path(path),
-        Language::JavaScript | Language::TypeScript
-    );
-    if !is_js_ts {
-        return false;
-    }
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    let in_config_dir = path
-        .components()
-        .any(|c| c.as_os_str() == "config" || c.as_os_str() == "pkg");
-    stem == "config" || (in_config_dir && stem == "index")
-}
-
-/// Names of top-level objects a module binds with `const <name> = {` /
-/// `export const <name> = {`. A cheap textual scan — the resolver re-parses the
-/// source properly; here we only need the candidate object names.
-fn exported_object_names(source: &str) -> Vec<String> {
+/// Names a resolver candidate exposes: top-level `const <name> = {` object
+/// bindings and `class <Name>` declarations. A cheap textual scan — the
+/// resolver re-parses properly; here we only need the candidate names.
+fn candidate_names(source: &str) -> Vec<String> {
     let mut names = Vec::new();
     for line in source.lines() {
         let line = line.trim_start().trim_start_matches("export ").trim_start();
-        let Some(rest) = line.strip_prefix("const ") else {
-            continue;
-        };
-        // `config = {` / `config: Config = {` — take the identifier, require an
-        // object initializer on the same line to avoid non-object consts.
-        let name: String = rest
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
-            .collect();
-        if !name.is_empty() && line.contains('{') {
-            names.push(name);
+        if let Some(rest) = line.strip_prefix("const ") {
+            // `config = {` / `config: Config = {` — require an object literal.
+            let name = leading_ident(rest);
+            if !name.is_empty() && line.contains('{') {
+                names.push(name);
+            }
+        } else if let Some(rest) = line.strip_prefix("class ") {
+            let name = leading_ident(rest);
+            if !name.is_empty() {
+                names.push(name);
+            }
         }
     }
     names
+}
+
+/// The leading identifier of `s` (`config: Config = {` → `config`).
+fn leading_ident(s: &str) -> String {
+    s.chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+        .collect()
 }

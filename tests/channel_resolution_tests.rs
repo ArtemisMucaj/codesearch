@@ -134,6 +134,7 @@ impl ChannelResolver for FixedResolver {
     fn resolve_config_expression(
         &self,
         _expression: &str,
+        _enclosing_class: Option<&str>,
         _candidates: &[(String, String)],
     ) -> Option<ResolvedConfigValue> {
         Some(self.0.clone())
@@ -172,4 +173,92 @@ fn mqtt_endpoint_not_confirmed_by_kafka_package() {
     assert_eq!(out[0].channel_raw(), "sensors/room");
     assert!(!out[0].is_confirmed());
     assert_eq!(out[0].library(), None);
+}
+
+/// The class that carries its topics through a constructor param (the producer
+/// indirection in execution-engine's DomainEvent).
+const CLASS_SOURCE: &str = r#"
+import { AsyncProducer } from '@backend/kafkajs'
+export class DomainEvent {
+    constructor(
+        private producer: AsyncProducer,
+        private topics: { gatewayRegistered: string },
+    ) { }
+    async gatewayRegistered(event) {
+        await this.producer.produce(this.topics.gatewayRegistered, JSON.stringify(event))
+    }
+}
+"#;
+
+const INSTANTIATION_SOURCE: &str = r#"
+class Application {
+    start() {
+        const domainEvent = new DomainEvent(this.producer, {
+            gatewayRegistered: this.config.broker.topics.gatewayRegistered,
+        })
+    }
+}
+"#;
+
+#[test]
+fn resolves_producer_topic_through_constructor_param_end_to_end() {
+    let resolver: Arc<dyn ChannelResolver> = Arc::new(TreeSitterChannelExtractor::new());
+    let use_case = ResolveChannelsUseCase::new(resolver);
+
+    // The produce call is inside DomainEvent, at domain-event.ts:15. Its topic
+    // is `this.topics.gatewayRegistered` — a constructor param.
+    let producer = ChannelEndpoint::new(
+        "engine".to_string(),
+        "src/connector/adapter/domain-event.ts".to_string(),
+        15,
+        Protocol::Kafka,
+        ChannelRole::Producer,
+        "this.topics.gatewayRegistered".to_string(),
+        "this.topics.gatewayRegistered".to_string(),
+        0.5,
+        EndpointSource::TreeSitter,
+    )
+    .unresolved();
+
+    // SCIP records the enclosing class (DomainEvent) and the kafka package near
+    // the call site.
+    let mut refs = HashMap::new();
+    let scip_ref = SymbolReference::new(
+        Some("gatewayRegistered".to_string()),
+        "AsyncProducer#produce".to_string(),
+        "src/connector/adapter/domain-event.ts".to_string(),
+        "src/connector/adapter/domain-event.ts".to_string(),
+        14, // method call one line above the topic arg
+        1,
+        ReferenceKind::MethodCall,
+        Language::TypeScript,
+        "engine".to_string(),
+    )
+    .with_callee_package("@backend/kafkajs")
+    .with_enclosing_scope("DomainEvent");
+    refs.insert(
+        "src/connector/adapter/domain-event.ts".to_string(),
+        vec![scip_ref],
+    );
+
+    let candidates = vec![
+        ("DomainEvent".to_string(), CLASS_SOURCE.to_string()),
+        (String::new(), INSTANTIATION_SOURCE.to_string()),
+        ("config".to_string(), CONFIG_SOURCE.to_string()),
+    ];
+
+    let out = use_case.resolve(vec![producer], &refs, &candidates);
+
+    // The two-hop chain resolved: this.topics.gatewayRegistered →
+    // new DomainEvent(…, { gatewayRegistered: this.config.broker.topics.… }) →
+    // config → the concrete topic + env var.
+    assert_eq!(out[0].channel_raw(), "gateway_registered_event");
+    assert!(out[0].is_resolved());
+    assert_eq!(
+        out[0].env_var(),
+        Some("KAFKA_GATEWAY_REGISTERED_EVENT_TOPIC")
+    );
+    // And the library was confirmed via SCIP.
+    assert!(out[0].is_confirmed());
+    assert_eq!(out[0].library(), Some("@backend/kafkajs"));
 }

@@ -53,6 +53,100 @@ pub(super) fn resolve_channel_expression(
     None
 }
 
+/// Resolve `this.<param>.<key>` where `<param>` is a constructor parameter of
+/// `class_name` that is wired from the caller at the `new class_name(...)` site.
+///
+/// Traces one hop: find the parameter's position in `class_name`'s constructor,
+/// find a `new class_name(...)` call, read the object literal passed at that
+/// position, and look up `<key>` to recover the *inner* expression (typically a
+/// config access). The inner expression is then resolved through
+/// [`resolve_channel_expression`]. `sources` are candidate module sources
+/// (`(object_name, source)`) — the class definition, the instantiation site,
+/// and the config module may live in different files, so all are searched.
+pub(super) fn resolve_via_constructor_param(
+    expression: &str,
+    class_name: &str,
+    sources: &[(&str, &str)],
+) -> Option<ResolvedChannel> {
+    // `this.topics.gatewayRegistered` → param `topics`, key `gatewayRegistered`.
+    let segments = property_segments(expression);
+    if segments.len() != 2 {
+        return None;
+    }
+    let param = segments[0].as_str();
+    let key = segments[1].as_str();
+
+    let param_index = sources
+        .iter()
+        .find_map(|(_, source)| constructor_param_index(source, class_name, param))?;
+
+    // Find the object literal passed at that position in a `new Class(...)` call
+    // and read the inner expression bound to `key`.
+    let inner = sources.iter().find_map(|(_, source)| {
+        constructor_arg_object_entry(source, class_name, param_index, key)
+    })?;
+
+    resolve_channel_expression(&inner, sources)
+}
+
+/// The zero-based position of parameter `param` in `class_name`'s constructor.
+fn constructor_param_index(source: &str, class_name: &str, param: &str) -> Option<usize> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        .ok()?;
+    let tree = parser.parse(source, None)?;
+
+    let class = find_class(tree.root_node(), source, class_name)?;
+    let ctor = find_constructor(class, source)?;
+    let params = ctor.child_by_field_name("parameters")?;
+
+    let mut cursor = params.walk();
+    let mut index = 0usize;
+    for child in params.children(&mut cursor) {
+        if !is_parameter_node(child.kind()) {
+            continue;
+        }
+        if parameter_name(child, source).as_deref() == Some(param) {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+/// From a `new class_name(...)` call, take the argument at `arg_index` (expected
+/// to be an object literal) and return the source text of the value bound to
+/// `key`.
+fn constructor_arg_object_entry(
+    source: &str,
+    class_name: &str,
+    arg_index: usize,
+    key: &str,
+) -> Option<String> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        .ok()?;
+    let tree = parser.parse(source, None)?;
+
+    let mut result = None;
+    find_new_expression(tree.root_node(), source, class_name, &mut |args| {
+        if result.is_some() {
+            return;
+        }
+        let Some(arg) = nth_call_argument(args, arg_index) else {
+            return;
+        };
+        if let Some(object) = unwrap_to_object(arg) {
+            if let Some(value) = object_property(object, source, key) {
+                result = Some(source[value.byte_range()].to_string());
+            }
+        }
+    });
+    result
+}
+
 /// Break a member-access expression into its bare segments, dropping a leading
 /// `this`: `this.config.broker.topics.orders` → `[config, broker, topics,
 /// orders]`. Subscript access (`a['b']`) is normalised to `a.b`.
@@ -265,6 +359,91 @@ fn strip_quotes(raw: &str) -> String {
         .to_string()
 }
 
+/// Find the `class_declaration` named `name`.
+fn find_class<'a>(node: Node<'a>, source: &str, name: &str) -> Option<Node<'a>> {
+    if node.kind() == "class_declaration" {
+        if let Some(id) = node.child_by_field_name("name") {
+            if &source[id.byte_range()] == name {
+                return Some(node);
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(found) = find_class(child, source, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// The constructor `method_definition` within a class node.
+fn find_constructor<'a>(class: Node<'a>, source: &str) -> Option<Node<'a>> {
+    let body = class.child_by_field_name("body")?;
+    let mut cursor = body.walk();
+    for child in body.children(&mut cursor) {
+        let is_ctor = child.kind() == "method_definition"
+            && child
+                .child_by_field_name("name")
+                .map(|n| &source[n.byte_range()] == "constructor")
+                .unwrap_or(false);
+        if is_ctor {
+            return Some(child);
+        }
+    }
+    None
+}
+
+/// True for a constructor parameter node kind (with or without modifiers,
+/// defaults, or optionality).
+fn is_parameter_node(kind: &str) -> bool {
+    matches!(kind, "required_parameter" | "optional_parameter")
+}
+
+/// The declared name of a constructor parameter, e.g. `topics` in
+/// `private topics: {…}`. Reads the `pattern` field (an identifier).
+fn parameter_name(param: Node<'_>, source: &str) -> Option<String> {
+    let pattern = param.child_by_field_name("pattern")?;
+    Some(source[pattern.byte_range()].to_string())
+}
+
+/// Visit every `new class_name(...)` expression, calling `f` with its
+/// `arguments` node.
+fn find_new_expression(
+    node: Node<'_>,
+    source: &str,
+    class_name: &str,
+    f: &mut impl FnMut(Node<'_>),
+) {
+    if node.kind() == "new_expression" {
+        if let Some(ctor) = node.child_by_field_name("constructor") {
+            if &source[ctor.byte_range()] == class_name {
+                if let Some(args) = node.child_by_field_name("arguments") {
+                    f(args);
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        find_new_expression(child, source, class_name, f);
+    }
+}
+
+/// The `index`-th positional argument of an `arguments` node (skipping the
+/// parentheses and commas).
+fn nth_call_argument<'a>(args: Node<'a>, index: usize) -> Option<Node<'a>> {
+    let mut cursor = args.walk();
+    // Bound to a local so `cursor` outlives the borrow (a tail-position
+    // iterator would drop it too early). `Node` is `Copy`, so the result does
+    // not depend on the cursor.
+    let found = args
+        .named_children(&mut cursor)
+        .enumerate()
+        .find_map(|(i, child)| (i == index).then_some(child));
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,5 +519,75 @@ export type Config = typeof config
         assert!(
             resolve_channel_expression("this.config.broker.topics.topologyEvent", &[]).is_none()
         );
+    }
+
+    // A class receives its topics through a constructor param, wired from the
+    // config at the `new Class(...)` site — the producer indirection.
+    const CLASS_SOURCE: &str = r#"
+import { AsyncProducer } from '@backend/kafkajs'
+export class DomainEvent {
+    constructor(
+        private producer: AsyncProducer,
+        private topics: { topologyEvent: string },
+    ) { }
+    async fire(event) {
+        await this.producer.produce(this.topics.topologyEvent, JSON.stringify(event))
+    }
+}
+"#;
+    const INSTANTIATION_SOURCE: &str = r#"
+function build() {
+    const d = new DomainEvent(this.producer, {
+        topologyEvent: this.config.broker.topics.topologyEvent,
+    })
+}
+"#;
+
+    #[test]
+    fn resolves_topic_through_constructor_param() {
+        let sources = [
+            ("DomainEvent", CLASS_SOURCE),
+            ("application", INSTANTIATION_SOURCE),
+            ("config", CONFIG),
+        ];
+        let r =
+            resolve_via_constructor_param("this.topics.topologyEvent", "DomainEvent", &sources)
+                .unwrap();
+        assert_eq!(r.value, "topology_event");
+        assert_eq!(r.env_var.as_deref(), Some("KAFKA_TOPOLOGY_EVENT_TOPIC"));
+    }
+
+    #[test]
+    fn constructor_param_index_is_positional() {
+        // `topics` is the second constructor parameter.
+        assert_eq!(
+            constructor_param_index(CLASS_SOURCE, "DomainEvent", "topics"),
+            Some(1)
+        );
+        assert_eq!(
+            constructor_param_index(CLASS_SOURCE, "DomainEvent", "producer"),
+            Some(0)
+        );
+        assert_eq!(
+            constructor_param_index(CLASS_SOURCE, "DomainEvent", "nope"),
+            None
+        );
+    }
+
+    #[test]
+    fn constructor_trace_gives_up_cleanly() {
+        // Unknown class, or a param not wired at the call site.
+        let sources = [("DomainEvent", CLASS_SOURCE), ("config", CONFIG)];
+        // No `new DomainEvent(...)` in these sources → None.
+        assert!(
+            resolve_via_constructor_param("this.topics.topologyEvent", "DomainEvent", &sources)
+                .is_none()
+        );
+        assert!(resolve_via_constructor_param(
+            "this.topics.topologyEvent",
+            "UnknownClass",
+            &sources
+        )
+        .is_none());
     }
 }

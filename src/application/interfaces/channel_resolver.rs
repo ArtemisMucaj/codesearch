@@ -21,11 +21,17 @@ pub struct ResolvedConfigValue {
 #[async_trait]
 pub trait ChannelResolver: Send + Sync {
     /// Resolve `expression` (e.g. `this.config.broker.topics.orders`) against
-    /// the given `(config_object_name, module_source)` candidates. Returns
-    /// `None` when nothing resolves it syntactically.
+    /// the given `(object_name, module_source)` candidates. Returns `None` when
+    /// nothing resolves it syntactically.
+    ///
+    /// When `enclosing_class` is set and the expression accesses a constructor
+    /// parameter (`this.topics.orders` inside a class), the resolver also traces
+    /// through the `new <class>(…)` instantiation to recover the wired config
+    /// expression before resolving it.
     fn resolve_config_expression(
         &self,
         expression: &str,
+        enclosing_class: Option<&str>,
         candidates: &[(String, String)],
     ) -> Option<ResolvedConfigValue>;
 }
