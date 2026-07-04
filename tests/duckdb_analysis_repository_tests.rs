@@ -3,8 +3,8 @@ use std::sync::Arc;
 use codesearch::{
     AnalysisRepository, CallGraphQuery, CallGraphRepository, CallGraphUseCase, Cluster,
     ClusterGraph, DuckdbAnalysisRepository, DuckdbCallGraphRepository, ExecutionFeature,
-    FeatureNode, Language, ReferenceKind, SymbolClusterDetectionUseCase, SymbolCommunity,
-    SymbolCommunityGraph, SymbolReference,
+    ExecutionFeaturesUseCase, FeatureNode, Language, ReferenceKind, SymbolClusterDetectionUseCase,
+    SymbolCommunity, SymbolCommunityGraph, SymbolReference,
 };
 use duckdb::{AccessMode, Config, Connection};
 use tokio::sync::Mutex;
@@ -521,4 +521,118 @@ async fn write_back_persists_and_replaces_cluster_graph() {
         .expect("stored graph");
     assert_eq!(loaded.clusters.len(), 1);
     assert_eq!(loaded.clusters[0].id, "c9");
+}
+
+/// Deferred write-back persists symbol communities the same way it does file
+/// clusters and execution features: a fresh read-only reader opened after the
+/// save sees the data, proving the write reached disk without a held lock.
+#[tokio::test]
+async fn write_back_persists_symbol_community_graph_for_a_later_reader() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("analysis.duckdb");
+
+    {
+        let conn = Arc::new(Mutex::new(Connection::open(&db_path).unwrap()));
+        let _writer = DuckdbAnalysisRepository::with_connection(conn)
+            .await
+            .unwrap();
+    }
+
+    let read_only_conn = Arc::new(Mutex::new(open_read_only(&db_path)));
+    let repo = DuckdbAnalysisRepository::with_read_only_write_back(read_only_conn, &db_path);
+
+    assert!(repo
+        .load_symbol_community_graph("repo-1")
+        .await
+        .unwrap()
+        .is_none());
+
+    repo.save_symbol_community_graph(&sample_symbol_community_graph("repo-1"))
+        .await
+        .unwrap();
+
+    let fresh_reader = DuckdbAnalysisRepository::with_connection_no_init(Arc::new(Mutex::new(
+        open_read_only(&db_path),
+    )));
+    let loaded = fresh_reader
+        .load_symbol_community_graph("repo-1")
+        .await
+        .unwrap()
+        .expect("symbol communities persisted to disk");
+    assert_eq!(loaded.total_symbols, 2);
+    assert_eq!(loaded.communities.len(), 1);
+    assert_eq!(loaded.communities[0].name, "payment");
+    assert_eq!(
+        loaded.communities[0].members,
+        vec![
+            "svc/PaymentGateway#refund().",
+            "svc/PaymentService#charge()."
+        ]
+    );
+}
+
+/// `ExecutionFeaturesUseCase` is a read-through cache like the symbol-cluster
+/// path: once features are computed and stored, deleting the backing call graph
+/// must not change the result — the second call is served from storage.
+#[tokio::test]
+async fn execution_features_use_case_serves_stored_result() {
+    let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+    let call_graph_repo = Arc::new(
+        DuckdbCallGraphRepository::with_connection(Arc::clone(&conn))
+            .await
+            .unwrap(),
+    );
+    let analysis_repo: Arc<dyn AnalysisRepository> = Arc::new(
+        DuckdbAnalysisRepository::with_connection(Arc::clone(&conn))
+            .await
+            .unwrap(),
+    );
+    let call_graph_use_case = Arc::new(CallGraphUseCase::new(call_graph_repo.clone()));
+
+    // `a` calls `b`/`c` and is never called → the sole entry point.
+    let references: Vec<SymbolReference> = [("a", "b"), ("b", "c"), ("a", "c")]
+        .iter()
+        .map(|(caller, callee)| {
+            SymbolReference::new(
+                Some(caller.to_string()),
+                callee.to_string(),
+                "src/lib.rs".to_string(),
+                "src/lib.rs".to_string(),
+                1,
+                1,
+                ReferenceKind::Call,
+                Language::Rust,
+                "repo-1".to_string(),
+            )
+        })
+        .collect();
+    call_graph_repo.save_batch(&references).await.unwrap();
+
+    let use_case =
+        ExecutionFeaturesUseCase::new(call_graph_use_case.clone()).with_storage(analysis_repo);
+
+    let first = use_case.list_features("repo-1", usize::MAX).await.unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].entry_point, "a");
+
+    // Wipe the call graph; a recompute would now find nothing.
+    call_graph_repo
+        .delete_by_repository("repo-1")
+        .await
+        .unwrap();
+    let all = call_graph_use_case
+        .find_callees("a", &CallGraphQuery::new().with_repository("repo-1"))
+        .await
+        .unwrap();
+    assert!(all.is_empty());
+
+    let second = use_case.list_features("repo-1", usize::MAX).await.unwrap();
+    assert_eq!(second.len(), first.len());
+    assert_eq!(second[0].entry_point, first[0].entry_point);
+    assert_eq!(second[0].reach, first[0].reach);
+
+    // Without storage the same query recomputes from the (now empty) graph.
+    let uncached = ExecutionFeaturesUseCase::new(call_graph_use_case);
+    let recomputed = uncached.list_features("repo-1", usize::MAX).await.unwrap();
+    assert!(recomputed.is_empty());
 }
