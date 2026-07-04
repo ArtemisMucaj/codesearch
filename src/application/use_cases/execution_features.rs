@@ -75,10 +75,7 @@ impl ExecutionFeaturesUseCase {
         }
 
         // Resolve the symbol to a fully-qualified name.
-        let resolved = self
-            .call_graph
-            .resolve_symbols(symbol, &query, 10)
-            .await?;
+        let resolved = self.call_graph.resolve_symbols(symbol, &query, 10).await?;
 
         if resolved.is_empty() {
             return Ok(None);
@@ -93,17 +90,11 @@ impl ExecutionFeaturesUseCase {
         } else {
             let discovery_query = CallGraphQuery::new();
             // Check outgoing edges first; entry points typically have them.
-            let callees = self
-                .call_graph
-                .find_callees(&fqn, &discovery_query)
-                .await?;
+            let callees = self.call_graph.find_callees(&fqn, &discovery_query).await?;
             if let Some(r) = callees.first() {
                 r.repository_id().to_string()
             } else {
-                let callers = self
-                    .call_graph
-                    .find_callers(&fqn, &discovery_query)
-                    .await?;
+                let callers = self.call_graph.find_callers(&fqn, &discovery_query).await?;
                 callers
                     .first()
                     .map(|r| r.repository_id().to_string())

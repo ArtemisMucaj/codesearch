@@ -233,9 +233,8 @@ impl ChatClient for OpenAiChatClient {
         let mut buffer = String::new();
 
         'outer: while let Some(chunk) = byte_stream.next().await {
-            let bytes = chunk.map_err(|e| {
-                DomainError::internal(format!("OpenAI stream read error: {e}"))
-            })?;
+            let bytes = chunk
+                .map_err(|e| DomainError::internal(format!("OpenAI stream read error: {e}")))?;
             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
             // Process all complete lines in the buffer.

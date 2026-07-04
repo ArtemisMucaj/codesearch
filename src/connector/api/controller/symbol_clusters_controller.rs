@@ -15,8 +15,15 @@ impl<'a> SymbolClustersController<'a> {
     }
 
     /// List all symbol communities for the given repository.
-    pub async fn list(&self, repository: Option<String>, format: OutputFormatTextJson) -> Result<String> {
-        let repository_id = self.container.resolve_repository_id(repository.as_deref()).await;
+    pub async fn list(
+        &self,
+        repository: Option<String>,
+        format: OutputFormatTextJson,
+    ) -> Result<String> {
+        let repository_id = self
+            .container
+            .resolve_repository_id(repository.as_deref())
+            .await;
         let use_case = self.container.symbol_cluster_detection_use_case();
         let graph = use_case
             .detect_communities(&repository_id)
@@ -75,7 +82,10 @@ impl<'a> SymbolClustersController<'a> {
         repository: Option<String>,
         format: OutputFormatTextJson,
     ) -> Result<String> {
-        let repository_id = self.container.resolve_repository_id(repository.as_deref()).await;
+        let repository_id = self
+            .container
+            .resolve_repository_id(repository.as_deref())
+            .await;
         let use_case = self.container.symbol_cluster_detection_use_case();
         let result = use_case
             .community_for_symbol(&symbol, &repository_id)

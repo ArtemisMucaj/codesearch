@@ -5,13 +5,14 @@ use crate::{Commands, FeaturesSubcommand};
 
 use super::container::Container;
 use super::controller::{
-    ClustersController, DeleteController, ExecutionFeaturesController, ExplainController,
-    ImpactController, IndexController, ListRepositoriesController, SearchController,
-    StatsController, SymbolClustersController, SymbolContextController, UsesController,
-    VisualizeController,
+    ChannelsController, ClustersController, DeleteController, ExecutionFeaturesController,
+    ExplainController, ImpactController, IndexController, ListRepositoriesController,
+    SearchController, StatsController, SymbolClustersController, SymbolContextController,
+    UsesController, VisualizeController,
 };
 
 pub struct Router<'a> {
+    channels_controller: ChannelsController<'a>,
     search_controller: SearchController<'a>,
     impact_controller: ImpactController<'a>,
     explain_controller: ExplainController<'a>,
@@ -30,6 +31,7 @@ pub struct Router<'a> {
 impl<'a> Router<'a> {
     pub fn new(container: &'a Container) -> Self {
         Self {
+            channels_controller: ChannelsController::new(container),
             search_controller: SearchController::new(container),
             impact_controller: ImpactController::new(container),
             explain_controller: ExplainController::new(container),
@@ -135,6 +137,25 @@ impl<'a> Router<'a> {
                         .await
                 }
             },
+            Commands::Channels {
+                repository,
+                protocol,
+                min_confidence,
+                exclude_channel,
+                include_tests,
+                format,
+            } => {
+                self.channels_controller
+                    .channels(
+                        repository,
+                        protocol,
+                        min_confidence,
+                        exclude_channel,
+                        include_tests,
+                        format,
+                    )
+                    .await
+            }
             Commands::Uses { from, to } => self.uses_controller.uses(from, to).await,
             Commands::Clusters { subcommand } => match subcommand {
                 ClustersSubcommand::List { repository, format } => {

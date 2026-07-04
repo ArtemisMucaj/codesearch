@@ -556,11 +556,11 @@ async fn test_hybrid_search_with_text_search_disabled_returns_semantic_only() {
 /// produces.
 ///
 /// Scenario (mirrors the user-reported bug):
-///   - `sample_middleware.js` defines and exports `appApplicationSource`
-///   - `sample_router.js` imports it as `const addSource = require(...)`
+///   - `sample_middleware.js` defines and exports `addContext`
+///   - `sample_router.js` imports it as `const addRoute = require(...)`
 ///
 /// After the `normalize_symbol` fix, `callee_symbol` is stored as just
-/// `appApplicationSource` (not the full SCIP path). The reference kind is
+/// `addContext` (not the full SCIP path). The reference kind is
 /// `Call` (inferred from the `().` descriptor suffix when SymbolKind is
 /// Unspecified).
 #[tokio::test(flavor = "multi_thread")]
@@ -570,8 +570,8 @@ async fn test_commonjs_require_captured_as_import_in_call_graph() {
 
     // Simulate the SCIP importer output for:
     //   const express = require('express')
-    //   const addSource = require('./sample_middleware.js')
-    //   app.use(addSource)  ← scip-typescript resolves this to appApplicationSource
+    //   const addRoute = require('./sample_middleware.js')
+    //   app.use(addRoute)  ← scip-typescript resolves this to addContext
     let refs = vec![
         // `const express = require('express')` — reference to the express module.
         // In real SCIP data, this is a plain reference (roles=0) to the module.
@@ -587,11 +587,11 @@ async fn test_commonjs_require_captured_as_import_in_call_graph() {
             Language::JavaScript,
             repo_id.to_string(),
         ),
-        // `app.use(addSource)` — scip-typescript resolves `addSource` to the
-        // actual exported function `appApplicationSource`.
+        // `app.use(addRoute)` — scip-typescript resolves `addRoute` to the
+        // actual exported function `addContext`.
         SymbolReference::new(
             Some("setup".to_string()), // enclosing function
-            "appApplicationSource".to_string(),
+            "addContext".to_string(),
             "routes/sample_router.js".to_string(),
             "routes/sample_router.js".to_string(),
             5,
@@ -600,9 +600,9 @@ async fn test_commonjs_require_captured_as_import_in_call_graph() {
             Language::JavaScript,
             repo_id.to_string(),
         ),
-        // `next()` inside appApplicationSource
+        // `next()` inside addContext
         SymbolReference::new(
-            Some("appApplicationSource".to_string()),
+            Some("addContext".to_string()),
             "next".to_string(),
             "middlewares/sample_middleware.js".to_string(),
             "middlewares/sample_middleware.js".to_string(),
@@ -638,20 +638,20 @@ async fn test_commonjs_require_captured_as_import_in_call_graph() {
         "Expected at least one Import reference with callee 'express' (from `const express = require('express')`)"
     );
 
-    // `app.use(addSource)` → Call reference with callee "appApplicationSource"
+    // `app.use(addRoute)` → Call reference with callee "addContext"
     let app_src_callers = env
         .call_graph_use_case
-        .find_callers("appApplicationSource", &query)
+        .find_callers("addContext", &query)
         .await
-        .expect("find_callers failed for 'appApplicationSource'");
+        .expect("find_callers failed for 'addContext'");
 
     assert!(
         !app_src_callers.is_empty(),
-        "Expected callers for 'appApplicationSource' \
-         (scip-typescript resolves `addSource` to the exported function)"
+        "Expected callers for 'addContext' \
+         (scip-typescript resolves `addRoute` to the exported function)"
     );
 
-    // `next()` inside appApplicationSource should be found
+    // `next()` inside addContext should be found
     let next_callers = env
         .call_graph_use_case
         .find_callers("next", &query)
@@ -660,12 +660,12 @@ async fn test_commonjs_require_captured_as_import_in_call_graph() {
 
     assert!(
         !next_callers.is_empty(),
-        "Expected calls to 'next()' from appApplicationSource in sample_middleware.js"
+        "Expected calls to 'next()' from addContext in sample_middleware.js"
     );
 }
 
 /// Integration test: verifies find_callers works when the middleware uses an
-/// inline named function expression (`module.exports = function appApplicationSource(...) {}`).
+/// inline named function expression (`module.exports = function addContext(...) {}`).
 ///
 /// Uses mock SCIP data directly instead of running the SCIP binary.
 #[tokio::test(flavor = "multi_thread")]
@@ -674,20 +674,20 @@ async fn test_require_resolves_inline_named_function_export() {
     let repo_id = "inline-fn-export-test";
 
     // Simulate SCIP output for:
-    //   middlewares/add-application-source.js:
-    //     module.exports = function appApplicationSource(req, res, next) { next(); };
-    //   routes/na-api-router.js:
-    //     const addSource = require('../middlewares/add-application-source.js');
-    //     function setup(app) { app.use(addSource); }
+    //   middlewares/add-context.js:
+    //     module.exports = function addContext(req, res, next) { next(); };
+    //   routes/api-router.js:
+    //     const addRoute = require('../middlewares/add-context.js');
+    //     function setup(app) { app.use(addRoute); }
     //
-    // scip-typescript resolves `addSource` at usage to `appApplicationSource`.
+    // scip-typescript resolves `addRoute` at usage to `addContext`.
     let refs = vec![
-        // Usage of addSource resolves to the exported function
+        // Usage of addRoute resolves to the exported function
         SymbolReference::new(
             Some("setup".to_string()),
-            "appApplicationSource".to_string(),
-            "routes/na-api-router.js".to_string(),
-            "routes/na-api-router.js".to_string(),
+            "addContext".to_string(),
+            "routes/api-router.js".to_string(),
+            "routes/api-router.js".to_string(),
             3,
             23,
             ReferenceKind::Call,
@@ -697,16 +697,16 @@ async fn test_require_resolves_inline_named_function_export() {
         // The require() line itself — import reference
         SymbolReference::new(
             None,
-            "appApplicationSource".to_string(),
-            "routes/na-api-router.js".to_string(),
-            "routes/na-api-router.js".to_string(),
+            "addContext".to_string(),
+            "routes/api-router.js".to_string(),
+            "routes/api-router.js".to_string(),
             1,
             18,
             ReferenceKind::Import,
             Language::JavaScript,
             repo_id.to_string(),
         )
-        .with_import_alias("addSource"),
+        .with_import_alias("addRoute"),
     ];
 
     env.call_graph_use_case
@@ -718,7 +718,7 @@ async fn test_require_resolves_inline_named_function_export() {
 
     let callers = env
         .call_graph_use_case
-        .find_callers("appApplicationSource", &query)
+        .find_callers("addContext", &query)
         .await
         .expect("find_callers failed");
 
@@ -729,8 +729,8 @@ async fn test_require_resolves_inline_named_function_export() {
 
     assert!(
         !import_refs.is_empty(),
-        "find_callers('appApplicationSource') must find the import in routes/na-api-router.js \
-         even when the middleware uses `module.exports = function appApplicationSource(...) {{}}`. \
+        "find_callers('addContext') must find the import in routes/api-router.js \
+         even when the middleware uses `module.exports = function addContext(...) {{}}`. \
          Got {} callers: {:?}",
         callers.len(),
         callers
@@ -746,39 +746,39 @@ async fn test_require_resolves_inline_named_function_export() {
     );
 }
 
-/// Integration test: `const addSource = require('../middlewares/add-application-source.js')`
-/// where the middleware exports `appApplicationSource` should result in
-/// `find_callers("appApplicationSource")` returning the import site — even though
-/// the local binding is `addSource` (a different name, with `../` in the path).
+/// Integration test: `const addRoute = require('../middlewares/add-context.js')`
+/// where the middleware exports `addContext` should result in
+/// `find_callers("addContext")` returning the import site — even though
+/// the local binding is `addRoute` (a different name, with `../` in the path).
 ///
-/// Also verifies that `find_callers("addSource")` works via the import_alias UNION.
+/// Also verifies that `find_callers("addRoute")` works via the import_alias UNION.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_require_with_dotdot_path_resolves_to_exported_symbol() {
     let env = setup_test_env().await;
     let repo_id = "dotdot-require-test";
 
     // Simulate SCIP output:
-    //   The require() creates an Import reference with callee=appApplicationSource
-    //   and import_alias=addSource (the local binding name).
+    //   The require() creates an Import reference with callee=addContext
+    //   and import_alias=addRoute (the local binding name).
     let refs = vec![
         SymbolReference::new(
             None,
-            "appApplicationSource".to_string(),
-            "routes/na-api-router.js".to_string(),
-            "routes/na-api-router.js".to_string(),
+            "addContext".to_string(),
+            "routes/api-router.js".to_string(),
+            "routes/api-router.js".to_string(),
             2,
             18,
             ReferenceKind::Import,
             Language::JavaScript,
             repo_id.to_string(),
         )
-        .with_import_alias("addSource"),
-        // Usage of addSource at a call site, resolved to appApplicationSource
+        .with_import_alias("addRoute"),
+        // Usage of addRoute at a call site, resolved to addContext
         SymbolReference::new(
             Some("setupRoutes".to_string()),
-            "appApplicationSource".to_string(),
-            "routes/na-api-router.js".to_string(),
-            "routes/na-api-router.js".to_string(),
+            "addContext".to_string(),
+            "routes/api-router.js".to_string(),
+            "routes/api-router.js".to_string(),
             5,
             24,
             ReferenceKind::Call,
@@ -794,11 +794,11 @@ async fn test_require_with_dotdot_path_resolves_to_exported_symbol() {
 
     let query = CallGraphQuery::new().with_repository(repo_id);
 
-    // The primary assertion: find_callers("appApplicationSource") must return the
-    // import in routes/na-api-router.js even though it was imported as `addSource`.
+    // The primary assertion: find_callers("addContext") must return the
+    // import in routes/api-router.js even though it was imported as `addRoute`.
     let callers = env
         .call_graph_use_case
-        .find_callers("appApplicationSource", &query)
+        .find_callers("addContext", &query)
         .await
         .expect("find_callers failed");
 
@@ -809,8 +809,8 @@ async fn test_require_with_dotdot_path_resolves_to_exported_symbol() {
 
     assert!(
         !import_refs.is_empty(),
-        "Expected find_callers('appApplicationSource') to return the import from \
-         routes/na-api-router.js (local binding: addSource). \
+        "Expected find_callers('addContext') to return the import from \
+         routes/api-router.js (local binding: addRoute). \
          Got {} total callers: {:?}",
         callers.len(),
         callers
@@ -825,24 +825,24 @@ async fn test_require_with_dotdot_path_resolves_to_exported_symbol() {
             .collect::<Vec<_>>()
     );
 
-    // The alias must be preserved so that `find_callers("addSource")` still works too.
+    // The alias must be preserved so that `find_callers("addRoute")` still works too.
     let alias = import_refs[0].import_alias();
     assert_eq!(
         alias,
-        Some("addSource"),
-        "import_alias must be the local binding 'addSource'"
+        Some("addRoute"),
+        "import_alias must be the local binding 'addRoute'"
     );
 
     // Verify that searching by the alias also works (via the UNION on import_alias).
     let alias_callers = env
         .call_graph_use_case
-        .find_callers("addSource", &query)
+        .find_callers("addRoute", &query)
         .await
         .expect("find_callers by alias failed");
 
     assert!(
         !alias_callers.is_empty(),
-        "find_callers('addSource') must also work via the import_alias UNION"
+        "find_callers('addRoute') must also work via the import_alias UNION"
     );
 }
 

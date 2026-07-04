@@ -21,7 +21,10 @@ impl<'a> ExecutionFeaturesController<'a> {
         limit: usize,
         format: OutputFormat,
     ) -> Result<String> {
-        let repository_id = self.container.resolve_repository_id(repository.as_deref()).await;
+        let repository_id = self
+            .container
+            .resolve_repository_id(repository.as_deref())
+            .await;
         let use_case = self.container.execution_features_use_case();
         let features = use_case.list_features(&repository_id, limit).await?;
 
@@ -40,9 +43,7 @@ impl<'a> ExecutionFeaturesController<'a> {
         format: OutputFormat,
     ) -> Result<String> {
         let use_case = self.container.execution_features_use_case();
-        let result = use_case
-            .get_feature(&symbol, repository.as_deref())
-            .await?;
+        let result = use_case.get_feature(&symbol, repository.as_deref()).await?;
 
         match result {
             None => Ok(match format {
@@ -119,12 +120,7 @@ impl<'a> ExecutionFeaturesController<'a> {
         features
             .iter()
             .filter_map(|f| f.path.first())
-            .map(|node| {
-                format!(
-                    "{}:{}:1:{}",
-                    node.file_path, node.line, node.symbol
-                )
-            })
+            .map(|node| format!("{}:{}:1:{}", node.file_path, node.line, node.symbol))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -167,12 +163,7 @@ impl<'a> ExecutionFeaturesController<'a> {
         feature
             .path
             .iter()
-            .map(|node| {
-                format!(
-                    "{}:{}:1:{}",
-                    node.file_path, node.line, node.symbol
-                )
-            })
+            .map(|node| format!("{}:{}:1:{}", node.file_path, node.line, node.symbol))
             .collect::<Vec<_>>()
             .join("\n")
     }

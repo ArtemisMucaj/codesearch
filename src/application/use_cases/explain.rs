@@ -625,7 +625,13 @@ async fn build_prompt(
         let key = (symbol.to_string(), file_path.to_string());
         if seen3.insert(key.clone()) {
             let src = source_cache.get(&key).cloned().flatten();
-            symbol_sources.push((symbol.to_string(), repo.to_string(), file_path.to_string(), *line, src));
+            symbol_sources.push((
+                symbol.to_string(),
+                repo.to_string(),
+                file_path.to_string(),
+                *line,
+                src,
+            ));
         }
     }
 

@@ -75,12 +75,11 @@ impl FileRelationshipUseCase {
         // files (e.g. a trait defined in a module and re-exported).
         let mut symbol_map: HashMap<String, (String, String)> = HashMap::new();
         for repo in &target_repos {
-            let entries = self
-                .vector_repo
-                .get_symbol_to_file_map(repo.id())
-                .await?;
+            let entries = self.vector_repo.get_symbol_to_file_map(repo.id()).await?;
             for (sym, file) in entries {
-                symbol_map.entry(sym).or_insert((file, repo.id().to_string()));
+                symbol_map
+                    .entry(sym)
+                    .or_insert((file, repo.id().to_string()));
             }
         }
 
@@ -115,7 +114,9 @@ impl FileRelationshipUseCase {
                 }
 
                 let key = (from_file, from_repo, to_file.clone(), to_repo.clone());
-                let entry = edge_map.entry(key).or_insert((0, HashSet::new(), HashSet::new()));
+                let entry = edge_map
+                    .entry(key)
+                    .or_insert((0, HashSet::new(), HashSet::new()));
                 entry.0 += 1;
                 entry.1.insert(sr.reference_kind().as_str());
                 entry.2.insert(callee.to_string());

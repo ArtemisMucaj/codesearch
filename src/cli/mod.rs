@@ -379,6 +379,37 @@ pub enum Commands {
         subcommand: FeaturesSubcommand,
     },
 
+    /// List cross-service channel links (Kafka topics, HTTP routes, MQTT
+    /// topics) between the repositories indexed in the current namespace
+    Channels {
+        /// Restrict to specific repositories (name or ID, may be repeated).
+        /// Omit to match across every repository in the namespace.
+        #[arg(short, long)]
+        repository: Option<Vec<String>>,
+
+        /// Filter by protocol: kafka, http, mqtt, amqp, or grpc.
+        #[arg(short, long)]
+        protocol: Option<String>,
+
+        /// Drop edges whose confidence is below this threshold (0.0–1.0).
+        #[arg(long)]
+        min_confidence: Option<f32>,
+
+        /// Exclude channels matching this glob (may be repeated),
+        /// e.g. --exclude-channel '/health*'.
+        #[arg(long)]
+        exclude_channel: Vec<String>,
+
+        /// Include endpoints from test files (test/, spec/, *-test.*, *.spec.*).
+        /// Excluded by default.
+        #[arg(long)]
+        include_tests: bool,
+
+        /// Output format: text or json.
+        #[arg(short = 'F', long, value_enum, default_value = "text")]
+        format: OutputFormatTextJson,
+    },
+
     /// List files in <from> that reference symbols defined in <to>
     Uses {
         /// Repository that is doing the using (the caller side).

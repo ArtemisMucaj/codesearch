@@ -6,12 +6,12 @@
  */
 
 const express = require('express');
-const addSource = require('./sample_middleware.js');
+const addRoute = require('./sample_middleware.js');
 
 const router = express.Router();
 
 function setupApiRoutes(app) {
-  router.use(addSource);
+  router.use(addRoute);
   app.use('/api', router);
 }
 

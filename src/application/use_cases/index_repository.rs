@@ -12,12 +12,13 @@ use tracing::{debug, info, warn};
 
 use crate::application::git_remote::detect_remote;
 use crate::application::{
-    CallGraphUseCase, EmbeddingService, FileHashRepository, MetadataRepository, ParserService,
-    VectorRepository,
+    CallGraphUseCase, ChannelEndpointRepository, ChannelExtractor, ChannelResolver,
+    EmbeddingService, FileHashRepository, MetadataRepository, ParserService,
+    ResolveChannelsUseCase, VectorRepository,
 };
 use crate::domain::{
-    compute_file_hash, DomainError, Embedding, FileHash, Language, LanguageStats, Repository,
-    SymbolReference, VectorStore,
+    compute_file_hash, ChannelEndpoint, DomainError, Embedding, FileHash, Language, LanguageStats,
+    Repository, SymbolReference, VectorStore,
 };
 
 /// Default number of concurrent `parse_only` calls during the parse phase.
@@ -69,6 +70,15 @@ pub struct IndexRepositoryUseCase {
     /// Optional SCIP indexer.  When present, JS/TS/PHP files use SCIP-derived
     /// symbol references instead of (or as a fallback from) tree-sitter.
     scip: Option<Arc<dyn Scip>>,
+    /// Optional channel-endpoint extraction (cross-service linking).  When
+    /// both are present, every parsed file also runs the channel extractor
+    /// and the endpoints are persisted alongside chunks and references.
+    channel_extractor: Option<Arc<dyn ChannelExtractor>>,
+    channel_endpoint_repo: Option<Arc<dyn ChannelEndpointRepository>>,
+    /// Optional cross-file channel resolution (library confirmation + config
+    /// value resolution). Runs once after extraction, using the SCIP refs and
+    /// the repo's config modules.
+    channel_resolver: Option<Arc<dyn ChannelResolver>>,
     /// Maximum number of concurrent `parse_only` calls.
     parse_concurrency: usize,
 }
@@ -90,6 +100,9 @@ impl IndexRepositoryUseCase {
             parser_service,
             embedding_service,
             scip: None,
+            channel_extractor: None,
+            channel_endpoint_repo: None,
+            channel_resolver: None,
             parse_concurrency: DEFAULT_PARSE_CONCURRENCY,
         }
     }
@@ -97,6 +110,23 @@ impl IndexRepositoryUseCase {
     /// Attach an optional SCIP indexer.
     pub fn with_scip(mut self, scip: Arc<dyn Scip>) -> Self {
         self.scip = Some(scip);
+        self
+    }
+
+    /// Attach channel-endpoint extraction (cross-service linking).
+    pub fn with_channel_extraction(
+        mut self,
+        extractor: Arc<dyn ChannelExtractor>,
+        repository: Arc<dyn ChannelEndpointRepository>,
+    ) -> Self {
+        self.channel_extractor = Some(extractor);
+        self.channel_endpoint_repo = Some(repository);
+        self
+    }
+
+    /// Attach cross-file channel resolution (runs after extraction).
+    pub fn with_channel_resolution(mut self, resolver: Arc<dyn ChannelResolver>) -> Self {
+        self.channel_resolver = Some(resolver);
         self
     }
 
@@ -143,6 +173,7 @@ impl IndexRepositoryUseCase {
             Arc::clone(&self.vector_repo),
             Arc::clone(&self.file_hash_repo),
             Arc::clone(&self.call_graph_use_case),
+            self.channel_endpoint_repo.clone(),
         ))
     }
 
@@ -178,6 +209,9 @@ impl IndexRepositoryUseCase {
                 self.call_graph_use_case
                     .delete_by_repository(existing.id())
                     .await?;
+                if let Some(channel_repo) = &self.channel_endpoint_repo {
+                    channel_repo.delete_by_repository(existing.id()).await?;
+                }
                 self.repository_repo.delete(existing.id()).await?;
             }
             return self
@@ -300,6 +334,7 @@ impl IndexRepositoryUseCase {
             absolute_path.to_path_buf(),
             repository.id().to_string(),
             self.parser_service.clone(),
+            self.channel_extractor.clone(),
             parse_concurrency,
         );
 
@@ -383,6 +418,7 @@ impl IndexRepositoryUseCase {
                 Arc::clone(&self.vector_repo),
                 Arc::clone(&self.file_hash_repo),
                 Arc::clone(&self.call_graph_use_case),
+                self.channel_endpoint_repo.clone(),
             )
             .await?;
             merge_stats(
@@ -404,6 +440,11 @@ impl IndexRepositoryUseCase {
             .update_languages(repository.id(), language_stats)
             .await?;
 
+        // Cross-file channel resolution: confirm libraries via SCIP and resolve
+        // config-driven channels. Runs after all endpoints are persisted.
+        self.resolve_channels(repository.id(), absolute_path, &scip_refs)
+            .await?;
+
         let duration = start_time.elapsed();
         info!(
             "Indexing complete: {} files, {} chunks, {} references in {:.2}s",
@@ -419,6 +460,46 @@ impl IndexRepositoryUseCase {
             .find_by_id(repository.id())
             .await?
             .ok_or_else(|| DomainError::internal("Repository not found after indexing"))
+    }
+
+    /// Enrich stored channel endpoints with library confirmation (SCIP) and
+    /// config-value resolution (AST). A no-op when no resolver is configured.
+    async fn resolve_channels(
+        &self,
+        repository_id: &str,
+        absolute_path: &Path,
+        scip_refs: &HashMap<String, Vec<SymbolReference>>,
+    ) -> Result<(), DomainError> {
+        let (Some(resolver), Some(repo)) = (&self.channel_resolver, &self.channel_endpoint_repo)
+        else {
+            return Ok(());
+        };
+
+        let endpoints = repo.find_by_repository(repository_id).await?;
+        if endpoints.is_empty() {
+            return Ok(());
+        }
+
+        // Config-candidate discovery walks and reads every JS/TS file in the
+        // repo — only worth it when something is actually unresolved. When every
+        // endpoint is already a resolved literal, skip the walk; library
+        // confirmation (which needs no candidates) still runs below.
+        let (config_candidates, sources_by_file) = if endpoints.iter().any(|e| !e.is_resolved()) {
+            discover_config_candidates(absolute_path).await
+        } else {
+            (Vec::new(), HashMap::new())
+        };
+
+        let use_case = ResolveChannelsUseCase::new(resolver.clone());
+        let resolved = use_case.resolve(endpoints, scip_refs, &config_candidates, &sources_by_file);
+
+        repo.save_batch(&resolved).await?;
+        debug!(
+            "Resolved {} channel endpoints ({} config candidates)",
+            resolved.len(),
+            config_candidates.len()
+        );
+        Ok(())
     }
 
     async fn incremental_index(
@@ -518,7 +599,7 @@ impl IndexRepositoryUseCase {
         // Track total chunks deleted
         let mut deleted_chunk_count = 0u64;
 
-        // Process deleted files (remove chunks and references)
+        // Process deleted files (remove chunks, references, and endpoints)
         for path in &deleted {
             debug!("Removing deleted file: {}", path);
             deleted_chunk_count += self
@@ -528,6 +609,11 @@ impl IndexRepositoryUseCase {
             self.call_graph_use_case
                 .delete_by_file(repository.id(), path)
                 .await?;
+            if let Some(channel_repo) = &self.channel_endpoint_repo {
+                channel_repo
+                    .delete_by_file_path(repository.id(), path)
+                    .await?;
+            }
         }
         if !deleted.is_empty() {
             let deleted_paths: Vec<String> = deleted.iter().map(|s| s.to_string()).collect();
@@ -536,7 +622,8 @@ impl IndexRepositoryUseCase {
                 .await?;
         }
 
-        // Process modified files (delete old chunks and references, then re-index)
+        // Process modified files (delete old chunks, references, and
+        // endpoints, then re-index)
         for path in &modified {
             debug!("Re-indexing modified file: {}", path);
             deleted_chunk_count += self
@@ -546,6 +633,11 @@ impl IndexRepositoryUseCase {
             self.call_graph_use_case
                 .delete_by_file(repository.id(), path)
                 .await?;
+            if let Some(channel_repo) = &self.channel_endpoint_repo {
+                channel_repo
+                    .delete_by_file_path(repository.id(), path)
+                    .await?;
+            }
         }
 
         // SCIP: same as the full-index path.
@@ -596,6 +688,7 @@ impl IndexRepositoryUseCase {
             absolute_path.to_path_buf(),
             repository.id().to_string(),
             self.parser_service.clone(),
+            self.channel_extractor.clone(),
             parse_concurrency,
         );
 
@@ -689,6 +782,7 @@ impl IndexRepositoryUseCase {
                 Arc::clone(&self.vector_repo),
                 Arc::clone(&self.file_hash_repo),
                 Arc::clone(&self.call_graph_use_case),
+                self.channel_endpoint_repo.clone(),
             )
             .await?;
             merge_stats(
@@ -742,6 +836,11 @@ impl IndexRepositoryUseCase {
             .update_languages(repository.id(), language_stats)
             .await?;
 
+        // Resolve across the full endpoint set (config resolution and library
+        // confirmation can span changed and unchanged files).
+        self.resolve_channels(repository.id(), absolute_path, &scip_refs)
+            .await?;
+
         let duration = start_time.elapsed();
         info!(
             "Incremental indexing complete: processed {} files ({} new chunks, {} references) in {:.2}s",
@@ -766,6 +865,9 @@ struct ParseOnlyResult {
     content_hash: String,
     language: Language,
     chunks: Vec<crate::domain::CodeChunk>,
+    /// Channel endpoints extracted from the file (empty when no channel
+    /// extractor is configured or the language has no detectors).
+    endpoints: Vec<ChannelEndpoint>,
 }
 
 /// Parsed batch after embedding — ready to be written to the DB.
@@ -820,6 +922,7 @@ fn spawn_parse_stream(
     abs_path: PathBuf,
     repo_id: String,
     parser_service: Arc<dyn ParserService>,
+    channel_extractor: Option<Arc<dyn ChannelExtractor>>,
     concurrency: usize,
 ) -> mpsc::Receiver<Option<ParseOnlyResult>> {
     // Buffer enough results to absorb a full flush cycle without stalling.
@@ -828,9 +931,19 @@ fn spawn_parse_stream(
         let mut stream = futures_util::stream::iter(files)
             .map(move |entry_path| {
                 let parser_service = parser_service.clone();
+                let channel_extractor = channel_extractor.clone();
                 let abs_path = abs_path.clone();
                 let repo_id = repo_id.clone();
-                async move { parse_only(entry_path, &abs_path, &repo_id, &*parser_service).await }
+                async move {
+                    parse_only(
+                        entry_path,
+                        &abs_path,
+                        &repo_id,
+                        &*parser_service,
+                        channel_extractor.as_deref(),
+                    )
+                    .await
+                }
             })
             .buffer_unordered(concurrency);
 
@@ -942,6 +1055,7 @@ async fn do_write(
     vector_repo: Arc<dyn VectorRepository>,
     file_hash_repo: Arc<dyn FileHashRepository>,
     call_graph_use_case: Arc<CallGraphUseCase>,
+    channel_endpoint_repo: Option<Arc<dyn ChannelEndpointRepository>>,
 ) -> Result<FlushStats, DomainError> {
     let EmbedResult {
         batch,
@@ -1024,6 +1138,20 @@ async fn do_write(
         ref_count += refs_count;
     }
 
+    // Channel endpoints: delete-then-save per file mirrors the call-graph
+    // lifecycle and keeps re-indexing idempotent.
+    if let Some(channel_repo) = &channel_endpoint_repo {
+        for (i, result) in batch.iter().enumerate() {
+            if per_file_embeddings[i].is_none() {
+                continue;
+            }
+            channel_repo
+                .delete_by_file_path(&repository_id, &result.relative_path)
+                .await?;
+            channel_repo.save_batch(&result.endpoints).await?;
+        }
+    }
+
     if !file_hashes.is_empty() {
         file_hash_repo.save_batch(&file_hashes).await?;
     }
@@ -1045,6 +1173,7 @@ async fn parse_only(
     absolute_path: &Path,
     repo_id: &str,
     parser_service: &dyn ParserService,
+    channel_extractor: Option<&dyn ChannelExtractor>,
 ) -> Option<ParseOnlyResult> {
     let language = Language::from_path(&entry_path);
     let relative_path = entry_path
@@ -1074,10 +1203,127 @@ async fn parse_only(
         }
     };
 
+    // Channel extraction failures must not fail chunk indexing — log and
+    // continue with no endpoints for the file.
+    let endpoints = match channel_extractor {
+        Some(extractor) if extractor.supports_language(language) => {
+            match extractor
+                .extract(&content, &relative_path, language, repo_id)
+                .await
+            {
+                Ok(endpoints) => endpoints,
+                Err(e) => {
+                    warn!(
+                        "Failed to extract channel endpoints from {}: {}",
+                        relative_path, e
+                    );
+                    Vec::new()
+                }
+            }
+        }
+        _ => Vec::new(),
+    };
+
     Some(ParseOnlyResult {
         relative_path,
         content_hash,
         language,
         chunks,
+        endpoints,
     })
+}
+
+/// Discover the JS/TS sources the channel resolver may search: config modules
+/// (for direct `this.config…` access) plus files that define or instantiate a
+/// class (for the `this.<param>.<key>` constructor-parameter indirection).
+///
+/// Returns `(name, source)` pairs. For a config file the name is the exported
+/// object (`config`); for a class file it is the class name. The resolver only
+/// uses the name to look up config objects — constructor tracing scans every
+/// source for `class`/`new` — so extra names are harmless. Sources are read
+/// once here so the resolver never touches the filesystem.
+#[allow(clippy::type_complexity)]
+async fn discover_config_candidates(
+    absolute_path: &Path,
+) -> (Vec<(String, String)>, HashMap<String, String>) {
+    let root = absolute_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut candidates = Vec::new();
+        // Repo-relative path → source, so a call site can be re-read for
+        // template/interface pattern inference (keys match endpoint file paths).
+        let mut sources_by_file: HashMap<String, String> = HashMap::new();
+        // Mirror the main indexing walker's filters so resolver discovery sees
+        // exactly the files the indexer indexed — no hidden/gitignored/generated
+        // files (e.g. `node_modules`, `target`) that would slow the scan and
+        // match config candidates from sources the indexer never chunked.
+        let walker = WalkBuilder::new(&root)
+            .hidden(true)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .build();
+        for entry in walker.flatten() {
+            let path = entry.path();
+            if !matches!(
+                Language::from_path(path),
+                Language::JavaScript | Language::TypeScript
+            ) {
+                continue;
+            }
+            let Ok(source) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            if let Ok(relative) = path.strip_prefix(&root) {
+                sources_by_file.insert(relative.to_string_lossy().to_string(), source.clone());
+            }
+            // Only files that carry a config object, a class definition, or a
+            // `new` are useful as candidates — skip the rest to keep the
+            // candidate set (and re-parsing cost) small.
+            let names = candidate_names(&source);
+            if names.is_empty() && !source.contains("new ") {
+                continue;
+            }
+            if names.is_empty() {
+                // Instantiation-only file: keep the source, name is unused.
+                candidates.push((String::new(), source));
+            } else {
+                for name in names {
+                    candidates.push((name, source.clone()));
+                }
+            }
+        }
+        (candidates, sources_by_file)
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Names a resolver candidate exposes: top-level `const <name> = {` object
+/// bindings and `class <Name>` declarations. A cheap textual scan — the
+/// resolver re-parses properly; here we only need the candidate names.
+fn candidate_names(source: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in source.lines() {
+        let line = line.trim_start().trim_start_matches("export ").trim_start();
+        if let Some(rest) = line.strip_prefix("const ") {
+            // `config = {` / `config: Config = {` — require an object literal.
+            let name = leading_ident(rest);
+            if !name.is_empty() && line.contains('{') {
+                names.push(name);
+            }
+        } else if let Some(rest) = line.strip_prefix("class ") {
+            let name = leading_ident(rest);
+            if !name.is_empty() {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+/// The leading identifier of `s` (`config: Config = {` → `config`).
+fn leading_ident(s: &str) -> String {
+    s.chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+        .collect()
 }
