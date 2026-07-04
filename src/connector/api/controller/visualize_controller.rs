@@ -27,7 +27,10 @@ impl<'a> VisualizeController<'a> {
         force_aggregate: bool,
         node_limit: usize,
     ) -> Result<String> {
-        let repository_id = self.container.resolve_repository_id(repository.as_deref()).await;
+        let repository_id = self
+            .container
+            .resolve_repository_id(repository.as_deref())
+            .await;
         // 1. Build the render-ready graph from the requested level.
         let view: GraphView = match level {
             VizLevel::File => self

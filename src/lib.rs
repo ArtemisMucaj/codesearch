@@ -7,12 +7,13 @@ pub mod tui;
 pub use application::{
     CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase,
     ChannelEndpointRepository, ChannelExtractor, ChannelLinkOptions, ChannelLinkReport,
-    ChannelLinkUseCase, ChannelStats, ChatClient, ClusterDetectionUseCase, ContextNode,
-    DeleteRepositoryUseCase, EmbeddingService, ExecutionFeaturesUseCase, ExplainResult,
-    ExplainUseCase, FileHashRepository, FileRelationshipUseCase, GraphExpansionUseCase,
-    ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode, IndexRepositoryUseCase,
-    ListRepositoriesUseCase, MetadataRepository, ParserService, QueryExpander, RerankingService,
-    Scip, SearchCodeUseCase, SnippetLookupUseCase, SymbolClusterDetectionUseCase, SymbolContext,
+    ChannelLinkUseCase, ChannelResolver, ChannelStats, ChatClient, ClusterDetectionUseCase,
+    ContextNode, DeleteRepositoryUseCase, EmbeddingService, ExecutionFeaturesUseCase,
+    ExplainResult, ExplainUseCase, FileHashRepository, FileRelationshipUseCase,
+    GraphExpansionUseCase, ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode,
+    IndexRepositoryUseCase, ListRepositoriesUseCase, MetadataRepository, ParserService,
+    QueryExpander, RerankingService, ResolveChannelsUseCase, ResolvedConfigValue, Scip,
+    SearchCodeUseCase, SnippetLookupUseCase, SymbolClusterDetectionUseCase, SymbolContext,
     SymbolContextUseCase, VectorRepository,
 };
 

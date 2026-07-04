@@ -19,7 +19,10 @@ impl<'a> ClustersController<'a> {
         repository: Option<String>,
         format: OutputFormatTextJson,
     ) -> Result<String> {
-        let repository_id = self.container.resolve_repository_id(repository.as_deref()).await;
+        let repository_id = self
+            .container
+            .resolve_repository_id(repository.as_deref())
+            .await;
         let use_case = self.container.cluster_detection_use_case();
         let cg = use_case
             .create_clusters(&repository_id)
@@ -28,8 +31,9 @@ impl<'a> ClustersController<'a> {
 
         let format: OutputFormat = format.into();
         Ok(match format {
-            OutputFormat::Json => serde_json::to_string_pretty(&cg)
-                .context("serializing cluster graph")?,
+            OutputFormat::Json => {
+                serde_json::to_string_pretty(&cg).context("serializing cluster graph")?
+            }
             OutputFormat::Vimgrep => {
                 anyhow::bail!("vimgrep output format is not supported for cluster list")
             }
@@ -62,10 +66,7 @@ impl<'a> ClustersController<'a> {
                         out.push_str(&format!("      {}\n", m));
                     }
                     if c.members.len() > 5 {
-                        out.push_str(&format!(
-                            "      … and {} more\n",
-                            c.members.len() - 5
-                        ));
+                        out.push_str(&format!("      … and {} more\n", c.members.len() - 5));
                     }
                 }
                 out
@@ -80,7 +81,10 @@ impl<'a> ClustersController<'a> {
         repository: Option<String>,
         format: OutputFormatTextJson,
     ) -> Result<String> {
-        let repository_id = self.container.resolve_repository_id(repository.as_deref()).await;
+        let repository_id = self
+            .container
+            .resolve_repository_id(repository.as_deref())
+            .await;
         let use_case = self.container.cluster_detection_use_case();
         let result = use_case
             .cluster_for_file(&file_path, &repository_id)
@@ -119,7 +123,10 @@ impl<'a> ClustersController<'a> {
 
     /// Print a Markdown architecture overview table.
     pub async fn overview(&self, repository: Option<String>) -> Result<String> {
-        let repository_id = self.container.resolve_repository_id(repository.as_deref()).await;
+        let repository_id = self
+            .container
+            .resolve_repository_id(repository.as_deref())
+            .await;
         let use_case = self.container.cluster_detection_use_case();
         Ok(use_case
             .architecture_overview(&repository_id)

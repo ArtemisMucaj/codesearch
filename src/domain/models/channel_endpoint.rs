@@ -162,6 +162,27 @@ pub struct ChannelEndpoint {
     /// Host portion of an absolute HTTP client URL. Unused until phase 3.
     host: Option<String>,
 
+    /// HTTP verb for an HTTP endpoint (`GET`, `POST`, … or `ANY` for a
+    /// verb-less route registration). `None` for non-HTTP protocols. Purely
+    /// descriptive — it is never part of the producer↔consumer join.
+    method: Option<String>,
+
+    /// The client library this endpoint was confirmed against, resolved from
+    /// the call's SCIP symbol (e.g. `@backend/kafkajs`). `None` when resolution
+    /// could not attribute the call to a known library.
+    library: Option<String>,
+
+    /// The environment variable that overrides the channel value, when the
+    /// channel was resolved through a `process.env.X || 'default'` config
+    /// expression (e.g. `KAFKA_TOPOLOGY_EVENT_TOPIC`). `None` otherwise.
+    env_var: Option<String>,
+
+    /// True when resolution confirmed the call really targets a known client
+    /// library (via its SCIP-resolved package). A confirmed endpoint from a
+    /// generic method name (`.produce()`, `.subscribe()`) is trustworthy;
+    /// an unconfirmed one is a weaker, method-name-only guess.
+    confirmed: bool,
+
     /// True when the channel is a wildcard/pattern subscription
     /// (e.g. MQTT `orders/+`).
     is_pattern: bool,
@@ -202,6 +223,10 @@ impl ChannelEndpoint {
             channel_raw,
             channel_normalized,
             host: None,
+            method: None,
+            library: None,
+            env_var: None,
+            confirmed: false,
             is_pattern: false,
             resolved: true,
             confidence: confidence.clamp(0.0, 1.0),
@@ -222,6 +247,10 @@ impl ChannelEndpoint {
         channel_raw: String,
         channel_normalized: String,
         host: Option<String>,
+        method: Option<String>,
+        library: Option<String>,
+        env_var: Option<String>,
+        confirmed: bool,
         is_pattern: bool,
         resolved: bool,
         confidence: f32,
@@ -238,6 +267,10 @@ impl ChannelEndpoint {
             channel_raw,
             channel_normalized,
             host,
+            method,
+            library,
+            env_var,
+            confirmed,
             is_pattern,
             resolved,
             confidence: confidence.clamp(0.0, 1.0),
@@ -255,6 +288,12 @@ impl ChannelEndpoint {
         self
     }
 
+    /// Attach the HTTP verb (uppercased). Non-HTTP endpoints leave this unset.
+    pub fn with_method(mut self, method: impl Into<String>) -> Self {
+        self.method = Some(method.into().to_uppercase());
+        self
+    }
+
     pub fn as_pattern(mut self) -> Self {
         self.is_pattern = true;
         self
@@ -264,6 +303,46 @@ impl ChannelEndpoint {
     /// not a literal).
     pub fn unresolved(mut self) -> Self {
         self.resolved = false;
+        self
+    }
+
+    /// Record the client library this endpoint was confirmed against.
+    pub fn with_library(mut self, library: impl Into<String>) -> Self {
+        self.library = Some(library.into());
+        self
+    }
+
+    /// Record the env var that overrides the channel value.
+    pub fn with_env_var(mut self, env_var: impl Into<String>) -> Self {
+        self.env_var = Some(env_var.into());
+        self
+    }
+
+    /// Mark the endpoint as library-confirmed (SCIP attributed the call to a
+    /// known client library).
+    pub fn confirmed(mut self) -> Self {
+        self.confirmed = true;
+        self
+    }
+
+    /// Replace the confidence score (resolution raises a weak method-name guess
+    /// once the library is confirmed).
+    pub fn with_confidence(mut self, confidence: f32) -> Self {
+        self.confidence = confidence.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Rewrite the channel to a value recovered by resolution: `raw` is what is
+    /// shown, `normalized` is what the producer↔consumer join keys on. Marks
+    /// the endpoint resolved.
+    pub fn resolve_channel(
+        mut self,
+        raw: impl Into<String>,
+        normalized: impl Into<String>,
+    ) -> Self {
+        self.channel_raw = raw.into();
+        self.channel_normalized = normalized.into();
+        self.resolved = true;
         self
     }
 
@@ -306,6 +385,27 @@ impl ChannelEndpoint {
 
     pub fn host(&self) -> Option<&str> {
         self.host.as_deref()
+    }
+
+    /// HTTP verb (`GET`, `POST`, `ANY`, …), or `None` for non-HTTP endpoints.
+    pub fn method(&self) -> Option<&str> {
+        self.method.as_deref()
+    }
+
+    /// The client library this endpoint was confirmed against
+    /// (e.g. `@backend/kafkajs`), or `None`.
+    pub fn library(&self) -> Option<&str> {
+        self.library.as_deref()
+    }
+
+    /// The env var overriding the channel value, or `None`.
+    pub fn env_var(&self) -> Option<&str> {
+        self.env_var.as_deref()
+    }
+
+    /// Whether resolution confirmed the call targets a known client library.
+    pub fn is_confirmed(&self) -> bool {
+        self.confirmed
     }
 
     pub fn is_pattern(&self) -> bool {
@@ -447,9 +547,13 @@ mod tests {
             ChannelRole::Producer,
             "orders.created".to_string(),
             "orders.created".to_string(),
-            None,
-            false,
-            true,
+            None, // host
+            None, // method
+            None, // library
+            None, // env_var
+            false, // confirmed
+            false, // is_pattern
+            true, // resolved
             -0.3,
             EndpointSource::TreeSitter,
         );

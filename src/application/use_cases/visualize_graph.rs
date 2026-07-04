@@ -485,7 +485,11 @@ fn render_svg(view: &GraphView) -> String {
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{:.0}\" height=\"{:.0}\" viewBox=\"0 0 {:.0} {:.0}\" font-family=\"sans-serif\">",
         W, H, W, H
     );
-    let _ = writeln!(s, "<rect width=\"{:.0}\" height=\"{:.0}\" fill=\"#1a1a2e\"/>", W, H);
+    let _ = writeln!(
+        s,
+        "<rect width=\"{:.0}\" height=\"{:.0}\" fill=\"#1a1a2e\"/>",
+        W, H
+    );
 
     // Edges.
     s.push_str("<g stroke=\"#aaaaaa\">\n");

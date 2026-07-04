@@ -89,7 +89,9 @@ enum StreamEvent {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum StreamDelta {
-    TextDelta { text: String },
+    TextDelta {
+        text: String,
+    },
     #[serde(other)]
     Other,
 }

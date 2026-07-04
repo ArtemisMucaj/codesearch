@@ -22,13 +22,7 @@ async fn make_call_graph_use_case() -> Arc<CallGraphUseCase> {
 }
 
 /// Shorthand for building a simple call edge.
-fn call_ref(
-    caller: &str,
-    callee: &str,
-    file: &str,
-    line: u32,
-    repo: &str,
-) -> SymbolReference {
+fn call_ref(caller: &str, callee: &str, file: &str, line: u32, repo: &str) -> SymbolReference {
     SymbolReference::new(
         Some(caller.to_string()),
         callee.to_string(),

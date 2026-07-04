@@ -6,6 +6,7 @@
 //! parser file sits at the per-file size guidance ceiling, and channel
 //! extraction is an independent pass with its own registry.
 
+mod config_resolver;
 mod registry;
 
 use std::collections::HashMap;
@@ -15,7 +16,9 @@ use streaming_iterator::StreamingIterator;
 use tracing::{debug, warn};
 use tree_sitter::{Node, Parser, Query, QueryCursor};
 
-use crate::application::{normalize_http_route, split_http_url, ChannelExtractor};
+use crate::application::{
+    normalize_http_route, split_http_url, ChannelExtractor, ChannelResolver, ResolvedConfigValue,
+};
 use crate::domain::{ChannelEndpoint, DomainError, EndpointSource, Language, Protocol};
 
 use registry::{detectors, Detector};
@@ -98,10 +101,20 @@ impl TreeSitterChannelExtractor {
             let raw_text = &content[node.byte_range()];
             let line = node.start_position().row as u32 + 1;
 
-            // A string literal resolves immediately; an identifier is
-            // recorded unresolved so the unmatched report stays honest and
-            // phase 3 has something to resolve.
-            let literal = if node.kind() == "identifier" {
+            // HTTP verb for display: the `@method` capture, with the verb-less
+            // route registrations (`route`, `all`) reported as `ANY`. Non-HTTP
+            // protocols carry no verb.
+            let http_method = (detector.protocol == Protocol::Http)
+                .then(|| match captured.get("method").copied() {
+                    Some("route") | Some("all") | None => "ANY".to_string(),
+                    Some(verb) => verb.to_string(),
+                });
+
+            // A string literal resolves immediately; an identifier or a
+            // property access (`this.topics.orders`) is recorded unresolved so
+            // the unmatched report stays honest and phase 3 has something to
+            // resolve.
+            let literal = if is_unresolved_channel(node.kind()) {
                 None
             } else {
                 strip_string_literal(raw_text)
@@ -125,24 +138,37 @@ impl TreeSitterChannelExtractor {
                     if let Some(host) = host {
                         endpoint = endpoint.with_host(host);
                     }
+                    if let Some(method) = &http_method {
+                        endpoint = endpoint.with_method(method);
+                    }
                     if is_pattern {
                         endpoint = endpoint.as_pattern();
                     }
                     endpoint
                 }
                 Some(_) => continue, // empty literal — nothing to join on
-                None if node.kind() == "identifier" => ChannelEndpoint::new(
-                    repository_id.to_string(),
-                    file_path.to_string(),
-                    line,
-                    detector.protocol,
-                    detector.role,
-                    raw_text.to_string(),
-                    raw_text.to_string(),
-                    detector.confidence,
-                    EndpointSource::TreeSitter,
-                )
-                .unresolved(),
+                None if is_unresolved_channel(node.kind()) => {
+                    // For a property access, the trailing name is the most
+                    // channel-like token (`this.topics.orders` → `orders`);
+                    // for a bare identifier it is the identifier itself.
+                    let name = unresolved_channel_name(node, content, raw_text);
+                    let mut endpoint = ChannelEndpoint::new(
+                        repository_id.to_string(),
+                        file_path.to_string(),
+                        line,
+                        detector.protocol,
+                        detector.role,
+                        name.clone(),
+                        name,
+                        detector.confidence,
+                        EndpointSource::TreeSitter,
+                    )
+                    .unresolved();
+                    if let Some(method) = &http_method {
+                        endpoint = endpoint.with_method(method);
+                    }
+                    endpoint
+                }
                 None => continue, // unparseable literal
             };
 
@@ -241,6 +267,25 @@ impl ChannelExtractor for TreeSitterChannelExtractor {
     }
 }
 
+impl ChannelResolver for TreeSitterChannelExtractor {
+    fn resolve_config_expression(
+        &self,
+        expression: &str,
+        candidates: &[(String, String)],
+    ) -> Option<ResolvedConfigValue> {
+        let borrowed: Vec<(&str, &str)> = candidates
+            .iter()
+            .map(|(name, source)| (name.as_str(), source.as_str()))
+            .collect();
+        config_resolver::resolve_channel_expression(expression, &borrowed).map(|r| {
+            ResolvedConfigValue {
+                value: r.value,
+                env_var: r.env_var,
+            }
+        })
+    }
+}
+
 /// Per-protocol channel normalization at extraction time.
 ///
 /// Returns `(host, normalized, is_pattern)`.
@@ -257,6 +302,42 @@ fn normalize_channel(protocol: Protocol, raw: &str) -> (Option<String>, String, 
         }
         Protocol::Kafka | Protocol::Amqp | Protocol::Grpc => (None, raw.trim().to_string(), false),
     }
+}
+
+/// Node kinds whose channel argument is not a literal and is therefore
+/// recorded as an unresolved endpoint: a bare identifier (`ORDERS_TOPIC`), or a
+/// property access carrying the topic through config
+/// (`this.topics.gatewayRegistered`, kafkajs wrappers). Covers the JS/TS
+/// `member_expression`, Python `attribute`, and Rust `field_expression` /
+/// `scoped_identifier` shapes.
+fn is_unresolved_channel(kind: &str) -> bool {
+    matches!(
+        kind,
+        "identifier"
+            | "member_expression"
+            | "attribute"
+            | "field_expression"
+            | "scoped_identifier"
+    )
+}
+
+/// The channel identifier recorded for an unresolved endpoint. A bare
+/// identifier is used verbatim; a **property access is kept whole**
+/// (`this.config.broker.topics.orders`) so the config resolver can follow the
+/// path — the display layer shortens it to the trailing property. Interior
+/// whitespace is collapsed so the stored form is stable.
+fn unresolved_channel_name(node: Node<'_>, content: &str, raw_text: &str) -> String {
+    let is_property_access = matches!(
+        node.kind(),
+        "member_expression" | "attribute" | "field_expression" | "scoped_identifier"
+    );
+    if is_property_access {
+        let full: String = content[node.byte_range()].split_whitespace().collect();
+        if !full.is_empty() {
+            return full;
+        }
+    }
+    raw_text.to_string()
 }
 
 /// Extract the contents of a string literal node's text, stripping quotes and
@@ -391,6 +472,10 @@ def get_order(order_id):
         assert_eq!(http[0].role(), ChannelRole::Consumer);
         assert_eq!(http[0].channel_normalized(), "/api/orders/{}");
         assert_eq!(http[0].enclosing_symbol(), Some("get_order"));
+        // `@app.route(...)` has no explicit verb — reported as ANY.
+        assert_eq!(http[0].method(), Some("ANY"));
+        // Non-HTTP endpoints carry no verb.
+        assert_eq!(kafka[0].method(), None);
     }
 
     #[tokio::test]
@@ -459,6 +544,8 @@ client.subscribe('sensors/+/temp');
         assert_eq!(http[0].channel_normalized(), "/api/orders/123");
         assert_eq!(http[0].host(), Some("orders-service"));
         assert_eq!(http[0].enclosing_symbol(), Some("fetchOrder"));
+        // axios.get(...) carries its verb through to the endpoint.
+        assert_eq!(http[0].method(), Some("GET"));
 
         let mqtt: Vec<_> = endpoints
             .iter()
@@ -468,6 +555,71 @@ client.subscribe('sensors/+/temp');
         let pattern = mqtt.iter().find(|e| e.is_pattern()).unwrap();
         assert_eq!(pattern.channel_raw(), "sensors/+/temp");
         assert_eq!(pattern.role(), ChannelRole::Consumer);
+    }
+
+    #[tokio::test]
+    async fn test_kafka_positional_produce_and_subscribe() {
+        // Positional Kafka shapes: the topic is the first positional arg,
+        // wired from config as a property access rather than a string literal.
+        let content = r#"
+class DomainEvent {
+    async gatewayRegistered(event) {
+        await this.producer.produce(this.topics.gatewayRegistered, payload, key);
+    }
+    async fixed(event) {
+        await this.producer.produce("orders.created", payload);
+    }
+}
+
+async function start() {
+    router.subscribe(this.config.broker.topics.topologyEvent, handler, schema);
+}
+"#;
+        let endpoints = extract(content, "application.ts", Language::TypeScript).await;
+
+        let producers: Vec<_> = endpoints
+            .iter()
+            .filter(|e| e.role() == ChannelRole::Producer && e.protocol() == Protocol::Kafka)
+            .collect();
+        assert_eq!(producers.len(), 2);
+        // Property-access topic → unresolved, trailing property recorded.
+        let prop = producers
+            .iter()
+            .find(|e| !e.is_resolved())
+            .expect("property-access producer");
+        // The full property path is kept so config resolution can follow it.
+        assert_eq!(prop.channel_raw(), "this.topics.gatewayRegistered");
+        assert_eq!(prop.enclosing_symbol(), Some("gatewayRegistered"));
+        // A string-literal topic resolves normally.
+        let literal = producers
+            .iter()
+            .find(|e| e.is_resolved())
+            .expect("string-literal producer");
+        assert_eq!(literal.channel_raw(), "orders.created");
+
+        let consumers: Vec<_> = endpoints
+            .iter()
+            .filter(|e| e.role() == ChannelRole::Consumer && e.protocol() == Protocol::Kafka)
+            .collect();
+        assert_eq!(consumers.len(), 1);
+        assert_eq!(
+            consumers[0].channel_raw(),
+            "this.config.broker.topics.topologyEvent"
+        );
+        assert!(!consumers[0].is_resolved());
+        assert_eq!(consumers[0].enclosing_symbol(), Some("start"));
+    }
+
+    #[tokio::test]
+    async fn test_mqtt_string_subscribe_not_stolen_by_kafka() {
+        // A string-argument `.subscribe('a/+')` must stay MQTT — the positional
+        // Kafka consumer detector only accepts identifier/property channels,
+        // never a string.
+        let content = r#"client.subscribe('sensors/+/temp');"#;
+        let endpoints = extract(content, "index.ts", Language::TypeScript).await;
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].protocol(), Protocol::Mqtt);
+        assert_eq!(endpoints[0].role(), ChannelRole::Consumer);
     }
 
     #[tokio::test]
@@ -481,6 +633,7 @@ app.get('/users/:id', async (req, res) => {
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].role(), ChannelRole::Consumer);
         assert_eq!(endpoints[0].channel_normalized(), "/users/{}");
+        assert_eq!(endpoints[0].method(), Some("GET"));
     }
 
     #[tokio::test]
@@ -504,6 +657,8 @@ async fn fetch_status() -> Result<String, Error> {
         assert_eq!(server.len(), 1);
         assert_eq!(server[0].channel_normalized(), "/api/orders/{}");
         assert_eq!(server[0].enclosing_symbol(), Some("build_router"));
+        // axum's `.route(...)` is verb-less — ANY.
+        assert_eq!(server[0].method(), Some("ANY"));
 
         let client: Vec<_> = endpoints
             .iter()
@@ -512,6 +667,7 @@ async fn fetch_status() -> Result<String, Error> {
         assert_eq!(client.len(), 1);
         assert_eq!(client[0].channel_normalized(), "/api/status");
         assert_eq!(client[0].host(), Some("status-service"));
+        assert_eq!(client[0].method(), Some("GET"));
         // The unambiguous reqwest:: path detector must win over the generic
         // method-name detector at the same call site.
         assert!((client[0].confidence() - 0.9).abs() < f32::EPSILON);

@@ -52,6 +52,12 @@ pub struct SymbolReference {
     /// Local alias used at the import/require site (e.g., `bar` in `import { foo as bar }`).
     /// `None` when the symbol is imported without renaming.
     import_alias: Option<String>,
+
+    /// The package the callee symbol is defined in, as reported by SCIP
+    /// (e.g. `@backend/kafkajs`). `None` for local symbols or a project's own
+    /// source. Lets channel resolution confirm which library a generic call
+    /// (`.produce()`, `.subscribe()`) actually reaches.
+    callee_package: Option<String>,
 }
 
 impl SymbolReference {
@@ -81,6 +87,7 @@ impl SymbolReference {
             caller_node_type: None,
             enclosing_scope: None,
             import_alias: None,
+            callee_package: None,
         }
     }
 
@@ -100,6 +107,7 @@ impl SymbolReference {
         caller_node_type: Option<String>,
         enclosing_scope: Option<String>,
         import_alias: Option<String>,
+        callee_package: Option<String>,
     ) -> Self {
         Self {
             id,
@@ -115,6 +123,7 @@ impl SymbolReference {
             caller_node_type,
             enclosing_scope,
             import_alias,
+            callee_package,
         }
     }
 
@@ -130,6 +139,11 @@ impl SymbolReference {
 
     pub fn with_import_alias(mut self, alias: impl Into<String>) -> Self {
         self.import_alias = Some(alias.into());
+        self
+    }
+
+    pub fn with_callee_package(mut self, package: impl Into<String>) -> Self {
+        self.callee_package = Some(package.into());
         self
     }
 
@@ -191,6 +205,12 @@ impl SymbolReference {
     /// For example, `bar` in `import { foo as bar }` or `const { foo: bar } = require(...)`.
     pub fn import_alias(&self) -> Option<&str> {
         self.import_alias.as_deref()
+    }
+
+    /// The package the callee is defined in (e.g. `@backend/kafkajs`), or
+    /// `None` for local/project-own symbols.
+    pub fn callee_package(&self) -> Option<&str> {
+        self.callee_package.as_deref()
     }
 
     /// Returns a formatted location string for this reference.

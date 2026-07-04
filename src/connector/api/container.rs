@@ -523,6 +523,9 @@ impl Container {
 
     pub fn index_use_case(&self) -> IndexRepositoryUseCase {
         let scip: Arc<dyn Scip> = Arc::new(ScipRunner);
+        // One extractor instance serves both roles: per-file extraction and the
+        // cross-file resolution pass (it owns the tree-sitter config resolver).
+        let channel_extractor = Arc::new(TreeSitterChannelExtractor::new());
         IndexRepositoryUseCase::new(
             self.repo_adapter.clone(),
             self.vector_repo.clone(),
@@ -533,9 +536,10 @@ impl Container {
         )
         .with_scip(scip)
         .with_channel_extraction(
-            Arc::new(TreeSitterChannelExtractor::new()),
+            channel_extractor.clone(),
             self.channel_endpoint_repo.clone(),
         )
+        .with_channel_resolution(channel_extractor)
         .with_parse_concurrency(self.config.parse_concurrency)
     }
 

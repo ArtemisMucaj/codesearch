@@ -12,8 +12,9 @@ use tracing::{debug, info, warn};
 
 use crate::application::git_remote::detect_remote;
 use crate::application::{
-    CallGraphUseCase, ChannelEndpointRepository, ChannelExtractor, EmbeddingService,
-    FileHashRepository, MetadataRepository, ParserService, VectorRepository,
+    CallGraphUseCase, ChannelEndpointRepository, ChannelExtractor, ChannelResolver,
+    EmbeddingService, FileHashRepository, MetadataRepository, ParserService,
+    ResolveChannelsUseCase, VectorRepository,
 };
 use crate::domain::{
     compute_file_hash, ChannelEndpoint, DomainError, Embedding, FileHash, Language, LanguageStats,
@@ -74,6 +75,10 @@ pub struct IndexRepositoryUseCase {
     /// and the endpoints are persisted alongside chunks and references.
     channel_extractor: Option<Arc<dyn ChannelExtractor>>,
     channel_endpoint_repo: Option<Arc<dyn ChannelEndpointRepository>>,
+    /// Optional cross-file channel resolution (library confirmation + config
+    /// value resolution). Runs once after extraction, using the SCIP refs and
+    /// the repo's config modules.
+    channel_resolver: Option<Arc<dyn ChannelResolver>>,
     /// Maximum number of concurrent `parse_only` calls.
     parse_concurrency: usize,
 }
@@ -97,6 +102,7 @@ impl IndexRepositoryUseCase {
             scip: None,
             channel_extractor: None,
             channel_endpoint_repo: None,
+            channel_resolver: None,
             parse_concurrency: DEFAULT_PARSE_CONCURRENCY,
         }
     }
@@ -115,6 +121,12 @@ impl IndexRepositoryUseCase {
     ) -> Self {
         self.channel_extractor = Some(extractor);
         self.channel_endpoint_repo = Some(repository);
+        self
+    }
+
+    /// Attach cross-file channel resolution (runs after extraction).
+    pub fn with_channel_resolution(mut self, resolver: Arc<dyn ChannelResolver>) -> Self {
+        self.channel_resolver = Some(resolver);
         self
     }
 
@@ -428,6 +440,11 @@ impl IndexRepositoryUseCase {
             .update_languages(repository.id(), language_stats)
             .await?;
 
+        // Cross-file channel resolution: confirm libraries via SCIP and resolve
+        // config-driven channels. Runs after all endpoints are persisted.
+        self.resolve_channels(repository.id(), absolute_path, &scip_refs)
+            .await?;
+
         let duration = start_time.elapsed();
         info!(
             "Indexing complete: {} files, {} chunks, {} references in {:.2}s",
@@ -443,6 +460,39 @@ impl IndexRepositoryUseCase {
             .find_by_id(repository.id())
             .await?
             .ok_or_else(|| DomainError::internal("Repository not found after indexing"))
+    }
+
+    /// Enrich stored channel endpoints with library confirmation (SCIP) and
+    /// config-value resolution (AST). A no-op when no resolver is configured.
+    async fn resolve_channels(
+        &self,
+        repository_id: &str,
+        absolute_path: &Path,
+        scip_refs: &HashMap<String, Vec<SymbolReference>>,
+    ) -> Result<(), DomainError> {
+        let (Some(resolver), Some(repo)) =
+            (&self.channel_resolver, &self.channel_endpoint_repo)
+        else {
+            return Ok(());
+        };
+
+        let endpoints = repo.find_by_repository(repository_id).await?;
+        if endpoints.is_empty() {
+            return Ok(());
+        }
+
+        let config_candidates = discover_config_candidates(absolute_path).await;
+
+        let use_case = ResolveChannelsUseCase::new(resolver.clone());
+        let resolved = use_case.resolve(endpoints, scip_refs, &config_candidates);
+
+        repo.save_batch(&resolved).await?;
+        debug!(
+            "Resolved {} channel endpoints ({} config candidates)",
+            resolved.len(),
+            config_candidates.len()
+        );
+        Ok(())
     }
 
     async fn incremental_index(
@@ -777,6 +827,11 @@ impl IndexRepositoryUseCase {
 
         self.repository_repo
             .update_languages(repository.id(), language_stats)
+            .await?;
+
+        // Resolve across the full endpoint set (config resolution and library
+        // confirmation can span changed and unchanged files).
+        self.resolve_channels(repository.id(), absolute_path, &scip_refs)
             .await?;
 
         let duration = start_time.elapsed();
@@ -1169,4 +1224,73 @@ async fn parse_only(
         chunks,
         endpoints,
     })
+}
+
+/// Discover config modules the channel resolver can search: JS/TS files whose
+/// path names them as config, paired with the object names they export.
+///
+/// Returns `(object_name, source)` pairs. A file exporting `const config = {…}`
+/// yields `("config", <source>)`. Sources are read once here and handed to the
+/// resolver so it never touches the filesystem itself. Kept intentionally
+/// cheap: only config-named files are read, not the whole tree.
+async fn discover_config_candidates(absolute_path: &Path) -> Vec<(String, String)> {
+    let root = absolute_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut candidates = Vec::new();
+        for entry in WalkBuilder::new(&root).build().flatten() {
+            let path = entry.path();
+            if !is_config_module(path) {
+                continue;
+            }
+            let Ok(source) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            for name in exported_object_names(&source) {
+                candidates.push((name, source.clone()));
+            }
+        }
+        candidates
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// True for a JS/TS file that looks like a config module (`config.ts`,
+/// `config.js`, or a file under a `config/` directory).
+fn is_config_module(path: &Path) -> bool {
+    let is_js_ts = matches!(
+        Language::from_path(path),
+        Language::JavaScript | Language::TypeScript
+    );
+    if !is_js_ts {
+        return false;
+    }
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let in_config_dir = path
+        .components()
+        .any(|c| c.as_os_str() == "config" || c.as_os_str() == "pkg");
+    stem == "config" || (in_config_dir && stem == "index")
+}
+
+/// Names of top-level objects a module binds with `const <name> = {` /
+/// `export const <name> = {`. A cheap textual scan — the resolver re-parses the
+/// source properly; here we only need the candidate object names.
+fn exported_object_names(source: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in source.lines() {
+        let line = line.trim_start().trim_start_matches("export ").trim_start();
+        let Some(rest) = line.strip_prefix("const ") else {
+            continue;
+        };
+        // `config = {` / `config: Config = {` — take the identifier, require an
+        // object initializer on the same line to avoid non-object consts.
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+            .collect();
+        if !name.is_empty() && line.contains('{') {
+            names.push(name);
+        }
+    }
+    names
 }

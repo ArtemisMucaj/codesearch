@@ -404,6 +404,11 @@ pub enum Commands {
         #[arg(long)]
         exclude_channel: Vec<String>,
 
+        /// Include endpoints from test files (test/, spec/, *-test.*, *.spec.*).
+        /// Excluded by default.
+        #[arg(long)]
+        include_tests: bool,
+
         /// Output format: text or json.
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormatTextJson,

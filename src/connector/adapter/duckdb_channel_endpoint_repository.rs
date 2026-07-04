@@ -47,6 +47,10 @@ impl DuckdbChannelEndpointRepository {
                 channel_raw TEXT NOT NULL,
                 channel_normalized TEXT NOT NULL,
                 host TEXT,
+                method TEXT,
+                library TEXT,
+                env_var TEXT,
+                confirmed BOOLEAN DEFAULT FALSE,
                 is_pattern BOOLEAN DEFAULT FALSE,
                 resolved BOOLEAN DEFAULT TRUE,
                 confidence FLOAT NOT NULL,
@@ -88,7 +92,7 @@ impl DuckdbChannelEndpointRepository {
     fn row_to_endpoint(row: &duckdb::Row<'_>) -> duckdb::Result<ChannelEndpoint> {
         let protocol_str: String = row.get(5)?;
         let role_str: String = row.get(6)?;
-        let source_str: String = row.get(13)?;
+        let source_str: String = row.get(17)?;
 
         // A stored string that no longer maps onto a known variant means the
         // row is corrupt or was written by an incompatible schema. Fail the
@@ -106,29 +110,34 @@ impl DuckdbChannelEndpointRepository {
             .ok_or_else(|| enum_error(5, "protocol", &protocol_str))?;
         let role = ChannelRole::parse(&role_str).ok_or_else(|| enum_error(6, "role", &role_str))?;
         let source = EndpointSource::parse(&source_str)
-            .ok_or_else(|| enum_error(13, "source", &source_str))?;
+            .ok_or_else(|| enum_error(17, "source", &source_str))?;
 
         Ok(ChannelEndpoint::reconstitute(
-            row.get::<_, String>(0)?,         // id
-            row.get::<_, String>(1)?,         // repository_id
-            row.get::<_, String>(2)?,         // file_path
-            row.get::<_, Option<String>>(3)?, // enclosing_symbol
-            row.get::<_, i32>(4)? as u32,     // line
+            row.get::<_, String>(0)?,          // id
+            row.get::<_, String>(1)?,          // repository_id
+            row.get::<_, String>(2)?,          // file_path
+            row.get::<_, Option<String>>(3)?,  // enclosing_symbol
+            row.get::<_, i32>(4)? as u32,      // line
             protocol,
             role,
-            row.get::<_, String>(7)?,         // channel_raw
-            row.get::<_, String>(8)?,         // channel_normalized
-            row.get::<_, Option<String>>(9)?, // host
-            row.get::<_, bool>(10)?,          // is_pattern
-            row.get::<_, bool>(11)?,          // resolved
-            row.get::<_, f32>(12)?,           // confidence
+            row.get::<_, String>(7)?,          // channel_raw
+            row.get::<_, String>(8)?,          // channel_normalized
+            row.get::<_, Option<String>>(9)?,  // host
+            row.get::<_, Option<String>>(10)?, // method
+            row.get::<_, Option<String>>(11)?, // library
+            row.get::<_, Option<String>>(12)?, // env_var
+            row.get::<_, bool>(13)?,           // confirmed
+            row.get::<_, bool>(14)?,           // is_pattern
+            row.get::<_, bool>(15)?,           // resolved
+            row.get::<_, f32>(16)?,            // confidence
             source,
         ))
     }
 
     const COLS: &'static str = "id, repository_id, file_path, enclosing_symbol, line, \
                                 protocol, role, channel_raw, channel_normalized, host, \
-                                is_pattern, resolved, confidence, source";
+                                method, library, env_var, confirmed, is_pattern, resolved, \
+                                confidence, source";
 
     async fn query_endpoints(
         &self,
@@ -180,8 +189,9 @@ impl ChannelEndpointRepository for DuckdbChannelEndpointRepository {
                     r#"INSERT INTO channel_endpoints (
                         id, repository_id, file_path, enclosing_symbol, line,
                         protocol, role, channel_raw, channel_normalized, host,
-                        is_pattern, resolved, confidence, source
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        method, library, env_var, confirmed, is_pattern,
+                        resolved, confidence, source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT (id) DO UPDATE SET
                         repository_id = excluded.repository_id,
                         file_path = excluded.file_path,
@@ -192,6 +202,10 @@ impl ChannelEndpointRepository for DuckdbChannelEndpointRepository {
                         channel_raw = excluded.channel_raw,
                         channel_normalized = excluded.channel_normalized,
                         host = excluded.host,
+                        method = excluded.method,
+                        library = excluded.library,
+                        env_var = excluded.env_var,
+                        confirmed = excluded.confirmed,
                         is_pattern = excluded.is_pattern,
                         resolved = excluded.resolved,
                         confidence = excluded.confidence,
@@ -212,6 +226,10 @@ impl ChannelEndpointRepository for DuckdbChannelEndpointRepository {
                     endpoint.channel_raw(),
                     endpoint.channel_normalized(),
                     endpoint.host(),
+                    endpoint.method(),
+                    endpoint.library(),
+                    endpoint.env_var(),
+                    endpoint.is_confirmed(),
                     endpoint.is_pattern(),
                     endpoint.is_resolved(),
                     endpoint.confidence(),
@@ -395,6 +413,7 @@ mod tests {
 
         let ep = endpoint("repo-a", "src/app.py", 12, ChannelRole::Producer)
             .with_host("orders-svc")
+            .with_method("post")
             .as_pattern()
             .unresolved();
         repo.save_batch(std::slice::from_ref(&ep)).await.unwrap();
@@ -408,6 +427,7 @@ mod tests {
         assert_eq!(f.role(), ChannelRole::Producer);
         assert_eq!(f.channel_raw(), "orders.created");
         assert_eq!(f.host(), Some("orders-svc"));
+        assert_eq!(f.method(), Some("POST"));
         assert!(f.is_pattern());
         assert!(!f.is_resolved());
         assert_eq!(f.source(), EndpointSource::TreeSitter);

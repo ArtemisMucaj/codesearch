@@ -137,6 +137,8 @@ fn process_document(
         // Find the enclosing function/method via backwards scan.
         let enclosing = find_enclosing_scope(&scope_defs, occ_line);
 
+        let callee_package = extract_package(&occ.symbol);
+
         let mut sym_ref = SymbolReference::new(
             enclosing.as_ref().map(|s| s.symbol.clone()),
             callee_symbol,
@@ -148,6 +150,10 @@ fn process_document(
             language,
             repo_id.to_string(),
         );
+
+        if let Some(package) = callee_package {
+            sym_ref = sym_ref.with_callee_package(package);
+        }
 
         if let Some(scope) = enclosing {
             if let Some(enc) = scope.enclosing_scope {
@@ -223,6 +229,28 @@ fn find_enclosing_scope(scope_defs: &[ScopeDef], line: u32) -> Option<ScopeDef> 
 /// local 42
 ///   → (empty — local symbols are filtered out by the caller)
 /// ```
+/// The package a SCIP symbol is defined in — the second of the three package
+/// fields (`<scheme> <manager> <package-name> <version> <descriptors>`), e.g.
+/// `@backend/kafkajs` for `scip-typescript npm @backend/kafkajs 6.0.0 …`.
+///
+/// Returns `None` for local symbols and for the synthetic `.` package that
+/// scip-typescript uses for a project's own source (which is not a real
+/// dependency and would only add noise). This is what lets a channel detector
+/// confirm that a generic `.produce()` really resolves into a Kafka client
+/// library rather than firing on an unrelated method of the same name.
+fn extract_package(symbol: &str) -> Option<String> {
+    if symbol.starts_with("local ") {
+        return None;
+    }
+    // parts: [scheme, manager, package-name, version, descriptors]
+    let parts: Vec<&str> = symbol.splitn(5, ' ').collect();
+    let package = parts.get(2)?;
+    if package.is_empty() || *package == "." {
+        return None;
+    }
+    Some(package.to_string())
+}
+
 fn normalize_symbol(symbol: &str, language: Language) -> String {
     if symbol.starts_with("local ") {
         return String::new();
@@ -490,6 +518,23 @@ mod tests {
             normalize_symbol(sym, Language::JavaScript),
             "ButtonComponent#render"
         );
+    }
+
+    #[test]
+    fn test_extract_package() {
+        // A third-party dependency exposes its package name.
+        assert_eq!(
+            extract_package("scip-typescript npm @backend/kafkajs 6.0.0 AsyncProducer#produce()."),
+            Some("@backend/kafkajs".to_string())
+        );
+        // A project's own source uses the synthetic `.` package — not a real
+        // dependency, so no package is reported.
+        assert_eq!(
+            extract_package("scip-typescript npm . . MessageRouter#subscribe()."),
+            None
+        );
+        // Local symbols carry no package.
+        assert_eq!(extract_package("local 42"), None);
     }
 
     #[test]

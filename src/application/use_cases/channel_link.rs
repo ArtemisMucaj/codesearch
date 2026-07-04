@@ -22,6 +22,10 @@ pub struct ChannelLinkOptions {
     /// Glob patterns (`*`, `?`) excluding channels from matching and output,
     /// e.g. `/health*`.
     pub exclude_channels: Vec<String>,
+    /// Include endpoints from test files. Off by default: test files rarely
+    /// describe real cross-service traffic, so they are dropped before
+    /// matching unless this is set.
+    pub include_tests: bool,
 }
 
 /// Result of joining producers and consumers on their channels.
@@ -77,6 +81,9 @@ impl ChannelLinkUseCase {
 
         if let Some(protocol) = options.protocol {
             endpoints.retain(|e| e.protocol() == protocol);
+        }
+        if !options.include_tests {
+            endpoints.retain(|e| !is_test_path(e.file_path()));
         }
         endpoints.retain(|e| {
             !options.exclude_channels.iter().any(|pattern| {
@@ -385,6 +392,32 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
     p == pattern.len()
 }
 
+/// True when a file path looks like a test file, by common conventions across
+/// TS/JS, Python, Go, and Rust: a `test`/`tests`/`__tests__`/`spec` path
+/// segment, or a stem ending in `-test`/`.test`/`_test`/`-spec`/`.spec`.
+pub fn is_test_path(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+
+    if path.split('/').any(|segment| {
+        matches!(segment, "test" | "tests" | "__tests__" | "spec" | "specs")
+    }) {
+        return true;
+    }
+
+    // Filename stem before the extension: `broker-test.ts` → `broker-test`.
+    let file = path.rsplit('/').next().unwrap_or(&path);
+    let stem = file.split('.').next().unwrap_or(file);
+    stem.ends_with("-test")
+        || stem.ends_with("_test")
+        || stem.ends_with("-spec")
+        || stem.ends_with("_spec")
+        // `foo.test.ts` / `foo.spec.ts`: a `.test`/`.spec` segment before the
+        // final extension.
+        || file
+            .split('.')
+            .any(|segment| matches!(segment, "test" | "spec"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,6 +513,28 @@ mod tests {
         assert!(!glob_match("orders.?", "orders.ab"));
         assert!(glob_match("*", "anything"));
         assert!(!glob_match("/health", "/metrics"));
+    }
+
+    #[test]
+    fn test_is_test_path() {
+        // Directory-segment conventions.
+        assert!(is_test_path(
+            "packages/execution-engine/test/connector/adapter/broker-test.ts"
+        ));
+        assert!(is_test_path("src/tests/handlers.py"));
+        assert!(is_test_path("app/__tests__/foo.js"));
+        assert!(is_test_path("pkg/spec/thing_spec.rb"));
+        // Filename-stem conventions.
+        assert!(is_test_path("src/broker-test.ts"));
+        assert!(is_test_path("src/broker_test.go"));
+        assert!(is_test_path("src/handlers.test.ts"));
+        assert!(is_test_path("src/handlers.spec.js"));
+        // Windows separators normalize.
+        assert!(is_test_path("packages\\svc\\test\\broker.ts"));
+        // Production files are kept.
+        assert!(!is_test_path("packages/svc/src/connector/adapter/broker.ts"));
+        assert!(!is_test_path("src/latest.ts")); // "latest" is not "-test"
+        assert!(!is_test_path("src/contest.py")); // "contest" is not a test
     }
 
     #[test]

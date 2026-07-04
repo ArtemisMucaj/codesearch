@@ -264,6 +264,11 @@ pub struct ChannelsInput {
     /// e.g. ["/health*"].
     #[serde(default)]
     pub exclude_channels: Vec<String>,
+
+    /// Include endpoints from test files (test/, spec/, *-test.*, *.spec.*).
+    /// Excluded by default, since test files rarely describe real traffic.
+    #[serde(default)]
+    pub include_tests: bool,
 }
 
 /// Input parameters for the list_symbol_clusters tool
@@ -921,6 +926,7 @@ impl CodesearchMcpServer {
             protocol,
             min_confidence: input.min_confidence,
             exclude_channels: input.exclude_channels,
+            include_tests: input.include_tests,
         };
         let report = self
             .container

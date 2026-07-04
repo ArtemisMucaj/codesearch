@@ -122,8 +122,7 @@ impl<'a> ExplainController<'a> {
         // main.rs's println! does not duplicate the output.
         let mut trailing = format!(
             "\n\n---\nAnalysed {} symbols across {} call levels.\n\n",
-            result.total_affected,
-            result.max_depth_reached,
+            result.total_affected, result.max_depth_reached,
         );
 
         if dump_symbols {
@@ -389,7 +388,9 @@ impl StreamingMarkdownFilter {
         self.tail.push_str(&text);
         if self.tail.len() > TAIL_RESERVE {
             // Snap back to a char boundary so we never split a multi-byte character.
-            let emit_len = self.tail.floor_char_boundary(self.tail.len() - TAIL_RESERVE);
+            let emit_len = self
+                .tail
+                .floor_char_boundary(self.tail.len() - TAIL_RESERVE);
             self.tail.drain(..emit_len).collect()
         } else {
             String::new()

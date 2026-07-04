@@ -143,6 +143,7 @@ impl<'a> Router<'a> {
                 unmatched,
                 min_confidence,
                 exclude_channel,
+                include_tests,
                 format,
             } => {
                 self.channels_controller
@@ -152,6 +153,7 @@ impl<'a> Router<'a> {
                         unmatched,
                         min_confidence,
                         exclude_channel,
+                        include_tests,
                         format,
                     )
                     .await

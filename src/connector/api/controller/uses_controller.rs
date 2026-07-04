@@ -51,10 +51,10 @@ impl<'a> UsesController<'a> {
                 .map(|r| (r.id().to_string(), r.name().to_string()))
         };
 
-        let (from_id, from_name) = resolve(&from)
-            .with_context(|| format!("Repository not found: '{from}'"))?;
-        let (to_id, to_name) = resolve(&to)
-            .with_context(|| format!("Repository not found: '{to}'"))?;
+        let (from_id, from_name) =
+            resolve(&from).with_context(|| format!("Repository not found: '{from}'"))?;
+        let (to_id, to_name) =
+            resolve(&to).with_context(|| format!("Repository not found: '{to}'"))?;
 
         // Build a cross-repo graph that includes both repos
         let graph = uc
@@ -76,7 +76,11 @@ impl<'a> UsesController<'a> {
         }
 
         // Sort by target file then source file for readable output
-        edges.sort_by(|a, b| a.to_file.cmp(&b.to_file).then(a.from_file.cmp(&b.from_file)));
+        edges.sort_by(|a, b| {
+            a.to_file
+                .cmp(&b.to_file)
+                .then(a.from_file.cmp(&b.from_file))
+        });
 
         // Group by target file
         let mut out = format!(
