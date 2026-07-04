@@ -196,8 +196,9 @@ struct Row<'a> {
 /// How a section renders the arrow to a counterpart.
 struct Section<'a> {
     title: &'a str,
-    /// Verb shown on the row's own arrow when it links to a counterpart, e.g.
-    /// "calls" for an HTTP client. Empty sections are skipped.
+    /// Preposition shown on the row's arrow to a counterpart: "from" for a
+    /// receiving section (the counterpart is upstream), "by" for a sending one
+    /// (downstream). Empty sections are skipped.
     link_verb: &'a str,
     rows: Vec<Row<'a>>,
 }
@@ -260,24 +261,26 @@ fn build_sections(report: &ChannelLinkReport) -> Vec<Section<'_>> {
     }
 
     vec![
+        // Receiving sections (server/consumer) link upstream → "from"; sending
+        // sections (client/producer) link downstream → "by".
         Section {
             title: "HTTP servers",
-            link_verb: "called by",
+            link_verb: "from",
             rows: http_servers.into_rows(),
         },
         Section {
             title: "HTTP clients",
-            link_verb: "calls",
+            link_verb: "by",
             rows: http_clients.into_rows(),
         },
         Section {
             title: "Messaging consumers",
-            link_verb: "fed by",
+            link_verb: "from",
             rows: messaging_consumers.into_rows(),
         },
         Section {
             title: "Messaging producers",
-            link_verb: "feeds",
+            link_verb: "by",
             rows: messaging_producers.into_rows(),
         },
     ]
@@ -532,16 +535,17 @@ mod tests {
         assert!(servers < clients && clients < consumers && consumers < producers);
 
         // HTTP verb prefixes the route (no `http:` prefix); mirrored arrows.
+        // Server links upstream ("from"), client links downstream ("by").
         assert!(out.contains("POST /v1/read/{} ← engine: router.ts:23 (controllerRouter)"));
-        assert!(out.contains("└── called by gateway: client.ts:10 (readNode)"));
+        assert!(out.contains("└── from gateway: client.ts:10 (readNode)"));
         assert!(out.contains("GET /v1/read/{} ← gateway: client.ts:10 (readNode)"));
-        assert!(out.contains("└── calls engine: router.ts:23 (controllerRouter)"));
+        assert!(out.contains("└── by engine: router.ts:23 (controllerRouter)"));
 
         // Messaging uses the protocol name as the prefix.
         assert!(out.contains("Kafka orders.created ← svc-a: checkout.ts:12 (checkout)"));
         assert!(out.contains("Kafka orders.created ← svc-b: worker.ts:30 (onOrder)"));
-        assert!(out.contains("└── feeds svc-b: worker.ts:30 (onOrder)"));
-        assert!(out.contains("└── fed by svc-a: checkout.ts:12 (checkout)"));
+        assert!(out.contains("└── by svc-b: worker.ts:30 (onOrder)"));
+        assert!(out.contains("└── from svc-a: checkout.ts:12 (checkout)"));
     }
 
     /// A dangling unresolved producer renders as a plain line with no arrow,
