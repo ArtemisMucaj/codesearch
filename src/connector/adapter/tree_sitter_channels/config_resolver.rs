@@ -19,10 +19,10 @@ use tree_sitter::{Node, Parser};
 /// A channel value recovered from config.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ResolvedChannel {
-    /// The concrete default string the channel resolves to (`"topology_event"`).
+    /// The concrete default string the channel resolves to (`"shipment_event"`).
     pub value: String,
     /// The env var that overrides it at runtime, if the config reads one
-    /// (`KAFKA_TOPOLOGY_EVENT_TOPIC`).
+    /// (`KAFKA_SHIPMENT_EVENT_TOPIC`).
     pub env_var: Option<String>,
 }
 
@@ -68,7 +68,7 @@ pub(super) fn resolve_via_constructor_param(
     class_name: &str,
     sources: &[(&str, &str)],
 ) -> Option<ResolvedChannel> {
-    // `this.topics.gatewayRegistered` → param `topics`, key `gatewayRegistered`.
+    // `this.topics.orderPlaced` → param `topics`, key `orderPlaced`.
     let segments = property_segments(expression);
     if segments.len() != 2 {
         return None;
@@ -139,12 +139,7 @@ fn variable_getter_method(node: Node<'_>, source: &str, var_name: &str) -> Optio
     result
 }
 
-fn find_variable_getter(
-    node: Node<'_>,
-    source: &str,
-    var_name: &str,
-    out: &mut Option<String>,
-) {
+fn find_variable_getter(node: Node<'_>, source: &str, var_name: &str, out: &mut Option<String>) {
     if out.is_some() {
         return;
     }
@@ -588,8 +583,8 @@ fn property_segments(expression: &str) -> Vec<String> {
 
 /// Walk `config_source`'s exported object literal down `path` and resolve the
 /// leaf value. `path` is the property chain *after* the config-object head,
-/// e.g. `["broker", "topics", "topologyEvent"]` for
-/// `config.broker.topics.topologyEvent`. Returns `None` when the object, the
+/// e.g. `["broker", "topics", "shipmentEvent"]` for
+/// `config.broker.topics.shipmentEvent`. Returns `None` when the object, the
 /// path, or the leaf initializer cannot be resolved syntactically.
 pub(super) fn resolve_in_config(
     config_source: &str,
@@ -692,7 +687,9 @@ fn object_property<'a>(object: Node<'a>, source: &str, key: &str) -> Option<Node
 fn property_key_text(key: Node<'_>, source: &str) -> String {
     let raw = &source[key.byte_range()];
     match key.kind() {
-        "string" => raw.trim_matches(|c| c == '"' || c == '\'' || c == '`').to_string(),
+        "string" => raw
+            .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+            .to_string(),
         _ => raw.to_string(),
     }
 }
@@ -722,7 +719,10 @@ fn resolve_value_expression(node: Node<'_>, source: &str) -> Option<ResolvedChan
                 }
             });
             match (default, env_var) {
-                (Some(value), env) => Some(ResolvedChannel { value, env_var: env }),
+                (Some(value), env) => Some(ResolvedChannel {
+                    value,
+                    env_var: env,
+                }),
                 // `process.env.X || otherVar` with no literal: fall back to the
                 // env var name as the value so the endpoint is at least named.
                 (None, Some(env)) => Some(ResolvedChannel {
@@ -881,7 +881,7 @@ export const config = {
     broker: {
         uri: process.env.KAFKA_BROKER || '127.0.0.1:9092',
         topics: {
-            topologyEvent: process.env.KAFKA_TOPOLOGY_EVENT_TOPIC || 'topology_event',
+            shipmentEvent: process.env.KAFKA_SHIPMENT_EVENT_TOPIC || 'shipment_event',
             plain: 'static_topic',
             envOnly: process.env.KAFKA_ENV_ONLY,
         },
@@ -892,9 +892,10 @@ export type Config = typeof config
 
     #[test]
     fn resolves_env_with_default() {
-        let r = resolve_in_config(CONFIG, "config", &["broker", "topics", "topologyEvent"]).unwrap();
-        assert_eq!(r.value, "topology_event");
-        assert_eq!(r.env_var.as_deref(), Some("KAFKA_TOPOLOGY_EVENT_TOPIC"));
+        let r =
+            resolve_in_config(CONFIG, "config", &["broker", "topics", "shipmentEvent"]).unwrap();
+        assert_eq!(r.value, "shipment_event");
+        assert_eq!(r.env_var.as_deref(), Some("KAFKA_SHIPMENT_EVENT_TOPIC"));
     }
 
     #[test]
@@ -921,50 +922,47 @@ export type Config = typeof config
     #[test]
     fn property_segments_drops_this_and_normalises_subscript() {
         assert_eq!(
-            property_segments("this.config.broker.topics.topologyEvent"),
-            vec!["config", "broker", "topics", "topologyEvent"]
+            property_segments("this.config.broker.topics.shipmentEvent"),
+            vec!["config", "broker", "topics", "shipmentEvent"]
         );
         assert_eq!(
-            property_segments("config.broker.topics['topologyEvent']"),
-            vec!["config", "broker", "topics", "topologyEvent"]
+            property_segments("config.broker.topics['shipmentEvent']"),
+            vec!["config", "broker", "topics", "shipmentEvent"]
         );
     }
 
     #[test]
     fn resolve_channel_expression_end_to_end() {
         let candidates = [("config", CONFIG)];
-        let r = resolve_channel_expression(
-            "this.config.broker.topics.topologyEvent",
-            &candidates,
-        )
-        .unwrap();
-        assert_eq!(r.value, "topology_event");
-        assert_eq!(r.env_var.as_deref(), Some("KAFKA_TOPOLOGY_EVENT_TOPIC"));
+        let r = resolve_channel_expression("this.config.broker.topics.shipmentEvent", &candidates)
+            .unwrap();
+        assert_eq!(r.value, "shipment_event");
+        assert_eq!(r.env_var.as_deref(), Some("KAFKA_SHIPMENT_EVENT_TOPIC"));
 
         // No matching candidate → None.
         assert!(
-            resolve_channel_expression("this.config.broker.topics.topologyEvent", &[]).is_none()
+            resolve_channel_expression("this.config.broker.topics.shipmentEvent", &[]).is_none()
         );
     }
 
     // A class receives its topics through a constructor param, wired from the
     // config at the `new Class(...)` site — the producer indirection.
     const CLASS_SOURCE: &str = r#"
-import { AsyncProducer } from '@backend/kafkajs'
-export class DomainEvent {
+import { EventProducer } from 'kafkajs'
+export class OrderEvents {
     constructor(
-        private producer: AsyncProducer,
-        private topics: { topologyEvent: string },
+        private producer: EventProducer,
+        private topics: { shipmentEvent: string },
     ) { }
     async fire(event) {
-        await this.producer.produce(this.topics.topologyEvent, JSON.stringify(event))
+        await this.producer.produce(this.topics.shipmentEvent, JSON.stringify(event))
     }
 }
 "#;
     const INSTANTIATION_SOURCE: &str = r#"
 function build() {
-    const d = new DomainEvent(this.producer, {
-        topologyEvent: this.config.broker.topics.topologyEvent,
+    const d = new OrderEvents(this.producer, {
+        shipmentEvent: this.config.broker.topics.shipmentEvent,
     })
 }
 "#;
@@ -972,30 +970,29 @@ function build() {
     #[test]
     fn resolves_topic_through_constructor_param() {
         let sources = [
-            ("DomainEvent", CLASS_SOURCE),
+            ("OrderEvents", CLASS_SOURCE),
             ("application", INSTANTIATION_SOURCE),
             ("config", CONFIG),
         ];
-        let r =
-            resolve_via_constructor_param("this.topics.topologyEvent", "DomainEvent", &sources)
-                .unwrap();
-        assert_eq!(r.value, "topology_event");
-        assert_eq!(r.env_var.as_deref(), Some("KAFKA_TOPOLOGY_EVENT_TOPIC"));
+        let r = resolve_via_constructor_param("this.topics.shipmentEvent", "OrderEvents", &sources)
+            .unwrap();
+        assert_eq!(r.value, "shipment_event");
+        assert_eq!(r.env_var.as_deref(), Some("KAFKA_SHIPMENT_EVENT_TOPIC"));
     }
 
     #[test]
     fn constructor_param_index_is_positional() {
         // `topics` is the second constructor parameter.
         assert_eq!(
-            constructor_param_index(CLASS_SOURCE, "DomainEvent", "topics"),
+            constructor_param_index(CLASS_SOURCE, "OrderEvents", "topics"),
             Some(1)
         );
         assert_eq!(
-            constructor_param_index(CLASS_SOURCE, "DomainEvent", "producer"),
+            constructor_param_index(CLASS_SOURCE, "OrderEvents", "producer"),
             Some(0)
         );
         assert_eq!(
-            constructor_param_index(CLASS_SOURCE, "DomainEvent", "nope"),
+            constructor_param_index(CLASS_SOURCE, "OrderEvents", "nope"),
             None
         );
     }
@@ -1003,14 +1000,16 @@ function build() {
     #[test]
     fn constructor_trace_gives_up_cleanly() {
         // Unknown class, or a param not wired at the call site.
-        let sources = [("DomainEvent", CLASS_SOURCE), ("config", CONFIG)];
-        // No `new DomainEvent(...)` in these sources → None.
-        assert!(
-            resolve_via_constructor_param("this.topics.topologyEvent", "DomainEvent", &sources)
-                .is_none()
-        );
+        let sources = [("OrderEvents", CLASS_SOURCE), ("config", CONFIG)];
+        // No `new OrderEvents(...)` in these sources → None.
         assert!(resolve_via_constructor_param(
-            "this.topics.topologyEvent",
+            "this.topics.shipmentEvent",
+            "OrderEvents",
+            &sources
+        )
+        .is_none());
+        assert!(resolve_via_constructor_param(
+            "this.topics.shipmentEvent",
             "UnknownClass",
             &sources
         )

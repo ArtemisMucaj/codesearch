@@ -127,7 +127,7 @@ fn endpoint_line(endpoint: &ChannelEndpoint, repo_names: &HashMap<String, String
 /// the verb / protocol name already carries it.
 ///
 /// A channel recovered from config, or confirmed against a client library,
-/// carries a trailing `(env: X, via @backend/kafkajs)` annotation.
+/// carries a trailing `(env: X, via kafkajs)` annotation.
 fn channel_label(endpoint: &ChannelEndpoint) -> String {
     let channel = channel_display(endpoint);
     let mut base = match endpoint.protocol() {
@@ -438,15 +438,15 @@ mod tests {
     #[test]
     fn resolved_endpoint_shows_env_and_library() {
         let resolved = endpoint(
-            "engine",
+            "orders",
             "app.ts",
             40,
             Protocol::Kafka,
             ChannelRole::Consumer,
-            "topology_event",
+            "shipment_event",
         )
-        .with_env_var("KAFKA_TOPOLOGY_EVENT_TOPIC")
-        .with_library("@backend/kafkajs");
+        .with_env_var("KAFKA_SHIPMENT_EVENT_TOPIC")
+        .with_library("kafkajs");
 
         let report = ChannelLinkReport {
             edges: vec![],
@@ -455,9 +455,9 @@ mod tests {
             noisy_channels: vec![],
         };
         let out = render_text(&report, &HashMap::new(), false);
-        assert!(out.contains(
-            "Kafka topology_event  (env: KAFKA_TOPOLOGY_EVENT_TOPIC, via @backend/kafkajs)"
-        ));
+        assert!(
+            out.contains("Kafka shipment_event  (env: KAFKA_SHIPMENT_EVENT_TOPIC, via kafkajs)")
+        );
     }
 
     /// An unresolved property-access channel is shown by its trailing segment,
@@ -465,12 +465,12 @@ mod tests {
     #[test]
     fn unresolved_property_path_is_shortened_for_display() {
         let unresolved = endpoint(
-            "engine",
+            "orders",
             "app.ts",
             93,
             Protocol::Kafka,
             ChannelRole::Consumer,
-            "this.config.broker.topics.topologyEvent",
+            "this.config.broker.topics.shipmentEvent",
         )
         .unresolved();
 
@@ -481,7 +481,7 @@ mod tests {
             noisy_channels: vec![],
         };
         let out = render_text(&report, &HashMap::new(), false);
-        assert!(out.contains("Kafka topologyEvent"));
+        assert!(out.contains("Kafka shipmentEvent"));
         assert!(!out.contains("this.config.broker"));
     }
 
@@ -490,7 +490,7 @@ mod tests {
     #[test]
     fn matched_pairs_render_in_four_sections_with_arrows() {
         let http_client = endpoint(
-            "gateway",
+            "web",
             "client.ts",
             10,
             Protocol::Http,
@@ -498,9 +498,9 @@ mod tests {
             "/v1/read/{}",
         )
         .with_method("get")
-        .with_enclosing_symbol("readNode");
+        .with_enclosing_symbol("readItem");
         let http_server = endpoint(
-            "engine",
+            "orders",
             "router.ts",
             23,
             Protocol::Http,
@@ -508,7 +508,7 @@ mod tests {
             "/v1/read/{}",
         )
         .with_method("post")
-        .with_enclosing_symbol("controllerRouter");
+        .with_enclosing_symbol("handleRead");
         let kafka_producer = endpoint(
             "svc-a",
             "checkout.ts",
@@ -550,10 +550,10 @@ mod tests {
         // Channel is a header line; each call site is indented beneath it.
         // Server links upstream ("from"), client links downstream ("by").
         assert!(out.contains("POST /v1/read/{}\n"));
-        assert!(out.contains("← engine: router.ts:23 (controllerRouter)"));
-        assert!(out.contains("└── from gateway: client.ts:10 (readNode)"));
-        assert!(out.contains("← gateway: client.ts:10 (readNode)"));
-        assert!(out.contains("└── by engine: router.ts:23 (controllerRouter)"));
+        assert!(out.contains("← orders: router.ts:23 (handleRead)"));
+        assert!(out.contains("└── from web: client.ts:10 (readItem)"));
+        assert!(out.contains("← web: client.ts:10 (readItem)"));
+        assert!(out.contains("└── by orders: router.ts:23 (handleRead)"));
 
         // Messaging uses the protocol name as the prefix.
         assert!(out.contains("Kafka orders.created\n"));
@@ -568,7 +568,7 @@ mod tests {
     #[test]
     fn dangling_endpoints_render_plainly_and_survive_unmatched_filter() {
         let dangling = endpoint(
-            "engine",
+            "orders",
             "broker.ts",
             102,
             Protocol::Mqtt,
@@ -589,10 +589,11 @@ mod tests {
         assert!(full.contains("Messaging producers:"));
         // Channel header, then the indented call site.
         assert!(full.contains("MQTT requestTopic\n"));
+        assert!(full.contains("← orders: broker.ts:102 (publish) [conf 0.80] [unresolved]"));
         assert!(
-            full.contains("← engine: broker.ts:102 (publish) [conf 0.80] [unresolved]")
+            !full.contains("└──"),
+            "dangling endpoint must have no arrow"
         );
-        assert!(!full.contains("└──"), "dangling endpoint must have no arrow");
 
         // `--unmatched` keeps it (no counterpart) and still draws no arrow.
         let unmatched = render_text(&report, &HashMap::new(), true);
@@ -618,7 +619,7 @@ mod tests {
     #[test]
     fn same_channel_sites_are_grouped_under_one_header() {
         let site_a = endpoint(
-            "engine",
+            "orders",
             "broker.ts",
             102,
             Protocol::Mqtt,
@@ -628,8 +629,8 @@ mod tests {
         .with_enclosing_symbol("publish")
         .as_pattern();
         let site_b = endpoint(
-            "engine",
-            "interaction-model.ts",
+            "orders",
+            "handlers.ts",
             27,
             Protocol::Mqtt,
             ChannelRole::Producer,
@@ -649,7 +650,7 @@ mod tests {
         // The channel label appears exactly once as a header…
         assert_eq!(out.matches("MQTT +/request [pattern]").count(), 1);
         // …with both call sites listed beneath it.
-        assert!(out.contains("← engine: broker.ts:102 (publish)"));
-        assert!(out.contains("← engine: interaction-model.ts:27 (request)"));
+        assert!(out.contains("← orders: broker.ts:102 (publish)"));
+        assert!(out.contains("← orders: handlers.ts:27 (request)"));
     }
 }

@@ -104,11 +104,12 @@ impl TreeSitterChannelExtractor {
             // HTTP verb for display: the `@method` capture, with the verb-less
             // route registrations (`route`, `all`) reported as `ANY`. Non-HTTP
             // protocols carry no verb.
-            let http_method = (detector.protocol == Protocol::Http)
-                .then(|| match captured.get("method").copied() {
+            let http_method = (detector.protocol == Protocol::Http).then(|| {
+                match captured.get("method").copied() {
                     Some("route") | Some("all") | None => "ANY".to_string(),
                     Some(verb) => verb.to_string(),
-                });
+                }
+            });
 
             // A string literal resolves immediately; an identifier or a
             // property access (`this.topics.orders`) is recorded unresolved so
@@ -282,8 +283,8 @@ impl ChannelResolver for TreeSitterChannelExtractor {
         // Direct config access (`this.config.broker.topics.X`) resolves in one
         // pass; a constructor-param access (`this.topics.X` inside a class)
         // needs the extra hop through the `new Class(…)` site.
-        let resolved = config_resolver::resolve_channel_expression(expression, &borrowed)
-            .or_else(|| {
+        let resolved =
+            config_resolver::resolve_channel_expression(expression, &borrowed).or_else(|| {
                 enclosing_class.and_then(|class| {
                     config_resolver::resolve_via_constructor_param(expression, class, &borrowed)
                 })
@@ -336,17 +337,13 @@ fn normalize_channel(protocol: Protocol, raw: &str) -> (Option<String>, String, 
 /// Node kinds whose channel argument is not a literal and is therefore
 /// recorded as an unresolved endpoint: a bare identifier (`ORDERS_TOPIC`), or a
 /// property access carrying the topic through config
-/// (`this.topics.gatewayRegistered`, kafkajs wrappers). Covers the JS/TS
+/// (`this.topics.orderPlaced`, kafkajs wrappers). Covers the JS/TS
 /// `member_expression`, Python `attribute`, and Rust `field_expression` /
 /// `scoped_identifier` shapes.
 fn is_unresolved_channel(kind: &str) -> bool {
     matches!(
         kind,
-        "identifier"
-            | "member_expression"
-            | "attribute"
-            | "field_expression"
-            | "scoped_identifier"
+        "identifier" | "member_expression" | "attribute" | "field_expression" | "scoped_identifier"
     )
 }
 
@@ -591,9 +588,9 @@ client.subscribe('sensors/+/temp');
         // Positional Kafka shapes: the topic is the first positional arg,
         // wired from config as a property access rather than a string literal.
         let content = r#"
-class DomainEvent {
-    async gatewayRegistered(event) {
-        await this.producer.produce(this.topics.gatewayRegistered, payload, key);
+class OrderEvents {
+    async orderPlaced(event) {
+        await this.producer.produce(this.topics.orderPlaced, payload, key);
     }
     async fixed(event) {
         await this.producer.produce("orders.created", payload);
@@ -601,7 +598,7 @@ class DomainEvent {
 }
 
 async function start() {
-    router.subscribe(this.config.broker.topics.topologyEvent, handler, schema);
+    router.subscribe(this.config.broker.topics.shipmentEvent, handler, schema);
 }
 "#;
         let endpoints = extract(content, "application.ts", Language::TypeScript).await;
@@ -617,8 +614,8 @@ async function start() {
             .find(|e| !e.is_resolved())
             .expect("property-access producer");
         // The full property path is kept so config resolution can follow it.
-        assert_eq!(prop.channel_raw(), "this.topics.gatewayRegistered");
-        assert_eq!(prop.enclosing_symbol(), Some("gatewayRegistered"));
+        assert_eq!(prop.channel_raw(), "this.topics.orderPlaced");
+        assert_eq!(prop.enclosing_symbol(), Some("orderPlaced"));
         // A string-literal topic resolves normally.
         let literal = producers
             .iter()
@@ -633,7 +630,7 @@ async function start() {
         assert_eq!(consumers.len(), 1);
         assert_eq!(
             consumers[0].channel_raw(),
-            "this.config.broker.topics.topologyEvent"
+            "this.config.broker.topics.shipmentEvent"
         );
         assert!(!consumers[0].is_resolved());
         assert_eq!(consumers[0].enclosing_symbol(), Some("start"));

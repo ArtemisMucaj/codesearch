@@ -54,7 +54,7 @@ pub struct SymbolReference {
     import_alias: Option<String>,
 
     /// The package the callee symbol is defined in, as reported by SCIP
-    /// (e.g. `@backend/kafkajs`). `None` for local symbols or a project's own
+    /// (e.g. `kafkajs`). `None` for local symbols or a project's own
     /// source. Lets channel resolution confirm which library a generic call
     /// (`.produce()`, `.subscribe()`) actually reaches.
     callee_package: Option<String>,
@@ -207,7 +207,7 @@ impl SymbolReference {
         self.import_alias.as_deref()
     }
 
-    /// The package the callee is defined in (e.g. `@backend/kafkajs`), or
+    /// The package the callee is defined in (e.g. `kafkajs`), or
     /// `None` for local/project-own symbols.
     pub fn callee_package(&self) -> Option<&str> {
         self.callee_package.as_deref()

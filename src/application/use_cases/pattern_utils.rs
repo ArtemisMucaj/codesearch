@@ -1,17 +1,17 @@
 /// Builds a RE2/POSIX-ERE substring pattern that tolerates stripped namespace
 /// separators caused by shell quoting.
 ///
-/// When a user types a PHP FQN like `Netatmo\Models\Homes\Home#method` in an
+/// When a user types a PHP FQN like `Acme\Models\Homes\Home#method` in an
 /// *unquoted* shell argument the shell strips the backslashes, yielding
-/// `NetatmoModelsHomesHome#method`.  This function generates a pattern that
+/// `AcmeModelsHomesHome#method`.  This function generates a pattern that
 /// matches **both** forms by:
 ///
 /// 1. Converting any separator character (`\`, `/`, `#`, `.`, `:`) already present
 ///    in the input into the flexible class `[/\\#.:]*` (zero or more of any
 ///    separator).
 /// 2. Inserting `[/\\#.:]*` at lowercase→uppercase PascalCase word boundaries
-///    so that shell-stripped segments (e.g. `NetatmoModels`) also match their
-///    separated form (e.g. `Netatmo\Models`).
+///    so that shell-stripped segments (e.g. `AcmeModels`) also match their
+///    separated form (e.g. `Acme\Models`).
 ///
 /// All other POSIX ERE metacharacters are escaped so they match literally.
 pub fn build_fuzzy_pattern(s: &str) -> String {

@@ -208,30 +208,30 @@ fn find_enclosing_scope(scope_defs: &[ScopeDef], line: u32) -> Option<ScopeDef> 
 /// SCIP symbol format: `<scheme> <manager> <pkg-name> <version> <descriptor>+`
 ///
 /// For JavaScript/TypeScript, scip-typescript encodes the file path as namespace
-/// descriptors: `middlewares/add-application-source.js/appApplicationSource().`
+/// descriptors: `middlewares/add-context.js/addContext().`
 /// We strip the file-path prefix to produce just the symbol name.
 ///
 /// For PHP, the `/` characters in SCIP descriptors represent namespace separators
 /// (`\` in PHP source). We convert them back to `\` so that users can search
-/// with familiar PHP-style namespaces (e.g. `Netatmo\Autoloader#loadMappedFile`).
+/// with familiar PHP-style namespaces (e.g. `Acme\Autoloader#loadMappedFile`).
 ///
 /// Examples:
 /// ```text
 /// scip-typescript npm . . ButtonComponent#render().
 ///   → ButtonComponent#render
 ///
-/// scip-typescript npm . . middlewares/add-application-source.js/appApplicationSource().
-///   → appApplicationSource
+/// scip-typescript npm . . middlewares/add-context.js/addContext().
+///   → addContext
 ///
-/// scip-php composer pkg dev Netatmo/Autoloader#myMethod().
-///   → Netatmo\Autoloader#myMethod
+/// scip-php composer pkg dev Acme/Autoloader#myMethod().
+///   → Acme\Autoloader#myMethod
 ///
 /// local 42
 ///   → (empty — local symbols are filtered out by the caller)
 /// ```
 /// The package a SCIP symbol is defined in — the second of the three package
 /// fields (`<scheme> <manager> <package-name> <version> <descriptors>`), e.g.
-/// `@backend/kafkajs` for `scip-typescript npm @backend/kafkajs 6.0.0 …`.
+/// `kafkajs` for `scip-typescript npm kafkajs 2.2.4 …`.
 ///
 /// Returns `None` for local symbols and for the synthetic `.` package that
 /// scip-typescript uses for a project's own source (which is not a real
@@ -287,8 +287,8 @@ fn normalize_symbol(symbol: &str, language: Language) -> String {
         unescaped.replace('/', "\\")
     } else {
         // Strip file-path namespace prefixes produced by scip-typescript.
-        // These look like `middlewares/add-application-source.js/appApplicationSource`
-        // or `api/camera/associate-dropbox.js/Dropbox`.
+        // These look like `middlewares/add-context.js/addContext`
+        // or `api/users/link-account.js/Account`.
         // We find the last segment that looks like a source-file extension followed by `/`
         // and strip everything up to and including it.
         strip_file_path_prefix(&unescaped)
@@ -298,7 +298,7 @@ fn normalize_symbol(symbol: &str, language: Language) -> String {
 /// Strip file-path namespace prefix from a normalised SCIP descriptor.
 ///
 /// scip-typescript encodes the source file as a chain of namespace descriptors,
-/// e.g. `middlewares/add-application-source.js/appApplicationSource`.
+/// e.g. `middlewares/add-context.js/addContext`.
 /// We want to strip the file-path portion and keep only the actual symbol name
 /// (which may include class#method separators).
 ///
@@ -346,7 +346,7 @@ fn is_file_path(s: &str) -> bool {
 ///
 /// For `ButtonComponent#render().` → returns `Some("ButtonComponent")`
 /// For `parseFile().`              → returns `None`
-/// For `middlewares/add-application-source.js/appApplicationSource().` → returns `None`
+/// For `middlewares/add-context.js/addContext().` → returns `None`
 ///   (the `middlewares/...` prefix is a file path, not a class scope)
 fn extract_enclosing_scope(symbol: &str) -> Option<String> {
     let parts: Vec<&str> = symbol.splitn(5, ' ').collect();
@@ -360,7 +360,7 @@ fn extract_enclosing_scope(symbol: &str) -> Option<String> {
             .trim_end_matches('/')
             .replace('`', "");
         if !scope.is_empty() {
-            // If the scope IS a file path (e.g. `middlewares/add-application-source.js`),
+            // If the scope IS a file path (e.g. `middlewares/add-context.js`),
             // it's not a meaningful enclosing scope — it's just the file namespace
             // from scip-typescript.
             if is_file_path(&scope) {
@@ -524,8 +524,8 @@ mod tests {
     fn test_extract_package() {
         // A third-party dependency exposes its package name.
         assert_eq!(
-            extract_package("scip-typescript npm @backend/kafkajs 6.0.0 AsyncProducer#produce()."),
-            Some("@backend/kafkajs".to_string())
+            extract_package("scip-typescript npm kafkajs 2.2.4 Producer#send()."),
+            Some("kafkajs".to_string())
         );
         // A project's own source uses the synthetic `.` package — not a real
         // dependency, so no package is reported.
@@ -545,19 +545,19 @@ mod tests {
 
     #[test]
     fn test_normalize_symbol_php_method() {
-        let sym = "scip-php composer pkg dev Netatmo/Autoloader#myMethod().";
+        let sym = "scip-php composer pkg dev Acme/Autoloader#myMethod().";
         assert_eq!(
             normalize_symbol(sym, Language::Php),
-            "Netatmo\\Autoloader#myMethod"
+            "Acme\\Autoloader#myMethod"
         );
     }
 
     #[test]
     fn test_normalize_symbol_php_namespaced_class() {
-        let sym = "scip-php composer pkg dev Netatmo/Models/Users/User#";
+        let sym = "scip-php composer pkg dev Acme/Models/Users/User#";
         assert_eq!(
             normalize_symbol(sym, Language::Php),
-            "Netatmo\\Models\\Users\\User"
+            "Acme\\Models\\Users\\User"
         );
     }
 
@@ -577,28 +577,21 @@ mod tests {
     #[test]
     fn test_normalize_symbol_js_file_path_prefix() {
         // scip-typescript encodes JS file paths as namespace descriptors.
-        let sym =
-            "scip-typescript npm . . middlewares/add-application-source.js/appApplicationSource().";
-        assert_eq!(
-            normalize_symbol(sym, Language::JavaScript),
-            "appApplicationSource"
-        );
+        let sym = "scip-typescript npm . . middlewares/add-context.js/addContext().";
+        assert_eq!(normalize_symbol(sym, Language::JavaScript), "addContext");
     }
 
     #[test]
     fn test_normalize_symbol_js_nested_path() {
-        let sym = "scip-typescript npm . . api/camera/associate-dropbox.js/associateDropbox().";
-        assert_eq!(
-            normalize_symbol(sym, Language::JavaScript),
-            "associateDropbox"
-        );
+        let sym = "scip-typescript npm . . api/users/link-account.js/linkAccount().";
+        assert_eq!(normalize_symbol(sym, Language::JavaScript), "linkAccount");
     }
 
     #[test]
     fn test_normalize_symbol_js_variable() {
         // Term (variable) — ends with `.` not `().`
-        let sym = "scip-typescript npm . . routes/na-api-router.js/addSource.";
-        assert_eq!(normalize_symbol(sym, Language::JavaScript), "addSource");
+        let sym = "scip-typescript npm . . routes/api-router.js/addRoute.";
+        assert_eq!(normalize_symbol(sym, Language::JavaScript), "addRoute");
     }
 
     #[test]
@@ -607,31 +600,31 @@ mod tests {
         // After trim_end_matches('/'), it becomes the bare file path, which
         // is_file_path detects. normalize_symbol still returns the file name
         // (without path) since it's a namespace, not a function.
-        let sym = "scip-typescript npm . . middlewares/add-application-source.js/";
-        // trim_end_matches('/') → `middlewares/add-application-source.js`
+        let sym = "scip-typescript npm . . middlewares/add-context.js/";
+        // trim_end_matches('/') → `middlewares/add-context.js`
         // strip_file_path_prefix sees no `.js/` in that string (no trailing slash)
         // so returns it unchanged. This is a module reference, which is fine:
         // the importer filters these out because they have no meaningful callee.
         let result = normalize_symbol(sym, Language::JavaScript);
         // The descriptor after stripping trailing `/` is the file path itself.
         // strip_file_path_prefix won't find `.js/` so it returns the whole thing.
-        assert_eq!(result, "middlewares/add-application-source.js");
+        assert_eq!(result, "middlewares/add-context.js");
     }
 
     #[test]
     fn test_normalize_symbol_js_parameter() {
         // Parameter of a function — the `()` wrapping means `(req)` remains intact
         // because trim_end_matches("().") only strips trailing `().` not `)`
-        let sym = "scip-typescript npm . . middlewares/add-application-source.js/appApplicationSource().(req)";
+        let sym = "scip-typescript npm . . middlewares/add-context.js/addContext().(req)";
         let result = normalize_symbol(sym, Language::JavaScript);
-        assert_eq!(result, "appApplicationSource().(req)");
+        assert_eq!(result, "addContext().(req)");
     }
 
     #[test]
     fn test_strip_file_path_prefix_basic() {
         assert_eq!(
-            strip_file_path_prefix("middlewares/add-application-source.js/appApplicationSource"),
-            "appApplicationSource"
+            strip_file_path_prefix("middlewares/add-context.js/addContext"),
+            "addContext"
         );
     }
 
@@ -654,10 +647,7 @@ mod tests {
     #[test]
     fn test_strip_file_path_prefix_only_file_with_slash() {
         // When the descriptor ends with `.js/`, stripping produces an empty string.
-        assert_eq!(
-            strip_file_path_prefix("middlewares/add-application-source.js/"),
-            ""
-        );
+        assert_eq!(strip_file_path_prefix("middlewares/add-context.js/"), "");
     }
 
     #[test]
@@ -665,8 +655,8 @@ mod tests {
         // When the descriptor is just a file path without trailing `/`,
         // no `.js/` pattern is found, so it's returned as-is.
         assert_eq!(
-            strip_file_path_prefix("middlewares/add-application-source.js"),
-            "middlewares/add-application-source.js"
+            strip_file_path_prefix("middlewares/add-context.js"),
+            "middlewares/add-context.js"
         );
     }
 
@@ -688,8 +678,7 @@ mod tests {
     #[test]
     fn test_extract_enclosing_scope_js_file_path() {
         // File path prefix should NOT be treated as an enclosing scope.
-        let sym =
-            "scip-typescript npm . . middlewares/add-application-source.js/appApplicationSource().";
+        let sym = "scip-typescript npm . . middlewares/add-context.js/addContext().";
         assert_eq!(extract_enclosing_scope(sym), None);
     }
 
@@ -698,7 +687,7 @@ mod tests {
         // scip-typescript omits kind for JS; we infer from `().` suffix.
         assert!(is_callable_kind(
             Some(SymbolKind::UnspecifiedKind),
-            Some("scip-typescript npm . . routes/na-api-router.js/handler().")
+            Some("scip-typescript npm . . routes/api-router.js/handler().")
         ));
     }
 
@@ -707,7 +696,7 @@ mod tests {
         // Variable (`.` suffix, not `().`) should NOT be callable.
         assert!(!is_callable_kind(
             Some(SymbolKind::UnspecifiedKind),
-            Some("scip-typescript npm . . routes/na-api-router.js/addSource.")
+            Some("scip-typescript npm . . routes/api-router.js/addRoute.")
         ));
     }
 
@@ -716,7 +705,7 @@ mod tests {
         let kind = infer_reference_kind(
             0,
             Some(SymbolKind::UnspecifiedKind),
-            "scip-typescript npm . . middlewares/add-application-source.js/appApplicationSource().",
+            "scip-typescript npm . . middlewares/add-context.js/addContext().",
         );
         assert_eq!(kind, ReferenceKind::Call);
     }

@@ -168,13 +168,13 @@ pub struct ChannelEndpoint {
     method: Option<String>,
 
     /// The client library this endpoint was confirmed against, resolved from
-    /// the call's SCIP symbol (e.g. `@backend/kafkajs`). `None` when resolution
+    /// the call's SCIP symbol (e.g. `kafkajs`). `None` when resolution
     /// could not attribute the call to a known library.
     library: Option<String>,
 
     /// The environment variable that overrides the channel value, when the
     /// channel was resolved through a `process.env.X || 'default'` config
-    /// expression (e.g. `KAFKA_TOPOLOGY_EVENT_TOPIC`). `None` otherwise.
+    /// expression (e.g. `KAFKA_SHIPMENT_EVENT_TOPIC`). `None` otherwise.
     env_var: Option<String>,
 
     /// True when resolution confirmed the call really targets a known client
@@ -393,7 +393,7 @@ impl ChannelEndpoint {
     }
 
     /// The client library this endpoint was confirmed against
-    /// (e.g. `@backend/kafkajs`), or `None`.
+    /// (e.g. `kafkajs`), or `None`.
     pub fn library(&self) -> Option<&str> {
         self.library.as_deref()
     }
@@ -547,13 +547,13 @@ mod tests {
             ChannelRole::Producer,
             "orders.created".to_string(),
             "orders.created".to_string(),
-            None, // host
-            None, // method
-            None, // library
-            None, // env_var
+            None,  // host
+            None,  // method
+            None,  // library
+            None,  // env_var
             false, // confirmed
             false, // is_pattern
-            true, // resolved
+            true,  // resolved
             -0.3,
             EndpointSource::TreeSitter,
         );

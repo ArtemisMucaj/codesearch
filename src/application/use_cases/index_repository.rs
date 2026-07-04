@@ -470,8 +470,7 @@ impl IndexRepositoryUseCase {
         absolute_path: &Path,
         scip_refs: &HashMap<String, Vec<SymbolReference>>,
     ) -> Result<(), DomainError> {
-        let (Some(resolver), Some(repo)) =
-            (&self.channel_resolver, &self.channel_endpoint_repo)
+        let (Some(resolver), Some(repo)) = (&self.channel_resolver, &self.channel_endpoint_repo)
         else {
             return Ok(());
         };
@@ -481,16 +480,10 @@ impl IndexRepositoryUseCase {
             return Ok(());
         }
 
-        let (config_candidates, sources_by_file) =
-            discover_config_candidates(absolute_path).await;
+        let (config_candidates, sources_by_file) = discover_config_candidates(absolute_path).await;
 
         let use_case = ResolveChannelsUseCase::new(resolver.clone());
-        let resolved = use_case.resolve(
-            endpoints,
-            scip_refs,
-            &config_candidates,
-            &sources_by_file,
-        );
+        let resolved = use_case.resolve(endpoints, scip_refs, &config_candidates, &sources_by_file);
 
         repo.save_batch(&resolved).await?;
         debug!(

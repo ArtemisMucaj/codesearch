@@ -398,9 +398,10 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 pub fn is_test_path(path: &str) -> bool {
     let path = path.replace('\\', "/");
 
-    if path.split('/').any(|segment| {
-        matches!(segment, "test" | "tests" | "__tests__" | "spec" | "specs")
-    }) {
+    if path
+        .split('/')
+        .any(|segment| matches!(segment, "test" | "tests" | "__tests__" | "spec" | "specs"))
+    {
         return true;
     }
 
@@ -519,7 +520,7 @@ mod tests {
     fn test_is_test_path() {
         // Directory-segment conventions.
         assert!(is_test_path(
-            "packages/execution-engine/test/connector/adapter/broker-test.ts"
+            "packages/orders-service/test/connector/adapter/broker-test.ts"
         ));
         assert!(is_test_path("src/tests/handlers.py"));
         assert!(is_test_path("app/__tests__/foo.js"));
@@ -532,7 +533,9 @@ mod tests {
         // Windows separators normalize.
         assert!(is_test_path("packages\\svc\\test\\broker.ts"));
         // Production files are kept.
-        assert!(!is_test_path("packages/svc/src/connector/adapter/broker.ts"));
+        assert!(!is_test_path(
+            "packages/svc/src/connector/adapter/broker.ts"
+        ));
         assert!(!is_test_path("src/latest.ts")); // "latest" is not "-test"
         assert!(!is_test_path("src/contest.py")); // "contest" is not a test
     }

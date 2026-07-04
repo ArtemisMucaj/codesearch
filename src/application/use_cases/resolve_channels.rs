@@ -7,7 +7,7 @@
 //! import, and uses two cross-file signals:
 //!
 //! 1. **Library confirmation** — the SCIP reference at the same call site
-//!    carries the package the callee is defined in (`@backend/kafkajs`). If it
+//!    carries the package the callee is defined in (`kafkajs`). If it
 //!    maps to a known client library, the endpoint is confirmed and its
 //!    confidence raised: a bare `.produce()` is no longer a guess.
 //! 2. **Config value resolution** — an unresolved property-access channel is
@@ -31,7 +31,7 @@ pub type ConfigCandidate = (String, String);
 /// one place library knowledge lives; adding a client is one entry.
 fn protocol_for_package(package: &str) -> Option<Protocol> {
     // Match on a substring so scoped/wrapped variants resolve too
-    // (`@backend/kafkajs`, `kafkajs`, `@confluentinc/kafka-javascript`).
+    // (`kafkajs`, `@confluentinc/kafka-javascript`, `node-rdkafka`).
     let p = package.to_ascii_lowercase();
     if p.contains("kafka") || p.contains("rdkafka") {
         Some(Protocol::Kafka)
@@ -85,7 +85,8 @@ impl ResolveChannelsUseCase {
         sources_by_file: &HashMap<String, String>,
     ) -> ChannelEndpoint {
         // 1. Library confirmation via the SCIP reference at this call site.
-        if let Some(package) = library_package_at(endpoint.file_path(), endpoint.line(), refs_by_file)
+        if let Some(package) =
+            library_package_at(endpoint.file_path(), endpoint.line(), refs_by_file)
         {
             if let Some(protocol) = protocol_for_package(&package) {
                 if protocol == endpoint.protocol() {
@@ -254,7 +255,7 @@ mod tests {
     fn scip_ref(line: u32, package: Option<&str>) -> SymbolReference {
         let r = SymbolReference::new(
             None,
-            "AsyncProducer#produce".to_string(),
+            "EventProducer#produce".to_string(),
             "src/app.ts".to_string(),
             "src/app.ts".to_string(),
             line,
@@ -278,7 +279,7 @@ mod tests {
     #[test]
     fn confirms_library_and_boosts_confidence() {
         let uc = ResolveChannelsUseCase::new(Arc::new(StubResolver::default()));
-        let refs = refs_map(vec![scip_ref(42, Some("@backend/kafkajs"))]);
+        let refs = refs_map(vec![scip_ref(42, Some("kafkajs"))]);
 
         let out = uc.resolve(
             vec![endpoint(Protocol::Kafka, "orders", true)],
@@ -286,7 +287,7 @@ mod tests {
             &[],
             &HashMap::new(),
         );
-        assert_eq!(out[0].library(), Some("@backend/kafkajs"));
+        assert_eq!(out[0].library(), Some("kafkajs"));
         assert!(out[0].is_confirmed());
         assert!((out[0].confidence() - CONFIRMED_CONFIDENCE).abs() < f32::EPSILON);
     }
@@ -295,7 +296,7 @@ mod tests {
     fn does_not_confirm_on_protocol_mismatch() {
         // An MQTT endpoint must not be confirmed by a kafka package.
         let uc = ResolveChannelsUseCase::new(Arc::new(StubResolver::default()));
-        let refs = refs_map(vec![scip_ref(42, Some("@backend/kafkajs"))]);
+        let refs = refs_map(vec![scip_ref(42, Some("kafkajs"))]);
 
         let out = uc.resolve(
             vec![endpoint(Protocol::Mqtt, "sensors/x", true)],
@@ -310,24 +311,28 @@ mod tests {
     #[test]
     fn resolves_config_value_and_env() {
         let resolved = ResolvedConfigValue {
-            value: "topology_event".to_string(),
-            env_var: Some("KAFKA_TOPOLOGY_EVENT_TOPIC".to_string()),
+            value: "shipment_event".to_string(),
+            env_var: Some("KAFKA_SHIPMENT_EVENT_TOPIC".to_string()),
         };
         let uc = ResolveChannelsUseCase::new(Arc::new(StubResolver {
             value: Some(resolved),
             ..Default::default()
         }));
-        let refs = refs_map(vec![scip_ref(42, Some("@backend/kafkajs"))]);
+        let refs = refs_map(vec![scip_ref(42, Some("kafkajs"))]);
 
         let out = uc.resolve(
-            vec![endpoint(Protocol::Kafka, "this.config.broker.topics.topologyEvent", false)],
+            vec![endpoint(
+                Protocol::Kafka,
+                "this.config.broker.topics.shipmentEvent",
+                false,
+            )],
             &refs,
             &[("config".to_string(), "…".to_string())],
             &HashMap::new(),
         );
-        assert_eq!(out[0].channel_raw(), "topology_event");
+        assert_eq!(out[0].channel_raw(), "shipment_event");
         assert!(out[0].is_resolved());
-        assert_eq!(out[0].env_var(), Some("KAFKA_TOPOLOGY_EVENT_TOPIC"));
+        assert_eq!(out[0].env_var(), Some("KAFKA_SHIPMENT_EVENT_TOPIC"));
         // Library confirmation still applied.
         assert!(out[0].is_confirmed());
     }

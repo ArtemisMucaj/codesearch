@@ -4,7 +4,7 @@
  * request object so downstream handlers can use it.
  */
 
-function appApplicationSource(req, res, next) {
+function addContext(req, res, next) {
   const appName = req.get('X-App-Name');
   if (!appName) {
     return res.status(400).json({ error: 'Missing X-App-Name header' });
@@ -13,4 +13,4 @@ function appApplicationSource(req, res, next) {
   next();
 }
 
-module.exports = appApplicationSource;
+module.exports = addContext;

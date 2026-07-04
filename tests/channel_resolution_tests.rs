@@ -1,31 +1,30 @@
 //! End-to-end channel resolution: SCIP library confirmation + AST config-value
 //! resolution, using the real tree-sitter resolver (not a stub).
 //!
-//! Mirrors the `@backend/kafkajs` + config-module shape found in the Netatmo
-//! execution-engine repo: a consumer subscribes with a config-driven topic
-//! whose value lives behind `process.env.X || 'default'`, and the call resolves
-//! (via SCIP) into a known Kafka client package.
+//! Mirrors a common `kafkajs` + config-module shape: a consumer subscribes with
+//! a config-driven topic whose value lives behind `process.env.X || 'default'`,
+//! and the call resolves (via SCIP) into a known Kafka client package.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use codesearch::{
-    ChannelResolver, ResolveChannelsUseCase, ResolvedConfigValue, TreeSitterChannelExtractor,
-};
-use codesearch::{
     ChannelEndpoint, ChannelRole, EndpointSource, Language, Protocol, ReferenceKind,
     SymbolReference,
 };
+use codesearch::{
+    ChannelResolver, ResolveChannelsUseCase, ResolvedConfigValue, TreeSitterChannelExtractor,
+};
 
-/// A config module matching the real execution-engine `config.ts` shape.
+/// A config module matching a typical service `config.ts` shape.
 const CONFIG_SOURCE: &str = r#"
-const APP_NAME = process.env.APP_NAME || 'execution-engine-domain-event'
+const APP_NAME = process.env.APP_NAME || 'orders-service'
 export const config = {
     broker: {
         uri: process.env.KAFKA_BROKER || '127.0.0.1:9092',
         topics: {
-            topologyEvent: process.env.KAFKA_TOPOLOGY_EVENT_TOPIC || 'topology_event',
-            gatewayRegistered: process.env.KAFKA_GATEWAY_REGISTERED_EVENT_TOPIC || 'gateway_registered_event',
+            shipmentEvent: process.env.KAFKA_SHIPMENT_EVENT_TOPIC || 'shipment_event',
+            orderPlaced: process.env.KAFKA_ORDER_PLACED_EVENT_TOPIC || 'order_placed_event',
         },
     },
 } as const
@@ -34,7 +33,7 @@ export type Config = typeof config
 
 fn unresolved_endpoint(role: ChannelRole, expr: &str, line: u32) -> ChannelEndpoint {
     ChannelEndpoint::new(
-        "engine".to_string(),
+        "orders".to_string(),
         "src/connector/api/application.ts".to_string(),
         line,
         Protocol::Kafka,
@@ -57,9 +56,9 @@ fn kafka_ref(line: u32, method: &str) -> SymbolReference {
         1,
         ReferenceKind::MethodCall,
         Language::TypeScript,
-        "engine".to_string(),
+        "orders".to_string(),
     )
-    .with_callee_package("@backend/kafkajs")
+    .with_callee_package("kafkajs")
 }
 
 #[test]
@@ -71,12 +70,12 @@ fn resolves_config_topic_and_confirms_library_end_to_end() {
     // A producer and a consumer, both config-driven and unresolved as extracted.
     let producer = unresolved_endpoint(
         ChannelRole::Producer,
-        "this.config.broker.topics.gatewayRegistered",
+        "this.config.broker.topics.orderPlaced",
         64,
     );
     let consumer = unresolved_endpoint(
         ChannelRole::Consumer,
-        "this.config.broker.topics.gatewayRegistered",
+        "this.config.broker.topics.orderPlaced",
         90,
     );
 
@@ -88,19 +87,21 @@ fn resolves_config_topic_and_confirms_library_end_to_end() {
 
     let candidates = vec![("config".to_string(), CONFIG_SOURCE.to_string())];
 
-    let out = use_case.resolve(vec![producer, consumer], &refs, &candidates, &HashMap::new());
+    let out = use_case.resolve(
+        vec![producer, consumer],
+        &refs,
+        &candidates,
+        &HashMap::new(),
+    );
 
     for endpoint in &out {
         // Config value resolved to the concrete default topic.
-        assert_eq!(endpoint.channel_raw(), "gateway_registered_event");
+        assert_eq!(endpoint.channel_raw(), "order_placed_event");
         assert!(endpoint.is_resolved());
-        assert_eq!(
-            endpoint.env_var(),
-            Some("KAFKA_GATEWAY_REGISTERED_EVENT_TOPIC")
-        );
+        assert_eq!(endpoint.env_var(), Some("KAFKA_ORDER_PLACED_EVENT_TOPIC"));
         // Library confirmed via SCIP.
         assert!(endpoint.is_confirmed());
-        assert_eq!(endpoint.library(), Some("@backend/kafkajs"));
+        assert_eq!(endpoint.library(), Some("kafkajs"));
         assert!((endpoint.confidence() - 0.9).abs() < f32::EPSILON);
     }
 
@@ -121,9 +122,17 @@ fn unmatched_config_expression_stays_unresolved() {
     );
     let candidates = vec![("config".to_string(), CONFIG_SOURCE.to_string())];
 
-    let out = use_case.resolve(vec![endpoint], &HashMap::new(), &candidates, &HashMap::new());
+    let out = use_case.resolve(
+        vec![endpoint],
+        &HashMap::new(),
+        &candidates,
+        &HashMap::new(),
+    );
     assert!(!out[0].is_resolved());
-    assert_eq!(out[0].channel_raw(), "this.config.broker.topics.unknownTopic");
+    assert_eq!(
+        out[0].channel_raw(),
+        "this.config.broker.topics.unknownTopic"
+    );
     assert_eq!(out[0].env_var(), None);
 }
 
@@ -160,7 +169,7 @@ fn mqtt_endpoint_not_confirmed_by_kafka_package() {
     let use_case = ResolveChannelsUseCase::new(resolver);
 
     let mqtt = ChannelEndpoint::new(
-        "engine".to_string(),
+        "orders".to_string(),
         "src/connector/api/application.ts".to_string(),
         50,
         Protocol::Mqtt,
@@ -186,16 +195,16 @@ fn mqtt_endpoint_not_confirmed_by_kafka_package() {
 }
 
 /// The class that carries its topics through a constructor param (the producer
-/// indirection in execution-engine's DomainEvent).
+/// indirection in the `OrderEvents` wrapper).
 const CLASS_SOURCE: &str = r#"
-import { AsyncProducer } from '@backend/kafkajs'
-export class DomainEvent {
+import { EventProducer } from 'kafkajs'
+export class OrderEvents {
     constructor(
-        private producer: AsyncProducer,
-        private topics: { gatewayRegistered: string },
+        private producer: EventProducer,
+        private topics: { orderPlaced: string },
     ) { }
-    async gatewayRegistered(event) {
-        await this.producer.produce(this.topics.gatewayRegistered, JSON.stringify(event))
+    async orderPlaced(event) {
+        await this.producer.produce(this.topics.orderPlaced, JSON.stringify(event))
     }
 }
 "#;
@@ -203,8 +212,8 @@ export class DomainEvent {
 const INSTANTIATION_SOURCE: &str = r#"
 class Application {
     start() {
-        const domainEvent = new DomainEvent(this.producer, {
-            gatewayRegistered: this.config.broker.topics.gatewayRegistered,
+        const orderEvents = new OrderEvents(this.producer, {
+            orderPlaced: this.config.broker.topics.orderPlaced,
         })
     }
 }
@@ -215,60 +224,57 @@ fn resolves_producer_topic_through_constructor_param_end_to_end() {
     let resolver: Arc<dyn ChannelResolver> = Arc::new(TreeSitterChannelExtractor::new());
     let use_case = ResolveChannelsUseCase::new(resolver);
 
-    // The produce call is inside DomainEvent, at domain-event.ts:15. Its topic
-    // is `this.topics.gatewayRegistered` — a constructor param.
+    // The produce call is inside OrderEvents, at order-events.ts:15. Its topic
+    // is `this.topics.orderPlaced` — a constructor param.
     let producer = ChannelEndpoint::new(
-        "engine".to_string(),
-        "src/connector/adapter/domain-event.ts".to_string(),
+        "orders".to_string(),
+        "src/connector/adapter/order-events.ts".to_string(),
         15,
         Protocol::Kafka,
         ChannelRole::Producer,
-        "this.topics.gatewayRegistered".to_string(),
-        "this.topics.gatewayRegistered".to_string(),
+        "this.topics.orderPlaced".to_string(),
+        "this.topics.orderPlaced".to_string(),
         0.5,
         EndpointSource::TreeSitter,
     )
     .unresolved();
 
-    // SCIP records the enclosing class (DomainEvent) and the kafka package near
+    // SCIP records the enclosing class (OrderEvents) and the kafka package near
     // the call site.
     let mut refs = HashMap::new();
     let scip_ref = SymbolReference::new(
-        Some("gatewayRegistered".to_string()),
-        "AsyncProducer#produce".to_string(),
-        "src/connector/adapter/domain-event.ts".to_string(),
-        "src/connector/adapter/domain-event.ts".to_string(),
+        Some("orderPlaced".to_string()),
+        "EventProducer#produce".to_string(),
+        "src/connector/adapter/order-events.ts".to_string(),
+        "src/connector/adapter/order-events.ts".to_string(),
         14, // method call one line above the topic arg
         1,
         ReferenceKind::MethodCall,
         Language::TypeScript,
-        "engine".to_string(),
+        "orders".to_string(),
     )
-    .with_callee_package("@backend/kafkajs")
-    .with_enclosing_scope("DomainEvent");
+    .with_callee_package("kafkajs")
+    .with_enclosing_scope("OrderEvents");
     refs.insert(
-        "src/connector/adapter/domain-event.ts".to_string(),
+        "src/connector/adapter/order-events.ts".to_string(),
         vec![scip_ref],
     );
 
     let candidates = vec![
-        ("DomainEvent".to_string(), CLASS_SOURCE.to_string()),
+        ("OrderEvents".to_string(), CLASS_SOURCE.to_string()),
         (String::new(), INSTANTIATION_SOURCE.to_string()),
         ("config".to_string(), CONFIG_SOURCE.to_string()),
     ];
 
     let out = use_case.resolve(vec![producer], &refs, &candidates, &HashMap::new());
 
-    // The two-hop chain resolved: this.topics.gatewayRegistered →
-    // new DomainEvent(…, { gatewayRegistered: this.config.broker.topics.… }) →
+    // The two-hop chain resolved: this.topics.orderPlaced →
+    // new OrderEvents(…, { orderPlaced: this.config.broker.topics.… }) →
     // config → the concrete topic + env var.
-    assert_eq!(out[0].channel_raw(), "gateway_registered_event");
+    assert_eq!(out[0].channel_raw(), "order_placed_event");
     assert!(out[0].is_resolved());
-    assert_eq!(
-        out[0].env_var(),
-        Some("KAFKA_GATEWAY_REGISTERED_EVENT_TOPIC")
-    );
+    assert_eq!(out[0].env_var(), Some("KAFKA_ORDER_PLACED_EVENT_TOPIC"));
     // And the library was confirmed via SCIP.
     assert!(out[0].is_confirmed());
-    assert_eq!(out[0].library(), Some("@backend/kafkajs"));
+    assert_eq!(out[0].library(), Some("kafkajs"));
 }

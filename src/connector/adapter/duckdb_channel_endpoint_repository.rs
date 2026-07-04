@@ -113,11 +113,11 @@ impl DuckdbChannelEndpointRepository {
             .ok_or_else(|| enum_error(17, "source", &source_str))?;
 
         Ok(ChannelEndpoint::reconstitute(
-            row.get::<_, String>(0)?,          // id
-            row.get::<_, String>(1)?,          // repository_id
-            row.get::<_, String>(2)?,          // file_path
-            row.get::<_, Option<String>>(3)?,  // enclosing_symbol
-            row.get::<_, i32>(4)? as u32,      // line
+            row.get::<_, String>(0)?,         // id
+            row.get::<_, String>(1)?,         // repository_id
+            row.get::<_, String>(2)?,         // file_path
+            row.get::<_, Option<String>>(3)?, // enclosing_symbol
+            row.get::<_, i32>(4)? as u32,     // line
             protocol,
             role,
             row.get::<_, String>(7)?,          // channel_raw
