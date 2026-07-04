@@ -320,7 +320,42 @@ impl DuckdbVectorRepository {
             );
             "#,
         )
-        .map_err(|e| DomainError::storage(format!("Failed to create global tables: {}", e)))
+        .map_err(|e| DomainError::storage(format!("Failed to create global tables: {}", e)))?;
+
+        Self::guard_against_legacy_namespace_config(conn)
+    }
+
+    /// Reject databases whose `namespace_config` predates the `schema_token`
+    /// column with a clear, actionable error instead of a cryptic SQL failure.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` leaves an older table untouched, so a DB
+    /// indexed by a prior release keeps a `namespace_config` with no
+    /// `schema_token` column; every schema-qualified query would then fail deep
+    /// in the search path. Schema tokens are new in this version and unreleased,
+    /// so there is no data worth migrating — we tell the user to re-index rather
+    /// than carry migration machinery.
+    fn guard_against_legacy_namespace_config(conn: &Connection) -> Result<(), DomainError> {
+        // The table always exists here (just created above if absent). A missing
+        // `schema_token` column means the table is the pre-token legacy shape.
+        let has_schema_token: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM information_schema.columns \
+                 WHERE table_name = 'namespace_config' AND column_name = 'schema_token'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false);
+
+        if has_schema_token {
+            return Ok(());
+        }
+
+        Err(DomainError::invalid_input(
+            "This database was created by an older codesearch version and is no \
+             longer compatible. Delete '~/.codesearch/codesearch.duckdb' and \
+             re-index with `codesearch index`.",
+        ))
     }
 
     /// Create `namespace` with a fixed embedding configuration, failing when
@@ -462,7 +497,9 @@ impl DuckdbVectorRepository {
                 // Generate a fresh, safe-by-construction schema token for this
                 // namespace. In read-only mode we still return one so callers
                 // have a valid (if empty) schema to address; it is never
-                // persisted because DDL is forbidden.
+                // persisted because DDL is forbidden. A legacy pre-token DB never
+                // reaches here in write mode — `guard_against_legacy_namespace_config`
+                // rejects it up front with an actionable re-index error.
                 let schema_token = Self::generate_schema_token();
                 if !read_only {
                     // New namespace: persist the config together with its token.
