@@ -481,10 +481,16 @@ impl IndexRepositoryUseCase {
             return Ok(());
         }
 
-        let config_candidates = discover_config_candidates(absolute_path).await;
+        let (config_candidates, sources_by_file) =
+            discover_config_candidates(absolute_path).await;
 
         let use_case = ResolveChannelsUseCase::new(resolver.clone());
-        let resolved = use_case.resolve(endpoints, scip_refs, &config_candidates);
+        let resolved = use_case.resolve(
+            endpoints,
+            scip_refs,
+            &config_candidates,
+            &sources_by_file,
+        );
 
         repo.save_batch(&resolved).await?;
         debug!(
@@ -1235,10 +1241,16 @@ async fn parse_only(
 /// uses the name to look up config objects — constructor tracing scans every
 /// source for `class`/`new` — so extra names are harmless. Sources are read
 /// once here so the resolver never touches the filesystem.
-async fn discover_config_candidates(absolute_path: &Path) -> Vec<(String, String)> {
+#[allow(clippy::type_complexity)]
+async fn discover_config_candidates(
+    absolute_path: &Path,
+) -> (Vec<(String, String)>, HashMap<String, String>) {
     let root = absolute_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let mut candidates = Vec::new();
+        // Repo-relative path → source, so a call site can be re-read for
+        // template/interface pattern inference (keys match endpoint file paths).
+        let mut sources_by_file: HashMap<String, String> = HashMap::new();
         for entry in WalkBuilder::new(&root).build().flatten() {
             let path = entry.path();
             if !matches!(
@@ -1250,8 +1262,11 @@ async fn discover_config_candidates(absolute_path: &Path) -> Vec<(String, String
             let Ok(source) = std::fs::read_to_string(path) else {
                 continue;
             };
+            if let Ok(relative) = path.strip_prefix(&root) {
+                sources_by_file.insert(relative.to_string_lossy().to_string(), source.clone());
+            }
             // Only files that carry a config object, a class definition, or a
-            // `new` are useful to the resolver — skip the rest to keep the
+            // `new` are useful as candidates — skip the rest to keep the
             // candidate set (and re-parsing cost) small.
             let names = candidate_names(&source);
             if names.is_empty() && !source.contains("new ") {
@@ -1266,7 +1281,7 @@ async fn discover_config_candidates(absolute_path: &Path) -> Vec<(String, String
                 }
             }
         }
-        candidates
+        (candidates, sources_by_file)
     })
     .await
     .unwrap_or_default()

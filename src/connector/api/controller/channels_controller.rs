@@ -130,13 +130,18 @@ fn endpoint_line(endpoint: &ChannelEndpoint, repo_names: &HashMap<String, String
 /// carries a trailing `(env: X, via @backend/kafkajs)` annotation.
 fn channel_label(endpoint: &ChannelEndpoint) -> String {
     let channel = channel_display(endpoint);
-    let base = match endpoint.protocol() {
+    let mut base = match endpoint.protocol() {
         Protocol::Http => {
             let verb = endpoint.method().unwrap_or("ANY");
             format!("{verb} {channel}")
         }
         protocol => format!("{} {channel}", protocol_name(protocol)),
     };
+    // A wildcard/pattern channel (MQTT `+`/`#`, or an inferred template
+    // pattern) is flagged so it reads as a pattern, not a concrete topic.
+    if endpoint.is_pattern() {
+        base.push_str(" [pattern]");
+    }
     match resolution_note(endpoint) {
         Some(note) => format!("{base}  ({note})"),
         None => base,

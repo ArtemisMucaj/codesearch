@@ -294,6 +294,25 @@ impl ChannelResolver for TreeSitterChannelExtractor {
             env_var: resolved.env_var,
         })
     }
+
+    fn resolve_topic_pattern(
+        &self,
+        expression: &str,
+        call_site_source: &str,
+        call_line: u32,
+        candidates: &[(String, String)],
+    ) -> Option<String> {
+        let borrowed: Vec<(&str, &str)> = candidates
+            .iter()
+            .map(|(name, source)| (name.as_str(), source.as_str()))
+            .collect();
+
+        // A template literal or getter-backed variable in the call site itself,
+        // else an interface-dispatched client call resolved across sources.
+        config_resolver::infer_topic_pattern(expression, call_site_source).or_else(|| {
+            config_resolver::resolve_via_interface(call_site_source, call_line, &borrowed)
+        })
+    }
 }
 
 /// Per-protocol channel normalization at extraction time.

@@ -88,7 +88,7 @@ fn resolves_config_topic_and_confirms_library_end_to_end() {
 
     let candidates = vec![("config".to_string(), CONFIG_SOURCE.to_string())];
 
-    let out = use_case.resolve(vec![producer, consumer], &refs, &candidates);
+    let out = use_case.resolve(vec![producer, consumer], &refs, &candidates, &HashMap::new());
 
     for endpoint in &out {
         // Config value resolved to the concrete default topic.
@@ -121,7 +121,7 @@ fn unmatched_config_expression_stays_unresolved() {
     );
     let candidates = vec![("config".to_string(), CONFIG_SOURCE.to_string())];
 
-    let out = use_case.resolve(vec![endpoint], &HashMap::new(), &candidates);
+    let out = use_case.resolve(vec![endpoint], &HashMap::new(), &candidates, &HashMap::new());
     assert!(!out[0].is_resolved());
     assert_eq!(out[0].channel_raw(), "this.config.broker.topics.unknownTopic");
     assert_eq!(out[0].env_var(), None);
@@ -138,6 +138,16 @@ impl ChannelResolver for FixedResolver {
         _candidates: &[(String, String)],
     ) -> Option<ResolvedConfigValue> {
         Some(self.0.clone())
+    }
+
+    fn resolve_topic_pattern(
+        &self,
+        _expression: &str,
+        _call_site_source: &str,
+        _call_line: u32,
+        _candidates: &[(String, String)],
+    ) -> Option<String> {
+        None
     }
 }
 
@@ -168,7 +178,7 @@ fn mqtt_endpoint_not_confirmed_by_kafka_package() {
         vec![kafka_ref(50, "produce")],
     );
 
-    let out = use_case.resolve(vec![mqtt], &refs, &[]);
+    let out = use_case.resolve(vec![mqtt], &refs, &[], &HashMap::new());
     // Value resolves, but the kafka package must not confirm an MQTT endpoint.
     assert_eq!(out[0].channel_raw(), "sensors/room");
     assert!(!out[0].is_confirmed());
@@ -247,7 +257,7 @@ fn resolves_producer_topic_through_constructor_param_end_to_end() {
         ("config".to_string(), CONFIG_SOURCE.to_string()),
     ];
 
-    let out = use_case.resolve(vec![producer], &refs, &candidates);
+    let out = use_case.resolve(vec![producer], &refs, &candidates, &HashMap::new());
 
     // The two-hop chain resolved: this.topics.gatewayRegistered →
     // new DomainEvent(…, { gatewayRegistered: this.config.broker.topics.… }) →

@@ -34,4 +34,22 @@ pub trait ChannelResolver: Send + Sync {
         enclosing_class: Option<&str>,
         candidates: &[(String, String)],
     ) -> Option<ResolvedConfigValue>;
+
+    /// Infer a topic *pattern* for a computed channel: a template literal
+    /// (`` `${id}/request` `` → `+/request`), a variable assigned from a local
+    /// getter that returns one, or an interface-dispatched client call
+    /// (`this.broker.publish(…)` where a `Broker implements Publisher` performs
+    /// the real publish).
+    ///
+    /// `call_site_source` is the source of the file the call occurs in and
+    /// `call_line` its 1-based line — both needed to read local getters and the
+    /// interface field type. `candidates` supply the other module sources
+    /// (implementing classes, config). Returns the MQTT pattern, or `None`.
+    fn resolve_topic_pattern(
+        &self,
+        expression: &str,
+        call_site_source: &str,
+        call_line: u32,
+        candidates: &[(String, String)],
+    ) -> Option<String>;
 }

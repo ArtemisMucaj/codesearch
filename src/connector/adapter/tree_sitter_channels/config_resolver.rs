@@ -89,6 +89,432 @@ pub(super) fn resolve_via_constructor_param(
     resolve_channel_expression(&inner, sources)
 }
 
+/// Infer an MQTT topic *pattern* from a topic expression built as a template
+/// literal, mapping each `${…}` interpolation to a single-level wildcard `+`.
+///
+/// Resolves two shapes within `source` (the file the call site lives in):
+/// - the expression is itself a template literal (`` `+/response/${host}` `` →
+///   `+/response/+`);
+/// - the expression is a local variable assigned from a `this.getX(…)` method
+///   whose body returns a template literal
+///   (`const t = this.getRequestTopic(id)` → `getRequestTopic` returns
+///   `` `${id}/request` `` → `+/request`).
+///
+/// Returns the pattern string. The caller marks the endpoint as a pattern.
+pub(super) fn infer_topic_pattern(expression: &str, source: &str) -> Option<String> {
+    // Case 1: a bare template literal passed directly.
+    let expr = expression.trim();
+    if expr.starts_with('`') {
+        return template_to_pattern_str(expr);
+    }
+
+    // Case 2: a plain identifier bound to `this.getX(...)`; follow the getter.
+    if is_plain_identifier(expr) {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+            .ok()?;
+        let tree = parser.parse(source, None)?;
+        let getter = variable_getter_method(tree.root_node(), source, expr)?;
+        let template = method_returns_template(tree.root_node(), source, &getter)?;
+        return template_to_pattern_str(&template);
+    }
+
+    None
+}
+
+/// True for a bare identifier (`requestTopic`) — no dots, brackets, or calls.
+fn is_plain_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+        && !s.chars().next().unwrap().is_numeric()
+}
+
+/// If `var_name` is declared as `const <var_name> = this.<method>(…)`, return
+/// `<method>`.
+fn variable_getter_method(node: Node<'_>, source: &str, var_name: &str) -> Option<String> {
+    let mut result = None;
+    find_variable_getter(node, source, var_name, &mut result);
+    result
+}
+
+fn find_variable_getter(
+    node: Node<'_>,
+    source: &str,
+    var_name: &str,
+    out: &mut Option<String>,
+) {
+    if out.is_some() {
+        return;
+    }
+    if node.kind() == "variable_declarator" {
+        let name_matches = node
+            .child_by_field_name("name")
+            .map(|n| &source[n.byte_range()] == var_name)
+            .unwrap_or(false);
+        if name_matches {
+            if let Some(value) = node.child_by_field_name("value") {
+                if value.kind() == "call_expression" {
+                    if let Some(func) = value.child_by_field_name("function") {
+                        // `this.<method>` → the method name.
+                        if func.kind() == "member_expression" {
+                            if let Some(prop) = func.child_by_field_name("property") {
+                                *out = Some(source[prop.byte_range()].to_string());
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        find_variable_getter(child, source, var_name, out);
+    }
+}
+
+/// The template-literal text returned by method `method_name`, if its body is a
+/// single `return <template_string>`.
+fn method_returns_template(node: Node<'_>, source: &str, method_name: &str) -> Option<String> {
+    let mut result = None;
+    find_method_return_template(node, source, method_name, &mut result);
+    result
+}
+
+fn find_method_return_template(
+    node: Node<'_>,
+    source: &str,
+    method_name: &str,
+    out: &mut Option<String>,
+) {
+    if out.is_some() {
+        return;
+    }
+    if node.kind() == "method_definition" {
+        let name_matches = node
+            .child_by_field_name("name")
+            .map(|n| &source[n.byte_range()] == method_name)
+            .unwrap_or(false);
+        if name_matches {
+            *out = find_return_template(node, source);
+            if out.is_some() {
+                return;
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        find_method_return_template(child, source, method_name, out);
+    }
+}
+
+/// The text of the first `return <template_string>` within `node`.
+fn find_return_template(node: Node<'_>, source: &str) -> Option<String> {
+    if node.kind() == "return_statement" {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "template_string" {
+                return Some(source[child.byte_range()].to_string());
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(found) = find_return_template(child, source) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Convert a template-literal *string* into an MQTT pattern by re-parsing it and
+/// mapping `${…}` → `+`. Returns `None` if there are no interpolations (a plain
+/// literal is not a pattern — it should resolve as an exact channel elsewhere).
+fn template_to_pattern_str(template: &str) -> Option<String> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        .ok()?;
+    // Parse as an expression statement.
+    let tree = parser.parse(template, None)?;
+    let ts = find_first(tree.root_node(), "template_string")?;
+    template_node_to_pattern(ts, template)
+}
+
+/// Build the MQTT pattern from a `template_string` node: each
+/// `template_substitution` becomes `+`, each `string_fragment` is kept verbatim.
+fn template_node_to_pattern(ts: Node<'_>, source: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut had_substitution = false;
+    let mut cursor = ts.walk();
+    for child in ts.children(&mut cursor) {
+        match child.kind() {
+            "string_fragment" => out.push_str(&source[child.byte_range()]),
+            "template_substitution" => {
+                had_substitution = true;
+                out.push('+');
+            }
+            // Escaped chars inside the template.
+            "escape_sequence" => out.push_str(&source[child.byte_range()]),
+            _ => {}
+        }
+    }
+    // A pattern only makes sense when at least one `${…}` was replaced; a
+    // literal-only template resolves as an exact channel, not a pattern.
+    if had_substitution && !out.is_empty() {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// First descendant of `node` with the given kind.
+fn find_first<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+    if node.kind() == kind {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(found) = find_first(child, kind) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Resolve a channel for an interface-dispatched messaging call
+/// (`this.<field>.<method>(…)` where `<field>` is an interface-typed parameter
+/// whose concrete implementation performs the real client call).
+///
+/// Given the call site's source and line, this:
+/// 1. reads the type of `<field>` from the enclosing class's constructor
+///    (`private broker: Publisher` → `Publisher`),
+/// 2. finds the class implementing that interface (`class Broker implements
+///    Publisher`),
+/// 3. locates `<method>` on that class and the `this.<client>.<method>(<topic>)`
+///    call inside it, and
+/// 4. infers the topic pattern from `<topic>` (via [`infer_topic_pattern`]).
+///
+/// Returns the inferred MQTT pattern. `sources` are candidate module sources.
+pub(super) fn resolve_via_interface(
+    call_site_source: &str,
+    call_line: u32,
+    sources: &[(&str, &str)],
+) -> Option<String> {
+    let (field, method) = call_receiver_and_method(call_site_source, call_line)?;
+    let interface = field_type_in_source(call_site_source, &field)?;
+
+    // Find the implementing class and infer the pattern from its method body.
+    sources.iter().find_map(|(_, source)| {
+        let class = class_implementing(source, &interface)?;
+        let topic_arg = method_client_topic_arg(source, &class, &method)?;
+        infer_topic_pattern(&topic_arg, source)
+    })
+}
+
+/// The `(field, method)` of a `this.<field>.<method>(…)` call at `line`.
+fn call_receiver_and_method(source: &str, line: u32) -> Option<(String, String)> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        .ok()?;
+    let tree = parser.parse(source, None)?;
+
+    let mut result = None;
+    find_this_field_call_at(tree.root_node(), source, line, &mut result);
+    result
+}
+
+fn find_this_field_call_at(
+    node: Node<'_>,
+    source: &str,
+    line: u32,
+    out: &mut Option<(String, String)>,
+) {
+    if out.is_some() {
+        return;
+    }
+    if node.kind() == "call_expression" && node.start_position().row as u32 + 1 == line {
+        if let Some(func) = node.child_by_field_name("function") {
+            // `this.<field>.<method>`
+            if func.kind() == "member_expression" {
+                if let (Some(object), Some(method)) = (
+                    func.child_by_field_name("object"),
+                    func.child_by_field_name("property"),
+                ) {
+                    if object.kind() == "member_expression" {
+                        let is_this = object
+                            .child_by_field_name("object")
+                            .map(|o| o.kind() == "this")
+                            .unwrap_or(false);
+                        if let (true, Some(field)) =
+                            (is_this, object.child_by_field_name("property"))
+                        {
+                            *out = Some((
+                                source[field.byte_range()].to_string(),
+                                source[method.byte_range()].to_string(),
+                            ));
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        find_this_field_call_at(child, source, line, out);
+    }
+}
+
+/// The declared type of constructor parameter `field` anywhere in `source`
+/// (`private broker: Publisher` → `Publisher`).
+fn field_type_in_source(source: &str, field: &str) -> Option<String> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        .ok()?;
+    let tree = parser.parse(source, None)?;
+    let mut result = None;
+    find_param_type(tree.root_node(), source, field, &mut result);
+    result
+}
+
+fn find_param_type(node: Node<'_>, source: &str, field: &str, out: &mut Option<String>) {
+    if out.is_some() {
+        return;
+    }
+    if is_parameter_node(node.kind()) && parameter_name(node, source).as_deref() == Some(field) {
+        if let Some(ann) = node.child_by_field_name("type") {
+            // type_annotation node → its type_identifier text (trim leading `:`).
+            let ty = source[ann.byte_range()]
+                .trim_start_matches(':')
+                .trim()
+                .to_string();
+            if !ty.is_empty() {
+                *out = Some(ty);
+                return;
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        find_param_type(child, source, field, out);
+    }
+}
+
+/// The name of the class in `source` that `implements <interface>`.
+fn class_implementing(source: &str, interface: &str) -> Option<String> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        .ok()?;
+    let tree = parser.parse(source, None)?;
+    let mut result = None;
+    find_implementing_class(tree.root_node(), source, interface, &mut result);
+    result
+}
+
+fn find_implementing_class(
+    node: Node<'_>,
+    source: &str,
+    interface: &str,
+    out: &mut Option<String>,
+) {
+    if out.is_some() {
+        return;
+    }
+    if node.kind() == "class_declaration" {
+        let implements = find_first(node, "implements_clause")
+            .map(|c| {
+                let text = &source[c.byte_range()];
+                text.split_whitespace().any(|t| t == interface)
+            })
+            .unwrap_or(false);
+        if implements {
+            if let Some(name) = node.child_by_field_name("name") {
+                *out = Some(source[name.byte_range()].to_string());
+                return;
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        find_implementing_class(child, source, interface, out);
+    }
+}
+
+/// Inside `class_name.method_name`, the first argument text of a
+/// `this.<client>.<method_name>(<arg>, …)` call — the client-level topic.
+fn method_client_topic_arg(source: &str, class_name: &str, method_name: &str) -> Option<String> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        .ok()?;
+    let tree = parser.parse(source, None)?;
+    let class = find_class(tree.root_node(), source, class_name)?;
+    let method = class_method(class, source, method_name)?;
+
+    let mut result = None;
+    find_inner_client_call_arg(method, source, method_name, &mut result);
+    result
+}
+
+/// The `method_definition` named `method_name` within a class node.
+fn class_method<'a>(class: Node<'a>, source: &str, method_name: &str) -> Option<Node<'a>> {
+    let body = class.child_by_field_name("body")?;
+    let mut cursor = body.walk();
+    // Bound to a local so `cursor` outlives the borrow (a tail-position `find`
+    // would drop it too early).
+    let found = body.children(&mut cursor).find(|child| {
+        child.kind() == "method_definition"
+            && child
+                .child_by_field_name("name")
+                .map(|n| &source[n.byte_range()] == method_name)
+                .unwrap_or(false)
+    });
+    found
+}
+
+fn find_inner_client_call_arg(
+    node: Node<'_>,
+    source: &str,
+    method_name: &str,
+    out: &mut Option<String>,
+) {
+    if out.is_some() {
+        return;
+    }
+    if node.kind() == "call_expression" {
+        if let Some(func) = node.child_by_field_name("function") {
+            // `this.<client>.<method_name>(...)`
+            let calls_method = func.kind() == "member_expression"
+                && func
+                    .child_by_field_name("property")
+                    .map(|p| &source[p.byte_range()] == method_name)
+                    .unwrap_or(false);
+            let on_this_field = func
+                .child_by_field_name("object")
+                .map(|o| o.kind() == "member_expression")
+                .unwrap_or(false);
+            if calls_method && on_this_field {
+                if let Some(args) = node.child_by_field_name("arguments") {
+                    if let Some(first) = nth_call_argument(args, 0) {
+                        *out = Some(source[first.byte_range()].to_string());
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        find_inner_client_call_arg(child, source, method_name, out);
+    }
+}
+
 /// The zero-based position of parameter `param` in `class_name`'s constructor.
 fn constructor_param_index(source: &str, class_name: &str, param: &str) -> Option<usize> {
     let mut parser = Parser::new();
@@ -589,5 +1015,115 @@ function build() {
             &sources
         )
         .is_none());
+    }
+
+    const BROKER_SOURCE: &str = r#"
+class Broker {
+    getRequestTopic(gatewayId) {
+        return `${gatewayId}/request`
+    }
+    getResponseTopic(gatewayId) {
+        return `${gatewayId}/response/${this.hostname}`
+    }
+    getSubscribeTopic() {
+        return `+/response/${this.hostname}`
+    }
+    async publish(gatewayId) {
+        const requestTopic = this.getRequestTopic(gatewayId)
+        await this.mqttClient.publish(requestTopic, payload)
+    }
+}
+"#;
+
+    #[test]
+    fn infers_pattern_from_direct_template_literal() {
+        // `${...}` → `+`, static fragments kept.
+        assert_eq!(
+            infer_topic_pattern("`+/response/${this.hostname}`", BROKER_SOURCE),
+            Some("+/response/+".to_string())
+        );
+    }
+
+    #[test]
+    fn infers_pattern_via_getter_variable() {
+        // requestTopic = this.getRequestTopic(id) → `${id}/request` → +/request
+        assert_eq!(
+            infer_topic_pattern("requestTopic", {
+                // The variable declaration + getter live in the same source.
+                &format!(
+                    "{BROKER_SOURCE}\nfunction f(){{ const requestTopic = this.getRequestTopic(x) }}"
+                )
+            }),
+            Some("+/request".to_string())
+        );
+    }
+
+    #[test]
+    fn getter_with_two_interpolations() {
+        let src = format!(
+            "{BROKER_SOURCE}\nfunction f(){{ const responseTopic = this.getResponseTopic(x) }}"
+        );
+        assert_eq!(
+            infer_topic_pattern("responseTopic", &src),
+            Some("+/response/+".to_string())
+        );
+    }
+
+    #[test]
+    fn no_interpolation_is_not_a_pattern() {
+        // A template with no `${…}` is a plain literal, not a pattern.
+        assert_eq!(infer_topic_pattern("`static/topic`", BROKER_SOURCE), None);
+        // An unknown identifier resolves to nothing.
+        assert_eq!(infer_topic_pattern("unknownVar", BROKER_SOURCE), None);
+    }
+
+    const IFACE_CALLER: &str = r#"
+export class InteractionModel {
+    constructor(
+        private broker: Publisher,
+        private logger: Logger,
+    ) {}
+    async request(node) {
+        await this.broker.publish(gatewayId, node, sessionId, requestMessage)
+    }
+}
+"#;
+    const IFACE_IMPL: &str = r#"
+export class Broker implements Publisher {
+    getRequestTopic(gatewayId) {
+        return `${gatewayId}/request`
+    }
+    async publish(gatewayId, node) {
+        const requestTopic = this.getRequestTopic(gatewayId)
+        await this.mqttClient.publish(requestTopic, payload)
+    }
+}
+"#;
+
+    #[test]
+    fn resolves_pattern_through_interface_dispatch() {
+        let sources = [("InteractionModel", IFACE_CALLER), ("Broker", IFACE_IMPL)];
+        // The publish call is on line 8 of IFACE_CALLER (this.broker.publish).
+        let pattern = resolve_via_interface(IFACE_CALLER, 8, &sources);
+        assert_eq!(pattern.as_deref(), Some("+/request"));
+    }
+
+    #[test]
+    fn interface_trace_reads_field_type_and_impl() {
+        assert_eq!(
+            field_type_in_source(IFACE_CALLER, "broker").as_deref(),
+            Some("Publisher")
+        );
+        assert_eq!(
+            class_implementing(IFACE_IMPL, "Publisher").as_deref(),
+            Some("Broker")
+        );
+    }
+
+    #[test]
+    fn interface_trace_gives_up_without_impl() {
+        // Only the caller — no implementing class in scope.
+        let sources = [("InteractionModel", IFACE_CALLER)];
+        assert!(resolve_via_interface(IFACE_CALLER, 8, &sources).is_none());
     }
 }

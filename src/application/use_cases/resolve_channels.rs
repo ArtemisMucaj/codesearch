@@ -59,16 +59,21 @@ impl ResolveChannelsUseCase {
     ///
     /// - `refs_by_file` is the SCIP call graph keyed by the file the reference
     ///   occurs in (as produced by the importer).
-    /// - `config_candidates` are the config modules discovered in the repo.
+    /// - `config_candidates` are the config/class modules discovered in the repo.
+    /// - `sources_by_file` maps a repo file path to its source, so a call site
+    ///   can be re-read for template/interface pattern inference.
     pub fn resolve(
         &self,
         endpoints: Vec<ChannelEndpoint>,
         refs_by_file: &HashMap<String, Vec<SymbolReference>>,
         config_candidates: &[ConfigCandidate],
+        sources_by_file: &HashMap<String, String>,
     ) -> Vec<ChannelEndpoint> {
         endpoints
             .into_iter()
-            .map(|endpoint| self.resolve_one(endpoint, refs_by_file, config_candidates))
+            .map(|endpoint| {
+                self.resolve_one(endpoint, refs_by_file, config_candidates, sources_by_file)
+            })
             .collect()
     }
 
@@ -77,6 +82,7 @@ impl ResolveChannelsUseCase {
         mut endpoint: ChannelEndpoint,
         refs_by_file: &HashMap<String, Vec<SymbolReference>>,
         config_candidates: &[ConfigCandidate],
+        sources_by_file: &HashMap<String, String>,
     ) -> ChannelEndpoint {
         // 1. Library confirmation via the SCIP reference at this call site.
         if let Some(package) = library_package_at(endpoint.file_path(), endpoint.line(), refs_by_file)
@@ -105,6 +111,23 @@ impl ResolveChannelsUseCase {
                 endpoint = endpoint.resolve_channel(resolved.value, normalized);
                 if let Some(env) = resolved.env_var {
                     endpoint = endpoint.with_env_var(env);
+                }
+            }
+        }
+
+        // 3. Topic-pattern inference for a channel computed at runtime — a
+        // template literal (`${id}/request`), a getter-backed variable, or an
+        // interface-dispatched client call. Needs the call site's own source.
+        if !endpoint.is_resolved() {
+            if let Some(source) = sources_by_file.get(endpoint.file_path()) {
+                if let Some(pattern) = self.resolver.resolve_topic_pattern(
+                    endpoint.channel_raw(),
+                    source,
+                    endpoint.line(),
+                    config_candidates,
+                ) {
+                    let (_, normalized, _) = normalize(endpoint.protocol(), &pattern);
+                    endpoint = endpoint.resolve_channel(pattern, normalized).as_pattern();
                 }
             }
         }
@@ -182,8 +205,10 @@ mod tests {
     use crate::application::ResolvedConfigValue;
     use crate::domain::{ChannelRole, EndpointSource, Language, ReferenceKind};
 
+    #[derive(Default)]
     struct StubResolver {
         value: Option<ResolvedConfigValue>,
+        pattern: Option<String>,
     }
 
     impl ChannelResolver for StubResolver {
@@ -194,6 +219,16 @@ mod tests {
             _candidates: &[(String, String)],
         ) -> Option<ResolvedConfigValue> {
             self.value.clone()
+        }
+
+        fn resolve_topic_pattern(
+            &self,
+            _expression: &str,
+            _call_site_source: &str,
+            _call_line: u32,
+            _candidates: &[(String, String)],
+        ) -> Option<String> {
+            self.pattern.clone()
         }
     }
 
@@ -242,10 +277,15 @@ mod tests {
 
     #[test]
     fn confirms_library_and_boosts_confidence() {
-        let uc = ResolveChannelsUseCase::new(Arc::new(StubResolver { value: None }));
+        let uc = ResolveChannelsUseCase::new(Arc::new(StubResolver::default()));
         let refs = refs_map(vec![scip_ref(42, Some("@backend/kafkajs"))]);
 
-        let out = uc.resolve(vec![endpoint(Protocol::Kafka, "orders", true)], &refs, &[]);
+        let out = uc.resolve(
+            vec![endpoint(Protocol::Kafka, "orders", true)],
+            &refs,
+            &[],
+            &HashMap::new(),
+        );
         assert_eq!(out[0].library(), Some("@backend/kafkajs"));
         assert!(out[0].is_confirmed());
         assert!((out[0].confidence() - CONFIRMED_CONFIDENCE).abs() < f32::EPSILON);
@@ -254,10 +294,15 @@ mod tests {
     #[test]
     fn does_not_confirm_on_protocol_mismatch() {
         // An MQTT endpoint must not be confirmed by a kafka package.
-        let uc = ResolveChannelsUseCase::new(Arc::new(StubResolver { value: None }));
+        let uc = ResolveChannelsUseCase::new(Arc::new(StubResolver::default()));
         let refs = refs_map(vec![scip_ref(42, Some("@backend/kafkajs"))]);
 
-        let out = uc.resolve(vec![endpoint(Protocol::Mqtt, "sensors/x", true)], &refs, &[]);
+        let out = uc.resolve(
+            vec![endpoint(Protocol::Mqtt, "sensors/x", true)],
+            &refs,
+            &[],
+            &HashMap::new(),
+        );
         assert!(!out[0].is_confirmed());
         assert_eq!(out[0].library(), None);
     }
@@ -270,6 +315,7 @@ mod tests {
         };
         let uc = ResolveChannelsUseCase::new(Arc::new(StubResolver {
             value: Some(resolved),
+            ..Default::default()
         }));
         let refs = refs_map(vec![scip_ref(42, Some("@backend/kafkajs"))]);
 
@@ -277,6 +323,7 @@ mod tests {
             vec![endpoint(Protocol::Kafka, "this.config.broker.topics.topologyEvent", false)],
             &refs,
             &[("config".to_string(), "…".to_string())],
+            &HashMap::new(),
         );
         assert_eq!(out[0].channel_raw(), "topology_event");
         assert!(out[0].is_resolved());
@@ -287,11 +334,37 @@ mod tests {
 
     #[test]
     fn leaves_unconfirmed_when_no_package() {
-        let uc = ResolveChannelsUseCase::new(Arc::new(StubResolver { value: None }));
+        let uc = ResolveChannelsUseCase::new(Arc::new(StubResolver::default()));
         let refs = refs_map(vec![scip_ref(42, None)]);
 
-        let out = uc.resolve(vec![endpoint(Protocol::Kafka, "orders", true)], &refs, &[]);
+        let out = uc.resolve(
+            vec![endpoint(Protocol::Kafka, "orders", true)],
+            &refs,
+            &[],
+            &HashMap::new(),
+        );
         assert!(!out[0].is_confirmed());
         assert!((out[0].confidence() - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn infers_topic_pattern_and_marks_endpoint() {
+        // An unresolved computed topic gets an inferred pattern from its source.
+        let uc = ResolveChannelsUseCase::new(Arc::new(StubResolver {
+            pattern: Some("+/request".to_string()),
+            ..Default::default()
+        }));
+        let mut sources = HashMap::new();
+        sources.insert("src/app.ts".to_string(), "…".to_string());
+
+        let out = uc.resolve(
+            vec![endpoint(Protocol::Mqtt, "requestTopic", false)],
+            &HashMap::new(),
+            &[],
+            &sources,
+        );
+        assert_eq!(out[0].channel_raw(), "+/request");
+        assert!(out[0].is_resolved());
+        assert!(out[0].is_pattern());
     }
 }
