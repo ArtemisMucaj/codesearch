@@ -200,6 +200,90 @@ async fn duckdb_vector_repository_bm25_text_search_finds_matching_chunks() {
     );
 }
 
+/// Regression: building the FTS/BM25 index for a namespace whose name is not a
+/// bare SQL identifier (e.g. `home-framework`) must succeed.
+///
+/// Previously the FTS source was a cross-schema view, which DuckDB's
+/// `create_fts_index` cannot index — it failed with an opaque `out is null`
+/// error at the end of indexing. Namespaces now back onto a generated schema
+/// token (`ns_<hex>`), so the index is built directly on the real table
+/// regardless of the user-facing namespace name. The chunks intentionally mix
+/// present and NULL `symbol_name` values (as `--no-embeddings` SCIP-imported
+/// chunks do) to exercise the nullable indexed column.
+#[tokio::test]
+async fn duckdb_vector_repository_bm25_builds_for_hyphenated_namespace() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("cs.duckdb");
+    let cfg = default_cfg();
+
+    let Some(repo) = try_with_namespace(&db_path, "home-framework", &cfg) else {
+        return;
+    };
+
+    // One chunk with a symbol name, one without (NULL symbol_name) — both are
+    // fed into the FTS index over `content` + `symbol_name`.
+    let with_symbol = CodeChunk::new(
+        "src/execution/engine.ts".to_string(),
+        "export function runExecutionEngine(topology: Topology): void {}".to_string(),
+        1,
+        1,
+        Language::TypeScript,
+        NodeType::Function,
+        "repo-hf".to_string(),
+    )
+    .with_symbol_name("runExecutionEngine");
+
+    let without_symbol = CodeChunk::new(
+        "src/execution/notes.ts".to_string(),
+        "// orchestrates topology execution across the framework".to_string(),
+        1,
+        1,
+        Language::TypeScript,
+        NodeType::Block,
+        "repo-hf".to_string(),
+    );
+
+    let with_emb = Embedding::new(
+        with_symbol.id().to_string(),
+        unit_vector(384, 3),
+        "mock".to_string(),
+    );
+    let without_emb = Embedding::new(
+        without_symbol.id().to_string(),
+        unit_vector(384, 4),
+        "mock".to_string(),
+    );
+
+    repo.save_batch(
+        &[with_symbol.clone(), without_symbol],
+        &[with_emb, without_emb],
+    )
+    .await
+    .expect("save_batch");
+
+    // `flush` builds the FTS index eagerly — this is the call site that raised
+    // `out is null` before the fix. It must now succeed.
+    repo.flush().await.expect("flush must build the FTS index");
+
+    // And a BM25 query over the hyphenated namespace must return the match.
+    let query_vec = unit_vector(384, 42);
+    let query = SearchQuery::new("execution engine topology")
+        .with_limit(5)
+        .with_text_search(true);
+
+    let results: Vec<_> = repo
+        .search(Some(&query_vec), &query)
+        .await
+        .expect("BM25 search over hyphenated namespace");
+
+    assert!(
+        results
+            .iter()
+            .any(|r| r.chunk().content().contains("runExecutionEngine")),
+        "expected the execution-engine chunk from a hyphenated namespace"
+    );
+}
+
 #[tokio::test]
 async fn duckdb_vector_repository_bm25_handles_empty_query() {
     let Some(repo) = try_in_memory() else { return };

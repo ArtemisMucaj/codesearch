@@ -1,25 +1,46 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
+use super::execution_features_naming::short_name;
 use crate::application::{CallGraphQuery, CallGraphUseCase};
-use crate::domain::{DomainError, ExecutionFeature, FeatureNode};
+use crate::domain::{DomainError, ExecutionFeature, FeatureNode, ReferenceKind, SymbolReference};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Criticality scoring constants (weights must sum to 1.0)
 // ──────────────────────────────────────────────────────────────────────────────
 
-const WEIGHT_FILE_SPREAD: f32 = 0.35;
-const WEIGHT_EXTERNAL_CALLS: f32 = 0.25;
-const WEIGHT_TEST_COVERAGE_GAP: f32 = 0.25;
-const WEIGHT_DEPTH: f32 = 0.15;
+/// Reachability dominates: a feature is "real" to the extent that it
+/// transitively drives many symbols. Depth (call-chain length) and file spread
+/// are secondary shape signals.
+const WEIGHT_REACH: f32 = 0.55;
+const WEIGHT_DEPTH: f32 = 0.30;
+const WEIGHT_FILE_SPREAD: f32 = 0.15;
 
 /// Soft reference depth for depth-score normalisation. A path reaching this
 /// depth scores 1.0 on the depth signal; deeper paths are clamped to 1.0.
-const DEPTH_REFERENCE: f32 = 20.0;
+const DEPTH_REFERENCE: f32 = 12.0;
 
-/// Baseline test-coverage-gap score. Entry points by structural definition
-/// have no callers in the repository, so the gap always applies uniformly.
-const TEST_COVERAGE_GAP_SCORE: f32 = 0.30;
+/// Soft reference reach for reach-score normalisation. A feature reaching this
+/// many distinct symbols scores 1.0 on the reach signal; wider ones clamp to 1.0.
+const REACH_REFERENCE: f32 = 40.0;
+
+/// Returns `true` when a reference represents an actual execution edge (a call
+/// that transfers control at run time), as opposed to a structural reference
+/// such as an import, type reference, or field access.
+///
+/// SCIP-imported graphs are dominated by `Unknown` references (imports, type
+/// occurrences, symbol mentions); traversing those as if they were calls
+/// produces shallow, meaningless "features". Restricting the call graph to real
+/// call edges is what makes reachability a faithful measure of a flow.
+fn is_execution_edge(reference: &SymbolReference) -> bool {
+    matches!(
+        reference.reference_kind(),
+        ReferenceKind::Call
+            | ReferenceKind::MethodCall
+            | ReferenceKind::Instantiation
+            | ReferenceKind::MacroInvocation
+    )
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Use case
@@ -90,23 +111,33 @@ impl ExecutionFeaturesUseCase {
         } else {
             let discovery_query = CallGraphQuery::new();
             // Check outgoing edges first; entry points typically have them.
+            // Only real call edges count: SCIP-imported graphs are dominated by
+            // structural references (imports, type occurrences), so the *first*
+            // edge is very likely a non-call reference that could attribute the
+            // wrong repository — see [`is_execution_edge`].
             let callees = self.call_graph.find_callees(&fqn, &discovery_query).await?;
-            if let Some(r) = callees.first() {
+            if let Some(r) = callees.iter().find(|r| is_execution_edge(r)) {
                 r.repository_id().to_string()
             } else {
                 let callers = self.call_graph.find_callers(&fqn, &discovery_query).await?;
                 callers
-                    .first()
+                    .iter()
+                    .find(|r| is_execution_edge(r))
                     .map(|r| r.repository_id().to_string())
                     .unwrap_or_default()
             }
         };
 
-        // Verify the resolved symbol is actually an entry point: nothing within
-        // the same repository calls it.
+        // Verify the resolved symbol is actually an entry point: no *named*
+        // symbol within the same repository calls it. Structural references
+        // (imports, type references) and NULL-caller top-level invocations do
+        // not disqualify it — the latter are what mark an entry point.
         let repo_query = CallGraphQuery::new().with_repository(&effective_repo);
         let callers_in_repo = self.call_graph.find_callers(&fqn, &repo_query).await?;
-        if !callers_in_repo.is_empty() {
+        if callers_in_repo
+            .iter()
+            .any(|r| is_execution_edge(r) && r.caller_symbol().is_some())
+        {
             return Ok(None);
         }
 
@@ -170,6 +201,11 @@ impl ExecutionFeaturesUseCase {
     /// Return the set of fully-qualified symbols in `repository_id` that are
     /// entry points: symbols that call at least one other symbol but are
     /// themselves never called within the repository.
+    ///
+    /// Only real call edges (see [`is_execution_edge`]) are considered — the
+    /// bulk of a SCIP-imported graph is structural references (imports, type
+    /// references) that must not be mistaken for calls, or every getter and
+    /// type-referenced symbol surfaces as a spurious "entry point".
     async fn find_entry_points(&self, repository_id: &str) -> Result<Vec<String>, DomainError> {
         let all_refs = self.call_graph.find_by_repository(repository_id).await?;
 
@@ -177,14 +213,22 @@ impl ExecutionFeaturesUseCase {
         let mut caller_symbols: HashSet<String> = HashSet::new();
 
         for r in &all_refs {
-            callee_symbols.insert(r.callee_symbol().to_string());
+            if !is_execution_edge(r) {
+                continue;
+            }
+            // Only a call from a *named* caller counts as "this symbol is called
+            // by something in the repo". Edges with a NULL caller are top-level /
+            // module-scope invocations (e.g. `app.start()` in an entry file) that
+            // SCIP could not attribute to an enclosing symbol — those are exactly
+            // what marks a true entry point, so they must not disqualify one.
             if let Some(caller) = r.caller_symbol() {
                 caller_symbols.insert(caller.to_string());
+                callee_symbols.insert(r.callee_symbol().to_string());
             }
         }
 
-        // Entry point = calls something (has outgoing edges) AND is never called
-        // (has no incoming edges within this repository).
+        // Entry point = calls something (has outgoing call edges) AND is never
+        // called by a named symbol within this repository.
         let mut entry_points: Vec<String> = caller_symbols
             .into_iter()
             .filter(|sym| !callee_symbols.contains(sym))
@@ -211,17 +255,20 @@ impl ExecutionFeaturesUseCase {
         let mut visited: HashSet<String> = HashSet::new();
         let mut queue: VecDeque<(String, usize, String, u32)> = VecDeque::new();
         let mut path: Vec<FeatureNode> = Vec::new();
-        // Symbols that have at least one outgoing edge in this repo.
-        // Non-root nodes absent from this set are BFS leaves (unresolved / external).
-        let mut symbols_with_callees: HashSet<String> = HashSet::new();
-        let mut total_callees_seen: usize = 0;
 
         visited.insert(entry_point.to_string());
 
         // Pre-fetch the entry-point's callees to (a) resolve its own file path
         // so the root node is not seeded with an empty string, and (b) avoid a
-        // redundant call_graph lookup on the first BFS iteration.
-        let initial_callees = self.call_graph.find_callees(entry_point, &query).await?;
+        // redundant call_graph lookup on the first BFS iteration. Only real call
+        // edges are traversed, so reachability reflects execution, not imports.
+        let initial_callees: Vec<SymbolReference> = self
+            .call_graph
+            .find_callees(entry_point, &query)
+            .await?
+            .into_iter()
+            .filter(is_execution_edge)
+            .collect();
         let entry_file_path = initial_callees
             .first()
             .map(|r| r.caller_file_path().to_string())
@@ -235,11 +282,7 @@ impl ExecutionFeaturesUseCase {
             repository_id: repository_id.to_string(),
         });
 
-        if !initial_callees.is_empty() {
-            symbols_with_callees.insert(entry_point.to_string());
-        }
         for reference in &initial_callees {
-            total_callees_seen += 1;
             let callee = reference.callee_symbol().to_string();
             if !visited.contains(&callee) {
                 visited.insert(callee.clone());
@@ -261,12 +304,14 @@ impl ExecutionFeaturesUseCase {
                 repository_id: repository_id.to_string(),
             });
 
-            let callees = self.call_graph.find_callees(&current, &query).await?;
-            if !callees.is_empty() {
-                symbols_with_callees.insert(current.clone());
-            }
+            let callees: Vec<SymbolReference> = self
+                .call_graph
+                .find_callees(&current, &query)
+                .await?
+                .into_iter()
+                .filter(is_execution_edge)
+                .collect();
             for reference in &callees {
-                total_callees_seen += 1;
                 let callee = reference.callee_symbol().to_string();
                 if visited.contains(&callee) {
                     continue;
@@ -281,39 +326,29 @@ impl ExecutionFeaturesUseCase {
             }
         }
 
-        // Unresolved callees: non-root nodes with no outgoing edges in this
-        // repository — a proxy for external / stdlib calls we cannot trace.
-        let unresolved_callees = path
-            .iter()
-            .skip(1)
-            .filter(|n| !symbols_with_callees.contains(&n.symbol))
-            .count();
-
         // ── Criticality scoring ────────────────────────────────────────────
-        let total_nodes = path.len().max(1);
+        // A feature's importance is dominated by how much of the codebase it
+        // transitively drives (reach), then how deep its call chain runs, then
+        // how many files it spans.
+        let reach = path.len();
         let distinct_files: HashSet<&str> = path.iter().map(|n| n.file_path.as_str()).collect();
         let file_count = distinct_files.len();
         let feature_depth = path.iter().map(|n| n.depth).max().unwrap_or(0);
 
-        // Signal 1 — file spread: ratio of distinct files to total path nodes.
-        let file_spread_score = (file_count as f32 / total_nodes as f32).min(1.0);
+        // Signal 1 — reach: distinct symbols transitively driven by this entry
+        // point, normalised. This is the primary "how much of a flow is it" cue.
+        let reach_score = (reach as f32 / REACH_REFERENCE).min(1.0);
 
-        // Signal 2 — external calls: ratio of leaf nodes (no outgoing edges in
-        // this repo) to all callee references seen during BFS.
-        let external_score =
-            (unresolved_callees as f32 / total_callees_seen.max(1) as f32).min(1.0);
-
-        // Signal 3 — test coverage gap. Entry points have no callers in the
-        // repository by definition, so the gap score applies unconditionally.
-        let test_gap_score = TEST_COVERAGE_GAP_SCORE;
-
-        // Signal 4 — depth: normalised call-chain length.
+        // Signal 2 — depth: normalised call-chain length.
         let depth_score = (feature_depth as f32 / DEPTH_REFERENCE).min(1.0);
 
-        let criticality = (WEIGHT_FILE_SPREAD * file_spread_score
-            + WEIGHT_EXTERNAL_CALLS * external_score
-            + WEIGHT_TEST_COVERAGE_GAP * test_gap_score
-            + WEIGHT_DEPTH * depth_score)
+        // Signal 3 — file spread: how many distinct files the flow touches,
+        // normalised against reach so a broad, cross-cutting flow scores higher.
+        let file_spread_score = (file_count as f32 / reach.max(1) as f32).min(1.0);
+
+        let criticality = (WEIGHT_REACH * reach_score
+            + WEIGHT_DEPTH * depth_score
+            + WEIGHT_FILE_SPREAD * file_spread_score)
             .min(1.0_f32);
 
         let name = short_name(entry_point);
@@ -325,29 +360,10 @@ impl ExecutionFeaturesUseCase {
             entry_point: entry_point.to_string(),
             repository_id: repository_id.to_string(),
             file_count,
+            reach,
             depth: feature_depth,
             path,
             criticality,
         })
     }
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// Extract the short (human-readable) name from a fully-qualified symbol.
-///
-/// Strips everything up to and including the last `/`, `#`, `.`, or `::`.
-fn short_name(fqn: &str) -> String {
-    // Handle SCIP-style `path/to/file Package#Method`.
-    let base = fqn.rsplit_once('#').map(|(_, r)| r).unwrap_or(fqn);
-    // Handle `::` separators (Rust, C++).
-    let base = base.rsplit_once("::").map(|(_, r)| r).unwrap_or(base);
-    // Handle `.` separators (Python, Java).
-    let base = base.rsplit_once('.').map(|(_, r)| r).unwrap_or(base);
-    // Strip trailing `()` or generic parameters.
-    let base = base.split('(').next().unwrap_or(base);
-    let base = base.split('<').next().unwrap_or(base);
-    base.trim().to_string()
 }

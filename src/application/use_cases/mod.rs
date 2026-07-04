@@ -3,6 +3,7 @@ mod channel_link;
 mod cluster_detection;
 mod delete_repository;
 mod execution_features;
+mod execution_features_naming;
 mod explain;
 mod file_relationship;
 mod graph_expansion;

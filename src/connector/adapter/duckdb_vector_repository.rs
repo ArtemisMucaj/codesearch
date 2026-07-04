@@ -51,7 +51,17 @@ pub struct NamespaceEmbeddingConfig {
 
 pub struct DuckdbVectorRepository {
     conn: Arc<Mutex<Connection>>,
+    /// User-facing namespace name (e.g. `homeframework`). Used as the
+    /// `namespace_config` primary key and in logs/errors. Never interpolated
+    /// into a SQL identifier.
     namespace: String,
+    /// Randomly-generated schema token (e.g. `ns_4f7a2c91`) that backs this
+    /// namespace's DuckDB schema. Safe by construction — every character is
+    /// generated, so it is always a valid bare identifier regardless of what
+    /// the user named the namespace. This is the value interpolated into all
+    /// schema-qualified SQL and the FTS PRAGMA. Resolved once and stored in
+    /// `namespace_config.schema_token`.
+    schema: String,
     /// Dimensionality of the embedding vectors for this namespace.
     dimensions: usize,
     /// Set to `true` whenever chunk data changes (inserts or deletes).
@@ -87,16 +97,17 @@ impl DuckdbVectorRepository {
         let conn = Connection::open(path)
             .map_err(|e| DomainError::storage(format!("Failed to open DuckDB database: {}", e)))?;
 
-        let schema = namespace.trim();
-        let schema_name = if schema.is_empty() { "main" } else { schema };
+        let trimmed = namespace.trim();
+        let namespace = if trimmed.is_empty() { "main" } else { trimmed };
 
-        let dimensions = Self::initialize(&conn, schema_name, cfg, false)?;
+        let (schema, dimensions) = Self::initialize(&conn, namespace, cfg, false)?;
 
-        let fts_already_exists = Self::fts_index_exists(&conn, schema_name);
+        let fts_already_exists = Self::fts_index_exists(&conn, &schema);
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
-            namespace: schema_name.to_string(),
+            namespace: namespace.to_string(),
+            schema,
             dimensions,
             fts_dirty: AtomicBool::new(!fts_already_exists),
             read_only: false,
@@ -115,11 +126,12 @@ impl DuckdbVectorRepository {
             embedding_model: "mock".to_string(),
             dimensions: 384,
         };
-        let dimensions = Self::initialize(&conn, namespace, &cfg, false)?;
+        let (schema, dimensions) = Self::initialize(&conn, namespace, &cfg, false)?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             namespace: namespace.to_string(),
+            schema,
             dimensions,
             fts_dirty: AtomicBool::new(true),
             read_only: false,
@@ -154,23 +166,24 @@ impl DuckdbVectorRepository {
         conn.execute_batch("LOAD vss; SET hnsw_enable_experimental_persistence = true; LOAD fts;")
             .map_err(|e| DomainError::storage(format!("Failed to load extensions: {}", e)))?;
 
-        let schema = namespace.trim();
-        let schema_name = if schema.is_empty() { "main" } else { schema };
+        let trimmed = namespace.trim();
+        let namespace = if trimmed.is_empty() { "main" } else { trimmed };
 
-        // Read stored dimensions (read-only: don't save anything)
-        let dimensions = Self::initialize(&conn, schema_name, cfg, true)?;
+        // Read stored dimensions and schema token (read-only: don't save anything).
+        let (schema, dimensions) = Self::initialize(&conn, namespace, cfg, true)?;
 
-        let fts_already_exists = Self::fts_index_exists(&conn, schema_name);
+        let fts_already_exists = Self::fts_index_exists(&conn, &schema);
         if !fts_already_exists {
             warn!(
                 "BM25 index not found for namespace '{}'; keyword search is disabled. \
                  Run 'codesearch index' to build it.",
-                schema_name
+                namespace
             );
         }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
-            namespace: schema_name.to_string(),
+            namespace: namespace.to_string(),
+            schema,
             dimensions,
             fts_dirty: AtomicBool::new(!fts_already_exists),
             read_only: true,
@@ -205,30 +218,34 @@ impl DuckdbVectorRepository {
     ///   `cfg.dimensions` is returned as a best-effort fallback.
     fn initialize(
         conn: &Connection,
-        schema_name: &str,
+        namespace: &str,
         cfg: &NamespaceEmbeddingConfig,
         read_only: bool,
-    ) -> Result<usize, DomainError> {
-        debug!("Initializing DuckDB with schema: {}", schema_name);
+    ) -> Result<(String, usize), DomainError> {
+        debug!("Initializing DuckDB for namespace: {}", namespace);
 
         if read_only {
             // Only load extensions; DDL forbidden.
             // (extensions were already loaded by the caller for read-only path)
-            // Read and validate stored namespace config.
-            return Self::read_and_validate_namespace_config(conn, schema_name, cfg, read_only);
+            // Read and validate stored namespace config; resolve the schema token.
+            return Self::read_and_validate_namespace_config(conn, namespace, cfg, read_only);
         }
 
         Self::init_extensions_and_global_tables(conn)?;
 
-        // Read or save namespace_config, obtain effective dimensions.
-        let dims = Self::read_and_validate_namespace_config(conn, schema_name, cfg, read_only)?;
+        // Read or save namespace_config, obtaining the schema token and effective
+        // dimensions. The token is generated on first creation and read back
+        // thereafter; see `read_and_validate_namespace_config`.
+        let (schema, dims) =
+            Self::read_and_validate_namespace_config(conn, namespace, cfg, read_only)?;
 
         // Namespace schema tables — use effective dims so the FLOAT column is
-        // always correct for both new and existing namespaces.
+        // always correct for both new and existing namespaces. The schema
+        // identifier is the generated token, so it is always a safe bare name.
         let schema_sql = format!(
             r#"
-            CREATE SCHEMA IF NOT EXISTS "{}";
-            CREATE TABLE IF NOT EXISTS "{}".chunks (
+            CREATE SCHEMA IF NOT EXISTS "{schema}";
+            CREATE TABLE IF NOT EXISTS "{schema}".chunks (
                 id TEXT PRIMARY KEY,
                 file_path TEXT NOT NULL,
                 content TEXT NOT NULL,
@@ -240,18 +257,15 @@ impl DuckdbVectorRepository {
                 parent_symbol TEXT,
                 repository_id TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS "{}".embeddings (
+            CREATE TABLE IF NOT EXISTS "{schema}".embeddings (
                 chunk_id TEXT PRIMARY KEY,
                 vector FLOAT[{dims}] NOT NULL,
                 model TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS embedding_hnsw_idx
-                ON "{}".embeddings USING HNSW (vector) WITH (metric = 'cosine');
+                ON "{schema}".embeddings USING HNSW (vector) WITH (metric = 'cosine');
             "#,
-            schema_name,
-            schema_name,
-            schema_name,
-            schema_name,
+            schema = schema,
             dims = dims
         );
 
@@ -259,8 +273,18 @@ impl DuckdbVectorRepository {
             DomainError::storage(format!("Failed to initialize namespace schema: {}", e))
         })?;
 
-        debug!("DuckDB schema initialised (namespace={schema_name}, dims={dims})");
-        Ok(dims)
+        debug!("DuckDB schema initialised (namespace={namespace}, schema={schema}, dims={dims})");
+        Ok((schema, dims))
+    }
+
+    /// Generates a fresh, collision-resistant schema token for a new namespace.
+    ///
+    /// The token is `ns_` followed by a random 32-hex-character UUIDv4 (dashes
+    /// stripped). Because every character after the prefix is generated, the
+    /// result is always a valid bare SQL identifier — independent of whatever
+    /// characters the user put in the namespace name.
+    fn generate_schema_token() -> String {
+        format!("ns_{}", uuid::Uuid::new_v4().simple())
     }
 
     /// Install/load the VSS + FTS extensions and create the global
@@ -289,13 +313,49 @@ impl DuckdbVectorRepository {
             );
             CREATE TABLE IF NOT EXISTS namespace_config (
                 namespace TEXT PRIMARY KEY,
+                schema_token TEXT NOT NULL,
                 embedding_target TEXT NOT NULL,
                 embedding_model TEXT NOT NULL,
                 dimensions INTEGER NOT NULL
             );
             "#,
         )
-        .map_err(|e| DomainError::storage(format!("Failed to create global tables: {}", e)))
+        .map_err(|e| DomainError::storage(format!("Failed to create global tables: {}", e)))?;
+
+        Self::guard_against_legacy_namespace_config(conn)
+    }
+
+    /// Reject databases whose `namespace_config` predates the `schema_token`
+    /// column with a clear, actionable error instead of a cryptic SQL failure.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` leaves an older table untouched, so a DB
+    /// indexed by a prior release keeps a `namespace_config` with no
+    /// `schema_token` column; every schema-qualified query would then fail deep
+    /// in the search path. Schema tokens are new in this version and unreleased,
+    /// so there is no data worth migrating — we tell the user to re-index rather
+    /// than carry migration machinery.
+    fn guard_against_legacy_namespace_config(conn: &Connection) -> Result<(), DomainError> {
+        // The table always exists here (just created above if absent). A missing
+        // `schema_token` column means the table is the pre-token legacy shape.
+        let has_schema_token: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM information_schema.columns \
+                 WHERE table_name = 'namespace_config' AND column_name = 'schema_token'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false);
+
+        if has_schema_token {
+            return Ok(());
+        }
+
+        Err(DomainError::invalid_input(
+            "This database was created by an older codesearch version and is no \
+             longer compatible. Delete '~/.codesearch/codesearch.duckdb' and \
+             re-index with `codesearch index`.",
+        ))
     }
 
     /// Create `namespace` with a fixed embedding configuration, failing when
@@ -312,8 +372,8 @@ impl DuckdbVectorRepository {
         let conn = Connection::open(path)
             .map_err(|e| DomainError::storage(format!("Failed to open DuckDB database: {}", e)))?;
 
-        let schema = namespace.trim();
-        let schema_name = if schema.is_empty() { "main" } else { schema };
+        let trimmed = namespace.trim();
+        let namespace = if trimmed.is_empty() { "main" } else { trimmed };
 
         // Global tables must exist before the existence probe on a fresh database.
         Self::init_extensions_and_global_tables(&conn)?;
@@ -321,7 +381,7 @@ impl DuckdbVectorRepository {
         let existing_model: Option<String> = conn
             .query_row(
                 "SELECT embedding_model FROM namespace_config WHERE namespace = ?",
-                params![schema_name],
+                params![namespace],
                 |row| row.get(0),
             )
             .ok();
@@ -330,48 +390,52 @@ impl DuckdbVectorRepository {
                 "Namespace '{}' already exists (embedding model '{}'). \
                  A namespace's embedding configuration is fixed at creation — \
                  choose a different name.",
-                schema_name, model
+                namespace, model
             )));
         }
 
-        Self::initialize(&conn, schema_name, cfg, false)?;
+        Self::initialize(&conn, namespace, cfg, false)?;
         Ok(())
     }
 
     /// Read the stored `namespace_config` row, validate it against `cfg`, and
-    /// return the effective dimensions.
+    /// return the namespace's schema token and effective dimensions.
     ///
-    /// - Existing row: validates `dimensions` and `embedding_model`.  Hard error
-    ///   on mismatch so corrupt searches never silently happen.
-    /// - No row + write mode: saves `cfg` and returns `cfg.dimensions`.
-    /// - No row + read-only mode: returns `cfg.dimensions` as a best-effort
-    ///   fallback (the namespace may simply not have been indexed yet).
+    /// - Existing row: validates `dimensions` and `embedding_model` (hard error
+    ///   on mismatch so corrupt searches never silently happen) and returns the
+    ///   stored `schema_token`.
+    /// - No row + write mode: generates a fresh schema token, saves `cfg`, and
+    ///   returns `(token, cfg.dimensions)`.
+    /// - No row + read-only mode: returns a freshly generated token and
+    ///   `cfg.dimensions` as a best-effort fallback. The namespace simply has
+    ///   no schema yet, so schema-qualified queries find nothing and the search
+    ///   path degrades gracefully.
     fn read_and_validate_namespace_config(
         conn: &Connection,
         namespace: &str,
         cfg: &NamespaceEmbeddingConfig,
         read_only: bool,
-    ) -> Result<usize, DomainError> {
+    ) -> Result<(String, usize), DomainError> {
         // Attempt to read the stored config; the table may not exist yet in
         // read-only mode (first ever open before any indexing).
         let stored = conn
             .query_row(
-                "SELECT embedding_target, embedding_model, dimensions \
+                "SELECT schema_token, embedding_target, embedding_model, dimensions \
                  FROM namespace_config WHERE namespace = ?",
                 params![namespace],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)? as usize,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)? as usize,
                     ))
                 },
             )
-            .ok()
-            .map(|(target, model, dims)| (target, model, dims));
+            .ok();
 
         match stored {
-            Some((stored_target, stored_model, stored_dims)) => {
+            Some((stored_token, stored_target, stored_model, stored_dims)) => {
                 // A "none" model on either side means --no-embeddings mode:
                 // there is no embedding space to protect, so the mismatch
                 // checks below don't apply.  Warn on mixed usage — chunks
@@ -388,7 +452,7 @@ impl DuckdbVectorRepository {
                             namespace, stored_model, cfg.embedding_model
                         );
                     }
-                    return Ok(stored_dims);
+                    return Ok((stored_token, stored_dims));
                 }
                 // Hard error: dimension mismatch means the schema cannot be used.
                 if stored_dims != cfg.dimensions {
@@ -424,20 +488,28 @@ impl DuckdbVectorRepository {
                     )));
                 }
                 debug!(
-                    "Namespace '{}' config validated (model='{}', dims={})",
-                    namespace, stored_model, stored_dims
+                    "Namespace '{}' config validated (schema='{}', model='{}', dims={})",
+                    namespace, stored_token, stored_model, stored_dims
                 );
-                Ok(stored_dims)
+                Ok((stored_token, stored_dims))
             }
             None => {
+                // Generate a fresh, safe-by-construction schema token for this
+                // namespace. In read-only mode we still return one so callers
+                // have a valid (if empty) schema to address; it is never
+                // persisted because DDL is forbidden. A legacy pre-token DB never
+                // reaches here in write mode — `guard_against_legacy_namespace_config`
+                // rejects it up front with an actionable re-index error.
+                let schema_token = Self::generate_schema_token();
                 if !read_only {
-                    // New namespace: persist the config.
+                    // New namespace: persist the config together with its token.
                     conn.execute(
                         "INSERT INTO namespace_config \
-                         (namespace, embedding_target, embedding_model, dimensions) \
-                         VALUES (?, ?, ?, ?)",
+                         (namespace, schema_token, embedding_target, embedding_model, dimensions) \
+                         VALUES (?, ?, ?, ?, ?)",
                         params![
                             namespace,
+                            schema_token,
                             cfg.embedding_target,
                             cfg.embedding_model,
                             cfg.dimensions as i64
@@ -447,66 +519,31 @@ impl DuckdbVectorRepository {
                         DomainError::storage(format!("Failed to save namespace config: {e}"))
                     })?;
                     debug!(
-                        "Namespace '{}' config saved (model='{}', dims={})",
-                        namespace, cfg.embedding_model, cfg.dimensions
+                        "Namespace '{}' config saved (schema='{}', model='{}', dims={})",
+                        namespace, schema_token, cfg.embedding_model, cfg.dimensions
                     );
                 }
-                Ok(cfg.dimensions)
+                Ok((schema_token, cfg.dimensions))
             }
         }
     }
 
     // ── FTS helpers ──────────────────────────────────────────────────────────
 
-    /// Converts a namespace into a bare SQL identifier safe for FTS use.
-    ///
-    /// DuckDB's FTS PRAGMA parses the table-name argument with a simplified
-    /// parser that does not support quoted identifiers, so the schema name must
-    /// be a plain token.  We replace every character that isn't alphanumeric or
-    /// `_` with `_`, prepend `ns_` when the first character would otherwise be
-    /// a digit, and append a 6-hex-character FNV-1a digest of the original
-    /// namespace so that distinct inputs that sanitize to the same string
-    /// (e.g. `my-lib` vs `my_lib`) always map to different identifiers.
-    fn fts_safe_name(namespace: &str) -> String {
-        // FNV-1a 32-bit hash for a short, stable disambiguator.
-        let mut hash: u32 = 2_166_136_261;
-        for b in namespace.bytes() {
-            hash ^= b as u32;
-            hash = hash.wrapping_mul(16_777_619);
-        }
-
-        let sanitized: String = namespace
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-
-        let base = if sanitized.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-            format!("ns_{sanitized}")
-        } else {
-            sanitized
-        };
-
-        format!("{base}_{hash:06x}")
+    /// Returns the DuckDB schema name that the FTS extension creates for a
+    /// namespace's chunks table.  The extension derives this as `fts_<table>`,
+    /// where `<table>` is the fully-qualified `create_fts_index` argument with
+    /// its dot replaced by `_`.  We index `"<schema>".chunks`, so the derived
+    /// schema is `fts_<schema>_chunks`.  Since `schema` is a generated token
+    /// (`ns_<hex>`), the result is always a valid bare identifier.
+    fn fts_schema_name(schema: &str) -> String {
+        format!("fts_{schema}_chunks")
     }
 
-    /// Returns the DuckDB schema name that the FTS extension creates for our
-    /// chunks table.  The FTS extension derives this as `fts_main_<view>` where
-    /// `<view>` is the sanitized view name we pass to the PRAGMA.
-    fn fts_schema_name(namespace: &str) -> String {
-        let safe = Self::fts_safe_name(namespace);
-        format!("fts_main_{safe}_chunks_fts_src")
-    }
-
-    /// Returns `true` if the FTS index for this namespace already exists in
-    /// the database (queried via `information_schema.schemata`).
-    fn fts_index_exists(conn: &Connection, namespace: &str) -> bool {
-        let fts_schema = Self::fts_schema_name(namespace);
+    /// Returns `true` if the FTS index for this schema already exists in the
+    /// database (queried via `information_schema.schemata`).
+    fn fts_index_exists(conn: &Connection, schema: &str) -> bool {
+        let fts_schema = Self::fts_schema_name(schema);
         match conn.query_row(
             "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?",
             params![fts_schema],
@@ -515,40 +552,28 @@ impl DuckdbVectorRepository {
             Ok(count) => count > 0,
             Err(e) => {
                 debug!(
-                    "Failed to query FTS index existence for namespace '{}' (schema '{}'): {}",
-                    namespace, fts_schema, e
+                    "Failed to query FTS index existence for schema '{}': {}",
+                    fts_schema, e
                 );
                 false
             }
         }
     }
 
-    /// Rebuilds the FTS index from scratch for the given namespace.
+    /// Rebuilds the FTS index from scratch for the given schema token.
     ///
-    /// Creates a view with a sanitized name (no special characters) in the
-    /// default schema that mirrors the namespaced chunks table, then points
-    /// the FTS PRAGMA at that view.  This avoids the PRAGMA's simplified
-    /// parser choking on characters like `-` in the schema name.
+    /// Indexes the real `"<schema>".chunks` table directly. The schema is a
+    /// generated token (`ns_<hex>`), so it is always a bare identifier the
+    /// FTS PRAGMA's simplified parser accepts — no sanitizing view is needed.
     ///
     /// Uses `stemmer='none'` so that code identifiers are not stemmed — exact
     /// token matching is more appropriate for source code than natural-language
     /// stemming. The `overwrite=1` flag drops any existing index and recreates it.
-    fn rebuild_fts_index(conn: &Connection, namespace: &str) -> Result<(), DomainError> {
-        let safe = Self::fts_safe_name(namespace);
-        // Temporary view with a clean identifier pointing at the real table.
-        let view_sql = format!(
-            "CREATE OR REPLACE VIEW {safe}_chunks_fts_src AS \
-             SELECT * FROM \"{ns}\".chunks;",
-            safe = safe,
-            ns = namespace.replace('"', "\"\""),
-        );
-        conn.execute_batch(&view_sql)
-            .map_err(|e| DomainError::storage(format!("Failed to create FTS source view: {e}")))?;
-
+    fn rebuild_fts_index(conn: &Connection, schema: &str) -> Result<(), DomainError> {
         let pragma_sql = format!(
-            "PRAGMA create_fts_index('{safe}_chunks_fts_src', 'id', 'content', 'symbol_name', \
+            "PRAGMA create_fts_index('{schema}.chunks', 'id', 'content', 'symbol_name', \
              stemmer='none', overwrite=1);",
-            safe = safe,
+            schema = schema,
         );
         conn.execute_batch(&pragma_sql)
             .map_err(|e| DomainError::storage(format!("Failed to rebuild FTS index: {e}")))
@@ -959,7 +984,7 @@ impl VectorRepository for DuckdbVectorRepository {
                         "INSERT OR REPLACE INTO \"{}\".chunks \
                         (id, file_path, content, start_line, end_line, language, node_type, symbol_name, parent_symbol, repository_id) \
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        self.namespace
+                        self.schema
                     ),
                 )
                 .map_err(|e| DomainError::storage(format!("Failed to prepare chunk insert: {}", e)))?;
@@ -1004,7 +1029,7 @@ impl VectorRepository for DuckdbVectorRepository {
             let sql = format!(
                 "INSERT OR REPLACE INTO \"{}\".embeddings (chunk_id, vector, model) \
                 VALUES {}",
-                self.namespace, values
+                self.schema, values
             );
             tx.execute(&sql, params_from_iter(bind)).map_err(|e| {
                 DomainError::storage(format!(
@@ -1040,13 +1065,13 @@ impl VectorRepository for DuckdbVectorRepository {
         tx.execute(
             &format!(
                 "DELETE FROM \"{}\".embeddings WHERE chunk_id = ?",
-                self.namespace
+                self.schema
             ),
             params![chunk_id],
         )
         .map_err(|e| DomainError::storage(format!("Failed to delete embedding: {}", e)))?;
         tx.execute(
-            &format!("DELETE FROM \"{}\".chunks WHERE id = ?", self.namespace),
+            &format!("DELETE FROM \"{}\".chunks WHERE id = ?", self.schema),
             params![chunk_id],
         )
         .map_err(|e| DomainError::storage(format!("Failed to delete chunk: {}", e)))?;
@@ -1065,7 +1090,7 @@ impl VectorRepository for DuckdbVectorRepository {
         tx.execute(
             &format!(
                 "DELETE FROM \"{0}\".embeddings WHERE chunk_id IN (SELECT id FROM \"{0}\".chunks WHERE repository_id = ?)",
-                self.namespace
+                self.schema
             ),
             params![repository_id],
         )
@@ -1074,7 +1099,7 @@ impl VectorRepository for DuckdbVectorRepository {
         tx.execute(
             &format!(
                 "DELETE FROM \"{}\".chunks WHERE repository_id = ?",
-                self.namespace
+                self.schema
             ),
             params![repository_id],
         )
@@ -1099,7 +1124,7 @@ impl VectorRepository for DuckdbVectorRepository {
         tx.execute(
             &format!(
                 "DELETE FROM \"{0}\".embeddings WHERE chunk_id IN (SELECT id FROM \"{0}\".chunks WHERE repository_id = ? AND file_path = ?)",
-                self.namespace
+                self.schema
             ),
             params![repository_id, file_path],
         )
@@ -1109,7 +1134,7 @@ impl VectorRepository for DuckdbVectorRepository {
             .execute(
                 &format!(
                     "DELETE FROM \"{}\".chunks WHERE repository_id = ? AND file_path = ?",
-                    self.namespace
+                    self.schema
                 ),
                 params![repository_id, file_path],
             )
@@ -1145,7 +1170,7 @@ impl VectorRepository for DuckdbVectorRepository {
                 "DELETE FROM \"{ns}\".embeddings WHERE chunk_id IN \
                  (SELECT id FROM \"{ns}\".chunks \
                   WHERE repository_id = ? AND file_path = ?)",
-                ns = self.namespace
+                ns = self.schema
             ))
             .map_err(|e| {
                 DomainError::storage(format!("Failed to prepare batch emb delete: {}", e))
@@ -1154,7 +1179,7 @@ impl VectorRepository for DuckdbVectorRepository {
             .prepare(&format!(
                 "DELETE FROM \"{ns}\".chunks \
                  WHERE repository_id = ? AND file_path = ?",
-                ns = self.namespace
+                ns = self.schema
             ))
             .map_err(|e| {
                 DomainError::storage(format!("Failed to prepare batch chunk delete: {}", e))
@@ -1209,7 +1234,7 @@ impl VectorRepository for DuckdbVectorRepository {
             None => Vec::new(),
             Some(embedding) => {
                 let array_lit = self.vector_to_array_literal(embedding)?;
-                Self::run_semantic(&conn, &self.namespace, &array_lit, query, query.limit())?
+                Self::run_semantic(&conn, &self.schema, &array_lit, query, query.limit())?
             }
         };
 
@@ -1232,7 +1257,7 @@ impl VectorRepository for DuckdbVectorRepository {
                 );
                 return Ok(semantic);
             }
-            match Self::rebuild_fts_index(&conn, &self.namespace) {
+            match Self::rebuild_fts_index(&conn, &self.schema) {
                 Ok(()) => {
                     self.fts_dirty.store(false, Ordering::Release);
                     debug!("FTS index rebuilt for namespace '{}'", self.namespace);
@@ -1256,7 +1281,7 @@ impl VectorRepository for DuckdbVectorRepository {
         } else {
             BM25_FETCH_LIMIT
         };
-        let text = match Self::run_text(&conn, &self.namespace, query, text_fetch_limit) {
+        let text = match Self::run_text(&conn, &self.schema, query, text_fetch_limit) {
             Ok(results) => results,
             Err(e) => {
                 // If BM25 query fails (e.g. FTS schema missing in read-only DB),
@@ -1289,7 +1314,7 @@ impl VectorRepository for DuckdbVectorRepository {
             return Ok(());
         }
         let conn = self.conn.lock().await;
-        Self::rebuild_fts_index(&conn, &self.namespace)?;
+        Self::rebuild_fts_index(&conn, &self.schema)?;
         self.fts_dirty.store(false, Ordering::Release);
         info!("BM25 index built for namespace '{}'", self.namespace);
         Ok(())
@@ -1306,7 +1331,7 @@ impl VectorRepository for DuckdbVectorRepository {
             .query_row(
                 &format!(
                     "SELECT EXISTS(SELECT 1 FROM \"{}\".embeddings)",
-                    self.namespace
+                    self.schema
                 ),
                 [],
                 |row| row.get(0),
@@ -1322,7 +1347,7 @@ impl VectorRepository for DuckdbVectorRepository {
         let conn = self.conn.lock().await;
         let count: i64 = conn
             .query_row(
-                &format!("SELECT COUNT(*) FROM \"{}\".chunks", self.namespace),
+                &format!("SELECT COUNT(*) FROM \"{}\".chunks", self.schema),
                 [],
                 |row| row.get(0),
             )
@@ -1343,7 +1368,7 @@ impl VectorRepository for DuckdbVectorRepository {
                     "SELECT id, file_path, content, start_line, end_line, language, node_type, \
                      symbol_name, parent_symbol, repository_id \
                      FROM \"{}\".chunks WHERE file_path = ? ORDER BY start_line",
-                    self.namespace
+                    self.schema
                 ),
                 false,
             )
@@ -1354,7 +1379,7 @@ impl VectorRepository for DuckdbVectorRepository {
                      symbol_name, parent_symbol, repository_id \
                      FROM \"{}\".chunks WHERE file_path = ? AND repository_id = ? \
                      ORDER BY start_line",
-                    self.namespace
+                    self.schema
                 ),
                 true,
             )
@@ -1411,7 +1436,7 @@ impl VectorRepository for DuckdbVectorRepository {
                      WHERE symbol_name = ? \
                      ORDER BY {file_rank_expr}, (end_line - start_line) ASC \
                      LIMIT 1",
-                    self.namespace
+                    self.schema
                 ),
                 false,
             )
@@ -1424,7 +1449,7 @@ impl VectorRepository for DuckdbVectorRepository {
                      WHERE symbol_name = ? AND repository_id = ? \
                      ORDER BY {file_rank_expr}, (end_line - start_line) ASC \
                      LIMIT 1",
-                    self.namespace
+                    self.schema
                 ),
                 true,
             )
@@ -1481,7 +1506,7 @@ impl VectorRepository for DuckdbVectorRepository {
             "SELECT id, file_path, content, start_line, end_line, language, node_type, \
              symbol_name, parent_symbol, repository_id \
              FROM \"{}\".chunks WHERE symbol_name IN ({})",
-            self.namespace, symbol_list
+            self.schema, symbol_list
         );
         if !repository_id.is_empty() {
             sql.push_str(" AND repository_id = ?");
@@ -1520,7 +1545,7 @@ impl VectorRepository for DuckdbVectorRepository {
             "SELECT symbol_name, file_path \
              FROM \"{}\".chunks \
              WHERE repository_id = ? AND symbol_name IS NOT NULL",
-            self.namespace
+            self.schema
         );
 
         let mut stmt = conn.prepare(&sql).map_err(|e| {
