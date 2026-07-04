@@ -182,8 +182,12 @@ async fn init_duckdb_metadata_repos(
         Arc::new(DuckdbCallGraphRepository::with_connection(Arc::clone(&shared_conn)).await?)
     };
     let analysis_repo: Arc<dyn AnalysisRepository> = if read_only {
-        Arc::new(DuckdbAnalysisRepository::with_connection_no_init(
+        // Loads use the shared read-only connection; saves are persisted via a
+        // short-lived writable connection (deferred write-back) so read commands
+        // keep filling the analysis cache without holding the write lock.
+        Arc::new(DuckdbAnalysisRepository::with_read_only_write_back(
             shared_conn,
+            db_path,
         ))
     } else {
         Arc::new(DuckdbAnalysisRepository::with_connection(shared_conn).await?)
@@ -353,12 +357,23 @@ impl Container {
 
         // Create vector repository, metadata adapter, file hash repository,
         // call graph repository, channel endpoint repository, and analysis repository
-        let (vector_repo, repo_adapter, file_hash_repo, call_graph_repo, channel_endpoint_repo, analysis_repo): StorageRepos =
-            if config.memory_storage {
+        let (
+            vector_repo,
+            repo_adapter,
+            file_hash_repo,
+            call_graph_repo,
+            channel_endpoint_repo,
+            analysis_repo,
+        ): StorageRepos = if config.memory_storage {
             debug!("Using in-memory vector storage");
             let vector = Arc::new(InMemoryVectorRepository::new());
-            let (repo_adapter, file_hash_repo, call_graph_repo, channel_endpoint_repo, analysis_repo) =
-                init_duckdb_metadata_repos(&db_path, config.read_only).await?;
+            let (
+                repo_adapter,
+                file_hash_repo,
+                call_graph_repo,
+                channel_endpoint_repo,
+                analysis_repo,
+            ) = init_duckdb_metadata_repos(&db_path, config.read_only).await?;
             (
                 vector,
                 repo_adapter,
@@ -388,13 +403,16 @@ impl Container {
                         Arc::new(DuckdbChannelEndpointRepository::with_connection_no_init(
                             Arc::clone(&shared_conn),
                         ));
-                    let call_graph_repo = Arc::new(
-                        DuckdbCallGraphRepository::with_connection_no_init(
+                    let call_graph_repo =
+                        Arc::new(DuckdbCallGraphRepository::with_connection_no_init(
                             Arc::clone(&shared_conn),
-                        ),
-                    );
+                        ));
+                    // Loads use the shared read-only connection; saves persist
+                    // via a short-lived writable connection (deferred
+                    // write-back) so read commands still fill the analysis cache
+                    // without holding the exclusive write lock.
                     let analysis_repo = Arc::new(
-                        DuckdbAnalysisRepository::with_connection_no_init(shared_conn),
+                        DuckdbAnalysisRepository::with_read_only_write_back(shared_conn, &db_path),
                     );
                     (
                         Arc::new(duckdb),
@@ -429,8 +447,13 @@ impl Container {
                         msg
                     );
                     let vector = Arc::new(InMemoryVectorRepository::new());
-                    let (repo_adapter, file_hash_repo, call_graph_repo, channel_endpoint_repo, analysis_repo) =
-                        init_duckdb_metadata_repos(&db_path, false).await?;
+                    let (
+                        repo_adapter,
+                        file_hash_repo,
+                        call_graph_repo,
+                        channel_endpoint_repo,
+                        analysis_repo,
+                    ) = init_duckdb_metadata_repos(&db_path, false).await?;
                     (
                         vector,
                         repo_adapter,
@@ -461,8 +484,10 @@ impl Container {
                         DuckdbChannelEndpointRepository::with_connection(Arc::clone(&shared_conn))
                             .await?,
                     );
-                    let call_graph_repo =
-                        Arc::new(DuckdbCallGraphRepository::with_connection(Arc::clone(&shared_conn)).await?);
+                    let call_graph_repo = Arc::new(
+                        DuckdbCallGraphRepository::with_connection(Arc::clone(&shared_conn))
+                            .await?,
+                    );
                     let analysis_repo =
                         Arc::new(DuckdbAnalysisRepository::with_connection(shared_conn).await?);
                     (
@@ -490,8 +515,10 @@ impl Container {
                         DuckdbChannelEndpointRepository::with_connection(Arc::clone(&shared_conn))
                             .await?,
                     );
-                    let call_graph_repo =
-                        Arc::new(DuckdbCallGraphRepository::with_connection(Arc::clone(&shared_conn)).await?);
+                    let call_graph_repo = Arc::new(
+                        DuckdbCallGraphRepository::with_connection(Arc::clone(&shared_conn))
+                            .await?,
+                    );
                     let analysis_repo =
                         Arc::new(DuckdbAnalysisRepository::with_connection(shared_conn).await?);
                     (

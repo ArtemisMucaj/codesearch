@@ -6,7 +6,7 @@ use codesearch::{
     FeatureNode, Language, ReferenceKind, SymbolClusterDetectionUseCase, SymbolCommunity,
     SymbolCommunityGraph, SymbolReference,
 };
-use duckdb::Connection;
+use duckdb::{AccessMode, Config, Connection};
 use tokio::sync::Mutex;
 
 async fn create_repo() -> DuckdbAnalysisRepository {
@@ -14,6 +14,13 @@ async fn create_repo() -> DuckdbAnalysisRepository {
     DuckdbAnalysisRepository::with_connection(conn)
         .await
         .unwrap()
+}
+
+/// Open a read-only connection to a database file, matching how the container
+/// builds the shared connection for read-only commands.
+fn open_read_only(path: &std::path::Path) -> Connection {
+    let config = Config::default().access_mode(AccessMode::ReadOnly).unwrap();
+    Connection::open_with_flags(path, config).unwrap()
 }
 
 fn sample_cluster_graph(repository_id: &str) -> ClusterGraph {
@@ -372,4 +379,113 @@ async fn symbol_cluster_detection_serves_stored_result() {
     let uncached = SymbolClusterDetectionUseCase::new(call_graph_use_case);
     let recomputed = uncached.detect_communities("repo-1").await.unwrap();
     assert_eq!(recomputed.total_symbols, 0);
+}
+
+/// A read-only repository built with deferred write-back must persist saved
+/// features to disk even though its shared connection is read-only, so the
+/// cache is filled without holding the exclusive write lock.
+///
+/// A read-only DuckDB connection reads a snapshot fixed at open time, so the
+/// write-back is intentionally *not* visible through the repo's own shared
+/// connection during the same run — the cache is filled for the *next*
+/// invocation, which opens a fresh snapshot. The assertion therefore checks a
+/// brand-new read-only reader opened after the write, which is exactly what a
+/// subsequent `codesearch features` process does.
+#[tokio::test]
+async fn write_back_persists_features_for_a_later_reader() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("analysis.duckdb");
+
+    // Create the schema with a normal writable repo, then drop it so no writer
+    // holds the lock.
+    {
+        let conn = Arc::new(Mutex::new(Connection::open(&db_path).unwrap()));
+        let _writer = DuckdbAnalysisRepository::with_connection(conn)
+            .await
+            .unwrap();
+    }
+
+    // The shared connection is read-only, exactly as in a `codesearch features`
+    // run; saves go through the deferred write-back connection.
+    let read_only_conn = Arc::new(Mutex::new(open_read_only(&db_path)));
+    let repo = DuckdbAnalysisRepository::with_read_only_write_back(read_only_conn, &db_path);
+
+    assert!(repo
+        .load_execution_features("repo-1")
+        .await
+        .unwrap()
+        .is_none());
+
+    let features = sample_features("repo-1");
+    repo.save_execution_features("repo-1", &features)
+        .await
+        .unwrap();
+
+    // A brand-new read-only reader (a later process) sees the persisted cache,
+    // proving the write-back reached disk without any writer holding the lock.
+    let fresh_reader = DuckdbAnalysisRepository::with_connection_no_init(Arc::new(Mutex::new(
+        open_read_only(&db_path),
+    )));
+    let reread = fresh_reader
+        .load_execution_features("repo-1")
+        .await
+        .unwrap()
+        .expect("features persisted to disk");
+    assert_eq!(reread.len(), 2);
+    assert_eq!(reread[0].entry_point, "main");
+    assert_eq!(reread[1].entry_point, "helper");
+}
+
+/// Deferred write-back also persists file clusters and replaces a stored set
+/// wholesale across separate write-back transactions, verified through fresh
+/// read-only readers.
+#[tokio::test]
+async fn write_back_persists_and_replaces_cluster_graph() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("analysis.duckdb");
+
+    {
+        let conn = Arc::new(Mutex::new(Connection::open(&db_path).unwrap()));
+        let _writer = DuckdbAnalysisRepository::with_connection(conn)
+            .await
+            .unwrap();
+    }
+
+    let read_only_conn = Arc::new(Mutex::new(open_read_only(&db_path)));
+    let repo = DuckdbAnalysisRepository::with_read_only_write_back(read_only_conn, &db_path);
+
+    repo.save_cluster_graph(&sample_cluster_graph("repo-1"))
+        .await
+        .unwrap();
+
+    let after_first = DuckdbAnalysisRepository::with_connection_no_init(Arc::new(Mutex::new(
+        open_read_only(&db_path),
+    )));
+    assert_eq!(
+        after_first
+            .load_cluster_graph("repo-1")
+            .await
+            .unwrap()
+            .expect("stored graph")
+            .clusters
+            .len(),
+        2
+    );
+
+    // A second write-back transaction replaces the previous set wholesale.
+    let mut updated = sample_cluster_graph("repo-1");
+    updated.clusters.truncate(1);
+    updated.clusters[0].id = "c9".to_string();
+    repo.save_cluster_graph(&updated).await.unwrap();
+
+    let after_replace = DuckdbAnalysisRepository::with_connection_no_init(Arc::new(Mutex::new(
+        open_read_only(&db_path),
+    )));
+    let loaded = after_replace
+        .load_cluster_graph("repo-1")
+        .await
+        .unwrap()
+        .expect("stored graph");
+    assert_eq!(loaded.clusters.len(), 1);
+    assert_eq!(loaded.clusters[0].id, "c9");
 }

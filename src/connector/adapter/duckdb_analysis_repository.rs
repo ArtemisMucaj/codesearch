@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use duckdb::{params, Connection};
+use duckdb::{params, AccessMode, Config, Connection};
 use tokio::sync::Mutex;
 use tracing::debug;
 
@@ -35,24 +37,62 @@ struct CommunityRow {
     members: Vec<String>,
 }
 
+/// Maximum number of retry attempts when the deferred write-back connection
+/// fails to acquire the write lock because another process (an ongoing
+/// `codesearch index`, or a concurrent analysis) holds it.
+const WRITE_BACK_LOCK_RETRIES: u32 = 3;
+
+/// Initial backoff for write-back lock-conflict retries. Doubles each attempt:
+/// 200 ms → 400 ms → 800 ms (≈ 1.4 s total before giving up and skipping the
+/// cache). Kept short: the query result is already in hand, so a failed cache
+/// write only costs the next run its warm start, never correctness.
+const WRITE_BACK_LOCK_RETRY_INITIAL_MS: u64 = 200;
+
+/// Returns `true` when the error looks like a DuckDB file-lock conflict raised
+/// by a concurrent writer process.
+fn is_lock_conflict(err: &str) -> bool {
+    err.contains("Could not set lock on file") || err.contains("Conflicting lock is held")
+}
+
 /// DuckDB persistence for derived call-graph analyses (Leiden clusters,
 /// symbol communities, execution features).
 ///
 /// Results are stored per `(repository_id, kind)` and replaced wholesale on
 /// save; a row in `analysis_runs` marks a stored (possibly empty) result, so
 /// "never computed" and "computed, nothing found" stay distinguishable.
+///
+/// # Read-only mode and deferred write-back
+///
+/// Read commands (`features`, `visualize`, …) open the database read-only so
+/// they never hold the exclusive write lock and any number of them can run
+/// concurrently. The shared `conn` is then read-only and cannot persist a
+/// freshly computed analysis. Rather than forfeit caching, such a repository is
+/// built with [`with_read_only_write_back`], recording the database path in
+/// `write_path`. On a `save_*`, it opens a **short-lived writable connection**
+/// against that path — after the read-only work is done and the result is
+/// already in hand — writes the cache, and drops the connection. The read path
+/// stays lock-free; only the brief flush touches the write lock, and it is
+/// best-effort: a lock conflict is retried briefly, then skipped.
 pub struct DuckdbAnalysisRepository {
+    /// Shared connection used for all loads. Writable in normal mode; read-only
+    /// when `write_path` is set.
     conn: Arc<Mutex<Connection>>,
+    /// When set, `conn` is read-only and saves go through a short-lived writable
+    /// connection opened against this database path (deferred write-back).
+    write_path: Option<PathBuf>,
 }
 
 impl DuckdbAnalysisRepository {
-    /// Create a new adapter using an existing shared connection.
+    /// Create a new adapter using an existing (writable) shared connection.
     pub async fn with_connection(conn: Arc<Mutex<Connection>>) -> Result<Self, DomainError> {
         let conn_guard = conn.lock().await;
         Self::initialize_schema(&conn_guard)?;
         drop(conn_guard);
 
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            write_path: None,
+        })
     }
 
     /// Create a new adapter from a shared connection without running schema
@@ -60,9 +100,81 @@ impl DuckdbAnalysisRepository {
     ///
     /// Use this when the connection is read-only (DDL is forbidden). Loads
     /// detect a missing schema and report "nothing stored" instead of erroring,
-    /// so read-only commands degrade to recomputing their analysis.
+    /// so read-only commands degrade to recomputing their analysis. Saves are
+    /// no-ops (no `write_path`); prefer [`with_read_only_write_back`] when the
+    /// cache should still be filled.
     pub fn with_connection_no_init(conn: Arc<Mutex<Connection>>) -> Self {
-        Self { conn }
+        Self {
+            conn,
+            write_path: None,
+        }
+    }
+
+    /// Create a read-only adapter that still fills the cache via deferred
+    /// write-back: loads use the shared read-only `conn`, while saves open a
+    /// short-lived writable connection against `db_path` (see the type docs).
+    pub fn with_read_only_write_back(conn: Arc<Mutex<Connection>>, db_path: &Path) -> Self {
+        Self {
+            conn,
+            write_path: Some(db_path.to_path_buf()),
+        }
+    }
+
+    /// Open a short-lived writable connection against `path` for deferred
+    /// write-back, retrying briefly on a cross-process lock conflict.
+    ///
+    /// The extensions/HNSW settings the reader loads are unnecessary here — the
+    /// analysis tables are plain relational tables — so this only ensures the
+    /// analysis schema exists before returning.
+    async fn open_write_back_conn(path: &Path) -> Result<Connection, DomainError> {
+        let mut delay_ms = WRITE_BACK_LOCK_RETRY_INITIAL_MS;
+        for attempt in 0..=WRITE_BACK_LOCK_RETRIES {
+            let config = Config::default()
+                .access_mode(AccessMode::ReadWrite)
+                .map_err(|e| {
+                    DomainError::storage(format!("Failed to configure write-back access: {}", e))
+                })?;
+            match Connection::open_with_flags(path, config) {
+                Ok(conn) => {
+                    Self::initialize_schema(&conn)?;
+                    return Ok(conn);
+                }
+                Err(e) if attempt < WRITE_BACK_LOCK_RETRIES && is_lock_conflict(&e.to_string()) => {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    delay_ms *= 2;
+                }
+                Err(e) => {
+                    return Err(DomainError::storage(format!(
+                        "Failed to open write-back connection: {}",
+                        e
+                    )))
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    /// Run `op` against a writable connection, transparently choosing between
+    /// the shared writable connection (normal mode) and a short-lived
+    /// write-back connection (read-only mode).
+    ///
+    /// In write-back mode a lock conflict never surfaces as an error: the query
+    /// result is already in hand, so a cache write that can't get the lock is
+    /// logged at debug and skipped.
+    async fn with_write_conn<F>(&self, op: F) -> Result<(), DomainError>
+    where
+        F: FnOnce(&mut Connection) -> Result<(), DomainError>,
+    {
+        match &self.write_path {
+            None => {
+                let mut conn = self.conn.lock().await;
+                op(&mut conn)
+            }
+            Some(path) => {
+                let mut conn = Self::open_write_back_conn(path).await?;
+                op(&mut conn)
+            }
+        }
     }
 
     fn initialize_schema(conn: &Connection) -> Result<(), DomainError> {
@@ -187,9 +299,10 @@ impl DuckdbAnalysisRepository {
     }
 
     /// Replace the stored communities for `(repository_id, level)` and record
-    /// the run, all in one transaction.
-    async fn save_communities(
-        &self,
+    /// the run, all in one transaction, on a caller-provided writable
+    /// connection.
+    fn write_communities_tx(
+        conn: &mut Connection,
         repository_id: &str,
         level: &str,
         kind: &str,
@@ -197,7 +310,6 @@ impl DuckdbAnalysisRepository {
         total_nodes: usize,
         total_edges: usize,
     ) -> Result<(), DomainError> {
-        let mut conn = self.conn.lock().await;
         let tx = conn
             .transaction()
             .map_err(|e| DomainError::storage(format!("Failed to begin transaction: {}", e)))?;
@@ -269,6 +381,128 @@ impl DuckdbAnalysisRepository {
             "Saved {} {} communities for repository {}",
             rows.len(),
             level,
+            repository_id
+        );
+        Ok(())
+    }
+
+    /// Replace the stored communities for `(repository_id, level)`, choosing a
+    /// writable connection via [`with_write_conn`] so the same path serves both
+    /// normal and read-only (deferred write-back) modes.
+    async fn save_communities(
+        &self,
+        repository_id: &str,
+        level: &str,
+        kind: &str,
+        rows: &[CommunityRow],
+        total_nodes: usize,
+        total_edges: usize,
+    ) -> Result<(), DomainError> {
+        self.with_write_conn(|conn| {
+            Self::write_communities_tx(
+                conn,
+                repository_id,
+                level,
+                kind,
+                rows,
+                total_nodes,
+                total_edges,
+            )
+        })
+        .await
+    }
+
+    /// Replace the stored execution features for `repository_id` and record the
+    /// run, all in one transaction, on a caller-provided writable connection.
+    fn write_execution_features_tx(
+        conn: &mut Connection,
+        repository_id: &str,
+        features: &[ExecutionFeature],
+    ) -> Result<(), DomainError> {
+        let tx = conn
+            .transaction()
+            .map_err(|e| DomainError::storage(format!("Failed to begin transaction: {}", e)))?;
+
+        tx.execute(
+            "DELETE FROM execution_feature_nodes WHERE repository_id = ?",
+            params![repository_id],
+        )
+        .map_err(|e| DomainError::storage(format!("Failed to clear feature nodes: {}", e)))?;
+        tx.execute(
+            "DELETE FROM execution_features WHERE repository_id = ?",
+            params![repository_id],
+        )
+        .map_err(|e| DomainError::storage(format!("Failed to clear features: {}", e)))?;
+        tx.execute(
+            "DELETE FROM analysis_runs WHERE repository_id = ? AND kind = ?",
+            params![repository_id, KIND_EXECUTION_FEATURES],
+        )
+        .map_err(|e| DomainError::storage(format!("Failed to clear analysis run: {}", e)))?;
+
+        {
+            let mut feature_stmt = tx
+                .prepare(
+                    "INSERT INTO execution_features \
+                     (id, repository_id, name, entry_point, depth, file_count, reach, criticality) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                )
+                .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
+            let mut node_stmt = tx
+                .prepare(
+                    "INSERT INTO execution_feature_nodes \
+                     (feature_id, repository_id, seq, symbol, file_path, line, depth) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?)",
+                )
+                .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
+
+            for feature in features {
+                feature_stmt
+                    .execute(params![
+                        feature.id,
+                        repository_id,
+                        feature.name,
+                        feature.entry_point,
+                        feature.depth as i64,
+                        feature.file_count as i64,
+                        feature.reach as i64,
+                        feature.criticality,
+                    ])
+                    .map_err(|e| DomainError::storage(format!("Failed to save feature: {}", e)))?;
+                for (seq, node) in feature.path.iter().enumerate() {
+                    node_stmt
+                        .execute(params![
+                            feature.id,
+                            repository_id,
+                            seq as i32,
+                            node.symbol,
+                            node.file_path,
+                            node.line as i32,
+                            node.depth as i32,
+                        ])
+                        .map_err(|e| {
+                            DomainError::storage(format!("Failed to save feature node: {}", e))
+                        })?;
+                }
+            }
+        }
+
+        tx.execute(
+            "INSERT INTO analysis_runs (repository_id, kind, total_nodes, total_edges) \
+             VALUES (?, ?, ?, 0)",
+            params![
+                repository_id,
+                KIND_EXECUTION_FEATURES,
+                features.len() as i64
+            ],
+        )
+        .map_err(|e| DomainError::storage(format!("Failed to record analysis run: {}", e)))?;
+
+        tx.commit()
+            .map_err(|e| DomainError::storage(format!("Failed to commit: {}", e)))?;
+
+        debug!(
+            "Saved {} execution features for repository {}",
+            features.len(),
             repository_id
         );
         Ok(())
@@ -474,94 +708,10 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
         repository_id: &str,
         features: &[ExecutionFeature],
     ) -> Result<(), DomainError> {
-        let mut conn = self.conn.lock().await;
-        let tx = conn
-            .transaction()
-            .map_err(|e| DomainError::storage(format!("Failed to begin transaction: {}", e)))?;
-
-        tx.execute(
-            "DELETE FROM execution_feature_nodes WHERE repository_id = ?",
-            params![repository_id],
-        )
-        .map_err(|e| DomainError::storage(format!("Failed to clear feature nodes: {}", e)))?;
-        tx.execute(
-            "DELETE FROM execution_features WHERE repository_id = ?",
-            params![repository_id],
-        )
-        .map_err(|e| DomainError::storage(format!("Failed to clear features: {}", e)))?;
-        tx.execute(
-            "DELETE FROM analysis_runs WHERE repository_id = ? AND kind = ?",
-            params![repository_id, KIND_EXECUTION_FEATURES],
-        )
-        .map_err(|e| DomainError::storage(format!("Failed to clear analysis run: {}", e)))?;
-
-        {
-            let mut feature_stmt = tx
-                .prepare(
-                    "INSERT INTO execution_features \
-                     (id, repository_id, name, entry_point, depth, file_count, reach, criticality) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                )
-                .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
-            let mut node_stmt = tx
-                .prepare(
-                    "INSERT INTO execution_feature_nodes \
-                     (feature_id, repository_id, seq, symbol, file_path, line, depth) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?)",
-                )
-                .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
-
-            for feature in features {
-                feature_stmt
-                    .execute(params![
-                        feature.id,
-                        repository_id,
-                        feature.name,
-                        feature.entry_point,
-                        feature.depth as i64,
-                        feature.file_count as i64,
-                        feature.reach as i64,
-                        feature.criticality,
-                    ])
-                    .map_err(|e| DomainError::storage(format!("Failed to save feature: {}", e)))?;
-                for (seq, node) in feature.path.iter().enumerate() {
-                    node_stmt
-                        .execute(params![
-                            feature.id,
-                            repository_id,
-                            seq as i32,
-                            node.symbol,
-                            node.file_path,
-                            node.line as i32,
-                            node.depth as i32,
-                        ])
-                        .map_err(|e| {
-                            DomainError::storage(format!("Failed to save feature node: {}", e))
-                        })?;
-                }
-            }
-        }
-
-        tx.execute(
-            "INSERT INTO analysis_runs (repository_id, kind, total_nodes, total_edges) \
-             VALUES (?, ?, ?, 0)",
-            params![
-                repository_id,
-                KIND_EXECUTION_FEATURES,
-                features.len() as i64
-            ],
-        )
-        .map_err(|e| DomainError::storage(format!("Failed to record analysis run: {}", e)))?;
-
-        tx.commit()
-            .map_err(|e| DomainError::storage(format!("Failed to commit: {}", e)))?;
-
-        debug!(
-            "Saved {} execution features for repository {}",
-            features.len(),
-            repository_id
-        );
-        Ok(())
+        self.with_write_conn(|conn| {
+            Self::write_execution_features_tx(conn, repository_id, features)
+        })
+        .await
     }
 
     async fn load_execution_features(
@@ -653,24 +803,30 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
     }
 
     async fn delete_by_repository(&self, repository_id: &str) -> Result<(), DomainError> {
-        let conn = self.conn.lock().await;
-        if !Self::schema_exists(&conn)? {
-            return Ok(());
+        // Short-circuit on the shared read connection so write-back mode never
+        // opens a writable connection just to find nothing to delete.
+        {
+            let conn = self.conn.lock().await;
+            if !Self::schema_exists(&conn)? {
+                return Ok(());
+            }
         }
 
-        for sql in [
-            "DELETE FROM cluster_members WHERE repository_id = ?",
-            "DELETE FROM clusters WHERE repository_id = ?",
-            "DELETE FROM execution_feature_nodes WHERE repository_id = ?",
-            "DELETE FROM execution_features WHERE repository_id = ?",
-            "DELETE FROM analysis_runs WHERE repository_id = ?",
-        ] {
-            conn.execute(sql, params![repository_id]).map_err(|e| {
-                DomainError::storage(format!("Failed to delete stored analyses: {}", e))
-            })?;
-        }
-
-        debug!("Deleted stored analyses for repository {}", repository_id);
-        Ok(())
+        self.with_write_conn(|conn| {
+            for sql in [
+                "DELETE FROM cluster_members WHERE repository_id = ?",
+                "DELETE FROM clusters WHERE repository_id = ?",
+                "DELETE FROM execution_feature_nodes WHERE repository_id = ?",
+                "DELETE FROM execution_features WHERE repository_id = ?",
+                "DELETE FROM analysis_runs WHERE repository_id = ?",
+            ] {
+                conn.execute(sql, params![repository_id]).map_err(|e| {
+                    DomainError::storage(format!("Failed to delete stored analyses: {}", e))
+                })?;
+            }
+            debug!("Deleted stored analyses for repository {}", repository_id);
+            Ok(())
+        })
+        .await
     }
 }
