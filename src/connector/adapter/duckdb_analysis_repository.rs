@@ -26,8 +26,9 @@ const LEVEL_FILE: &str = "file";
 /// `clusters.level` value for symbol-level communities.
 const LEVEL_SYMBOL: &str = "symbol";
 
-/// Row shape shared by [`Cluster`] and [`SymbolCommunity`] — the two types are
-/// structurally identical, so one set of SQL paths serves both levels.
+/// Owned row shape shared by [`Cluster`] and [`SymbolCommunity`] — the two types
+/// are structurally identical, so one set of SQL paths serves both levels. Used
+/// on the load path, where the data must outlive the connection borrow.
 struct CommunityRow {
     id: String,
     name: String,
@@ -35,6 +36,18 @@ struct CommunityRow {
     size: usize,
     cohesion: f32,
     members: Vec<String>,
+}
+
+/// Borrowed view of a community for the save path — lives only for the duration
+/// of one write transaction, so it borrows the domain object's fields instead of
+/// cloning them.
+struct CommunityRowRef<'a> {
+    id: &'a str,
+    name: &'a str,
+    dominant_language: &'a str,
+    size: usize,
+    cohesion: f32,
+    members: &'a [String],
 }
 
 /// Maximum number of retry attempts when the deferred write-back connection
@@ -306,7 +319,7 @@ impl DuckdbAnalysisRepository {
         repository_id: &str,
         level: &str,
         kind: &str,
-        rows: &[CommunityRow],
+        rows: &[CommunityRowRef<'_>],
         total_nodes: usize,
         total_edges: usize,
     ) -> Result<(), DomainError> {
@@ -357,7 +370,7 @@ impl DuckdbAnalysisRepository {
                         row.cohesion,
                     ])
                     .map_err(|e| DomainError::storage(format!("Failed to save cluster: {}", e)))?;
-                for member in &row.members {
+                for member in row.members {
                     member_stmt
                         .execute(params![row.id, repository_id, level, member])
                         .map_err(|e| {
@@ -394,7 +407,7 @@ impl DuckdbAnalysisRepository {
         repository_id: &str,
         level: &str,
         kind: &str,
-        rows: &[CommunityRow],
+        rows: &[CommunityRowRef<'_>],
         total_nodes: usize,
         total_edges: usize,
     ) -> Result<(), DomainError> {
@@ -589,16 +602,16 @@ impl DuckdbAnalysisRepository {
 #[async_trait]
 impl AnalysisRepository for DuckdbAnalysisRepository {
     async fn save_cluster_graph(&self, graph: &ClusterGraph) -> Result<(), DomainError> {
-        let rows: Vec<CommunityRow> = graph
+        let rows: Vec<CommunityRowRef<'_>> = graph
             .clusters
             .iter()
-            .map(|c| CommunityRow {
-                id: c.id.clone(),
-                name: c.name.clone(),
-                dominant_language: c.dominant_language.clone(),
+            .map(|c| CommunityRowRef {
+                id: &c.id,
+                name: &c.name,
+                dominant_language: &c.dominant_language,
                 size: c.size,
                 cohesion: c.cohesion,
-                members: c.members.clone(),
+                members: &c.members,
             })
             .collect();
         self.save_communities(
@@ -648,16 +661,16 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
         &self,
         graph: &SymbolCommunityGraph,
     ) -> Result<(), DomainError> {
-        let rows: Vec<CommunityRow> = graph
+        let rows: Vec<CommunityRowRef<'_>> = graph
             .communities
             .iter()
-            .map(|c| CommunityRow {
-                id: c.id.clone(),
-                name: c.name.clone(),
-                dominant_language: c.dominant_language.clone(),
+            .map(|c| CommunityRowRef {
+                id: &c.id,
+                name: &c.name,
+                dominant_language: &c.dominant_language,
                 size: c.size,
                 cohesion: c.cohesion,
-                members: c.members.clone(),
+                members: &c.members,
             })
             .collect();
         self.save_communities(
@@ -813,6 +826,11 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
         }
 
         self.with_write_conn(|conn| {
+            // All five deletes commit together: a partial delete would leave
+            // orphaned members/nodes pointing at a removed run.
+            let tx = conn
+                .transaction()
+                .map_err(|e| DomainError::storage(format!("Failed to begin transaction: {}", e)))?;
             for sql in [
                 "DELETE FROM cluster_members WHERE repository_id = ?",
                 "DELETE FROM clusters WHERE repository_id = ?",
@@ -820,10 +838,12 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
                 "DELETE FROM execution_features WHERE repository_id = ?",
                 "DELETE FROM analysis_runs WHERE repository_id = ?",
             ] {
-                conn.execute(sql, params![repository_id]).map_err(|e| {
+                tx.execute(sql, params![repository_id]).map_err(|e| {
                     DomainError::storage(format!("Failed to delete stored analyses: {}", e))
                 })?;
             }
+            tx.commit()
+                .map_err(|e| DomainError::storage(format!("Failed to commit: {}", e)))?;
             debug!("Deleted stored analyses for repository {}", repository_id);
             Ok(())
         })

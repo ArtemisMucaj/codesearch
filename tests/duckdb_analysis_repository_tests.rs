@@ -239,6 +239,39 @@ async fn symbol_community_graph_roundtrip() {
 }
 
 #[tokio::test]
+async fn save_replaces_previous_symbol_community_graph() {
+    let repo = create_repo().await;
+
+    repo.save_symbol_community_graph(&sample_symbol_community_graph("repo-1"))
+        .await
+        .unwrap();
+
+    // A different, still non-empty result must replace the previous set
+    // wholesale — proving full-to-full replacement, not just empty overwrite.
+    let mut updated = sample_symbol_community_graph("repo-1");
+    updated.communities[0].id = "s9".to_string();
+    updated.communities[0].name = "billing".to_string();
+    updated.communities[0].members = vec!["svc/BillingService#invoice().".to_string()];
+    updated.communities[0].size = 1;
+    updated.total_symbols = 1;
+    repo.save_symbol_community_graph(&updated).await.unwrap();
+
+    let loaded = repo
+        .load_symbol_community_graph("repo-1")
+        .await
+        .unwrap()
+        .expect("stored graph");
+    assert_eq!(loaded.total_symbols, 1);
+    assert_eq!(loaded.communities.len(), 1);
+    assert_eq!(loaded.communities[0].id, "s9");
+    assert_eq!(loaded.communities[0].name, "billing");
+    assert_eq!(
+        loaded.communities[0].members,
+        vec!["svc/BillingService#invoice()."]
+    );
+}
+
+#[tokio::test]
 async fn execution_features_roundtrip() {
     let repo = create_repo().await;
 

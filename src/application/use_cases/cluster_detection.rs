@@ -1161,7 +1161,7 @@ impl ClusterDetectionUseCase {
     /// Build a render-ready [`GraphView`] of the file-dependency graph, with each
     /// file coloured by the Leiden cluster it belongs to.
     ///
-    /// Reuses [`Self::create_clusters_with_graph`] so the partition, cluster
+    /// Reuses [`Self::clusters_and_graph`] so the partition, cluster
     /// names, and cohesion are identical to what the `clusters` command reports;
     /// the community index of each node is the cluster's position in the
     /// size-sorted [`ClusterGraph::clusters`] list.

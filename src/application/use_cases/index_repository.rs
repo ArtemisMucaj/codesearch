@@ -144,11 +144,18 @@ impl IndexRepositoryUseCase {
 
     /// Drop every stored analysis for `repository_id`.  Called after indexing
     /// changes the call graph, since stored analyses derive entirely from it.
-    async fn invalidate_analyses(&self, repository_id: &str) -> Result<(), DomainError> {
+    ///
+    /// Best-effort: stored analyses are a derived cache, so a failure to drop
+    /// them is logged and swallowed rather than aborting the primary indexing
+    /// operation (which has, by this point, already rewritten the vector,
+    /// file-hash, and call-graph data). A stale cache is corrected on the next
+    /// run; a hard error here would leave the repository record dangling.
+    async fn invalidate_analyses(&self, repository_id: &str) {
         if let Some(analysis_repo) = &self.analysis_repo {
-            analysis_repo.delete_by_repository(repository_id).await?;
+            if let Err(e) = analysis_repo.delete_by_repository(repository_id).await {
+                warn!("Failed to invalidate stored analyses for {repository_id}: {e}");
+            }
         }
-        Ok(())
     }
 
     /// Set the maximum number of concurrent parse tasks.
@@ -233,7 +240,7 @@ impl IndexRepositoryUseCase {
                 if let Some(channel_repo) = &self.channel_endpoint_repo {
                     channel_repo.delete_by_repository(existing.id()).await?;
                 }
-                self.invalidate_analyses(existing.id()).await?;
+                self.invalidate_analyses(existing.id()).await;
                 self.repository_repo.delete(existing.id()).await?;
             }
             return self
@@ -619,8 +626,12 @@ impl IndexRepositoryUseCase {
         );
 
         // Any file change rewrites part of the call graph, so analyses derived
-        // from it (clusters, communities, features) become stale.
-        let call_graph_changed = !added.is_empty() || !modified.is_empty() || !deleted.is_empty();
+        // from it (clusters, communities, features) become stale. The
+        // unchanged-file SCIP resync below can also rewrite edges (e.g. a
+        // dependency's change altered cross-file references, or SCIP ran for the
+        // first time), so this may also flip to true there.
+        let mut call_graph_changed =
+            !added.is_empty() || !modified.is_empty() || !deleted.is_empty();
 
         // Track total chunks deleted
         let mut deleted_chunk_count = 0u64;
@@ -822,11 +833,14 @@ impl IndexRepositoryUseCase {
 
         progress_bar.finish_and_clear();
 
-        // SCIP references for unchanged files.
+        // SCIP references for unchanged files. Rewriting these edges also makes
+        // derived analyses stale, so flag the call graph as changed whenever the
+        // resync touches at least one unchanged file.
         for (relative_path, file_refs) in scip_refs.iter() {
             if new_processed_paths.contains(relative_path) {
                 continue;
             }
+            call_graph_changed = true;
             self.call_graph_use_case
                 .delete_by_file(repository.id(), relative_path)
                 .await?;
@@ -868,7 +882,7 @@ impl IndexRepositoryUseCase {
             .await?;
 
         if call_graph_changed {
-            self.invalidate_analyses(repository.id()).await?;
+            self.invalidate_analyses(repository.id()).await;
         }
 
         let duration = start_time.elapsed();

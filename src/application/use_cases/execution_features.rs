@@ -160,6 +160,19 @@ impl ExecutionFeaturesUseCase {
             query = query.with_repository(repo);
         }
 
+        // Cache-first fast path: when the repository is known and its feature
+        // set is cached, an exact entry-point match can be served without
+        // touching the live call graph at all. Exact match is unambiguous, so
+        // this never returns a different result than the graph path would;
+        // substring names still fall through to `resolve_symbols` below.
+        if let Some(repo) = repository_id {
+            if let Some(stored) = self.load_stored(repo).await {
+                if let Some(feature) = stored.into_iter().find(|f| f.entry_point == symbol) {
+                    return Ok(Some(feature));
+                }
+            }
+        }
+
         // Resolve the symbol to a fully-qualified name.
         let resolved = self.call_graph.resolve_symbols(symbol, &query, 10).await?;
 
