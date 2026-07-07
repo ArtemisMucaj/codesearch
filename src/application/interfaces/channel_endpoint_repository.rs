@@ -24,7 +24,10 @@ pub trait ChannelEndpointRepository: Send + Sync {
         protocol: Protocol,
     ) -> Result<Vec<ChannelEndpoint>, DomainError>;
 
-    /// Find every stored endpoint across all repositories in the namespace.
+    /// Find every stored endpoint. The `channel_endpoints` table is global (not
+    /// namespace-scoped like `chunks`/`embeddings`), so this spans every
+    /// repository in every namespace — callers that want a single namespace must
+    /// scope by passing that namespace's repository ids to `find_by_repository`.
     async fn find_all(&self) -> Result<Vec<ChannelEndpoint>, DomainError>;
 
     /// Delete all endpoints for a specific file within a repository.
@@ -37,4 +40,17 @@ pub trait ChannelEndpointRepository: Send + Sync {
 
     /// Delete all endpoints for a repository.
     async fn delete_by_repository(&self, repository_id: &str) -> Result<(), DomainError>;
+
+    /// Delete a repository's *synthesized* endpoints — those originated from the
+    /// SCIP call graph rather than extracted from source (`source = 'config'`).
+    ///
+    /// They are pure derived data recomputed on every resolution pass, so the
+    /// pass clears them first and rewrites a fresh set. This keeps the stored
+    /// set free of stale rows for call sites that no longer resolve, without
+    /// disturbing tree-sitter-extracted endpoints (which follow the per-file
+    /// incremental lifecycle instead).
+    async fn delete_synthesized_by_repository(
+        &self,
+        repository_id: &str,
+    ) -> Result<(), DomainError>;
 }

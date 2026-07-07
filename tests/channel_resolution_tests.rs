@@ -88,6 +88,7 @@ fn resolves_config_topic_and_confirms_library_end_to_end() {
     let candidates = vec![("config".to_string(), CONFIG_SOURCE.to_string())];
 
     let out = use_case.resolve(
+        "orders",
         vec![producer, consumer],
         &refs,
         &candidates,
@@ -123,6 +124,7 @@ fn unmatched_config_expression_stays_unresolved() {
     let candidates = vec![("config".to_string(), CONFIG_SOURCE.to_string())];
 
     let out = use_case.resolve(
+        "orders",
         vec![endpoint],
         &HashMap::new(),
         &candidates,
@@ -158,6 +160,10 @@ impl ChannelResolver for FixedResolver {
     ) -> Option<String> {
         None
     }
+
+    fn channel_argument_at(&self, _call_site_source: &str, _call_line: u32) -> Option<String> {
+        None
+    }
 }
 
 #[test]
@@ -187,11 +193,15 @@ fn mqtt_endpoint_not_confirmed_by_kafka_package() {
         vec![kafka_ref(50, "produce")],
     );
 
-    let out = use_case.resolve(vec![mqtt], &refs, &[], &HashMap::new());
-    // Value resolves, but the kafka package must not confirm an MQTT endpoint.
-    assert_eq!(out[0].channel_raw(), "sensors/room");
-    assert!(!out[0].is_confirmed());
-    assert_eq!(out[0].library(), None);
+    let out = use_case.resolve("orders", vec![mqtt], &refs, &[], &HashMap::new());
+    // The MQTT endpoint is first; the kafka package must not confirm it.
+    let mqtt_out = out
+        .iter()
+        .find(|e| e.protocol() == Protocol::Mqtt)
+        .expect("mqtt endpoint");
+    assert_eq!(mqtt_out.channel_raw(), "sensors/room");
+    assert!(!mqtt_out.is_confirmed());
+    assert_eq!(mqtt_out.library(), None);
 }
 
 /// The class that carries its topics through a constructor param (the producer
@@ -266,7 +276,7 @@ fn resolves_producer_topic_through_constructor_param_end_to_end() {
         ("config".to_string(), CONFIG_SOURCE.to_string()),
     ];
 
-    let out = use_case.resolve(vec![producer], &refs, &candidates, &HashMap::new());
+    let out = use_case.resolve("orders", vec![producer], &refs, &candidates, &HashMap::new());
 
     // The two-hop chain resolved: this.topics.orderPlaced →
     // new OrderEvents(…, { orderPlaced: this.config.broker.topics.… }) →

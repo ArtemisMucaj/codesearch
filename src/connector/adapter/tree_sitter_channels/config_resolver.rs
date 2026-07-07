@@ -102,6 +102,78 @@ pub(super) fn resolve_via_constructor_param(
     resolve_channel_expression(&inner, sources)
 }
 
+/// Resolve `this.<field>` where the field is assigned in the constructor from a
+/// value destructured out of a whole-object parameter that is itself wired from
+/// a config path at the `new Class(...)` site.
+///
+/// This is the librdkafka-wrapper shape:
+///
+/// ```ts
+/// // adapter.ts
+/// constructor(cfg: KafkaAdapterConfig, logger) {
+///     const { broker, group, topics } = cfg   // destructure the whole param
+///     this.topics = topics                     // stash a field
+/// }
+/// start() { this.consumer.connect({ topics: this.topics }, …) }  // ← use it
+/// // server.ts
+/// new KafkaClientAdapter(config.kafka.heatingAlgorithmsConsumer, logger)
+/// // config.ts → config.kafka.heatingAlgorithmsConsumer.topics = env ?? 'default'
+/// ```
+///
+/// The chain traced here (four hops the single-hop
+/// [`resolve_via_constructor_param`] does not cover): `this.topics` → the field
+/// initializer `topics` → the destructuring `const { …topics… } = cfg` → the
+/// constructor param `cfg` (index 0) → the `new Class(<config.path>, …)` arg at
+/// that index → `<config.path>.topics` resolved in the config module.
+///
+/// `expression` is the `this.<field>` access; `class_name` is the enclosing
+/// class; `sources` are candidate `(object_name, source)` module sources (the
+/// adapter, the wiring/server module, and the config module).
+pub(super) fn resolve_via_field_from_config_param(
+    expression: &str,
+    class_name: &str,
+    sources: &[(&str, &str)],
+) -> Option<ResolvedChannel> {
+    // `this.topics` → field `topics`. Only a direct `this.<field>` shape.
+    let segments = property_segments(expression);
+    if segments.len() != 1 {
+        return None;
+    }
+    let field = segments[0].as_str();
+
+    // 1. The field's initializer local: `this.topics = topics` → `topics`.
+    let local = sources
+        .iter()
+        .find_map(|(_, source)| field_assignment_local(source, class_name, field))?;
+
+    // 2. Where `local` comes from: a `const { …local… } = <param>` destructuring
+    //    inside the constructor → the param name and the key taken from it.
+    let (param, key) = sources
+        .iter()
+        .find_map(|(_, source)| destructured_from_param(source, class_name, &local))?;
+
+    // 3. The param's position, then every `new Class(<arg>, …)` argument at that
+    //    position — a config path like `config.kafka.heatingAlgorithmsConsumer`.
+    //    A class may be instantiated at several sites (production wiring plus
+    //    test doubles with inline mock configs), so all are collected.
+    let param_index = sources
+        .iter()
+        .find_map(|(_, source)| constructor_param_index(source, class_name, &param))?;
+    let config_paths: Vec<String> = sources
+        .iter()
+        .flat_map(|(_, source)| constructor_positional_args(source, class_name, param_index))
+        .collect();
+
+    // 4. Append the destructured key and resolve `<config.path>.<key>` — the
+    //    first instantiation whose wired path resolves in config wins, so a test
+    //    double's mock argument (which resolves to nothing) is skipped in favour
+    //    of the real wiring.
+    config_paths.iter().find_map(|config_path| {
+        let full_expression = format!("{config_path}.{key}");
+        resolve_channel_expression(&full_expression, sources)
+    })
+}
+
 /// Infer an MQTT topic *pattern* from a topic expression built as a template
 /// literal, mapping each `${…}` interpolation to a single-level wildcard `+`.
 ///
@@ -312,6 +384,49 @@ pub(super) fn resolve_via_interface(
         let topic_arg = method_client_topic_arg(source, &class, &method)?;
         infer_topic_pattern(&topic_arg, source)
     })
+}
+
+/// The channel argument expression of the messaging call at `line` (1-based).
+///
+/// Reads the first positional argument, or — when that argument is an options
+/// object — the value of its `topic`/`topics` property
+/// (`connect({ topics: this.topics }, cb)` → `this.topics`). Used to give a
+/// synthesized (SCIP-originated) endpoint a real expression to resolve. Returns
+/// `None` when there is no call at that line or no channel-like argument.
+pub(super) fn channel_argument_at(source: &str, line: u32) -> Option<String> {
+    let tree = parse_ts(source)?;
+    let mut result = None;
+    find_channel_argument_at(tree.root_node(), source, line, &mut result);
+    result
+}
+
+fn find_channel_argument_at(node: Node<'_>, source: &str, line: u32, out: &mut Option<String>) {
+    if out.is_some() {
+        return;
+    }
+    if node.kind() == "call_expression" && node.start_position().row as u32 + 1 == line {
+        if let Some(args) = node.child_by_field_name("arguments") {
+            if let Some(first) = nth_call_argument(args, 0) {
+                // `{ topic: X }` / `{ topics: Y }` → the keyed value; otherwise
+                // the positional argument itself (`produce(this.topic, …)`).
+                let value = unwrap_to_object(first)
+                    .and_then(|obj| {
+                        object_property(obj, source, "topics")
+                            .or_else(|| object_property(obj, source, "topic"))
+                    })
+                    .unwrap_or(first);
+                let text = source[value.byte_range()].split_whitespace().collect::<String>();
+                if !text.is_empty() {
+                    *out = Some(text);
+                    return;
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        find_channel_argument_at(child, source, line, out);
+    }
 }
 
 /// The `(field, method)` of a `this.<field>.<method>(…)` call at `line`.
@@ -552,6 +667,155 @@ fn constructor_arg_object_entry(
     result
 }
 
+/// The right-hand side of `this.<field> = <local>` inside `class_name`'s
+/// constructor, when it is a bare identifier.
+///
+/// `this.topics = topics` → `Some("topics")`. Returns `None` for a field whose
+/// initializer is not a plain identifier (a literal or expression needs no
+/// param trace).
+fn field_assignment_local(source: &str, class_name: &str, field: &str) -> Option<String> {
+    let tree = parse_ts(source)?;
+    let class = find_class(tree.root_node(), source, class_name)?;
+    let ctor = find_constructor(class, source)?;
+
+    let mut result = None;
+    find_field_assignment(ctor, source, field, &mut result);
+    result
+}
+
+fn find_field_assignment(node: Node<'_>, source: &str, field: &str, out: &mut Option<String>) {
+    if out.is_some() {
+        return;
+    }
+    // `this.<field> = <rhs>`
+    if node.kind() == "assignment_expression" {
+        if let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) {
+            let assigns_field = left.kind() == "member_expression"
+                && left
+                    .child_by_field_name("object")
+                    .map(|o| o.kind() == "this")
+                    .unwrap_or(false)
+                && left
+                    .child_by_field_name("property")
+                    .map(|p| &source[p.byte_range()] == field)
+                    .unwrap_or(false);
+            if assigns_field && right.kind() == "identifier" {
+                *out = Some(source[right.byte_range()].to_string());
+                return;
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        find_field_assignment(child, source, field, out);
+    }
+}
+
+/// Find a `const { … } = <param>` destructuring inside `class_name`'s
+/// constructor that binds `local`, returning `(param_name, key_taken)`.
+///
+/// `const { broker, group, topics } = cfg` with `local = "topics"` →
+/// `Some(("cfg", "topics"))`. A renamed binding
+/// (`const { topics: t } = cfg`) keys on the *source* property, so it returns
+/// `("cfg", "topics")` for `local = "t"`.
+fn destructured_from_param(
+    source: &str,
+    class_name: &str,
+    local: &str,
+) -> Option<(String, String)> {
+    let tree = parse_ts(source)?;
+    let class = find_class(tree.root_node(), source, class_name)?;
+    let ctor = find_constructor(class, source)?;
+
+    let mut result = None;
+    find_destructuring(ctor, source, local, &mut result);
+    result
+}
+
+fn find_destructuring(
+    node: Node<'_>,
+    source: &str,
+    local: &str,
+    out: &mut Option<(String, String)>,
+) {
+    if out.is_some() {
+        return;
+    }
+    if node.kind() == "variable_declarator" {
+        if let (Some(name), Some(value)) = (
+            node.child_by_field_name("name"),
+            node.child_by_field_name("value"),
+        ) {
+            // `{ … } = <param>` where the RHS is a bare identifier (the param).
+            if name.kind() == "object_pattern" && value.kind() == "identifier" {
+                if let Some(key) = object_pattern_key_for_local(name, source, local) {
+                    *out = Some((source[value.byte_range()].to_string(), key));
+                    return;
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        find_destructuring(child, source, local, out);
+    }
+}
+
+/// Within an `object_pattern` (`{ a, b: c, … }`), the source-side property whose
+/// binding name is `local`. Plain shorthand (`topics`) keys and binds on the
+/// same name; a renamed pair (`topics: t`) keys on `topics`, binds `t`.
+fn object_pattern_key_for_local(pattern: Node<'_>, source: &str, local: &str) -> Option<String> {
+    let mut cursor = pattern.walk();
+    for child in pattern.children(&mut cursor) {
+        match child.kind() {
+            // Shorthand: `{ topics }` — key and binding are the same identifier.
+            "shorthand_property_identifier_pattern" => {
+                if &source[child.byte_range()] == local {
+                    return Some(local.to_string());
+                }
+            }
+            // Renamed: `{ topics: t }` — pair_pattern with key `topics`, value `t`.
+            "pair_pattern" => {
+                let key = child.child_by_field_name("key");
+                let value = child.child_by_field_name("value");
+                if let (Some(key), Some(value)) = (key, value) {
+                    if &source[value.byte_range()] == local {
+                        return Some(source[key.byte_range()].to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The source text of the `index`-th positional argument of **every**
+/// `new class_name(…)` call in `source` — the config paths wired into a
+/// constructor param across all instantiation sites
+/// (`new KafkaClientAdapter(config.kafka.heatingAlgorithmsConsumer, logger)` at
+/// index 0 → `config.kafka.heatingAlgorithmsConsumer`). A class is often
+/// instantiated more than once (production wiring plus test doubles), so the
+/// caller tries each until one resolves.
+fn constructor_positional_args(source: &str, class_name: &str, index: usize) -> Vec<String> {
+    let Some(tree) = parse_ts(source) else {
+        return Vec::new();
+    };
+    let mut results = Vec::new();
+    find_new_expression(tree.root_node(), source, class_name, &mut |args| {
+        if let Some(arg) = nth_call_argument(args, index) {
+            let normalized: String = source[arg.byte_range()].split_whitespace().collect();
+            if !normalized.is_empty() {
+                results.push(normalized);
+            }
+        }
+    });
+    results
+}
+
 /// Break a member-access expression into its bare segments, dropping a leading
 /// `this`: `this.config.broker.topics.orders` → `[config, broker, topics,
 /// orders]`. Subscript access (`a['b']`) is normalised to `a.b`.
@@ -676,35 +940,33 @@ fn property_key_text(key: Node<'_>, source: &str) -> String {
 
 /// Resolve a leaf value expression into a channel value:
 /// - `process.env.X || 'default'` → `{ value: "default", env_var: Some("X") }`
+/// - `a ?? b ?? 'default'`         → `{ value: "default", env_var: Some(a) }` (chain)
 /// - `'literal'` / `"literal"`     → `{ value: "literal", env_var: None }`
 /// - `process.env.X`               → `{ value: "X", env_var: Some("X") }` (best effort)
+///
+/// A wrapping call chain (`(…).split(',').map(t => t.trim())`), parentheses, or
+/// a single-element array (`[…]`) around the value is unwrapped first — config
+/// modules often post-process a topic string into a list without changing which
+/// literal/env var it resolves to.
 fn resolve_value_expression(node: Node<'_>, source: &str) -> Option<ResolvedChannel> {
+    let node = unwrap_value_node(node);
     match node.kind() {
         "string" => Some(ResolvedChannel {
             value: strip_quotes(&source[node.byte_range()]),
             env_var: None,
         }),
-        // `A || B` / `A ?? B`: prefer the string default on the right, keep the
-        // env var from the left.
+        // `A || B`, `A ?? B`, or a longer `A ?? B ?? 'default'` chain: take the
+        // string default (searched across the whole chain) and the first env var.
         "binary_expression" => {
-            let left = node.child_by_field_name("left")?;
-            let right = node.child_by_field_name("right")?;
-            let env_var = env_var_name(left, source);
-            // The default is whichever side is a string literal (usually right).
-            let default = [right, left].into_iter().find_map(|side| {
-                if side.kind() == "string" {
-                    Some(strip_quotes(&source[side.byte_range()]))
-                } else {
-                    None
-                }
-            });
+            let default = chain_string_default(node, source);
+            let env_var = chain_first_env_var(node, source);
             match (default, env_var) {
                 (Some(value), env) => Some(ResolvedChannel {
                     value,
                     env_var: env,
                 }),
-                // `process.env.X || otherVar` with no literal: fall back to the
-                // env var name as the value so the endpoint is at least named.
+                // No literal anywhere: fall back to the env var name so the
+                // endpoint is at least named.
                 (None, Some(env)) => Some(ResolvedChannel {
                     value: env.clone(),
                     env_var: Some(env),
@@ -722,6 +984,89 @@ fn resolve_value_expression(node: Node<'_>, source: &str) -> Option<ResolvedChan
         }
         _ => None,
     }
+}
+
+/// Strip value-preserving wrappers off a config leaf so the underlying
+/// literal/env-chain is reached: a `(…)`/`… as T` wrapper, a method chain that
+/// only reshapes a string into a list (`.split`, `.map`, `.filter`, `.trim`),
+/// and a single-element array literal (`[expr]`).
+fn unwrap_value_node(node: Node<'_>) -> Node<'_> {
+    let mut current = node;
+    loop {
+        match current.kind() {
+            "parenthesized_expression" | "as_expression" | "satisfies_expression" => {
+                // Descend to the first meaningful inner expression.
+                let mut cursor = current.walk();
+                let inner = current
+                    .children(&mut cursor)
+                    .find(|c| c.is_named() && c.kind() != "type_identifier");
+                match inner {
+                    Some(inner) => current = inner,
+                    None => return current,
+                }
+            }
+            // `<receiver>.split(',')…` — the channel lives in the receiver.
+            "call_expression" => {
+                let Some(func) = current.child_by_field_name("function") else {
+                    return current;
+                };
+                if func.kind() == "member_expression" {
+                    if let Some(receiver) = func.child_by_field_name("object") {
+                        current = receiver;
+                        continue;
+                    }
+                }
+                return current;
+            }
+            // `[expr, …]` — resolve the first element (topics as a one-item list).
+            "array" => {
+                let mut cursor = current.walk();
+                // Bound to a local so `cursor` outlives the borrow (`Node` is
+                // `Copy`, so `first` does not depend on the cursor).
+                let first = current.named_children(&mut cursor).next();
+                match first {
+                    Some(first) => current = first,
+                    None => return current,
+                }
+            }
+            _ => return current,
+        }
+    }
+}
+
+/// The first string literal anywhere in a `??`/`||` chain, unwrapping nested
+/// binary expressions and value wrappers (`a ?? b ?? 'x'` → `"x"`).
+fn chain_string_default(node: Node<'_>, source: &str) -> Option<String> {
+    let node = unwrap_value_node(node);
+    if node.kind() == "string" {
+        return Some(strip_quotes(&source[node.byte_range()]));
+    }
+    if node.kind() == "binary_expression" {
+        let right = node.child_by_field_name("right");
+        let left = node.child_by_field_name("left");
+        // Right side usually holds the literal default; recurse both.
+        return right
+            .and_then(|n| chain_string_default(n, source))
+            .or_else(|| left.and_then(|n| chain_string_default(n, source)));
+    }
+    None
+}
+
+/// The first (leftmost) `process.env.X` in a `??`/`||` chain — the primary env
+/// override for the channel.
+fn chain_first_env_var(node: Node<'_>, source: &str) -> Option<String> {
+    let node = unwrap_value_node(node);
+    if let Some(env) = env_var_name(node, source) {
+        return Some(env);
+    }
+    if node.kind() == "binary_expression" {
+        let left = node.child_by_field_name("left");
+        let right = node.child_by_field_name("right");
+        return left
+            .and_then(|n| chain_first_env_var(n, source))
+            .or_else(|| right.and_then(|n| chain_first_env_var(n, source)));
+    }
+    None
 }
 
 /// The env var name if `node` is `process.env.NAME` or `process.env['NAME']`.
@@ -994,6 +1339,195 @@ function build() {
             &sources
         )
         .is_none());
+    }
+
+    // The librdkafka-wrapper shape: a field assigned from a whole-object
+    // constructor param that is destructured, then wired from a config path at
+    // the `new` site. Mirrors heating-algorithms' `KafkaClientAdapter`.
+    const WRAPPER_ADAPTER: &str = r#"
+export class KafkaClientAdapter {
+    private consumer: Consumer
+    private topics: string[]
+    private logger: Logger
+    constructor(cfg: KafkaAdapterConfig, logger: Logger) {
+        const { broker, group, topics } = cfg
+        this.consumer = new Consumer(broker, logger, group)
+        this.logger = logger
+        this.topics = topics
+    }
+    start(onMessageFn) {
+        this.consumer.connect({ topics: this.topics }, (c, msg) => onMessageFn(msg))
+    }
+}
+"#;
+    const WRAPPER_WIRING: &str = r#"
+class Server {
+    constructor(logger) {
+        this.kafkaClient = new KafkaClientAdapter(config.kafka.heatingAlgorithmsConsumer, logger)
+    }
+}
+"#;
+    const WRAPPER_CONFIG: &str = r#"
+const config = {
+    kafka: {
+        heatingAlgorithmsConsumer: {
+            broker: process.env.KAFKA_BROKER ?? '127.0.0.1:9092',
+            topics: (process.env.KAFKA_TOPICS ?? process.env.KAFKA_TOPIC ?? 'heating-algorithms-topic')
+                .split(',')
+                .map(t => t.trim()),
+            group: process.env.KAFKA_GROUP ?? 'heating-algorithms-topic',
+        },
+        topologyConsumer: {
+            broker: process.env.KAFKA_BROKER ?? '127.0.0.1:9092',
+            topics: [process.env.TOPOLOGY_CHANGE_TOPIC ?? 'topology_change'],
+        },
+    },
+}
+export { config }
+"#;
+
+    #[test]
+    fn resolves_field_from_destructured_config_param() {
+        let sources = [
+            ("KafkaClientAdapter", WRAPPER_ADAPTER),
+            ("Server", WRAPPER_WIRING),
+            ("config", WRAPPER_CONFIG),
+        ];
+        // `this.topics` → field ← destructured `cfg` ← config path → the
+        // chained `??` default, through the `.split().map()` wrapper.
+        let r =
+            resolve_via_field_from_config_param("this.topics", "KafkaClientAdapter", &sources)
+                .unwrap();
+        assert_eq!(r.value, "heating-algorithms-topic");
+        assert_eq!(r.env_var.as_deref(), Some("KAFKA_TOPICS"));
+    }
+
+    #[test]
+    fn resolves_field_from_config_param_array_topics() {
+        // Same shape, but wired from `topologyConsumer` whose topics is an array
+        // literal `[env ?? 'topology_change']`.
+        let wiring = r#"
+class Server {
+    constructor(logger) {
+        this.kafkaTopologyClient = new KafkaClientAdapter(config.kafka.topologyConsumer, logger)
+    }
+}
+"#;
+        let sources = [
+            ("KafkaClientAdapter", WRAPPER_ADAPTER),
+            ("Server", wiring),
+            ("config", WRAPPER_CONFIG),
+        ];
+        let r =
+            resolve_via_field_from_config_param("this.topics", "KafkaClientAdapter", &sources)
+                .unwrap();
+        assert_eq!(r.value, "topology_change");
+        assert_eq!(r.env_var.as_deref(), Some("TOPOLOGY_CHANGE_TOPIC"));
+    }
+
+    #[test]
+    fn resolves_field_from_config_param_skipping_test_double() {
+        // The class is instantiated twice: a test file with an inline mock config
+        // (which resolves to nothing) and the real wiring. The real one must win
+        // regardless of candidate order.
+        let test_double = r#"
+describe('KafkaClientAdapter', () => {
+    it('starts', () => {
+        const adapter = new KafkaClientAdapter({ broker: 'x', group: 'g', topics: ['mock'] }, logger)
+    })
+})
+"#;
+        // Test double is listed *before* the real wiring on purpose.
+        let sources = [
+            ("KafkaClientAdapter", WRAPPER_ADAPTER),
+            ("", test_double),
+            ("Server", WRAPPER_WIRING),
+            ("config", WRAPPER_CONFIG),
+        ];
+        let r =
+            resolve_via_field_from_config_param("this.topics", "KafkaClientAdapter", &sources)
+                .unwrap();
+        assert_eq!(r.value, "heating-algorithms-topic");
+        assert_eq!(r.env_var.as_deref(), Some("KAFKA_TOPICS"));
+    }
+
+    #[test]
+    fn field_from_config_param_gives_up_without_wiring() {
+        // No `new KafkaClientAdapter(...)` site in scope → None.
+        let sources = [
+            ("KafkaClientAdapter", WRAPPER_ADAPTER),
+            ("config", WRAPPER_CONFIG),
+        ];
+        assert!(resolve_via_field_from_config_param(
+            "this.topics",
+            "KafkaClientAdapter",
+            &sources
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn channel_argument_reads_options_object_and_positional() {
+        // The call sits on its own line, as at a real endpoint site.
+        let source = r#"
+class Adapter {
+    start() {
+        this.consumer.connect({ topics: this.topics }, cb)
+    }
+    produce(message) {
+        this.producer.produce(this.topic, message)
+    }
+}
+"#;
+        // Options object: `connect({ topics: this.topics }, cb)` → `this.topics`.
+        assert_eq!(
+            channel_argument_at(source, 4).as_deref(),
+            Some("this.topics")
+        );
+        // Positional: `produce(this.topic, message)` → `this.topic`.
+        assert_eq!(
+            channel_argument_at(source, 7).as_deref(),
+            Some("this.topic")
+        );
+        // A line with no call → None.
+        assert_eq!(channel_argument_at(source, 1), None);
+    }
+
+    #[test]
+    fn channel_argument_reads_multiline_connect() {
+        // The real `@backend/kafkajs` shape: the call opens on one line and the
+        // options object sits on the next.
+        let source = r#"
+class Adapter {
+    start(onMessageFn) {
+        this.consumer.connect(
+            { topics: this.topics },
+            (consumer, msg) => onMessageFn(msg),
+            this.onReadyFn(),
+        )
+    }
+}
+"#;
+        // `connect(` opens on line 4.
+        assert_eq!(
+            channel_argument_at(source, 4).as_deref(),
+            Some("this.topics")
+        );
+    }
+
+    #[test]
+    fn resolves_chained_nullish_with_split_wrapper() {
+        // The value-node unwrapping handles `(a ?? b ?? 'x').split(',')`.
+        let config = r#"
+const config = {
+    kafka: {
+        topics: (process.env.KAFKA_TOPICS ?? process.env.KAFKA_TOPIC ?? 'heating-algorithms-topic').split(','),
+    },
+}
+"#;
+        let r = resolve_in_config(config, "config", &["kafka", "topics"]).unwrap();
+        assert_eq!(r.value, "heating-algorithms-topic");
+        assert_eq!(r.env_var.as_deref(), Some("KAFKA_TOPICS"));
     }
 
     const BROKER_SOURCE: &str = r#"

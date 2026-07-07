@@ -278,6 +278,16 @@ impl ChannelEndpoint {
         }
     }
 
+    /// Replace the random id with a caller-chosen one.
+    ///
+    /// Used for *synthesized* endpoints (originated from the call graph, not
+    /// extracted), whose id is derived deterministically from their call site so
+    /// that re-indexing upserts the same row instead of accumulating duplicates.
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = id.into();
+        self
+    }
+
     pub fn with_enclosing_symbol(mut self, symbol: impl Into<String>) -> Self {
         self.enclosing_symbol = Some(symbol.into());
         self

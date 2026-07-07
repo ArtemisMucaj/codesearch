@@ -280,13 +280,24 @@ impl ChannelResolver for TreeSitterChannelExtractor {
             .map(|(name, source)| (name.as_str(), source.as_str()))
             .collect();
 
-        // Direct config access (`this.config.broker.topics.X`) resolves in one
-        // pass; a constructor-param access (`this.topics.X` inside a class)
-        // needs the extra hop through the `new Class(…)` site.
-        let resolved =
-            config_resolver::resolve_channel_expression(expression, &borrowed).or_else(|| {
+        // Three resolution shapes, cheapest first:
+        // 1. Direct config access (`this.config.broker.topics.X`) — one pass.
+        // 2. Constructor-param access (`this.topics.X` used directly) — one hop
+        //    through the `new Class(…)` site.
+        // 3. Field-from-destructured-param (`this.topics`, where the field is
+        //    assigned from a whole-object param wired from a config path) — the
+        //    librdkafka-wrapper shape, several hops.
+        let resolved = config_resolver::resolve_channel_expression(expression, &borrowed)
+            .or_else(|| {
                 enclosing_class.and_then(|class| {
                     config_resolver::resolve_via_constructor_param(expression, class, &borrowed)
+                })
+            })
+            .or_else(|| {
+                enclosing_class.and_then(|class| {
+                    config_resolver::resolve_via_field_from_config_param(
+                        expression, class, &borrowed,
+                    )
                 })
             })?;
 
@@ -313,6 +324,10 @@ impl ChannelResolver for TreeSitterChannelExtractor {
         config_resolver::infer_topic_pattern(expression, call_site_source).or_else(|| {
             config_resolver::resolve_via_interface(call_site_source, call_line, &borrowed)
         })
+    }
+
+    fn channel_argument_at(&self, call_site_source: &str, call_line: u32) -> Option<String> {
+        config_resolver::channel_argument_at(call_site_source, call_line)
     }
 }
 
@@ -642,6 +657,40 @@ app.get('/users/:id', async (req, res) => {
         assert_eq!(endpoints[0].role(), ChannelRole::Consumer);
         assert_eq!(endpoints[0].channel_normalized(), "/users/{}");
         assert_eq!(endpoints[0].method(), Some("GET"));
+    }
+
+    #[tokio::test]
+    async fn test_typescript_express_route_on_this_field() {
+        // A class holds the router as a field: `this.router.get('/p', …)`. The
+        // object is a member expression, not a bare identifier, but its trailing
+        // property (`router`) still matches the route-object allowlist.
+        let content = r#"
+class ThermoRouter {
+    constructor() {
+        this.router = Router()
+        this.router.get('/minHeatingTime', authorize, (req, res) => handle(req, res))
+        this.router.post('/rhc', (req, res) => set(req, res))
+    }
+}
+"#;
+        let endpoints = extract(content, "router.ts", Language::TypeScript).await;
+        let routes: Vec<_> = endpoints
+            .iter()
+            .filter(|e| e.protocol() == Protocol::Http && e.role() == ChannelRole::Consumer)
+            .collect();
+        assert_eq!(routes.len(), 2);
+
+        let get = routes
+            .iter()
+            .find(|e| e.channel_normalized() == "/minHeatingTime")
+            .expect("GET route");
+        assert_eq!(get.method(), Some("GET"));
+
+        let post = routes
+            .iter()
+            .find(|e| e.channel_normalized() == "/rhc")
+            .expect("POST route");
+        assert_eq!(post.method(), Some("POST"));
     }
 
     #[tokio::test]

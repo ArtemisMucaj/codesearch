@@ -49,4 +49,15 @@ pub trait ChannelResolver: Send + Sync {
         call_line: u32,
         candidates: &[(String, String)],
     ) -> Option<String>;
+
+    /// The channel argument expression of the messaging call at `call_line`
+    /// (1-based) in `call_site_source`, as written.
+    ///
+    /// Used to give a *synthesized* endpoint — one originated from the SCIP call
+    /// graph, not matched by a framework detector — the real topic expression so
+    /// it can flow through the resolution passes. Reads the first positional
+    /// argument, or the `topic`/`topics` value of a leading options object
+    /// (`connect({ topics: this.topics }, …)` → `this.topics`). Returns `None`
+    /// when no call or channel-like argument is found at that line.
+    fn channel_argument_at(&self, call_site_source: &str, call_line: u32) -> Option<String>;
 }
