@@ -415,7 +415,9 @@ fn find_channel_argument_at(node: Node<'_>, source: &str, line: u32, out: &mut O
                             .or_else(|| object_property(obj, source, "topic"))
                     })
                     .unwrap_or(first);
-                let text = source[value.byte_range()].split_whitespace().collect::<String>();
+                let text = source[value.byte_range()]
+                    .split_whitespace()
+                    .collect::<String>();
                 if !text.is_empty() {
                     *out = Some(text);
                     return;
@@ -949,7 +951,7 @@ fn property_key_text(key: Node<'_>, source: &str) -> String {
 /// modules often post-process a topic string into a list without changing which
 /// literal/env var it resolves to.
 fn resolve_value_expression(node: Node<'_>, source: &str) -> Option<ResolvedChannel> {
-    let node = unwrap_value_node(node);
+    let node = unwrap_value_node(node, source);
     match node.kind() {
         "string" => Some(ResolvedChannel {
             value: strip_quotes(&source[node.byte_range()]),
@@ -986,11 +988,16 @@ fn resolve_value_expression(node: Node<'_>, source: &str) -> Option<ResolvedChan
     }
 }
 
+/// Method names that only reshape a string into a list without changing which
+/// literal/env var the value resolves to. Peeling these off is safe; peeling a
+/// value-changing call (e.g. `JSON.parse(...)`) would silently misresolve.
+const RESHAPING_METHODS: &[&str] = &["split", "map", "filter", "trim"];
+
 /// Strip value-preserving wrappers off a config leaf so the underlying
 /// literal/env-chain is reached: a `(…)`/`… as T` wrapper, a method chain that
 /// only reshapes a string into a list (`.split`, `.map`, `.filter`, `.trim`),
 /// and a single-element array literal (`[expr]`).
-fn unwrap_value_node(node: Node<'_>) -> Node<'_> {
+fn unwrap_value_node<'a>(node: Node<'a>, source: &str) -> Node<'a> {
     let mut current = node;
     loop {
         match current.kind() {
@@ -1005,28 +1012,37 @@ fn unwrap_value_node(node: Node<'_>) -> Node<'_> {
                     None => return current,
                 }
             }
-            // `<receiver>.split(',')…` — the channel lives in the receiver.
+            // `<receiver>.split(',')…` — only reshaping methods keep the channel
+            // in the receiver. Other calls (e.g. `JSON.parse(...)`) change the
+            // value, so they are left intact.
             "call_expression" => {
                 let Some(func) = current.child_by_field_name("function") else {
                     return current;
                 };
                 if func.kind() == "member_expression" {
-                    if let Some(receiver) = func.child_by_field_name("object") {
-                        current = receiver;
-                        continue;
+                    let is_reshaping = func
+                        .child_by_field_name("property")
+                        .map(|p| RESHAPING_METHODS.contains(&&source[p.byte_range()]))
+                        .unwrap_or(false);
+                    if is_reshaping {
+                        if let Some(receiver) = func.child_by_field_name("object") {
+                            current = receiver;
+                            continue;
+                        }
                     }
                 }
                 return current;
             }
-            // `[expr, …]` — resolve the first element (topics as a one-item list).
+            // `[expr]` — resolve the sole element of a genuinely single-item list.
+            // A multi-element array would silently drop entries, so leave it be.
             "array" => {
                 let mut cursor = current.walk();
                 // Bound to a local so `cursor` outlives the borrow (`Node` is
-                // `Copy`, so `first` does not depend on the cursor).
-                let first = current.named_children(&mut cursor).next();
-                match first {
-                    Some(first) => current = first,
-                    None => return current,
+                // `Copy`, so the elements do not depend on the cursor).
+                let mut named = current.named_children(&mut cursor);
+                match (named.next(), named.next()) {
+                    (Some(first), None) => current = first,
+                    _ => return current,
                 }
             }
             _ => return current,
@@ -1037,7 +1053,7 @@ fn unwrap_value_node(node: Node<'_>) -> Node<'_> {
 /// The first string literal anywhere in a `??`/`||` chain, unwrapping nested
 /// binary expressions and value wrappers (`a ?? b ?? 'x'` → `"x"`).
 fn chain_string_default(node: Node<'_>, source: &str) -> Option<String> {
-    let node = unwrap_value_node(node);
+    let node = unwrap_value_node(node, source);
     if node.kind() == "string" {
         return Some(strip_quotes(&source[node.byte_range()]));
     }
@@ -1055,7 +1071,7 @@ fn chain_string_default(node: Node<'_>, source: &str) -> Option<String> {
 /// The first (leftmost) `process.env.X` in a `??`/`||` chain — the primary env
 /// override for the channel.
 fn chain_first_env_var(node: Node<'_>, source: &str) -> Option<String> {
-    let node = unwrap_value_node(node);
+    let node = unwrap_value_node(node, source);
     if let Some(env) = env_var_name(node, source) {
         return Some(env);
     }
@@ -1244,6 +1260,42 @@ export type Config = typeof config
         assert!(resolve_in_config(CONFIG, "missing", &["broker"]).is_none());
     }
 
+    // Only string-reshaping method chains and single-element arrays are peeled
+    // off a config leaf; value-changing calls and multi-element arrays are left
+    // intact so `unwrap_value_node` never silently misresolves the channel.
+    const UNWRAP_CONFIG: &str = r#"
+export const config = {
+    reshaped: (process.env.KAFKA_TOPICS || 'reshaped_topic').split(',').map(t => t.trim()),
+    singleArray: [process.env.SINGLE_TOPIC || 'single_topic'],
+    parsed: JSON.parse(process.env.CONFIG_JSON || '{}'),
+    multiArray: ['first_topic', 'second_topic'],
+}
+"#;
+
+    #[test]
+    fn unwraps_reshaping_chain_and_single_element_array() {
+        // `.split(',').map(...)` reshapes the string default — unwrapped.
+        let r = resolve_in_config(UNWRAP_CONFIG, "config", &["reshaped"]).unwrap();
+        assert_eq!(r.value, "reshaped_topic");
+        assert_eq!(r.env_var.as_deref(), Some("KAFKA_TOPICS"));
+
+        // `[<one element>]` — unwrapped to the sole element.
+        let r = resolve_in_config(UNWRAP_CONFIG, "config", &["singleArray"]).unwrap();
+        assert_eq!(r.value, "single_topic");
+        assert_eq!(r.env_var.as_deref(), Some("SINGLE_TOPIC"));
+    }
+
+    #[test]
+    fn leaves_non_reshaping_call_and_multi_element_array_intact() {
+        // `JSON.parse(...)` changes the value; it must not collapse to its
+        // receiver, so the leaf stays a call and resolves to nothing.
+        assert!(resolve_in_config(UNWRAP_CONFIG, "config", &["parsed"]).is_none());
+
+        // A multi-element array would silently drop `second_topic`; it is left
+        // as an `array` node and does not resolve to a single channel.
+        assert!(resolve_in_config(UNWRAP_CONFIG, "config", &["multiArray"]).is_none());
+    }
+
     #[test]
     fn property_segments_drops_this_and_normalises_subscript() {
         assert_eq!(
@@ -1395,9 +1447,8 @@ export { config }
         ];
         // `this.topics` → field ← destructured `cfg` ← config path → the
         // chained `??` default, through the `.split().map()` wrapper.
-        let r =
-            resolve_via_field_from_config_param("this.topics", "KafkaClientAdapter", &sources)
-                .unwrap();
+        let r = resolve_via_field_from_config_param("this.topics", "KafkaClientAdapter", &sources)
+            .unwrap();
         assert_eq!(r.value, "heating-algorithms-topic");
         assert_eq!(r.env_var.as_deref(), Some("KAFKA_TOPICS"));
     }
@@ -1418,9 +1469,8 @@ class Server {
             ("Server", wiring),
             ("config", WRAPPER_CONFIG),
         ];
-        let r =
-            resolve_via_field_from_config_param("this.topics", "KafkaClientAdapter", &sources)
-                .unwrap();
+        let r = resolve_via_field_from_config_param("this.topics", "KafkaClientAdapter", &sources)
+            .unwrap();
         assert_eq!(r.value, "topology_change");
         assert_eq!(r.env_var.as_deref(), Some("TOPOLOGY_CHANGE_TOPIC"));
     }
@@ -1444,9 +1494,8 @@ describe('KafkaClientAdapter', () => {
             ("Server", WRAPPER_WIRING),
             ("config", WRAPPER_CONFIG),
         ];
-        let r =
-            resolve_via_field_from_config_param("this.topics", "KafkaClientAdapter", &sources)
-                .unwrap();
+        let r = resolve_via_field_from_config_param("this.topics", "KafkaClientAdapter", &sources)
+            .unwrap();
         assert_eq!(r.value, "heating-algorithms-topic");
         assert_eq!(r.env_var.as_deref(), Some("KAFKA_TOPICS"));
     }
@@ -1458,12 +1507,10 @@ describe('KafkaClientAdapter', () => {
             ("KafkaClientAdapter", WRAPPER_ADAPTER),
             ("config", WRAPPER_CONFIG),
         ];
-        assert!(resolve_via_field_from_config_param(
-            "this.topics",
-            "KafkaClientAdapter",
-            &sources
-        )
-        .is_none());
+        assert!(
+            resolve_via_field_from_config_param("this.topics", "KafkaClientAdapter", &sources)
+                .is_none()
+        );
     }
 
     #[test]
