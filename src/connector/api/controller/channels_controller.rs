@@ -45,6 +45,12 @@ impl<'a> ChannelsController<'a> {
             .map(|r| (r.id().to_string(), r.name().to_string()))
             .collect();
 
+        // `channel_endpoints` is a single global table (not namespace-scoped
+        // like `chunks`/`embeddings`), so an unfiltered query would leak
+        // endpoints from every namespace. When no repository is named, scope to
+        // the repositories of the current namespace — matching how the rest of
+        // the CLI auto-detects context — so `channels` mirrors `search` and
+        // `clusters` instead of reporting the whole database.
         let repository_ids: Option<Vec<String>> = match repositories {
             Some(keys) => {
                 let mut ids = Vec::new();
@@ -63,7 +69,15 @@ impl<'a> ChannelsController<'a> {
                 }
                 Some(ids)
             }
-            None => None,
+            None => {
+                let namespace = self.container.namespace();
+                let ids: Vec<String> = all_repos
+                    .iter()
+                    .filter(|r| r.namespace() == Some(namespace))
+                    .map(|r| r.id().to_string())
+                    .collect();
+                Some(ids)
+            }
         };
 
         let options = ChannelLinkOptions {

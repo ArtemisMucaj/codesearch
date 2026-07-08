@@ -49,4 +49,51 @@ pub trait ChannelResolver: Send + Sync {
         call_line: u32,
         candidates: &[(String, String)],
     ) -> Option<String>;
+
+    /// The channel argument expression of the messaging call at `call_line`
+    /// (1-based) in `call_site_source`, as written.
+    ///
+    /// Used to give a *synthesized* endpoint — one originated from the SCIP call
+    /// graph, not matched by a framework detector — the real topic expression so
+    /// it can flow through the resolution passes. Reads the first positional
+    /// argument, or the `topic`/`topics` value of a leading options object
+    /// (`connect({ topics: this.topics }, …)` → `this.topics`). Returns `None`
+    /// when no call or channel-like argument is found at that line.
+    fn channel_argument_at(&self, call_site_source: &str, call_line: u32) -> Option<String>;
+
+    /// Whether the call at `call_line` (1-based) in `call_site_source` looks
+    /// like an HTTP **route registration** rather than a settings access.
+    ///
+    /// Express overloads `app.get(name)`: with a single argument it *reads a
+    /// setting* (`app.get('title')`), and only with a handler as its second
+    /// argument does it *register a route* (`app.get('/p', handler)`). A route
+    /// call always carries at least two arguments, so this reports whether the
+    /// call at that line has a second argument — letting synthesis reject the
+    /// settings getter that SCIP still resolves into the express route type.
+    /// Returns `false` when no call is found at that line.
+    fn is_http_route_call_at(&self, call_site_source: &str, call_line: u32) -> bool;
+
+    /// Expand a channel registered inside a loop over a local array of route
+    /// objects into one value per array element.
+    ///
+    /// The dominant Express fan-out shape registers many routes from a table:
+    ///
+    /// ```ts
+    /// const routes = [{ path: '/search', handler: search }, …]
+    /// for (const route of routes) router.post(route.path, route.handler)
+    /// ```
+    ///
+    /// The call site reads `route.path`, an access on the loop variable, so no
+    /// single value resolves. Given that expression, the call-site source, and
+    /// the call line, an implementation finds the enclosing `for (const <var> of
+    /// <array>)` (or `<array>.forEach(<var> => …)`), resolves `<array>` to a
+    /// local array literal, and returns the `<field>` string of each element.
+    /// Returns `None` when the expression is not a loop-variable field access or
+    /// the array cannot be resolved to element literals.
+    fn resolve_loop_array_paths(
+        &self,
+        expression: &str,
+        call_site_source: &str,
+        call_line: u32,
+    ) -> Option<Vec<String>>;
 }

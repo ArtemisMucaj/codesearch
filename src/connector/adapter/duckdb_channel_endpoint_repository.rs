@@ -318,6 +318,28 @@ impl ChannelEndpointRepository for DuckdbChannelEndpointRepository {
         );
         Ok(())
     }
+
+    async fn delete_synthesized_by_repository(
+        &self,
+        repository_id: &str,
+    ) -> Result<(), DomainError> {
+        let conn = self.conn.lock().await;
+        let count = conn
+            .execute(
+                "DELETE FROM channel_endpoints \
+                 WHERE repository_id = ? AND source = ?",
+                params![repository_id, EndpointSource::Config.as_str()],
+            )
+            .map_err(|e| {
+                DomainError::storage(format!("Failed to delete synthesized endpoints: {}", e))
+            })?;
+
+        debug!(
+            "Deleted {} synthesized channel endpoints for repository {}",
+            count, repository_id
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -430,6 +452,37 @@ mod tests {
         repo.delete_by_repository("repo-a").await.unwrap();
         assert_eq!(repo.find_by_repository("repo-a").await.unwrap().len(), 0);
         assert_eq!(repo.find_by_repository("repo-b").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_delete_synthesized_keeps_extracted() {
+        let repo = create_test_repo().await;
+
+        let extracted = endpoint("repo-a", "src/a.py", 1, ChannelRole::Producer);
+        let synthesized = ChannelEndpoint::new(
+            "repo-a".to_string(),
+            "src/b.ts".to_string(),
+            5,
+            Protocol::Kafka,
+            ChannelRole::Consumer,
+            "Consumer".to_string(),
+            "Consumer".to_string(),
+            0.6,
+            EndpointSource::Config,
+        )
+        .with_id("synth:repo-a:src/b.ts:5:consumer")
+        .unresolved();
+        repo.save_batch(&[extracted, synthesized]).await.unwrap();
+        assert_eq!(repo.find_by_repository("repo-a").await.unwrap().len(), 2);
+
+        repo.delete_synthesized_by_repository("repo-a")
+            .await
+            .unwrap();
+
+        // Only the tree-sitter endpoint remains.
+        let remaining = repo.find_by_repository("repo-a").await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].source(), EndpointSource::TreeSitter);
     }
 
     #[tokio::test]

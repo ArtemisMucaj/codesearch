@@ -12,13 +12,13 @@ use tracing::{debug, info, warn};
 
 use crate::application::git_remote::detect_remote;
 use crate::application::{
-    AnalysisRepository, CallGraphUseCase, ChannelEndpointRepository, ChannelExtractor,
-    ChannelResolver, EmbeddingService, FileHashRepository, MetadataRepository, ParserService,
-    ResolveChannelsUseCase, VectorRepository,
+    is_messaging_package, AnalysisRepository, CallGraphUseCase, ChannelEndpointRepository,
+    ChannelExtractor, ChannelResolver, EmbeddingService, FileHashRepository, MetadataRepository,
+    ParserService, ResolveChannelsUseCase, VectorRepository,
 };
 use crate::domain::{
-    compute_file_hash, ChannelEndpoint, DomainError, Embedding, FileHash, Language, LanguageStats,
-    Repository, SymbolReference, VectorStore,
+    compute_file_hash, ChannelEndpoint, DomainError, Embedding, EndpointSource, FileHash, Language,
+    LanguageStats, Repository, SymbolReference, VectorStore,
 };
 
 /// Default number of concurrent `parse_only` calls during the parse phase.
@@ -504,23 +504,52 @@ impl IndexRepositoryUseCase {
             return Ok(());
         };
 
-        let endpoints = repo.find_by_repository(repository_id).await?;
-        if endpoints.is_empty() {
+        // Load only tree-sitter-extracted endpoints to enrich. Synthesized
+        // endpoints (`source = 'config'`, originated from the call graph) are
+        // derived data recomputed below, so they are dropped from storage first
+        // and never reloaded — this avoids re-saving a stale channel value for a
+        // call site that resolution can now do better on.
+        repo.delete_synthesized_by_repository(repository_id).await?;
+        let endpoints: Vec<_> = repo
+            .find_by_repository(repository_id)
+            .await?
+            .into_iter()
+            .filter(|e| e.source() == EndpointSource::TreeSitter)
+            .collect();
+        // Nothing to enrich *and* no call graph to originate endpoints from —
+        // the resolution pass would be a no-op. When extraction found nothing
+        // but SCIP has references, we still run: a wrapper/fork call site
+        // (`consumer.connect({ topics })`) is originated purely from the call
+        // graph by `synthesize_from_packages`.
+        if endpoints.is_empty() && scip_refs.is_empty() {
             return Ok(());
         }
 
         // Config-candidate discovery walks and reads every JS/TS file in the
-        // repo — only worth it when something is actually unresolved. When every
-        // endpoint is already a resolved literal, skip the walk; library
-        // confirmation (which needs no candidates) still runs below.
-        let (config_candidates, sources_by_file) = if endpoints.iter().any(|e| !e.is_resolved()) {
+        // repo — only worth it when something needs resolving. Run it when an
+        // extracted endpoint is unresolved, or when the call graph carries a
+        // messaging-library reference that will originate an (unresolved)
+        // endpoint needing the same config sources to resolve. Otherwise skip
+        // the walk; library confirmation (which needs no candidates) still runs.
+        let needs_resolution = endpoints.iter().any(|e| !e.is_resolved())
+            || scip_refs
+                .values()
+                .flatten()
+                .any(|r| r.callee_package().is_some_and(is_messaging_package));
+        let (config_candidates, sources_by_file) = if needs_resolution {
             discover_config_candidates(absolute_path).await
         } else {
             (Vec::new(), HashMap::new())
         };
 
         let use_case = ResolveChannelsUseCase::new(resolver.clone());
-        let resolved = use_case.resolve(endpoints, scip_refs, &config_candidates, &sources_by_file);
+        let resolved = use_case.resolve(
+            repository_id,
+            endpoints,
+            scip_refs,
+            &config_candidates,
+            &sources_by_file,
+        );
 
         repo.save_batch(&resolved).await?;
         debug!(

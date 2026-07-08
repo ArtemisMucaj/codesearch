@@ -102,6 +102,78 @@ pub(super) fn resolve_via_constructor_param(
     resolve_channel_expression(&inner, sources)
 }
 
+/// Resolve `this.<field>` where the field is assigned in the constructor from a
+/// value destructured out of a whole-object parameter that is itself wired from
+/// a config path at the `new Class(...)` site.
+///
+/// This is the librdkafka-wrapper shape:
+///
+/// ```ts
+/// // adapter.ts
+/// constructor(cfg: KafkaAdapterConfig, logger) {
+///     const { broker, group, topics } = cfg   // destructure the whole param
+///     this.topics = topics                     // stash a field
+/// }
+/// start() { this.consumer.connect({ topics: this.topics }, …) }  // ← use it
+/// // server.ts
+/// new KafkaClientAdapter(config.kafka.heatingAlgorithmsConsumer, logger)
+/// // config.ts → config.kafka.heatingAlgorithmsConsumer.topics = env ?? 'default'
+/// ```
+///
+/// The chain traced here (four hops the single-hop
+/// [`resolve_via_constructor_param`] does not cover): `this.topics` → the field
+/// initializer `topics` → the destructuring `const { …topics… } = cfg` → the
+/// constructor param `cfg` (index 0) → the `new Class(<config.path>, …)` arg at
+/// that index → `<config.path>.topics` resolved in the config module.
+///
+/// `expression` is the `this.<field>` access; `class_name` is the enclosing
+/// class; `sources` are candidate `(object_name, source)` module sources (the
+/// adapter, the wiring/server module, and the config module).
+pub(super) fn resolve_via_field_from_config_param(
+    expression: &str,
+    class_name: &str,
+    sources: &[(&str, &str)],
+) -> Option<ResolvedChannel> {
+    // `this.topics` → field `topics`. Only a direct `this.<field>` shape.
+    let segments = property_segments(expression);
+    if segments.len() != 1 {
+        return None;
+    }
+    let field = segments[0].as_str();
+
+    // 1. The field's initializer local: `this.topics = topics` → `topics`.
+    let local = sources
+        .iter()
+        .find_map(|(_, source)| field_assignment_local(source, class_name, field))?;
+
+    // 2. Where `local` comes from: a `const { …local… } = <param>` destructuring
+    //    inside the constructor → the param name and the key taken from it.
+    let (param, key) = sources
+        .iter()
+        .find_map(|(_, source)| destructured_from_param(source, class_name, &local))?;
+
+    // 3. The param's position, then every `new Class(<arg>, …)` argument at that
+    //    position — a config path like `config.kafka.heatingAlgorithmsConsumer`.
+    //    A class may be instantiated at several sites (production wiring plus
+    //    test doubles with inline mock configs), so all are collected.
+    let param_index = sources
+        .iter()
+        .find_map(|(_, source)| constructor_param_index(source, class_name, &param))?;
+    let config_paths: Vec<String> = sources
+        .iter()
+        .flat_map(|(_, source)| constructor_positional_args(source, class_name, param_index))
+        .collect();
+
+    // 4. Append the destructured key and resolve `<config.path>.<key>` — the
+    //    first instantiation whose wired path resolves in config wins, so a test
+    //    double's mock argument (which resolves to nothing) is skipped in favour
+    //    of the real wiring.
+    config_paths.iter().find_map(|config_path| {
+        let full_expression = format!("{config_path}.{key}");
+        resolve_channel_expression(&full_expression, sources)
+    })
+}
+
 /// Infer an MQTT topic *pattern* from a topic expression built as a template
 /// literal, mapping each `${…}` interpolation to a single-level wildcard `+`.
 ///
@@ -312,6 +384,279 @@ pub(super) fn resolve_via_interface(
         let topic_arg = method_client_topic_arg(source, &class, &method)?;
         infer_topic_pattern(&topic_arg, source)
     })
+}
+
+/// The channel argument expression of the messaging call at `line` (1-based).
+///
+/// Reads the first positional argument, or — when that argument is an options
+/// object — the value of its `topic`/`topics` property
+/// (`connect({ topics: this.topics }, cb)` → `this.topics`). Used to give a
+/// synthesized (SCIP-originated) endpoint a real expression to resolve. Returns
+/// `None` when there is no call at that line or no channel-like argument.
+pub(super) fn channel_argument_at(source: &str, line: u32) -> Option<String> {
+    let tree = parse_ts(source)?;
+    let mut result = None;
+    find_channel_argument_at(tree.root_node(), source, line, &mut result);
+    result
+}
+
+fn find_channel_argument_at(node: Node<'_>, source: &str, line: u32, out: &mut Option<String>) {
+    if out.is_some() {
+        return;
+    }
+    if node.kind() == "call_expression" && node.start_position().row as u32 + 1 == line {
+        if let Some(args) = node.child_by_field_name("arguments") {
+            if let Some(first) = nth_call_argument(args, 0) {
+                // `{ topic: X }` / `{ topics: Y }` → the keyed value; otherwise
+                // the positional argument itself (`produce(this.topic, …)`).
+                let value = unwrap_to_object(first)
+                    .and_then(|obj| {
+                        object_property(obj, source, "topics")
+                            .or_else(|| object_property(obj, source, "topic"))
+                    })
+                    .unwrap_or(first);
+                let text = source[value.byte_range()]
+                    .split_whitespace()
+                    .collect::<String>();
+                if !text.is_empty() {
+                    *out = Some(text);
+                    return;
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        find_channel_argument_at(child, source, line, out);
+    }
+}
+
+/// Whether the `call_expression` at `line` (1-based) has a second argument —
+/// the discriminator between an Express route registration (`app.get('/p',
+/// handler)`) and its one-argument settings getter (`app.get('title')`).
+pub(super) fn is_http_route_call_at(source: &str, line: u32) -> bool {
+    let Some(tree) = parse_ts(source) else {
+        return false;
+    };
+    let mut call = None;
+    find_call_node_at(tree.root_node(), line, &mut call);
+    let Some(call) = call else {
+        return false;
+    };
+    call.child_by_field_name("arguments")
+        .and_then(|args| nth_call_argument(args, 1))
+        .is_some()
+}
+
+/// Expand a loop-variable field access (`route.path`) into the concrete value
+/// of that field for every element of the array the loop iterates.
+///
+/// Handles the Express route-table fan-out:
+///
+/// ```ts
+/// const routes = [{ path: '/search', … }, { path: '/delete', … }]
+/// for (const route of routes) router.post(route.path, …)   // ← call_line
+/// ```
+///
+/// `expression` is the channel argument as written (`route.path`); `call_line`
+/// is the 1-based line of the registration call. Returns `['/search',
+/// '/delete', …]`, or `None` when the shape does not match (not a
+/// loop-variable access, the array is not a local literal, or an element lacks
+/// a string `<field>`).
+pub(super) fn resolve_loop_array_paths(
+    expression: &str,
+    source: &str,
+    call_line: u32,
+) -> Option<Vec<String>> {
+    // `route.path` → loop var `route`, field `path`. Exactly two segments.
+    let segments = property_segments(expression);
+    if segments.len() != 2 {
+        return None;
+    }
+    let (loop_var, field) = (segments[0].as_str(), segments[1].as_str());
+
+    let tree = parse_ts(source)?;
+
+    // Find the call, then the loop enclosing it that binds `loop_var`, and read
+    // the array identifier it iterates.
+    let mut call_node = None;
+    find_call_node_at(tree.root_node(), call_line, &mut call_node);
+    let array_name = loop_array_name(call_node?, source, loop_var)?;
+
+    // Resolve `array_name` to a local `const … = [ … ]` array literal.
+    let array = find_named_array(tree.root_node(), source, &array_name)?;
+
+    // Read `<field>` off each element object; every element must contribute a
+    // string value, else the fan-out is partial and we resolve nothing (an
+    // honest "unresolved" beats a silently truncated route list).
+    let mut cursor = array.walk();
+    let mut paths = Vec::new();
+    for element in array.named_children(&mut cursor) {
+        let obj = unwrap_to_object(element)?;
+        let value = object_property(obj, source, field)?;
+        let literal = strip_str_literal_node(value, source)?;
+        paths.push(literal);
+    }
+    (!paths.is_empty()).then_some(paths)
+}
+
+/// Locate the `call_expression` starting at `line` (1-based).
+fn find_call_node_at<'a>(node: Node<'a>, line: u32, out: &mut Option<Node<'a>>) {
+    if out.is_some() {
+        return;
+    }
+    if node.kind() == "call_expression" && node.start_position().row as u32 + 1 == line {
+        *out = Some(node);
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        find_call_node_at(child, line, out);
+    }
+}
+
+/// Walk up from `call` to the loop that binds `loop_var` and return the name of
+/// the array it iterates: `for (const <loop_var> of <array>)` or
+/// `<array>.forEach(<loop_var> => …)`.
+fn loop_array_name(call: Node<'_>, source: &str, loop_var: &str) -> Option<String> {
+    let mut current = call.parent();
+    while let Some(node) = current {
+        match node.kind() {
+            // `for (const route of routes) …`
+            "for_in_statement" => {
+                let binds_var = node
+                    .child_by_field_name("left")
+                    .map(|l| binding_names(l, source).iter().any(|n| n == loop_var))
+                    .unwrap_or(false);
+                if binds_var {
+                    if let Some(right) = node.child_by_field_name("right") {
+                        if right.kind() == "identifier" {
+                            return Some(source[right.byte_range()].to_string());
+                        }
+                    }
+                }
+            }
+            // `routes.forEach(route => …)` / `routes.map(route => …)`
+            "call_expression" => {
+                if let Some(name) = foreach_array_name(node, source, loop_var) {
+                    return Some(name);
+                }
+            }
+            _ => {}
+        }
+        current = node.parent();
+    }
+    None
+}
+
+/// If `call` is `<array>.forEach(<loop_var> => …)` (or `.map`), return `<array>`
+/// when its callback's first parameter is `loop_var`.
+fn foreach_array_name(call: Node<'_>, source: &str, loop_var: &str) -> Option<String> {
+    let func = call.child_by_field_name("function")?;
+    if func.kind() != "member_expression" {
+        return None;
+    }
+    let method = func.child_by_field_name("property")?;
+    if !matches!(&source[method.byte_range()], "forEach" | "map") {
+        return None;
+    }
+    let receiver = func.child_by_field_name("object")?;
+    if receiver.kind() != "identifier" {
+        return None;
+    }
+    // First callback argument's first parameter must be `loop_var`.
+    let args = call.child_by_field_name("arguments")?;
+    let callback = nth_call_argument(args, 0)?;
+    let param = callback_first_param(callback, source)?;
+    (param == loop_var).then(|| source[receiver.byte_range()].to_string())
+}
+
+/// The first parameter name of an arrow/function-expression callback.
+fn callback_first_param(callback: Node<'_>, source: &str) -> Option<String> {
+    match callback.kind() {
+        "arrow_function" | "function_expression" | "function" => {
+            // `route => …`: a bare identifier parameter.
+            if let Some(param) = callback.child_by_field_name("parameter") {
+                return Some(source[param.byte_range()].to_string());
+            }
+            // `(route, i) => …`: formal_parameters, take the first.
+            let params = callback.child_by_field_name("parameters")?;
+            let mut cursor = params.walk();
+            let first = params.named_children(&mut cursor).next()?;
+            Some(
+                parameter_name(first, source)
+                    .unwrap_or_else(|| source[first.byte_range()].to_string()),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// The identifier(s) a `for…of` left-hand binding introduces.
+fn binding_names(node: Node<'_>, source: &str) -> Vec<String> {
+    // `const route` → lexical_declaration/variable_declarator/identifier; a bare
+    // `route` is an identifier directly.
+    match node.kind() {
+        "identifier" => vec![source[node.byte_range()].to_string()],
+        _ => {
+            let mut out = Vec::new();
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                out.extend(binding_names(child, source));
+            }
+            out
+        }
+    }
+}
+
+/// Find a local `const/let <name> = [ … ]` array literal.
+fn find_named_array<'a>(node: Node<'a>, source: &str, name: &str) -> Option<Node<'a>> {
+    if node.kind() == "variable_declarator" {
+        if let Some(id) = node.child_by_field_name("name") {
+            if &source[id.byte_range()] == name {
+                if let Some(value) = node.child_by_field_name("value") {
+                    if let Some(array) = unwrap_to_array(value) {
+                        return Some(array);
+                    }
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(found) = find_named_array(child, source, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Unwrap `[ … ] as const` / `([ … ])` down to the `array` node, if any.
+fn unwrap_to_array(node: Node<'_>) -> Option<Node<'_>> {
+    if node.kind() == "array" {
+        return Some(node);
+    }
+    if matches!(
+        node.kind(),
+        "as_expression" | "parenthesized_expression" | "satisfies_expression"
+    ) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(array) = unwrap_to_array(child) {
+                return Some(array);
+            }
+        }
+    }
+    None
+}
+
+/// The inner text of a string-literal value node, or `None` if not a string.
+fn strip_str_literal_node(node: Node<'_>, source: &str) -> Option<String> {
+    if node.kind() != "string" && node.kind() != "template_string" {
+        return None;
+    }
+    let text = strip_quotes(&source[node.byte_range()]);
+    (!text.is_empty()).then_some(text)
 }
 
 /// The `(field, method)` of a `this.<field>.<method>(…)` call at `line`.
@@ -552,6 +897,155 @@ fn constructor_arg_object_entry(
     result
 }
 
+/// The right-hand side of `this.<field> = <local>` inside `class_name`'s
+/// constructor, when it is a bare identifier.
+///
+/// `this.topics = topics` → `Some("topics")`. Returns `None` for a field whose
+/// initializer is not a plain identifier (a literal or expression needs no
+/// param trace).
+fn field_assignment_local(source: &str, class_name: &str, field: &str) -> Option<String> {
+    let tree = parse_ts(source)?;
+    let class = find_class(tree.root_node(), source, class_name)?;
+    let ctor = find_constructor(class, source)?;
+
+    let mut result = None;
+    find_field_assignment(ctor, source, field, &mut result);
+    result
+}
+
+fn find_field_assignment(node: Node<'_>, source: &str, field: &str, out: &mut Option<String>) {
+    if out.is_some() {
+        return;
+    }
+    // `this.<field> = <rhs>`
+    if node.kind() == "assignment_expression" {
+        if let (Some(left), Some(right)) = (
+            node.child_by_field_name("left"),
+            node.child_by_field_name("right"),
+        ) {
+            let assigns_field = left.kind() == "member_expression"
+                && left
+                    .child_by_field_name("object")
+                    .map(|o| o.kind() == "this")
+                    .unwrap_or(false)
+                && left
+                    .child_by_field_name("property")
+                    .map(|p| &source[p.byte_range()] == field)
+                    .unwrap_or(false);
+            if assigns_field && right.kind() == "identifier" {
+                *out = Some(source[right.byte_range()].to_string());
+                return;
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        find_field_assignment(child, source, field, out);
+    }
+}
+
+/// Find a `const { … } = <param>` destructuring inside `class_name`'s
+/// constructor that binds `local`, returning `(param_name, key_taken)`.
+///
+/// `const { broker, group, topics } = cfg` with `local = "topics"` →
+/// `Some(("cfg", "topics"))`. A renamed binding
+/// (`const { topics: t } = cfg`) keys on the *source* property, so it returns
+/// `("cfg", "topics")` for `local = "t"`.
+fn destructured_from_param(
+    source: &str,
+    class_name: &str,
+    local: &str,
+) -> Option<(String, String)> {
+    let tree = parse_ts(source)?;
+    let class = find_class(tree.root_node(), source, class_name)?;
+    let ctor = find_constructor(class, source)?;
+
+    let mut result = None;
+    find_destructuring(ctor, source, local, &mut result);
+    result
+}
+
+fn find_destructuring(
+    node: Node<'_>,
+    source: &str,
+    local: &str,
+    out: &mut Option<(String, String)>,
+) {
+    if out.is_some() {
+        return;
+    }
+    if node.kind() == "variable_declarator" {
+        if let (Some(name), Some(value)) = (
+            node.child_by_field_name("name"),
+            node.child_by_field_name("value"),
+        ) {
+            // `{ … } = <param>` where the RHS is a bare identifier (the param).
+            if name.kind() == "object_pattern" && value.kind() == "identifier" {
+                if let Some(key) = object_pattern_key_for_local(name, source, local) {
+                    *out = Some((source[value.byte_range()].to_string(), key));
+                    return;
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        find_destructuring(child, source, local, out);
+    }
+}
+
+/// Within an `object_pattern` (`{ a, b: c, … }`), the source-side property whose
+/// binding name is `local`. Plain shorthand (`topics`) keys and binds on the
+/// same name; a renamed pair (`topics: t`) keys on `topics`, binds `t`.
+fn object_pattern_key_for_local(pattern: Node<'_>, source: &str, local: &str) -> Option<String> {
+    let mut cursor = pattern.walk();
+    for child in pattern.children(&mut cursor) {
+        match child.kind() {
+            // Shorthand: `{ topics }` — key and binding are the same identifier.
+            "shorthand_property_identifier_pattern" => {
+                if &source[child.byte_range()] == local {
+                    return Some(local.to_string());
+                }
+            }
+            // Renamed: `{ topics: t }` — pair_pattern with key `topics`, value `t`.
+            "pair_pattern" => {
+                let key = child.child_by_field_name("key");
+                let value = child.child_by_field_name("value");
+                if let (Some(key), Some(value)) = (key, value) {
+                    if &source[value.byte_range()] == local {
+                        return Some(source[key.byte_range()].to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The source text of the `index`-th positional argument of **every**
+/// `new class_name(…)` call in `source` — the config paths wired into a
+/// constructor param across all instantiation sites
+/// (`new KafkaClientAdapter(config.kafka.heatingAlgorithmsConsumer, logger)` at
+/// index 0 → `config.kafka.heatingAlgorithmsConsumer`). A class is often
+/// instantiated more than once (production wiring plus test doubles), so the
+/// caller tries each until one resolves.
+fn constructor_positional_args(source: &str, class_name: &str, index: usize) -> Vec<String> {
+    let Some(tree) = parse_ts(source) else {
+        return Vec::new();
+    };
+    let mut results = Vec::new();
+    find_new_expression(tree.root_node(), source, class_name, &mut |args| {
+        if let Some(arg) = nth_call_argument(args, index) {
+            let normalized: String = source[arg.byte_range()].split_whitespace().collect();
+            if !normalized.is_empty() {
+                results.push(normalized);
+            }
+        }
+    });
+    results
+}
+
 /// Break a member-access expression into its bare segments, dropping a leading
 /// `this`: `this.config.broker.topics.orders` → `[config, broker, topics,
 /// orders]`. Subscript access (`a['b']`) is normalised to `a.b`.
@@ -676,35 +1170,33 @@ fn property_key_text(key: Node<'_>, source: &str) -> String {
 
 /// Resolve a leaf value expression into a channel value:
 /// - `process.env.X || 'default'` → `{ value: "default", env_var: Some("X") }`
+/// - `a ?? b ?? 'default'`         → `{ value: "default", env_var: Some(a) }` (chain)
 /// - `'literal'` / `"literal"`     → `{ value: "literal", env_var: None }`
 /// - `process.env.X`               → `{ value: "X", env_var: Some("X") }` (best effort)
+///
+/// A wrapping call chain (`(…).split(',').map(t => t.trim())`), parentheses, or
+/// a single-element array (`[…]`) around the value is unwrapped first — config
+/// modules often post-process a topic string into a list without changing which
+/// literal/env var it resolves to.
 fn resolve_value_expression(node: Node<'_>, source: &str) -> Option<ResolvedChannel> {
+    let node = unwrap_value_node(node, source);
     match node.kind() {
         "string" => Some(ResolvedChannel {
             value: strip_quotes(&source[node.byte_range()]),
             env_var: None,
         }),
-        // `A || B` / `A ?? B`: prefer the string default on the right, keep the
-        // env var from the left.
+        // `A || B`, `A ?? B`, or a longer `A ?? B ?? 'default'` chain: take the
+        // string default (searched across the whole chain) and the first env var.
         "binary_expression" => {
-            let left = node.child_by_field_name("left")?;
-            let right = node.child_by_field_name("right")?;
-            let env_var = env_var_name(left, source);
-            // The default is whichever side is a string literal (usually right).
-            let default = [right, left].into_iter().find_map(|side| {
-                if side.kind() == "string" {
-                    Some(strip_quotes(&source[side.byte_range()]))
-                } else {
-                    None
-                }
-            });
+            let default = chain_string_default(node, source);
+            let env_var = chain_first_env_var(node, source);
             match (default, env_var) {
                 (Some(value), env) => Some(ResolvedChannel {
                     value,
                     env_var: env,
                 }),
-                // `process.env.X || otherVar` with no literal: fall back to the
-                // env var name as the value so the endpoint is at least named.
+                // No literal anywhere: fall back to the env var name so the
+                // endpoint is at least named.
                 (None, Some(env)) => Some(ResolvedChannel {
                     value: env.clone(),
                     env_var: Some(env),
@@ -722,6 +1214,103 @@ fn resolve_value_expression(node: Node<'_>, source: &str) -> Option<ResolvedChan
         }
         _ => None,
     }
+}
+
+/// Method names that only reshape a string into a list without changing which
+/// literal/env var the value resolves to. Peeling these off is safe; peeling a
+/// value-changing call (e.g. `JSON.parse(...)`) would silently misresolve.
+const RESHAPING_METHODS: &[&str] = &["split", "map", "filter", "trim"];
+
+/// Strip value-preserving wrappers off a config leaf so the underlying
+/// literal/env-chain is reached: a `(…)`/`… as T` wrapper, a method chain that
+/// only reshapes a string into a list (`.split`, `.map`, `.filter`, `.trim`),
+/// and a single-element array literal (`[expr]`).
+fn unwrap_value_node<'a>(node: Node<'a>, source: &str) -> Node<'a> {
+    let mut current = node;
+    loop {
+        match current.kind() {
+            "parenthesized_expression" | "as_expression" | "satisfies_expression" => {
+                // Descend to the first meaningful inner expression.
+                let mut cursor = current.walk();
+                let inner = current
+                    .children(&mut cursor)
+                    .find(|c| c.is_named() && c.kind() != "type_identifier");
+                match inner {
+                    Some(inner) => current = inner,
+                    None => return current,
+                }
+            }
+            // `<receiver>.split(',')…` — only reshaping methods keep the channel
+            // in the receiver. Other calls (e.g. `JSON.parse(...)`) change the
+            // value, so they are left intact.
+            "call_expression" => {
+                let Some(func) = current.child_by_field_name("function") else {
+                    return current;
+                };
+                if func.kind() == "member_expression" {
+                    let is_reshaping = func
+                        .child_by_field_name("property")
+                        .map(|p| RESHAPING_METHODS.contains(&&source[p.byte_range()]))
+                        .unwrap_or(false);
+                    if is_reshaping {
+                        if let Some(receiver) = func.child_by_field_name("object") {
+                            current = receiver;
+                            continue;
+                        }
+                    }
+                }
+                return current;
+            }
+            // `[expr]` — resolve the sole element of a genuinely single-item list.
+            // A multi-element array would silently drop entries, so leave it be.
+            "array" => {
+                let mut cursor = current.walk();
+                // Bound to a local so `cursor` outlives the borrow (`Node` is
+                // `Copy`, so the elements do not depend on the cursor).
+                let mut named = current.named_children(&mut cursor);
+                match (named.next(), named.next()) {
+                    (Some(first), None) => current = first,
+                    _ => return current,
+                }
+            }
+            _ => return current,
+        }
+    }
+}
+
+/// The first string literal anywhere in a `??`/`||` chain, unwrapping nested
+/// binary expressions and value wrappers (`a ?? b ?? 'x'` → `"x"`).
+fn chain_string_default(node: Node<'_>, source: &str) -> Option<String> {
+    let node = unwrap_value_node(node, source);
+    if node.kind() == "string" {
+        return Some(strip_quotes(&source[node.byte_range()]));
+    }
+    if node.kind() == "binary_expression" {
+        let right = node.child_by_field_name("right");
+        let left = node.child_by_field_name("left");
+        // Right side usually holds the literal default; recurse both.
+        return right
+            .and_then(|n| chain_string_default(n, source))
+            .or_else(|| left.and_then(|n| chain_string_default(n, source)));
+    }
+    None
+}
+
+/// The first (leftmost) `process.env.X` in a `??`/`||` chain — the primary env
+/// override for the channel.
+fn chain_first_env_var(node: Node<'_>, source: &str) -> Option<String> {
+    let node = unwrap_value_node(node, source);
+    if let Some(env) = env_var_name(node, source) {
+        return Some(env);
+    }
+    if node.kind() == "binary_expression" {
+        let left = node.child_by_field_name("left");
+        let right = node.child_by_field_name("right");
+        return left
+            .and_then(|n| chain_first_env_var(n, source))
+            .or_else(|| right.and_then(|n| chain_first_env_var(n, source)));
+    }
+    None
 }
 
 /// The env var name if `node` is `process.env.NAME` or `process.env['NAME']`.
@@ -899,6 +1488,42 @@ export type Config = typeof config
         assert!(resolve_in_config(CONFIG, "missing", &["broker"]).is_none());
     }
 
+    // Only string-reshaping method chains and single-element arrays are peeled
+    // off a config leaf; value-changing calls and multi-element arrays are left
+    // intact so `unwrap_value_node` never silently misresolves the channel.
+    const UNWRAP_CONFIG: &str = r#"
+export const config = {
+    reshaped: (process.env.KAFKA_TOPICS || 'reshaped_topic').split(',').map(t => t.trim()),
+    singleArray: [process.env.SINGLE_TOPIC || 'single_topic'],
+    parsed: JSON.parse(process.env.CONFIG_JSON || '{}'),
+    multiArray: ['first_topic', 'second_topic'],
+}
+"#;
+
+    #[test]
+    fn unwraps_reshaping_chain_and_single_element_array() {
+        // `.split(',').map(...)` reshapes the string default — unwrapped.
+        let r = resolve_in_config(UNWRAP_CONFIG, "config", &["reshaped"]).unwrap();
+        assert_eq!(r.value, "reshaped_topic");
+        assert_eq!(r.env_var.as_deref(), Some("KAFKA_TOPICS"));
+
+        // `[<one element>]` — unwrapped to the sole element.
+        let r = resolve_in_config(UNWRAP_CONFIG, "config", &["singleArray"]).unwrap();
+        assert_eq!(r.value, "single_topic");
+        assert_eq!(r.env_var.as_deref(), Some("SINGLE_TOPIC"));
+    }
+
+    #[test]
+    fn leaves_non_reshaping_call_and_multi_element_array_intact() {
+        // `JSON.parse(...)` changes the value; it must not collapse to its
+        // receiver, so the leaf stays a call and resolves to nothing.
+        assert!(resolve_in_config(UNWRAP_CONFIG, "config", &["parsed"]).is_none());
+
+        // A multi-element array would silently drop `second_topic`; it is left
+        // as an `array` node and does not resolve to a single channel.
+        assert!(resolve_in_config(UNWRAP_CONFIG, "config", &["multiArray"]).is_none());
+    }
+
     #[test]
     fn property_segments_drops_this_and_normalises_subscript() {
         assert_eq!(
@@ -923,6 +1548,91 @@ export type Config = typeof config
         assert!(
             resolve_channel_expression("this.config.broker.topics.shipmentEvent", &[]).is_none()
         );
+    }
+
+    // The Express route-table fan-out: a `for…of` over a local array of route
+    // objects, registering each `route.path`.
+    const ROUTE_TABLE: &str = r#"
+export function getRouter() {
+    const router = express.Router()
+    const routes = [
+        { path: '/search', handler: search },
+        { path: '/delete', handler: deleteEndpoint },
+        { path: '/create', handler: create },
+    ]
+    for (const route of routes) {
+        router.post(route.path, createAsyncRoute(route.handler))
+    }
+    return router
+}
+"#;
+
+    #[test]
+    fn resolve_loop_array_paths_for_of() {
+        // The `router.post(route.path, …)` call is on line 10.
+        let paths = resolve_loop_array_paths("route.path", ROUTE_TABLE, 10).unwrap();
+        assert_eq!(paths, vec!["/search", "/delete", "/create"]);
+    }
+
+    #[test]
+    fn resolve_loop_array_paths_foreach() {
+        // Same table, registered via `routes.forEach(route => …)`.
+        let source = r#"
+function getRouter() {
+    const routes = [
+        { path: '/a', handler: a },
+        { path: '/b', handler: b },
+    ]
+    routes.forEach(route => {
+        router.get(route.path, route.handler)
+    })
+}
+"#;
+        // `router.get(route.path, …)` is on line 8.
+        let paths = resolve_loop_array_paths("route.path", source, 8).unwrap();
+        assert_eq!(paths, vec!["/a", "/b"]);
+    }
+
+    #[test]
+    fn is_http_route_call_distinguishes_getter_from_route() {
+        let source = r#"
+function configure(app) {
+    app.use(setResponseHeaders(app.get('title')))
+    app.get('/health', (req, res) => res.send('ok'))
+}
+"#;
+        // `app.get('title')` on line 3 — one argument, a settings getter.
+        assert!(!is_http_route_call_at(source, 3));
+        // `app.get('/health', handler)` on line 4 — two arguments, a route.
+        assert!(is_http_route_call_at(source, 4));
+        // No call on this line.
+        assert!(!is_http_route_call_at(source, 1));
+    }
+
+    #[test]
+    fn resolve_loop_array_paths_rejects_non_loop_and_partial() {
+        // A bare literal call, not a loop variable → None.
+        let not_a_loop = r#"
+function f() {
+    router.post('/plain', handler)
+}
+"#;
+        assert!(resolve_loop_array_paths("route.path", not_a_loop, 3).is_none());
+
+        // An element missing the `path` field makes the fan-out partial, so the
+        // whole expansion is rejected rather than silently dropping a route.
+        let partial = r#"
+function f() {
+    const routes = [
+        { path: '/ok', handler: ok },
+        { handler: orphan },
+    ]
+    for (const route of routes) {
+        router.post(route.path, route.handler)
+    }
+}
+"#;
+        assert!(resolve_loop_array_paths("route.path", partial, 8).is_none());
     }
 
     // A class receives its topics through a constructor param, wired from the
@@ -994,6 +1704,190 @@ function build() {
             &sources
         )
         .is_none());
+    }
+
+    // The librdkafka-wrapper shape: a field assigned from a whole-object
+    // constructor param that is destructured, then wired from a config path at
+    // the `new` site. Mirrors heating-algorithms' `KafkaClientAdapter`.
+    const WRAPPER_ADAPTER: &str = r#"
+export class KafkaClientAdapter {
+    private consumer: Consumer
+    private topics: string[]
+    private logger: Logger
+    constructor(cfg: KafkaAdapterConfig, logger: Logger) {
+        const { broker, group, topics } = cfg
+        this.consumer = new Consumer(broker, logger, group)
+        this.logger = logger
+        this.topics = topics
+    }
+    start(onMessageFn) {
+        this.consumer.connect({ topics: this.topics }, (c, msg) => onMessageFn(msg))
+    }
+}
+"#;
+    const WRAPPER_WIRING: &str = r#"
+class Server {
+    constructor(logger) {
+        this.kafkaClient = new KafkaClientAdapter(config.kafka.heatingAlgorithmsConsumer, logger)
+    }
+}
+"#;
+    const WRAPPER_CONFIG: &str = r#"
+const config = {
+    kafka: {
+        heatingAlgorithmsConsumer: {
+            broker: process.env.KAFKA_BROKER ?? '127.0.0.1:9092',
+            topics: (process.env.KAFKA_TOPICS ?? process.env.KAFKA_TOPIC ?? 'heating-algorithms-topic')
+                .split(',')
+                .map(t => t.trim()),
+            group: process.env.KAFKA_GROUP ?? 'heating-algorithms-topic',
+        },
+        topologyConsumer: {
+            broker: process.env.KAFKA_BROKER ?? '127.0.0.1:9092',
+            topics: [process.env.TOPOLOGY_CHANGE_TOPIC ?? 'topology_change'],
+        },
+    },
+}
+export { config }
+"#;
+
+    #[test]
+    fn resolves_field_from_destructured_config_param() {
+        let sources = [
+            ("KafkaClientAdapter", WRAPPER_ADAPTER),
+            ("Server", WRAPPER_WIRING),
+            ("config", WRAPPER_CONFIG),
+        ];
+        // `this.topics` → field ← destructured `cfg` ← config path → the
+        // chained `??` default, through the `.split().map()` wrapper.
+        let r = resolve_via_field_from_config_param("this.topics", "KafkaClientAdapter", &sources)
+            .unwrap();
+        assert_eq!(r.value, "heating-algorithms-topic");
+        assert_eq!(r.env_var.as_deref(), Some("KAFKA_TOPICS"));
+    }
+
+    #[test]
+    fn resolves_field_from_config_param_array_topics() {
+        // Same shape, but wired from `topologyConsumer` whose topics is an array
+        // literal `[env ?? 'topology_change']`.
+        let wiring = r#"
+class Server {
+    constructor(logger) {
+        this.kafkaTopologyClient = new KafkaClientAdapter(config.kafka.topologyConsumer, logger)
+    }
+}
+"#;
+        let sources = [
+            ("KafkaClientAdapter", WRAPPER_ADAPTER),
+            ("Server", wiring),
+            ("config", WRAPPER_CONFIG),
+        ];
+        let r = resolve_via_field_from_config_param("this.topics", "KafkaClientAdapter", &sources)
+            .unwrap();
+        assert_eq!(r.value, "topology_change");
+        assert_eq!(r.env_var.as_deref(), Some("TOPOLOGY_CHANGE_TOPIC"));
+    }
+
+    #[test]
+    fn resolves_field_from_config_param_skipping_test_double() {
+        // The class is instantiated twice: a test file with an inline mock config
+        // (which resolves to nothing) and the real wiring. The real one must win
+        // regardless of candidate order.
+        let test_double = r#"
+describe('KafkaClientAdapter', () => {
+    it('starts', () => {
+        const adapter = new KafkaClientAdapter({ broker: 'x', group: 'g', topics: ['mock'] }, logger)
+    })
+})
+"#;
+        // Test double is listed *before* the real wiring on purpose.
+        let sources = [
+            ("KafkaClientAdapter", WRAPPER_ADAPTER),
+            ("", test_double),
+            ("Server", WRAPPER_WIRING),
+            ("config", WRAPPER_CONFIG),
+        ];
+        let r = resolve_via_field_from_config_param("this.topics", "KafkaClientAdapter", &sources)
+            .unwrap();
+        assert_eq!(r.value, "heating-algorithms-topic");
+        assert_eq!(r.env_var.as_deref(), Some("KAFKA_TOPICS"));
+    }
+
+    #[test]
+    fn field_from_config_param_gives_up_without_wiring() {
+        // No `new KafkaClientAdapter(...)` site in scope → None.
+        let sources = [
+            ("KafkaClientAdapter", WRAPPER_ADAPTER),
+            ("config", WRAPPER_CONFIG),
+        ];
+        assert!(
+            resolve_via_field_from_config_param("this.topics", "KafkaClientAdapter", &sources)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn channel_argument_reads_options_object_and_positional() {
+        // The call sits on its own line, as at a real endpoint site.
+        let source = r#"
+class Adapter {
+    start() {
+        this.consumer.connect({ topics: this.topics }, cb)
+    }
+    produce(message) {
+        this.producer.produce(this.topic, message)
+    }
+}
+"#;
+        // Options object: `connect({ topics: this.topics }, cb)` → `this.topics`.
+        assert_eq!(
+            channel_argument_at(source, 4).as_deref(),
+            Some("this.topics")
+        );
+        // Positional: `produce(this.topic, message)` → `this.topic`.
+        assert_eq!(
+            channel_argument_at(source, 7).as_deref(),
+            Some("this.topic")
+        );
+        // A line with no call → None.
+        assert_eq!(channel_argument_at(source, 1), None);
+    }
+
+    #[test]
+    fn channel_argument_reads_multiline_connect() {
+        // The real `@backend/kafkajs` shape: the call opens on one line and the
+        // options object sits on the next.
+        let source = r#"
+class Adapter {
+    start(onMessageFn) {
+        this.consumer.connect(
+            { topics: this.topics },
+            (consumer, msg) => onMessageFn(msg),
+            this.onReadyFn(),
+        )
+    }
+}
+"#;
+        // `connect(` opens on line 4.
+        assert_eq!(
+            channel_argument_at(source, 4).as_deref(),
+            Some("this.topics")
+        );
+    }
+
+    #[test]
+    fn resolves_chained_nullish_with_split_wrapper() {
+        // The value-node unwrapping handles `(a ?? b ?? 'x').split(',')`.
+        let config = r#"
+const config = {
+    kafka: {
+        topics: (process.env.KAFKA_TOPICS ?? process.env.KAFKA_TOPIC ?? 'heating-algorithms-topic').split(','),
+    },
+}
+"#;
+        let r = resolve_in_config(config, "config", &["kafka", "topics"]).unwrap();
+        assert_eq!(r.value, "heating-algorithms-topic");
+        assert_eq!(r.env_var.as_deref(), Some("KAFKA_TOPICS"));
     }
 
     const BROKER_SOURCE: &str = r#"
