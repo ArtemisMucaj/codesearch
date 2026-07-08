@@ -731,6 +731,114 @@ class ThermoRouter {
     }
 
     #[tokio::test]
+    async fn test_express_loop_registered_route_captured_unresolved() {
+        // Routes registered inside a loop over a local table pass the path as a
+        // `member_expression` (`route.path`), not a string. The detector must
+        // still capture it — as an unresolved `route.path` endpoint — so phase 3's
+        // loop-array resolver can fan it out to the concrete paths.
+        let content = r#"
+function createRouter() {
+    const router = express.Router()
+    const routes = [
+        { path: '/getstatus', factory: getStatus },
+        { path: '/setmode', factory: setMode },
+    ]
+    for (const route of routes) {
+        const handler = route.factory()
+        router.get(route.path, handler)
+        router.post(route.path, handler)
+    }
+    return router
+}
+"#;
+        let endpoints = extract(content, "routes/index.js", Language::JavaScript).await;
+        let routes: Vec<_> = endpoints
+            .iter()
+            .filter(|e| e.protocol() == Protocol::Http && e.role() == ChannelRole::Consumer)
+            .collect();
+        // One GET + one POST, both unresolved with the property-access channel.
+        assert_eq!(routes.len(), 2);
+        assert!(routes.iter().all(|e| !e.is_resolved()));
+        assert!(routes.iter().all(|e| e.channel_raw() == "route.path"));
+        assert!(routes.iter().any(|e| e.method() == Some("GET")));
+        assert!(routes.iter().any(|e| e.method() == Some("POST")));
+    }
+
+    #[tokio::test]
+    async fn test_express_member_channel_does_not_overmatch() {
+        // Accepting a `member_expression` channel (for `router.get(route.path,…)`)
+        // must not widen the net. Guards, in order:
+        //  1. A string route with a member-expression *handler* still reads the
+        //     path from the first arg — the handler slot is never the channel.
+        //  2. `app.get(config.title)` — one arg, a member expression — is still the
+        //     settings getter, not a route (no second arg).
+        //  3. A non-Express receiver (`this.emitter.on(events.ready, cb)`) whose
+        //     object is not in the allowlist must never become an HTTP route.
+        let content = r#"
+function configure(app, emitter) {
+    app.get('/health', this.handlers.health)
+    const title = app.get(config.title)
+    emitter.on(events.ready, () => start())
+    this.emitter.on(events.error, handleError)
+}
+"#;
+        let endpoints = extract(content, "app.ts", Language::TypeScript).await;
+        let routes: Vec<_> = endpoints
+            .iter()
+            .filter(|e| e.protocol() == Protocol::Http && e.role() == ChannelRole::Consumer)
+            .collect();
+        // Only the one real `/health` route — string channel, member handler.
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].channel_normalized(), "/health");
+        assert_eq!(routes[0].method(), Some("GET"));
+        // `app.get(config.title)` (settings getter) produced nothing, and the
+        // `emitter.on(...)` calls are not HTTP at all.
+        assert!(!routes.iter().any(|e| e.channel_raw().contains("title")));
+        assert!(!endpoints.iter().any(|e| e.channel_raw().contains("events")));
+    }
+
+    #[tokio::test]
+    async fn test_node_http_client_request_and_get() {
+        // Node's core `http`/`https` modules: `.request(url, …)` and `.get(url)`
+        // are outbound client calls (producers). `http.createServer(app)` stands
+        // up a server and must NOT be matched — its routes are Express's job.
+        let content = r#"
+const http = require('http')
+const https = require('https')
+
+const server = http.createServer(app)
+
+function fetchTopology(url) {
+    const req = https.request('http://user-api/topology', options, resp => handle(resp))
+    http.get(url, resp => handle(resp))
+}
+"#;
+        let endpoints = extract(content, "client.js", Language::JavaScript).await;
+        let clients: Vec<_> = endpoints
+            .iter()
+            .filter(|e| e.protocol() == Protocol::Http && e.role() == ChannelRole::Producer)
+            .collect();
+        // Exactly the two outbound calls — never `createServer`.
+        assert_eq!(clients.len(), 2);
+
+        // The string-literal URL resolves to its path + host.
+        let literal = clients
+            .iter()
+            .find(|e| e.is_resolved())
+            .expect("string-literal request");
+        assert_eq!(literal.channel_normalized(), "/topology");
+        assert_eq!(literal.host(), Some("user-api"));
+        assert_eq!(literal.enclosing_symbol(), Some("fetchTopology"));
+
+        // The variable-URL `http.get(url, …)` is captured unresolved.
+        let variable = clients
+            .iter()
+            .find(|e| !e.is_resolved())
+            .expect("variable-url request");
+        assert_eq!(variable.channel_raw(), "url");
+    }
+
+    #[tokio::test]
     async fn test_rust_axum_and_reqwest() {
         let content = r#"
 async fn build_router() -> Router {

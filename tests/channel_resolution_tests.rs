@@ -13,7 +13,8 @@ use codesearch::{
     SymbolReference,
 };
 use codesearch::{
-    ChannelResolver, ResolveChannelsUseCase, ResolvedConfigValue, TreeSitterChannelExtractor,
+    ChannelExtractor, ChannelResolver, ResolveChannelsUseCase, ResolvedConfigValue,
+    TreeSitterChannelExtractor,
 };
 
 /// A config module matching a typical service `config.ts` shape.
@@ -306,4 +307,86 @@ fn resolves_producer_topic_through_constructor_param_end_to_end() {
     // And the library was confirmed via SCIP.
     assert!(out[0].is_confirmed());
     assert_eq!(out[0].library(), Some("kafkajs"));
+}
+
+/// An Express router that registers every route in a local table via a
+/// `for…of` loop — the vanilla-JS shape used by oem-api's route modules. Both
+/// verbs pass the path as `route.path`, a property access rather than a string.
+const ROUTER_SOURCE: &str = r#"
+const express = require('express')
+
+function createRouter() {
+    const router = express.Router()
+    const routes = [
+        { path: '/getstatus', factory: getStatus },
+        { path: '/setmode', factory: setMode },
+        { path: '/getconfigs', factory: getConfigs },
+    ]
+    for (const route of routes) {
+        const handler = createAsyncRoute(route.factory())
+        router.get(route.path, handler)
+        router.post(route.path, handler)
+    }
+    return router
+}
+"#;
+
+#[tokio::test]
+async fn expands_loop_registered_express_routes_end_to_end() {
+    // Extract with the real detector, then resolve — the whole pipeline from
+    // source to concrete routes. This is the oem-api regression: routes
+    // registered as `router.get(route.path, …)` used to be invisible.
+    let extractor = TreeSitterChannelExtractor::new();
+    let extracted = extractor
+        .extract(
+            ROUTER_SOURCE,
+            "routes/index.js",
+            Language::JavaScript,
+            "oem",
+        )
+        .await
+        .unwrap();
+
+    // The detector captured the loop-registered routes as unresolved `route.path`
+    // placeholders (one GET, one POST) — nothing concrete yet.
+    let placeholders: Vec<_> = extracted
+        .iter()
+        .filter(|e| e.protocol() == Protocol::Http)
+        .collect();
+    assert_eq!(placeholders.len(), 2);
+    assert!(placeholders.iter().all(|e| !e.is_resolved()));
+    assert!(placeholders.iter().all(|e| e.channel_raw() == "route.path"));
+
+    // Resolve: the loop-array pass reads the source and fans each placeholder
+    // out to one endpoint per table entry.
+    let resolver: Arc<dyn ChannelResolver> = Arc::new(TreeSitterChannelExtractor::new());
+    let use_case = ResolveChannelsUseCase::new(resolver);
+    let mut sources = HashMap::new();
+    sources.insert("routes/index.js".to_string(), ROUTER_SOURCE.to_string());
+
+    let out = use_case.resolve("oem", extracted, &HashMap::new(), &[], &sources);
+
+    // Three paths × two verbs = six concrete, resolved HTTP routes.
+    let routes: Vec<_> = out
+        .iter()
+        .filter(|e| e.protocol() == Protocol::Http)
+        .collect();
+    assert_eq!(routes.len(), 6);
+    assert!(routes.iter().all(|e| e.is_resolved()));
+
+    let mut normalized: Vec<&str> = routes.iter().map(|e| e.channel_normalized()).collect();
+    normalized.sort_unstable();
+    normalized.dedup();
+    assert_eq!(normalized, vec!["/getconfigs", "/getstatus", "/setmode"]);
+
+    // Each path is registered under both verbs.
+    for path in ["/getstatus", "/setmode", "/getconfigs"] {
+        let verbs: Vec<_> = routes
+            .iter()
+            .filter(|e| e.channel_normalized() == path)
+            .filter_map(|e| e.method())
+            .collect();
+        assert!(verbs.contains(&"GET"), "{path} should have a GET route");
+        assert!(verbs.contains(&"POST"), "{path} should have a POST route");
+    }
 }

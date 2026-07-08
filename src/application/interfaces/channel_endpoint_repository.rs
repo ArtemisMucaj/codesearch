@@ -53,4 +53,20 @@ pub trait ChannelEndpointRepository: Send + Sync {
         &self,
         repository_id: &str,
     ) -> Result<(), DomainError>;
+
+    /// Delete a repository's *tree-sitter-extracted* endpoints (`source =
+    /// 'tree_sitter'`).
+    ///
+    /// The resolution pass reloads the whole tree-sitter set, resolves it, and
+    /// saves the result. Resolution may *replace* an endpoint rather than update
+    /// it in place — a loop-registered route (`router.get(route.path, …)`) is one
+    /// unresolved placeholder that fans out into one new-id endpoint per
+    /// route-table entry. Because the placeholder keeps its own id, an upsert of
+    /// the resolved set alone would orphan it. The pass therefore clears the
+    /// tree-sitter set with this call before saving the resolved result, exactly
+    /// as it does for synthesized endpoints.
+    async fn delete_tree_sitter_by_repository(
+        &self,
+        repository_id: &str,
+    ) -> Result<(), DomainError>;
 }
