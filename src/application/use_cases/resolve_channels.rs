@@ -18,9 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::application::{normalize_channel, ChannelResolver};
-use crate::domain::{
-    ChannelEndpoint, ChannelRole, EndpointSource, Protocol, SymbolReference,
-};
+use crate::domain::{ChannelEndpoint, ChannelRole, EndpointSource, Protocol, SymbolReference};
 
 /// Confidence assigned to an endpoint once its library is confirmed via SCIP —
 /// high, because the receiver's type (not just a method name) now backs it.
@@ -103,7 +101,10 @@ fn http_verb_for_symbol(callee_symbol: &str) -> Option<&'static str> {
         }
     }
 
-    let method = callee_symbol.rsplit(['#', '.', ':']).next().unwrap_or(callee_symbol);
+    let method = callee_symbol
+        .rsplit(['#', '.', ':'])
+        .next()
+        .unwrap_or(callee_symbol);
     match method.to_ascii_lowercase().as_str() {
         "get" => Some("GET"),
         "post" => Some("POST"),
@@ -238,7 +239,65 @@ impl ResolveChannelsUseCase {
                 sources_by_file,
             ));
         }
+
+        // Fan-out expansion: an HTTP route registered inside a loop over a local
+        // route table (`for (const r of routes) router.post(r.path, …)`) leaves
+        // one unresolved endpoint whose channel is `r.path`. Expand it into one
+        // resolved endpoint per array element, replacing the placeholder.
+        self.expand_loop_registered_routes(&mut resolved, sources_by_file);
+
         resolved
+    }
+
+    /// Replace each unresolved HTTP endpoint whose channel is a loop-variable
+    /// field access with one resolved endpoint per element of the route table it
+    /// iterates (see [`ChannelResolver::resolve_loop_array_paths`]).
+    fn expand_loop_registered_routes(
+        &self,
+        endpoints: &mut Vec<ChannelEndpoint>,
+        sources_by_file: &HashMap<String, String>,
+    ) {
+        let mut expanded = Vec::new();
+        endpoints.retain(|endpoint| {
+            // Only unresolved HTTP endpoints whose raw channel is a `<var>.<field>`
+            // access are candidates; anything already resolved stays as-is.
+            if endpoint.protocol() != Protocol::Http
+                || endpoint.is_resolved()
+                || !endpoint.channel_raw().contains('.')
+            {
+                return true;
+            }
+            let Some(source) = sources_by_file.get(endpoint.file_path()) else {
+                return true;
+            };
+            let Some(paths) = self.resolver.resolve_loop_array_paths(
+                endpoint.channel_raw(),
+                source,
+                endpoint.line(),
+            ) else {
+                return true;
+            };
+
+            // One resolved endpoint per route-table entry. The id stays keyed on
+            // the call site plus the path so a re-index upserts the same rows.
+            for path in paths {
+                let (host, normalized, is_pattern) = normalize_channel(Protocol::Http, &path);
+                let mut route = endpoint
+                    .clone()
+                    .with_id(format!("{}:{}", endpoint.id(), normalized))
+                    .resolve_channel(path, normalized);
+                if let Some(host) = host {
+                    route = route.with_host(host);
+                }
+                if is_pattern {
+                    route = route.as_pattern();
+                }
+                expanded.push(route);
+            }
+            // Drop the placeholder — it has been replaced by the expansion.
+            false
+        });
+        endpoints.append(&mut expanded);
     }
 
     fn resolve_one(
@@ -404,9 +463,9 @@ fn synthesize_from_packages(
         .map(|e| (e.file_path(), e.line(), e.role()))
         .collect();
     let is_covered = |file: &str, line: u32, role: ChannelRole| {
-        covered.iter().any(|&(f, l, r)| {
-            f == file && r == role && l.abs_diff(line) <= CALL_SITE_LINE_WINDOW
-        })
+        covered
+            .iter()
+            .any(|&(f, l, r)| f == file && r == role && l.abs_diff(line) <= CALL_SITE_LINE_WINDOW)
     };
 
     let mut synthesized = Vec::new();
@@ -436,18 +495,38 @@ fn synthesize_from_packages(
             // resolution passes can trace it to a config value); fall back to
             // the SCIP receiver type as a descriptive label otherwise. For an
             // HTTP route the argument is the path literal, which resolves at once.
-            let raw = sources_by_file
+            let call_arg = sources_by_file
                 .get(file_path)
-                .and_then(|source| resolver.channel_argument_at(source, line))
-                .unwrap_or_else(|| channel_hint(r.callee_symbol()));
+                .and_then(|source| resolver.channel_argument_at(source, line));
+
+            // A read-loop verb (`consumeOne`, `run`, `each`…) carries no channel
+            // argument — the topic was set at the `subscribe`/`connect` call the
+            // loop reads from. With no argument to read, synthesizing here would
+            // only label the endpoint with the receiver type (`Consumer`), a
+            // never-resolvable duplicate of the real subscription. Skip it.
+            if call_arg.is_none() && read_loop_verb(r.callee_symbol()) {
+                continue;
+            }
+
+            // Express's `app.get(name)` settings getter resolves into the same
+            // route type as a real `app.get('/p', handler)`, so SCIP alone can't
+            // tell them apart. A route always carries a handler as its second
+            // argument; when the call site is available and has none, this is a
+            // settings read, not a route — skip it.
+            if matches!(kind, RefKind::Http { .. }) {
+                if let Some(source) = sources_by_file.get(file_path) {
+                    if !resolver.is_http_route_call_at(source, line) {
+                        continue;
+                    }
+                }
+            }
+
+            let raw = call_arg.unwrap_or_else(|| channel_hint(r.callee_symbol()));
 
             // Deterministic id keyed on the call site so a re-index upserts the
             // same row (channel value may improve as resolution does) rather than
             // leaving a stale duplicate behind.
-            let id = format!(
-                "synth:{repository_id}:{file_path}:{line}:{}",
-                role.as_str()
-            );
+            let id = format!("synth:{repository_id}:{file_path}:{line}:{}", role.as_str());
 
             // An HTTP route path read as a string literal is a resolved channel;
             // a messaging topic read as a property access stays unresolved for
@@ -508,7 +587,10 @@ fn synthesize_from_packages(
 /// How a SCIP reference into a known library is classified for synthesis.
 enum RefKind {
     /// A messaging call (Kafka/MQTT/AMQP/gRPC) with a producer/consumer role.
-    Messaging { protocol: Protocol, role: ChannelRole },
+    Messaging {
+        protocol: Protocol,
+        role: ChannelRole,
+    },
     /// An HTTP server route registration, with its verb. Always a consumer.
     Http { verb: &'static str },
 }
@@ -562,6 +644,25 @@ fn strip_str_literal(raw: &str) -> Option<String> {
     }
 }
 
+/// Whether the SCIP callee names a consumer's **read-loop** method — one that
+/// pulls from an already-subscribed topic and so carries no channel argument of
+/// its own (`consumer.consumeOne()`, `consumer.run(handler)`,
+/// `consumer.each(...)`). The topic those loops read was named at the earlier
+/// `subscribe`/`connect` call, which synthesis handles separately; a read-loop
+/// site has nothing to originate, so it must not fabricate a receiver-labelled
+/// endpoint when no argument is present.
+fn read_loop_verb(callee_symbol: &str) -> bool {
+    let method = callee_symbol
+        .rsplit(['#', '.', ':'])
+        .next()
+        .unwrap_or(callee_symbol)
+        .to_ascii_lowercase();
+    matches!(
+        method.as_str(),
+        "consume" | "consumeone" | "run" | "each" | "eachmessage" | "eachbatch"
+    )
+}
+
 /// A display hint for a synthesized endpoint with no recoverable channel: the
 /// receiver type of the SCIP symbol (`Consumer#connect` → `Consumer`), else the
 /// method name. Purely descriptive — the endpoint stays unresolved.
@@ -593,6 +694,12 @@ mod tests {
         /// Channel argument the stub reports for any call site (simulates
         /// reading the topic expression out of the source).
         channel_arg: Option<String>,
+        /// Loop-array path fan-out the stub reports for any call site.
+        loop_paths: Option<Vec<String>>,
+        /// Whether a call site looks like a route registration. `None` (the
+        /// default) reports `true`, so route synthesis is not gated unless a
+        /// test opts into the settings-getter case with `Some(false)`.
+        is_route_call: Option<bool>,
     }
 
     impl ChannelResolver for StubResolver {
@@ -617,6 +724,19 @@ mod tests {
 
         fn channel_argument_at(&self, _call_site_source: &str, _call_line: u32) -> Option<String> {
             self.channel_arg.clone()
+        }
+
+        fn resolve_loop_array_paths(
+            &self,
+            _expression: &str,
+            _call_site_source: &str,
+            _call_line: u32,
+        ) -> Option<Vec<String>> {
+            self.loop_paths.clone()
+        }
+
+        fn is_http_route_call_at(&self, _call_site_source: &str, _call_line: u32) -> bool {
+            self.is_route_call.unwrap_or(true)
         }
     }
 
@@ -778,7 +898,10 @@ mod tests {
         // Unambiguous verbs need no type.
         assert_eq!(role_for_symbol("send"), Some(ChannelRole::Producer));
         assert_eq!(role_for_symbol("subscribe"), Some(ChannelRole::Consumer));
-        assert_eq!(role_for_symbol("Client#produce"), Some(ChannelRole::Producer));
+        assert_eq!(
+            role_for_symbol("Client#produce"),
+            Some(ChannelRole::Producer)
+        );
         assert_eq!(
             role_for_symbol("Consumer#consumeOne"),
             Some(ChannelRole::Consumer)
@@ -831,6 +954,79 @@ mod tests {
         assert_eq!(ep.line(), 38);
     }
 
+    /// A consumer's read-loop call (`consumer.consumeOne()`) carries no channel
+    /// argument — the topic was named at the earlier `subscribe`/`connect`. With
+    /// no argument to read, synthesis must skip it rather than fabricate an
+    /// endpoint labelled with the receiver type (`Consumer`).
+    #[test]
+    fn does_not_synthesize_from_read_loop_call_without_argument() {
+        // Default stub reports no channel argument at any call site.
+        let uc = ResolveChannelsUseCase::new(Arc::new(StubResolver::default()));
+
+        let mut refs = HashMap::new();
+        refs.insert(
+            "src/consumer.ts".to_string(),
+            vec![SymbolReference::new(
+                None,
+                "Consumer#consumeOne".to_string(),
+                "src/consumer.ts".to_string(),
+                "src/consumer.ts".to_string(),
+                94,
+                9,
+                ReferenceKind::MethodCall,
+                Language::TypeScript,
+                "repo".to_string(),
+            )
+            .with_callee_package("@backend/kafkajs")
+            .with_enclosing_scope("Consumer")],
+        );
+
+        let out = uc.resolve("repo", vec![], &refs, &[], &HashMap::new());
+        assert!(
+            out.is_empty(),
+            "read-loop call with no channel argument must not synthesize, got {:?}",
+            out.iter().map(|e| e.channel_raw()).collect::<Vec<_>>()
+        );
+    }
+
+    /// A read-loop call *does* originate an endpoint when the call site actually
+    /// carries a topic argument the resolver can read (some wrappers pass the
+    /// topic into `run`/`consume`), so the skip is gated on the missing argument.
+    #[test]
+    fn synthesizes_from_read_loop_call_with_argument() {
+        let resolver = StubResolver {
+            channel_arg: Some("'orders'".to_string()),
+            ..Default::default()
+        };
+        let uc = ResolveChannelsUseCase::new(Arc::new(resolver));
+
+        let mut refs = HashMap::new();
+        refs.insert(
+            "src/consumer.ts".to_string(),
+            vec![SymbolReference::new(
+                None,
+                "Consumer#consume".to_string(),
+                "src/consumer.ts".to_string(),
+                "src/consumer.ts".to_string(),
+                50,
+                9,
+                ReferenceKind::MethodCall,
+                Language::TypeScript,
+                "repo".to_string(),
+            )
+            .with_callee_package("@backend/kafkajs")],
+        );
+
+        // The channel argument is read from the call-site source, so a source
+        // entry must exist for the resolver stub to be consulted at all.
+        let mut sources = HashMap::new();
+        sources.insert("src/consumer.ts".to_string(), "// source".to_string());
+
+        let out = uc.resolve("repo", vec![], &refs, &[], &sources);
+        assert_eq!(out.len(), 1, "argument present → synthesize");
+        assert_eq!(out[0].role(), ChannelRole::Consumer);
+    }
+
     /// A literal `produce("orders", …)` the extractor already resolved must not
     /// gain a weaker synthesized twin from the SCIP reference at the same site.
     #[test]
@@ -862,6 +1058,52 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].channel_raw(), "orders");
         assert!(out[0].is_resolved());
+    }
+
+    /// An unresolved HTTP endpoint whose channel is a loop-variable field access
+    /// (`route.path`) is expanded into one resolved endpoint per route-table
+    /// entry the resolver reports, and the placeholder is dropped.
+    #[test]
+    fn expands_loop_registered_routes() {
+        let resolver = StubResolver {
+            loop_paths: Some(vec![
+                "/search".to_string(),
+                "/delete".to_string(),
+                "/create".to_string(),
+            ]),
+            ..Default::default()
+        };
+        let uc = ResolveChannelsUseCase::new(Arc::new(resolver));
+
+        // The placeholder the synthesizer would leave: unresolved HTTP consumer
+        // whose raw channel is the loop-variable access.
+        let placeholder = ChannelEndpoint::new(
+            "repo".to_string(),
+            "src/routes/index.ts".to_string(),
+            79,
+            Protocol::Http,
+            ChannelRole::Consumer,
+            "route.path".to_string(),
+            "route.path".to_string(),
+            0.6,
+            EndpointSource::Config,
+        )
+        .with_method("POST")
+        .unresolved();
+
+        let mut sources = HashMap::new();
+        sources.insert("src/routes/index.ts".to_string(), "// source".to_string());
+
+        let out = uc.resolve("repo", vec![placeholder], &HashMap::new(), &[], &sources);
+
+        // Three resolved routes, no `route.path` placeholder left behind.
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|e| e.is_resolved()));
+        assert!(out.iter().all(|e| e.method() == Some("POST")));
+        let mut paths: Vec<_> = out.iter().map(|e| e.channel_normalized()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["/create", "/delete", "/search"]);
+        assert!(out.iter().all(|e| e.channel_raw() != "route.path"));
     }
 
     /// A non-messaging package reference never originates an endpoint.
@@ -956,6 +1198,44 @@ mod tests {
         assert!(ep.is_resolved());
         assert_eq!(ep.library(), Some("@types/express-serve-static-core"));
         assert_eq!(ep.enclosing_symbol(), Some("ThermoregulationRouter"));
+    }
+
+    /// Express's `app.get('title')` settings getter resolves into the same route
+    /// type as a real route (SCIP `IRouter#get`), but has a single argument.
+    /// Synthesis must reject it so it does not become a bogus `GET` route.
+    #[test]
+    fn does_not_synthesize_route_from_settings_getter() {
+        let uc = ResolveChannelsUseCase::new(Arc::new(StubResolver {
+            // The call site is a one-argument getter, not a route registration.
+            is_route_call: Some(false),
+            ..Default::default()
+        }));
+
+        let mut refs = HashMap::new();
+        refs.insert(
+            "src/app.ts".to_string(),
+            vec![SymbolReference::new(
+                None,
+                "Application#get".to_string(),
+                "src/app.ts".to_string(),
+                "src/app.ts".to_string(),
+                28,
+                9,
+                ReferenceKind::MethodCall,
+                Language::TypeScript,
+                "repo".to_string(),
+            )
+            .with_callee_package("@types/express-serve-static-core")],
+        );
+        let mut sources = HashMap::new();
+        sources.insert("src/app.ts".to_string(), "// source".to_string());
+
+        let out = uc.resolve("repo", vec![], &refs, &[], &sources);
+        assert!(
+            out.is_empty(),
+            "settings getter must not synthesize a route, got {:?}",
+            out.iter().map(|e| e.channel_raw()).collect::<Vec<_>>()
+        );
     }
 
     /// An HTTP **client** package (axios) must never originate a server route —

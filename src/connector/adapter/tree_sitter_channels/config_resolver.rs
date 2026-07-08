@@ -431,6 +431,234 @@ fn find_channel_argument_at(node: Node<'_>, source: &str, line: u32, out: &mut O
     }
 }
 
+/// Whether the `call_expression` at `line` (1-based) has a second argument —
+/// the discriminator between an Express route registration (`app.get('/p',
+/// handler)`) and its one-argument settings getter (`app.get('title')`).
+pub(super) fn is_http_route_call_at(source: &str, line: u32) -> bool {
+    let Some(tree) = parse_ts(source) else {
+        return false;
+    };
+    let mut call = None;
+    find_call_node_at(tree.root_node(), line, &mut call);
+    let Some(call) = call else {
+        return false;
+    };
+    call.child_by_field_name("arguments")
+        .and_then(|args| nth_call_argument(args, 1))
+        .is_some()
+}
+
+/// Expand a loop-variable field access (`route.path`) into the concrete value
+/// of that field for every element of the array the loop iterates.
+///
+/// Handles the Express route-table fan-out:
+///
+/// ```ts
+/// const routes = [{ path: '/search', … }, { path: '/delete', … }]
+/// for (const route of routes) router.post(route.path, …)   // ← call_line
+/// ```
+///
+/// `expression` is the channel argument as written (`route.path`); `call_line`
+/// is the 1-based line of the registration call. Returns `['/search',
+/// '/delete', …]`, or `None` when the shape does not match (not a
+/// loop-variable access, the array is not a local literal, or an element lacks
+/// a string `<field>`).
+pub(super) fn resolve_loop_array_paths(
+    expression: &str,
+    source: &str,
+    call_line: u32,
+) -> Option<Vec<String>> {
+    // `route.path` → loop var `route`, field `path`. Exactly two segments.
+    let segments = property_segments(expression);
+    if segments.len() != 2 {
+        return None;
+    }
+    let (loop_var, field) = (segments[0].as_str(), segments[1].as_str());
+
+    let tree = parse_ts(source)?;
+
+    // Find the call, then the loop enclosing it that binds `loop_var`, and read
+    // the array identifier it iterates.
+    let mut call_node = None;
+    find_call_node_at(tree.root_node(), call_line, &mut call_node);
+    let array_name = loop_array_name(call_node?, source, loop_var)?;
+
+    // Resolve `array_name` to a local `const … = [ … ]` array literal.
+    let array = find_named_array(tree.root_node(), source, &array_name)?;
+
+    // Read `<field>` off each element object; every element must contribute a
+    // string value, else the fan-out is partial and we resolve nothing (an
+    // honest "unresolved" beats a silently truncated route list).
+    let mut cursor = array.walk();
+    let mut paths = Vec::new();
+    for element in array.named_children(&mut cursor) {
+        let obj = unwrap_to_object(element)?;
+        let value = object_property(obj, source, field)?;
+        let literal = strip_str_literal_node(value, source)?;
+        paths.push(literal);
+    }
+    (!paths.is_empty()).then_some(paths)
+}
+
+/// Locate the `call_expression` starting at `line` (1-based).
+fn find_call_node_at<'a>(node: Node<'a>, line: u32, out: &mut Option<Node<'a>>) {
+    if out.is_some() {
+        return;
+    }
+    if node.kind() == "call_expression" && node.start_position().row as u32 + 1 == line {
+        *out = Some(node);
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        find_call_node_at(child, line, out);
+    }
+}
+
+/// Walk up from `call` to the loop that binds `loop_var` and return the name of
+/// the array it iterates: `for (const <loop_var> of <array>)` or
+/// `<array>.forEach(<loop_var> => …)`.
+fn loop_array_name(call: Node<'_>, source: &str, loop_var: &str) -> Option<String> {
+    let mut current = call.parent();
+    while let Some(node) = current {
+        match node.kind() {
+            // `for (const route of routes) …`
+            "for_in_statement" => {
+                let binds_var = node
+                    .child_by_field_name("left")
+                    .map(|l| binding_names(l, source).iter().any(|n| n == loop_var))
+                    .unwrap_or(false);
+                if binds_var {
+                    if let Some(right) = node.child_by_field_name("right") {
+                        if right.kind() == "identifier" {
+                            return Some(source[right.byte_range()].to_string());
+                        }
+                    }
+                }
+            }
+            // `routes.forEach(route => …)` / `routes.map(route => …)`
+            "call_expression" => {
+                if let Some(name) = foreach_array_name(node, source, loop_var) {
+                    return Some(name);
+                }
+            }
+            _ => {}
+        }
+        current = node.parent();
+    }
+    None
+}
+
+/// If `call` is `<array>.forEach(<loop_var> => …)` (or `.map`), return `<array>`
+/// when its callback's first parameter is `loop_var`.
+fn foreach_array_name(call: Node<'_>, source: &str, loop_var: &str) -> Option<String> {
+    let func = call.child_by_field_name("function")?;
+    if func.kind() != "member_expression" {
+        return None;
+    }
+    let method = func.child_by_field_name("property")?;
+    if !matches!(&source[method.byte_range()], "forEach" | "map") {
+        return None;
+    }
+    let receiver = func.child_by_field_name("object")?;
+    if receiver.kind() != "identifier" {
+        return None;
+    }
+    // First callback argument's first parameter must be `loop_var`.
+    let args = call.child_by_field_name("arguments")?;
+    let callback = nth_call_argument(args, 0)?;
+    let param = callback_first_param(callback, source)?;
+    (param == loop_var).then(|| source[receiver.byte_range()].to_string())
+}
+
+/// The first parameter name of an arrow/function-expression callback.
+fn callback_first_param(callback: Node<'_>, source: &str) -> Option<String> {
+    match callback.kind() {
+        "arrow_function" | "function_expression" | "function" => {
+            // `route => …`: a bare identifier parameter.
+            if let Some(param) = callback.child_by_field_name("parameter") {
+                return Some(source[param.byte_range()].to_string());
+            }
+            // `(route, i) => …`: formal_parameters, take the first.
+            let params = callback.child_by_field_name("parameters")?;
+            let mut cursor = params.walk();
+            let first = params.named_children(&mut cursor).next()?;
+            Some(
+                parameter_name(first, source)
+                    .unwrap_or_else(|| source[first.byte_range()].to_string()),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// The identifier(s) a `for…of` left-hand binding introduces.
+fn binding_names(node: Node<'_>, source: &str) -> Vec<String> {
+    // `const route` → lexical_declaration/variable_declarator/identifier; a bare
+    // `route` is an identifier directly.
+    match node.kind() {
+        "identifier" => vec![source[node.byte_range()].to_string()],
+        _ => {
+            let mut out = Vec::new();
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                out.extend(binding_names(child, source));
+            }
+            out
+        }
+    }
+}
+
+/// Find a local `const/let <name> = [ … ]` array literal.
+fn find_named_array<'a>(node: Node<'a>, source: &str, name: &str) -> Option<Node<'a>> {
+    if node.kind() == "variable_declarator" {
+        if let Some(id) = node.child_by_field_name("name") {
+            if &source[id.byte_range()] == name {
+                if let Some(value) = node.child_by_field_name("value") {
+                    if let Some(array) = unwrap_to_array(value) {
+                        return Some(array);
+                    }
+                }
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(found) = find_named_array(child, source, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Unwrap `[ … ] as const` / `([ … ])` down to the `array` node, if any.
+fn unwrap_to_array(node: Node<'_>) -> Option<Node<'_>> {
+    if node.kind() == "array" {
+        return Some(node);
+    }
+    if matches!(
+        node.kind(),
+        "as_expression" | "parenthesized_expression" | "satisfies_expression"
+    ) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(array) = unwrap_to_array(child) {
+                return Some(array);
+            }
+        }
+    }
+    None
+}
+
+/// The inner text of a string-literal value node, or `None` if not a string.
+fn strip_str_literal_node(node: Node<'_>, source: &str) -> Option<String> {
+    if node.kind() != "string" && node.kind() != "template_string" {
+        return None;
+    }
+    let text = strip_quotes(&source[node.byte_range()]);
+    (!text.is_empty()).then_some(text)
+}
+
 /// The `(field, method)` of a `this.<field>.<method>(…)` call at `line`.
 fn call_receiver_and_method(source: &str, line: u32) -> Option<(String, String)> {
     let tree = parse_ts(source)?;
@@ -1320,6 +1548,91 @@ export const config = {
         assert!(
             resolve_channel_expression("this.config.broker.topics.shipmentEvent", &[]).is_none()
         );
+    }
+
+    // The Express route-table fan-out: a `for…of` over a local array of route
+    // objects, registering each `route.path`.
+    const ROUTE_TABLE: &str = r#"
+export function getRouter() {
+    const router = express.Router()
+    const routes = [
+        { path: '/search', handler: search },
+        { path: '/delete', handler: deleteEndpoint },
+        { path: '/create', handler: create },
+    ]
+    for (const route of routes) {
+        router.post(route.path, createAsyncRoute(route.handler))
+    }
+    return router
+}
+"#;
+
+    #[test]
+    fn resolve_loop_array_paths_for_of() {
+        // The `router.post(route.path, …)` call is on line 10.
+        let paths = resolve_loop_array_paths("route.path", ROUTE_TABLE, 10).unwrap();
+        assert_eq!(paths, vec!["/search", "/delete", "/create"]);
+    }
+
+    #[test]
+    fn resolve_loop_array_paths_foreach() {
+        // Same table, registered via `routes.forEach(route => …)`.
+        let source = r#"
+function getRouter() {
+    const routes = [
+        { path: '/a', handler: a },
+        { path: '/b', handler: b },
+    ]
+    routes.forEach(route => {
+        router.get(route.path, route.handler)
+    })
+}
+"#;
+        // `router.get(route.path, …)` is on line 8.
+        let paths = resolve_loop_array_paths("route.path", source, 8).unwrap();
+        assert_eq!(paths, vec!["/a", "/b"]);
+    }
+
+    #[test]
+    fn is_http_route_call_distinguishes_getter_from_route() {
+        let source = r#"
+function configure(app) {
+    app.use(setResponseHeaders(app.get('title')))
+    app.get('/health', (req, res) => res.send('ok'))
+}
+"#;
+        // `app.get('title')` on line 3 — one argument, a settings getter.
+        assert!(!is_http_route_call_at(source, 3));
+        // `app.get('/health', handler)` on line 4 — two arguments, a route.
+        assert!(is_http_route_call_at(source, 4));
+        // No call on this line.
+        assert!(!is_http_route_call_at(source, 1));
+    }
+
+    #[test]
+    fn resolve_loop_array_paths_rejects_non_loop_and_partial() {
+        // A bare literal call, not a loop variable → None.
+        let not_a_loop = r#"
+function f() {
+    router.post('/plain', handler)
+}
+"#;
+        assert!(resolve_loop_array_paths("route.path", not_a_loop, 3).is_none());
+
+        // An element missing the `path` field makes the fan-out partial, so the
+        // whole expansion is rejected rather than silently dropping a route.
+        let partial = r#"
+function f() {
+    const routes = [
+        { path: '/ok', handler: ok },
+        { handler: orphan },
+    ]
+    for (const route of routes) {
+        router.post(route.path, route.handler)
+    }
+}
+"#;
+        assert!(resolve_loop_array_paths("route.path", partial, 8).is_none());
     }
 
     // A class receives its topics through a constructor param, wired from the

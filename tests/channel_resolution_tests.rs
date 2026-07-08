@@ -164,6 +164,19 @@ impl ChannelResolver for FixedResolver {
     fn channel_argument_at(&self, _call_site_source: &str, _call_line: u32) -> Option<String> {
         None
     }
+
+    fn resolve_loop_array_paths(
+        &self,
+        _expression: &str,
+        _call_site_source: &str,
+        _call_line: u32,
+    ) -> Option<Vec<String>> {
+        None
+    }
+
+    fn is_http_route_call_at(&self, _call_site_source: &str, _call_line: u32) -> bool {
+        true
+    }
 }
 
 #[test]
@@ -276,7 +289,13 @@ fn resolves_producer_topic_through_constructor_param_end_to_end() {
         ("config".to_string(), CONFIG_SOURCE.to_string()),
     ];
 
-    let out = use_case.resolve("orders", vec![producer], &refs, &candidates, &HashMap::new());
+    let out = use_case.resolve(
+        "orders",
+        vec![producer],
+        &refs,
+        &candidates,
+        &HashMap::new(),
+    );
 
     // The two-hop chain resolved: this.topics.orderPlaced →
     // new OrderEvents(…, { orderPlaced: this.config.broker.topics.… }) →

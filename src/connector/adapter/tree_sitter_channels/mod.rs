@@ -329,6 +329,19 @@ impl ChannelResolver for TreeSitterChannelExtractor {
     fn channel_argument_at(&self, call_site_source: &str, call_line: u32) -> Option<String> {
         config_resolver::channel_argument_at(call_site_source, call_line)
     }
+
+    fn resolve_loop_array_paths(
+        &self,
+        expression: &str,
+        call_site_source: &str,
+        call_line: u32,
+    ) -> Option<Vec<String>> {
+        config_resolver::resolve_loop_array_paths(expression, call_site_source, call_line)
+    }
+
+    fn is_http_route_call_at(&self, call_site_source: &str, call_line: u32) -> bool {
+        config_resolver::is_http_route_call_at(call_site_source, call_line)
+    }
 }
 
 /// Node kinds whose channel argument is not a literal and is therefore
@@ -657,6 +670,30 @@ app.get('/users/:id', async (req, res) => {
         assert_eq!(endpoints[0].role(), ChannelRole::Consumer);
         assert_eq!(endpoints[0].channel_normalized(), "/users/{}");
         assert_eq!(endpoints[0].method(), Some("GET"));
+    }
+
+    #[tokio::test]
+    async fn test_express_get_setting_is_not_a_route() {
+        // `app.get(name)` with a *single* argument is Express's settings getter,
+        // not a route registration. A route always carries a handler as its
+        // second argument, so the one-arg call must produce no endpoint while the
+        // real two-arg route beside it still does.
+        let content = r#"
+function configure(app) {
+    app.set('title', 'timeline')
+    app.use(setResponseHeaders(app.get('title')))
+    app.get('/health', (req, res) => res.send('ok'))
+}
+"#;
+        let endpoints = extract(content, "app.ts", Language::TypeScript).await;
+        let routes: Vec<_> = endpoints
+            .iter()
+            .filter(|e| e.protocol() == Protocol::Http && e.role() == ChannelRole::Consumer)
+            .collect();
+        // Only the two-arg `/health` route — never `app.get('title')`.
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].channel_normalized(), "/health");
+        assert_eq!(routes[0].method(), Some("GET"));
     }
 
     #[tokio::test]
