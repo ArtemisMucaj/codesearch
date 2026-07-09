@@ -1314,9 +1314,25 @@ impl VectorRepository for DuckdbVectorRepository {
             return Ok(());
         }
         let conn = self.conn.lock().await;
-        Self::rebuild_fts_index(&conn, &self.schema)?;
-        self.fts_dirty.store(false, Ordering::Release);
-        info!("BM25 index built for namespace '{}'", self.namespace);
+        // A failed FTS rebuild must not abort the whole indexing run: the flush
+        // shares its connection with the chunk/channel/call-graph writes, so
+        // propagating the error here discards data that was already committed and
+        // leaves the run non-zero. BM25 is an optional accelerator — degrade to
+        // semantic-only (matching the lazy-rebuild path in `search`) and let the
+        // index complete. `fts_dirty` stays set so the next search retries.
+        match Self::rebuild_fts_index(&conn, &self.schema) {
+            Ok(()) => {
+                self.fts_dirty.store(false, Ordering::Release);
+                info!("BM25 index built for namespace '{}'", self.namespace);
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to build BM25 index for namespace '{}' \
+                     (keyword search disabled until the next successful build): {}",
+                    self.namespace, e
+                );
+            }
+        }
         Ok(())
     }
 
