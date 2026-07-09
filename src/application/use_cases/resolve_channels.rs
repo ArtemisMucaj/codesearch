@@ -264,6 +264,13 @@ impl ResolveChannelsUseCase {
     /// Only HTTP consumers (server routes) are prefixed; HTTP producers (client
     /// calls) already carry their full target path. The prefix is memoized per
     /// `(file, enclosing_symbol)` so a router registering many routes traces once.
+    ///
+    /// **Idempotent.** An incremental re-index reloads the *already-prefixed*
+    /// endpoints from storage and runs this pass again over them; applying the
+    /// prefix a second time would double it (`/history/history/…`). A route whose
+    /// path already carries the prefix is therefore left untouched — the trace is
+    /// deterministic, so the same prefix is recovered each run and this guard
+    /// keeps the served path stable across re-indexes.
     fn apply_route_prefixes(
         &self,
         endpoints: &mut [ChannelEndpoint],
@@ -295,6 +302,12 @@ impl ResolveChannelsUseCase {
                 .clone();
 
             let Some(prefix) = prefix else { continue };
+            // Skip a path that already carries this prefix — a reloaded endpoint
+            // from a prior index whose prefix was applied then. Guards against
+            // compounding the prefix on every incremental re-index.
+            if already_prefixed(endpoint.channel_raw(), &prefix) {
+                continue;
+            }
             let prefixed_raw = join_route(&prefix, endpoint.channel_raw());
             let (host, normalized, is_pattern) = normalize_channel(Protocol::Http, &prefixed_raw);
             *endpoint = endpoint.clone().resolve_channel(prefixed_raw, normalized);
@@ -697,6 +710,23 @@ fn join_route(prefix: &str, path: &str) -> String {
         return left.to_string();
     }
     format!("{left}/{right}")
+}
+
+/// Whether `path` already begins with mount `prefix` as a whole leading segment
+/// — the served path from a prior index (`/history/:id` for prefix `/history`),
+/// or the prefix alone (`/history`). Matches on a segment boundary so a distinct
+/// route that merely shares a textual prefix (`/historybooks`) is not mistaken
+/// for an already-prefixed one and skipped.
+fn already_prefixed(path: &str, prefix: &str) -> bool {
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        return false;
+    }
+    match path.strip_prefix(prefix) {
+        // Exactly the prefix, or the prefix followed by a path separator.
+        Some(rest) => rest.is_empty() || rest.starts_with('/'),
+        None => false,
+    }
 }
 
 /// Strip a JS/TS string literal to its inner text (`'/path'` → `/path`),
@@ -1217,6 +1247,53 @@ mod tests {
         // Method and role are untouched.
         assert_eq!(out[0].method(), Some("GET"));
         assert_eq!(out[0].role(), ChannelRole::Consumer);
+    }
+
+    /// Applying the prefix pass twice (as an incremental re-index does, over the
+    /// already-prefixed endpoints reloaded from storage) must not compound the
+    /// prefix — the served path stays `/history/:id`, never `/history/history/…`.
+    #[test]
+    fn prefix_application_is_idempotent() {
+        let uc = ResolveChannelsUseCase::new(Arc::new(StubResolver {
+            route_prefix: Some("/history".to_string()),
+            ..Default::default()
+        }));
+
+        let route = ChannelEndpoint::new(
+            "repo".to_string(),
+            "src/router.ts".to_string(),
+            16,
+            Protocol::Http,
+            ChannelRole::Consumer,
+            "/:homeId".to_string(),
+            "/{}".to_string(),
+            0.8,
+            EndpointSource::TreeSitter,
+        )
+        .with_method("GET")
+        .with_enclosing_symbol("configurationRouter");
+
+        // First pass prefixes it.
+        let once = uc.resolve("repo", vec![route], &HashMap::new(), &[], &HashMap::new());
+        assert_eq!(once[0].channel_raw(), "/history/:homeId");
+
+        // Second pass over the already-prefixed endpoint (simulating an
+        // incremental re-index reloading it) must leave it unchanged.
+        let twice = uc.resolve("repo", once, &HashMap::new(), &[], &HashMap::new());
+        assert_eq!(twice[0].channel_raw(), "/history/:homeId");
+        assert_eq!(twice[0].channel_normalized(), "/history/{}");
+    }
+
+    /// The idempotency guard matches on a segment boundary: a distinct route that
+    /// only shares a textual prefix (`/historybooks` vs prefix `/history`) is
+    /// still prefixed, not mistaken for an already-mounted path.
+    #[test]
+    fn already_prefixed_respects_segment_boundary() {
+        assert!(already_prefixed("/history", "/history"));
+        assert!(already_prefixed("/history/:id", "/history"));
+        assert!(already_prefixed("/history/:id", "/history/"));
+        assert!(!already_prefixed("/historybooks", "/history"));
+        assert!(!already_prefixed("/status", "/history"));
     }
 
     /// When the tracer resolves no prefix, the route keeps its bare registered
