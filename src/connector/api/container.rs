@@ -126,6 +126,11 @@ pub struct Container {
     call_graph_use_case: Arc<CallGraphUseCase>,
     channel_endpoint_repo: Arc<dyn ChannelEndpointRepository>,
     analysis_repo: Arc<dyn AnalysisRepository>,
+    /// Lazily opened memory store, shared across calls. Caching matters for
+    /// the long-running MCP server: DuckDB allows only one writer per file,
+    /// so concurrent tool calls must reuse a single connection instead of
+    /// each opening `memory.duckdb`.
+    memory_repo: std::sync::Mutex<Option<Arc<dyn MemoryRepository>>>,
     config: ContainerConfig,
 }
 
@@ -575,6 +580,7 @@ impl Container {
             call_graph_use_case,
             channel_endpoint_repo,
             analysis_repo,
+            memory_repo: std::sync::Mutex::new(None),
             config,
         })
     }
@@ -747,14 +753,22 @@ impl Container {
     /// dimensions); opening it with a different setup is a hard error, since
     /// stored memory vectors would be incomparable with new queries.
     pub fn memory_repository(&self) -> Result<Arc<dyn MemoryRepository>> {
+        let mut cache = self
+            .memory_repo
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory repository cache lock poisoned"))?;
+        if let Some(repo) = cache.as_ref() {
+            return Ok(Arc::clone(repo));
+        }
         let db_path = PathBuf::from(&self.config.data_dir).join(MEMORY_DB_FILE);
         let embedding_cfg = self.embedding_service.config();
-        let repo = DuckdbMemoryRepository::new(
+        let repo: Arc<dyn MemoryRepository> = Arc::new(DuckdbMemoryRepository::new(
             &db_path,
             embedding_cfg.dimensions(),
             embedding_cfg.model_name(),
-        )?;
-        Ok(Arc::new(repo))
+        )?);
+        *cache = Some(Arc::clone(&repo));
+        Ok(repo)
     }
 
     /// Session import + memory extraction, driven by the given chat model.

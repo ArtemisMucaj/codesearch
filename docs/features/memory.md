@@ -118,6 +118,22 @@ runs a cosine-similarity leg over `memory_vectors` plus a keyword leg over
 names/content, and fuses both rankings with Reciprocal Rank Fusion. When the
 store was created without embeddings, search degrades to the keyword leg.
 
+## MCP tools
+
+When running as an MCP server (`codesearch mcp`), memory recall is exposed to
+AI tools alongside code search:
+
+| Tool | Description |
+|------|-------------|
+| `search_memory` | Hybrid recall over the memory store. Accepts `query`, optional `kind`, and `limit`. Returns full item content with fused scores. |
+| `list_memories` | List stored memories, newest first. Accepts optional `kind` — e.g. `kind="preference"` at session start to load every known user preference. |
+
+This gives agents the recall half of the loop: import sessions with the CLI
+(e.g. from a session-end hook), then let the agent call `search_memory` at
+task start to load relevant preferences, experiences, and facts. The MCP
+server holds a single shared connection to `memory.duckdb`, so concurrent
+tool calls do not contend for DuckDB's single-writer lock.
+
 ## Update semantics
 
 OpenViking merges memory fields with per-field `merge_op`s (`patch`, `sum`,
