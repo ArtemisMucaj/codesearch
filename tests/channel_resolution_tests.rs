@@ -178,6 +178,15 @@ impl ChannelResolver for FixedResolver {
     fn is_http_route_call_at(&self, _call_site_source: &str, _call_line: u32) -> bool {
         true
     }
+
+    fn resolve_route_prefix(
+        &self,
+        _route_file: &str,
+        _enclosing_symbol: Option<&str>,
+        _candidates: &[(String, String)],
+    ) -> Option<String> {
+        None
+    }
 }
 
 #[test]

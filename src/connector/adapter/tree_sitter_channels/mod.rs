@@ -8,6 +8,7 @@
 
 mod config_resolver;
 mod registry;
+mod route_prefix;
 
 use std::collections::HashMap;
 
@@ -337,6 +338,19 @@ impl ChannelResolver for TreeSitterChannelExtractor {
         call_line: u32,
     ) -> Option<Vec<String>> {
         config_resolver::resolve_loop_array_paths(expression, call_site_source, call_line)
+    }
+
+    fn resolve_route_prefix(
+        &self,
+        route_file: &str,
+        enclosing_symbol: Option<&str>,
+        candidates: &[(String, String)],
+    ) -> Option<String> {
+        let borrowed: Vec<(&str, &str)> = candidates
+            .iter()
+            .map(|(name, source)| (name.as_str(), source.as_str()))
+            .collect();
+        route_prefix::resolve_route_prefix(route_file, enclosing_symbol, &borrowed)
     }
 
     fn is_http_route_call_at(&self, call_site_source: &str, call_line: u32) -> bool {

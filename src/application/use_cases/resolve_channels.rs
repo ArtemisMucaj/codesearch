@@ -246,7 +246,65 @@ impl ResolveChannelsUseCase {
         // resolved endpoint per array element, replacing the placeholder.
         self.expand_loop_registered_routes(&mut resolved, sources_by_file);
 
+        // Mount-prefix resolution: an Express route's registered path is not its
+        // served path when the router is mounted under a prefix
+        // (`app.use('/history', router)`). Prepend the traced prefix so the
+        // served path is what joins across services. Runs last so it sees the
+        // final (loop-expanded) route set.
+        self.apply_route_prefixes(&mut resolved, config_candidates);
+
         resolved
+    }
+
+    /// Prepend the mount prefix to each resolved HTTP route whose router is
+    /// mounted under a string-literal prefix (see
+    /// [`ChannelResolver::resolve_route_prefix`]). A route the tracer cannot
+    /// resolve a prefix for keeps its bare registered path unchanged — no guess.
+    ///
+    /// Only HTTP consumers (server routes) are prefixed; HTTP producers (client
+    /// calls) already carry their full target path. The prefix is memoized per
+    /// `(file, enclosing_symbol)` so a router registering many routes traces once.
+    fn apply_route_prefixes(
+        &self,
+        endpoints: &mut [ChannelEndpoint],
+        config_candidates: &[ConfigCandidate],
+    ) {
+        let mut cache: HashMap<(String, Option<String>), Option<String>> = HashMap::new();
+
+        for endpoint in endpoints.iter_mut() {
+            if endpoint.protocol() != Protocol::Http
+                || endpoint.role() != ChannelRole::Consumer
+                || !endpoint.is_resolved()
+            {
+                continue;
+            }
+
+            let key = (
+                endpoint.file_path().to_string(),
+                endpoint.enclosing_symbol().map(str::to_string),
+            );
+            let prefix = cache
+                .entry(key)
+                .or_insert_with(|| {
+                    self.resolver.resolve_route_prefix(
+                        endpoint.file_path(),
+                        endpoint.enclosing_symbol(),
+                        config_candidates,
+                    )
+                })
+                .clone();
+
+            let Some(prefix) = prefix else { continue };
+            let prefixed_raw = join_route(&prefix, endpoint.channel_raw());
+            let (host, normalized, is_pattern) = normalize_channel(Protocol::Http, &prefixed_raw);
+            *endpoint = endpoint.clone().resolve_channel(prefixed_raw, normalized);
+            if let Some(host) = host {
+                *endpoint = endpoint.clone().with_host(host);
+            }
+            if is_pattern {
+                *endpoint = endpoint.clone().as_pattern();
+            }
+        }
     }
 
     /// Replace each unresolved HTTP endpoint whose channel is a loop-variable
@@ -630,6 +688,17 @@ fn classify_ref(package: &str, callee_symbol: &str) -> Option<RefKind> {
     None
 }
 
+/// Join a mount prefix and a route's registered path into the served path,
+/// collapsing the slash between them (`/history` + `/:id` → `/history/:id`).
+fn join_route(prefix: &str, path: &str) -> String {
+    let left = prefix.trim_end_matches('/');
+    let right = path.trim_start_matches('/');
+    if right.is_empty() {
+        return left.to_string();
+    }
+    format!("{left}/{right}")
+}
+
 /// Strip a JS/TS string literal to its inner text (`'/path'` → `/path`),
 /// returning `None` when `raw` is not a quoted string (an identifier or property
 /// access built at runtime).
@@ -700,6 +769,8 @@ mod tests {
         /// default) reports `true`, so route synthesis is not gated unless a
         /// test opts into the settings-getter case with `Some(false)`.
         is_route_call: Option<bool>,
+        /// Mount prefix the stub reports for any route registration site.
+        route_prefix: Option<String>,
     }
 
     impl ChannelResolver for StubResolver {
@@ -737,6 +808,15 @@ mod tests {
 
         fn is_http_route_call_at(&self, _call_site_source: &str, _call_line: u32) -> bool {
             self.is_route_call.unwrap_or(true)
+        }
+
+        fn resolve_route_prefix(
+            &self,
+            _route_file: &str,
+            _enclosing_symbol: Option<&str>,
+            _candidates: &[(String, String)],
+        ) -> Option<String> {
+            self.route_prefix.clone()
         }
     }
 
@@ -1104,6 +1184,93 @@ mod tests {
         paths.sort();
         assert_eq!(paths, vec!["/create", "/delete", "/search"]);
         assert!(out.iter().all(|e| e.channel_raw() != "route.path"));
+    }
+
+    /// A resolved HTTP route whose router is mounted under a prefix has that
+    /// prefix prepended to its served path (raw and normalized), and gains no
+    /// prefix twin — the endpoint is rewritten in place.
+    #[test]
+    fn prepends_resolved_mount_prefix_to_http_route() {
+        let uc = ResolveChannelsUseCase::new(Arc::new(StubResolver {
+            route_prefix: Some("/history".to_string()),
+            ..Default::default()
+        }));
+
+        let route = ChannelEndpoint::new(
+            "repo".to_string(),
+            "src/router.ts".to_string(),
+            16,
+            Protocol::Http,
+            ChannelRole::Consumer,
+            "/:homeId/:deviceId".to_string(),
+            "/{}/{}".to_string(),
+            0.8,
+            EndpointSource::TreeSitter,
+        )
+        .with_method("GET")
+        .with_enclosing_symbol("configurationRouter");
+
+        let out = uc.resolve("repo", vec![route], &HashMap::new(), &[], &HashMap::new());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].channel_raw(), "/history/:homeId/:deviceId");
+        assert_eq!(out[0].channel_normalized(), "/history/{}/{}");
+        // Method and role are untouched.
+        assert_eq!(out[0].method(), Some("GET"));
+        assert_eq!(out[0].role(), ChannelRole::Consumer);
+    }
+
+    /// When the tracer resolves no prefix, the route keeps its bare registered
+    /// path — no guess, no regression against pre-prefix behaviour.
+    #[test]
+    fn keeps_bare_path_when_no_prefix_resolved() {
+        // Default stub returns `None` for the prefix.
+        let uc = ResolveChannelsUseCase::new(Arc::new(StubResolver::default()));
+
+        let route = ChannelEndpoint::new(
+            "repo".to_string(),
+            "src/router.ts".to_string(),
+            16,
+            Protocol::Http,
+            ChannelRole::Consumer,
+            "/status".to_string(),
+            "/status".to_string(),
+            0.8,
+            EndpointSource::TreeSitter,
+        )
+        .with_method("GET");
+
+        let out = uc.resolve("repo", vec![route], &HashMap::new(), &[], &HashMap::new());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].channel_normalized(), "/status");
+    }
+
+    /// The prefix pass touches HTTP *server* routes only; an HTTP *producer*
+    /// (client call) already carries its full target path and must be left alone
+    /// even though the stub would offer a prefix.
+    #[test]
+    fn does_not_prefix_http_producer() {
+        let uc = ResolveChannelsUseCase::new(Arc::new(StubResolver {
+            route_prefix: Some("/history".to_string()),
+            ..Default::default()
+        }));
+
+        let client = ChannelEndpoint::new(
+            "repo".to_string(),
+            "src/client.ts".to_string(),
+            5,
+            Protocol::Http,
+            ChannelRole::Producer,
+            "/history/:id".to_string(),
+            "/history/{}".to_string(),
+            0.7,
+            EndpointSource::TreeSitter,
+        )
+        .with_method("GET");
+
+        let out = uc.resolve("repo", vec![client], &HashMap::new(), &[], &HashMap::new());
+        assert_eq!(out.len(), 1);
+        // Unchanged — no double prefix.
+        assert_eq!(out[0].channel_normalized(), "/history/{}");
     }
 
     /// A non-messaging package reference never originates an endpoint.
