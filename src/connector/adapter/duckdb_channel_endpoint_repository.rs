@@ -340,6 +340,28 @@ impl ChannelEndpointRepository for DuckdbChannelEndpointRepository {
         );
         Ok(())
     }
+
+    async fn delete_tree_sitter_by_repository(
+        &self,
+        repository_id: &str,
+    ) -> Result<(), DomainError> {
+        let conn = self.conn.lock().await;
+        let count = conn
+            .execute(
+                "DELETE FROM channel_endpoints \
+                 WHERE repository_id = ? AND source = ?",
+                params![repository_id, EndpointSource::TreeSitter.as_str()],
+            )
+            .map_err(|e| {
+                DomainError::storage(format!("Failed to delete tree-sitter endpoints: {}", e))
+            })?;
+
+        debug!(
+            "Deleted {} tree-sitter channel endpoints for repository {}",
+            count, repository_id
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]

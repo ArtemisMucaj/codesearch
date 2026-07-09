@@ -50,7 +50,11 @@ async fn setup_test_env() -> TestEnv {
     .with_channel_extraction(
         Arc::new(TreeSitterChannelExtractor::new()),
         Arc::clone(&channel_repo),
-    );
+    )
+    // The resolution pass (library confirmation, config resolution, loop-route
+    // fan-out) only runs when a resolver is wired — without it, re-index
+    // regressions in that pass go untested.
+    .with_channel_resolution(Arc::new(TreeSitterChannelExtractor::new()));
 
     TestEnv {
         index_use_case,
@@ -227,4 +231,71 @@ async fn test_incremental_reindex_does_not_duplicate_endpoints() {
     index(&env, &path, "orders-tmp").await;
     let after_delete = env.channel_repo.find_by_repository(&repo_id).await.unwrap();
     assert!(after_delete.is_empty());
+}
+
+/// Re-indexing an Express router that registers routes in a loop
+/// (`router.get(route.path, …)`) must not accumulate stale `route.path`
+/// placeholders. The resolution pass fans the placeholder out into one endpoint
+/// per route-table entry; without clearing the tree-sitter set first, the
+/// upsert-only save left the consumed placeholder behind as an orphan.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_loop_registered_routes_reindex_leaves_no_placeholder() {
+    let env = setup_test_env().await;
+
+    let temp_dir = tempdir().expect("Failed to create temp directory");
+    let router = r#"
+const express = require('express')
+
+function createRouter() {
+    const router = express.Router()
+    const routes = [
+        { path: '/getstatus', factory: getStatus },
+        { path: '/setmode', factory: setMode },
+        { path: '/getconfigs', factory: getConfigs },
+    ]
+    for (const route of routes) {
+        const handler = createAsyncRoute(route.factory())
+        router.get(route.path, handler)
+        router.post(route.path, handler)
+    }
+    return router
+}
+module.exports = createRouter
+"#;
+    std::fs::write(temp_dir.path().join("index.js"), router).unwrap();
+    let path = temp_dir.path().to_str().unwrap().to_string();
+
+    let repo_id = index(&env, &path, "routes-tmp").await;
+
+    // Helper: the endpoint set for this repo, and its placeholder subset.
+    let assert_clean = |endpoints: &[codesearch::ChannelEndpoint]| {
+        let http: Vec<_> = endpoints
+            .iter()
+            .filter(|e| e.protocol() == Protocol::Http && e.role() == ChannelRole::Consumer)
+            .collect();
+        // 3 paths × GET+POST = 6 resolved routes, no unresolved `route.path` left.
+        assert_eq!(http.len(), 6, "expected 6 fanned-out routes");
+        assert!(
+            http.iter().all(|e| e.is_resolved()),
+            "no route should stay unresolved"
+        );
+        assert!(
+            !endpoints.iter().any(|e| e.channel_raw() == "route.path"),
+            "the loop placeholder must not survive"
+        );
+        let mut paths: Vec<_> = http.iter().map(|e| e.channel_normalized()).collect();
+        paths.sort_unstable();
+        paths.dedup();
+        assert_eq!(paths, vec!["/getconfigs", "/getstatus", "/setmode"]);
+    };
+
+    let initial = env.channel_repo.find_by_repository(&repo_id).await.unwrap();
+    assert_clean(&initial);
+
+    // Unchanged re-index (forces the resolution pass again): still clean, and the
+    // endpoint count is stable — no duplicates, no resurrected placeholder.
+    index(&env, &path, "routes-tmp").await;
+    let reindexed = env.channel_repo.find_by_repository(&repo_id).await.unwrap();
+    assert_eq!(reindexed.len(), initial.len(), "re-index changed the count");
+    assert_clean(&reindexed);
 }

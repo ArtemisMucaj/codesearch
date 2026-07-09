@@ -11,6 +11,7 @@ mod fetch;
 mod kafka_positional;
 mod kafkajs;
 mod mqtt_js;
+mod node_http;
 
 use super::Detector;
 use crate::domain::Language;
@@ -32,6 +33,7 @@ pub(super) fn detectors() -> Vec<Detector> {
     all.extend(express::detectors());
     all.extend(axios::detectors());
     all.extend(fetch::detectors());
+    all.extend(node_http::detectors());
     all.extend(kafkajs::detectors());
     all.extend(kafka_positional::detectors());
     all.extend(mqtt_js::detectors());

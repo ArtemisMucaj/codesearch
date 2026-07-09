@@ -96,4 +96,37 @@ pub trait ChannelResolver: Send + Sync {
         call_site_source: &str,
         call_line: u32,
     ) -> Option<Vec<String>>;
+
+    /// The URL path prefix an HTTP route is mounted under, traced across the
+    /// codebase, or `None` when no literal prefix can be established.
+    ///
+    /// Express routes are registered on a router in one place and *mounted* under
+    /// a prefix in another (`app.use('/history', router)`), often via a factory
+    /// function and a custom wrapper method:
+    ///
+    /// ```ts
+    /// // configuration-router.ts
+    /// export function configurationRouter(router) { router.get('/:id', …) }
+    /// // app.ts
+    /// httpApp.addRouter('/history', configurationRouter(router))
+    /// // http-app.ts
+    /// addRouter(path, router) { this.app.use(path, router) }
+    /// ```
+    ///
+    /// The registered path (`/:id`) is not the served path (`/history/:id`). Given
+    /// the route's registration site — the file it is registered in and the
+    /// enclosing function/router symbol — an implementation follows the router
+    /// object through factory calls and mount wrappers to the `.use(prefix, …)`
+    /// that applies a string-literal prefix, and returns that prefix. `candidates`
+    /// supply every module source so the trace can cross files.
+    ///
+    /// Returns `None` when the route is mounted at the root, the prefix is
+    /// computed at runtime, or the chain cannot be followed — in which case the
+    /// caller keeps the bare registered path rather than guessing.
+    fn resolve_route_prefix(
+        &self,
+        route_file: &str,
+        enclosing_symbol: Option<&str>,
+        candidates: &[(String, String)],
+    ) -> Option<String>;
 }

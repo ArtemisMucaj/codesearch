@@ -551,6 +551,15 @@ impl IndexRepositoryUseCase {
             &sources_by_file,
         );
 
+        // Resolution rewrites the tree-sitter set: it resolves endpoints in place
+        // (same id, overwritten by the upsert) but also *replaces* some — a
+        // loop-registered route (`router.get(route.path, …)`) is dropped and
+        // fanned out into one new-id endpoint per route-table entry. The dropped
+        // placeholder keeps its own id, so the upsert alone would leave it behind
+        // as a stale `[unresolved]` row. Delete the tree-sitter set first, then
+        // save the resolved result as the sole source of truth (synthesized
+        // endpoints were already cleared above).
+        repo.delete_tree_sitter_by_repository(repository_id).await?;
         repo.save_batch(&resolved).await?;
         debug!(
             "Resolved {} channel endpoints ({} config candidates)",
