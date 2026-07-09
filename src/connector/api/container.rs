@@ -7,12 +7,15 @@ use tracing::{debug, warn};
 
 use crate::application::{
     AnalysisRepository, CallGraphRepository, CallGraphUseCase, ChannelEndpointRepository,
-    ChannelLinkUseCase, FileHashRepository, MetadataRepository, QueryExpander,
+    ChannelLinkUseCase, ChatClient, FileHashRepository, ImportSessionUseCase,
+    MemoryExtractionUseCase, MemoryRepository, MemorySearchUseCase, MetadataRepository,
+    QueryExpander,
 };
 use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::scip::ScipRunner;
 use crate::connector::adapter::{
-    DuckdbAnalysisRepository, NamespaceEmbeddingConfig, NoEmbedding, NO_EMBEDDINGS_MODEL,
+    DuckdbAnalysisRepository, DuckdbMemoryRepository, NamespaceEmbeddingConfig, NoEmbedding,
+    MEMORY_DB_FILE, NO_EMBEDDINGS_MODEL,
 };
 use crate::{
     AnthropicClient, AnthropicReranking, ClusterDetectionUseCase, DeleteRepositoryUseCase,
@@ -735,6 +738,44 @@ impl Container {
     pub fn symbol_cluster_detection_use_case(&self) -> SymbolClusterDetectionUseCase {
         SymbolClusterDetectionUseCase::new(self.call_graph_use_case.clone())
             .with_storage(self.analysis_repo.clone())
+    }
+
+    /// Open the memory store — a dedicated DuckDB file (`memory.duckdb`)
+    /// separate from the code index, created on first use.
+    ///
+    /// The store is keyed to the container's embedding setup (model +
+    /// dimensions); opening it with a different setup is a hard error, since
+    /// stored memory vectors would be incomparable with new queries.
+    pub fn memory_repository(&self) -> Result<Arc<dyn MemoryRepository>> {
+        let db_path = PathBuf::from(&self.config.data_dir).join(MEMORY_DB_FILE);
+        let embedding_cfg = self.embedding_service.config();
+        let repo = DuckdbMemoryRepository::new(
+            &db_path,
+            embedding_cfg.dimensions(),
+            embedding_cfg.model_name(),
+        )?;
+        Ok(Arc::new(repo))
+    }
+
+    /// Session import + memory extraction, driven by the given chat model.
+    pub fn memory_import_use_case(
+        &self,
+        chat_client: Arc<dyn ChatClient>,
+    ) -> Result<ImportSessionUseCase> {
+        let memory_repo = self.memory_repository()?;
+        let extraction = MemoryExtractionUseCase::new(
+            chat_client,
+            Arc::clone(&memory_repo),
+            self.embedding_service.clone(),
+        );
+        Ok(ImportSessionUseCase::new(memory_repo, extraction))
+    }
+
+    pub fn memory_search_use_case(&self) -> Result<MemorySearchUseCase> {
+        Ok(MemorySearchUseCase::new(
+            self.memory_repository()?,
+            self.embedding_service.clone(),
+        ))
     }
 
     pub fn data_dir(&self) -> &str {

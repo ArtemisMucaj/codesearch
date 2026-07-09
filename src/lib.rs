@@ -9,11 +9,13 @@ pub use application::{
     ChannelEndpointRepository, ChannelExtractor, ChannelLinkOptions, ChannelLinkReport,
     ChannelLinkUseCase, ChannelResolver, ChatClient, ClusterDetectionUseCase, ContextNode,
     DeleteRepositoryUseCase, EmbeddingService, ExecutionFeaturesUseCase, ExplainResult,
-    ExplainUseCase, FileHashRepository, FileRelationshipUseCase, GraphExpansionUseCase,
-    ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode, IndexRepositoryUseCase,
-    ListRepositoriesUseCase, MetadataRepository, ParserService, QueryExpander, RerankingService,
-    ResolveChannelsUseCase, ResolvedConfigValue, Scip, SearchCodeUseCase, SnippetLookupUseCase,
-    SymbolClusterDetectionUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
+    ExplainUseCase, ExtractionReport, FileHashRepository, FileRelationshipUseCase,
+    GraphExpansionUseCase, ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode, ImportOutcome,
+    ImportSessionUseCase, IndexRepositoryUseCase, ListRepositoriesUseCase, MemoryExtractionUseCase,
+    MemoryRepository, MemorySearchUseCase, MetadataRepository, ParserService, QueryExpander,
+    RerankingService, ResolveChannelsUseCase, ResolvedConfigValue, Scip, SearchCodeUseCase,
+    SnippetLookupUseCase, SymbolClusterDetectionUseCase, SymbolContext, SymbolContextUseCase,
+    VectorRepository,
 };
 
 pub use application::{aggregate, render, VizFormat, DEFAULT_NODE_LIMIT};
@@ -24,19 +26,21 @@ pub use cli::{
 };
 
 pub use connector::{
-    AnthropicClient, AnthropicReranking, DuckdbAnalysisRepository, DuckdbCallGraphRepository,
-    DuckdbChannelEndpointRepository, DuckdbFileHashRepository, DuckdbMetadataRepository,
+    parse_transcript, parse_transcript_file, AnthropicClient, AnthropicReranking,
+    DuckdbAnalysisRepository, DuckdbCallGraphRepository, DuckdbChannelEndpointRepository,
+    DuckdbFileHashRepository, DuckdbMemoryRepository, DuckdbMetadataRepository,
     DuckdbVectorRepository, InMemoryVectorRepository, LlmQueryExpander, MockEmbedding,
     MockReranking, NamespaceEmbeddingConfig, NoEmbedding, OpenAiChatClient, OpenAiEmbedding,
     OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterChannelExtractor, TreeSitterParser,
-    DEFAULT_ONNX_EMBEDDING_MODEL, NO_EMBEDDINGS_MODEL,
+    DEFAULT_ONNX_EMBEDDING_MODEL, MEMORY_DB_FILE, NO_EMBEDDINGS_MODEL,
 };
 
 pub use domain::{
     compute_file_hash, ChannelEdge, ChannelEndpoint, ChannelRole, Cluster, ClusterGraph, CodeChunk,
     DomainError, Embedding, EmbeddingConfig, EndpointSource, ExecutionFeature, FeatureNode,
-    FileHash, IndexingStatus, Language, NodeType, Protocol, ReferenceKind, Repository, SearchQuery,
-    SearchResult, SymbolCommunity, SymbolCommunityGraph, SymbolReference, VectorStore,
+    FileHash, ImportedSession, IndexingStatus, Language, MemoryItem, MemoryKind, MemoryOperation,
+    NodeType, Protocol, ReferenceKind, Repository, SearchQuery, SearchResult, SessionMessage,
+    SessionTranscript, SymbolCommunity, SymbolCommunityGraph, SymbolReference, VectorStore,
 };
 
 pub use domain::{CommunityMeta, GraphEdge, GraphLevel, GraphNode, GraphView};

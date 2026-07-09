@@ -265,6 +265,9 @@ async fn main() -> Result<()> {
                 | Commands::Uses { .. }
                 | Commands::Visualize { .. }
                 | Commands::Tui { .. }
+                // Memory commands only touch memory.duckdb, never the code
+                // index, so the index database can stay read-only.
+                | Commands::Memory { .. }
         );
 
     let config = ContainerConfig {

@@ -198,6 +198,100 @@ pub enum TuiMode {
     Context,
 }
 
+/// Memory kind filter for `memory search` / `memory list`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MemoryKindArg {
+    Preference,
+    Experience,
+    Skill,
+    Fact,
+}
+
+impl From<MemoryKindArg> for crate::domain::MemoryKind {
+    fn from(arg: MemoryKindArg) -> Self {
+        match arg {
+            MemoryKindArg::Preference => crate::domain::MemoryKind::Preference,
+            MemoryKindArg::Experience => crate::domain::MemoryKind::Experience,
+            MemoryKindArg::Skill => crate::domain::MemoryKind::Skill,
+            MemoryKindArg::Fact => crate::domain::MemoryKind::Fact,
+        }
+    }
+}
+
+/// Subcommands for the `memory` command — long-term memory extracted from
+/// finished assistant sessions (stored in `memory.duckdb`, separate from the
+/// code index).
+#[derive(Subcommand)]
+pub enum MemorySubcommand {
+    /// Import a finished session transcript and extract memories from it.
+    ///
+    /// Accepts Claude Code session logs (~/.claude/projects/<project>/<id>.jsonl)
+    /// or generic JSONL chat logs ({"role": "...", "content": "..."} per line).
+    /// Extraction calls the configured LLM — point ANTHROPIC_BASE_URL /
+    /// ANTHROPIC_MODEL / ANTHROPIC_API_KEY (or the OPENAI_* equivalents with
+    /// --llm open-ai) at a small model; extraction is a summarization-style
+    /// task that does not need a frontier model.
+    Import {
+        /// Path to the transcript file (JSONL).
+        path: String,
+
+        /// LLM provider for extraction: 'anthropic' (default) or 'open-ai'
+        #[arg(long, value_enum, default_value = "anthropic")]
+        llm: LlmTarget,
+
+        /// Re-import even if this session was already imported.
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Search stored memories (hybrid semantic + keyword).
+    Search {
+        query: String,
+
+        /// Maximum number of results.
+        #[arg(long, default_value = "10")]
+        num: usize,
+
+        /// Restrict to one memory kind.
+        #[arg(short, long, value_enum)]
+        kind: Option<MemoryKindArg>,
+
+        /// Output format: text or json.
+        #[arg(short = 'F', long, value_enum, default_value = "text")]
+        format: OutputFormatTextJson,
+    },
+
+    /// List stored memories, newest first.
+    List {
+        /// Restrict to one memory kind.
+        #[arg(short, long, value_enum)]
+        kind: Option<MemoryKindArg>,
+
+        /// Output format: text or json.
+        #[arg(short = 'F', long, value_enum, default_value = "text")]
+        format: OutputFormatTextJson,
+    },
+
+    /// Show the full content of one memory item.
+    Show {
+        /// Memory item ID (or unique kind/name as '<kind>/<name>').
+        id: String,
+    },
+
+    /// Delete a memory item by ID.
+    Delete {
+        /// Memory item ID.
+        id: String,
+    },
+
+    /// List imported sessions.
+    Sessions {
+        /// Output format: text or json.
+        #[arg(short = 'F', long, value_enum, default_value = "text")]
+        format: OutputFormatTextJson,
+    },
+}
+
 /// Embedding backend to use for indexing and search.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum EmbeddingTarget {
@@ -455,6 +549,12 @@ pub enum Commands {
         /// Auto-aggregate when the graph has more than this many nodes.
         #[arg(long, default_value_t = 5000)]
         node_limit: usize,
+    },
+
+    /// Long-term memory: import finished sessions and search what was learned
+    Memory {
+        #[command(subcommand)]
+        subcommand: MemorySubcommand,
     },
 
     /// Start MCP (Model Context Protocol) server for integration with AI tools

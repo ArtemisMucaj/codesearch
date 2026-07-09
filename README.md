@@ -247,6 +247,24 @@ codesearch explain authenticate --llm open-ai
 
 See [Call Graph Analysis — LLM Explanation](docs/features/call-graph.md#llm-explanation-codesearch-explain) for the full flag reference, environment variables, and example output.
 
+## Long-Term Memory (`memory`)
+
+Import finished assistant sessions (Claude Code transcripts or generic JSONL
+chat logs) and distill them into durable, searchable memories — user
+preferences, reusable experiences, procedural skills, and project facts.
+Extraction uses a small LLM via the same provider configuration as `explain`;
+memories live in their own database (`~/.codesearch/memory.duckdb`), separate
+from the code index.
+
+```bash
+codesearch memory import ~/.claude/projects/<project>/<session-id>.jsonl
+codesearch memory search "how do we handle lock conflicts"
+codesearch memory list --kind preference
+```
+
+See [Long-Term Memory](docs/features/memory.md) for the memory kinds, update
+semantics, and model configuration.
+
 ## Interactive TUI (`tui`)
 
 A full-screen terminal UI combining search, impact analysis, and context lookup in one interface.

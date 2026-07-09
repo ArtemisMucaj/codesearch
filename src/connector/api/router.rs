@@ -1,14 +1,14 @@
 use anyhow::Result;
 
-use crate::cli::{ClustersSubcommand, SymbolClustersSubcommand};
+use crate::cli::{ClustersSubcommand, MemorySubcommand, SymbolClustersSubcommand};
 use crate::{Commands, FeaturesSubcommand};
 
 use super::container::Container;
 use super::controller::{
     ChannelsController, ClustersController, DeleteController, ExecutionFeaturesController,
     ExplainController, ImpactController, IndexController, ListRepositoriesController,
-    SearchController, StatsController, SymbolClustersController, SymbolContextController,
-    UsesController, VisualizeController,
+    MemoryController, SearchController, StatsController, SymbolClustersController,
+    SymbolContextController, UsesController, VisualizeController,
 };
 
 pub struct Router<'a> {
@@ -20,6 +20,7 @@ pub struct Router<'a> {
     stats_controller: StatsController<'a>,
     index_controller: IndexController<'a>,
     list_repositories_controller: ListRepositoriesController<'a>,
+    memory_controller: MemoryController<'a>,
     delete_controller: DeleteController<'a>,
     uses_controller: UsesController<'a>,
     execution_features_controller: ExecutionFeaturesController<'a>,
@@ -39,6 +40,7 @@ impl<'a> Router<'a> {
             stats_controller: StatsController::new(container),
             index_controller: IndexController::new(container),
             list_repositories_controller: ListRepositoriesController::new(container),
+            memory_controller: MemoryController::new(container),
             delete_controller: DeleteController::new(container),
             uses_controller: UsesController::new(container),
             execution_features_controller: ExecutionFeaturesController::new(container),
@@ -198,6 +200,29 @@ impl<'a> Router<'a> {
                     .visualize(repository, level, format, output, aggregate, node_limit)
                     .await
             }
+            Commands::Memory { subcommand } => match subcommand {
+                MemorySubcommand::Import { path, llm, force } => {
+                    self.memory_controller.import(path, llm, force).await
+                }
+                MemorySubcommand::Search {
+                    query,
+                    num,
+                    kind,
+                    format,
+                } => {
+                    self.memory_controller
+                        .search(query, num, kind, format)
+                        .await
+                }
+                MemorySubcommand::List { kind, format } => {
+                    self.memory_controller.list(kind, format).await
+                }
+                MemorySubcommand::Show { id } => self.memory_controller.show(id).await,
+                MemorySubcommand::Delete { id } => self.memory_controller.delete(id).await,
+                MemorySubcommand::Sessions { format } => {
+                    self.memory_controller.sessions(format).await
+                }
+            },
             Commands::Create { .. } => Err(anyhow::anyhow!(
                 "create command is handled separately in main"
             )),
