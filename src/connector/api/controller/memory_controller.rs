@@ -64,7 +64,7 @@ impl<'a> MemoryController<'a> {
     /// so the picker stays open and live throughout.
     pub async fn serve_import_requests(
         &self,
-        requests: std::sync::mpsc::Receiver<ImportRequest>,
+        mut requests: tokio::sync::mpsc::UnboundedReceiver<ImportRequest>,
         events: std::sync::mpsc::Sender<ImportEvent>,
         llm: LlmTarget,
     ) -> Result<()> {
@@ -81,8 +81,9 @@ impl<'a> MemoryController<'a> {
 
         // The picker sends requests one at a time (import-highlighted), so a
         // simple sequential loop keeps memory writes serialized and progress
-        // easy to follow. `recv` blocks the worker thread, not the UI.
-        while let Ok(ImportRequest { session }) = requests.recv() {
+        // easy to follow. `recv().await` yields the async worker while idle
+        // instead of pinning a runtime thread.
+        while let Some(ImportRequest { session }) = requests.recv().await {
             let id = (session.source.as_str().to_string(), session.id.clone());
             let _ = events.send(ImportEvent::Started { id: id.clone() });
 
@@ -109,8 +110,14 @@ impl<'a> MemoryController<'a> {
         use_case: &ImportSessionUseCase,
         session: &DiscoveredSession,
     ) -> Result<String> {
-        let transcript = load_discovered_transcript(session)
-            .with_context(|| format!("could not load '{}'", session.display_title()))?;
+        // Loading a transcript is blocking file/SQLite I/O; keep it off the
+        // async worker thread.
+        let title = session.display_title().to_string();
+        let owned = session.clone();
+        let transcript = tokio::task::spawn_blocking(move || load_discovered_transcript(&owned))
+            .await
+            .map_err(|e| anyhow::anyhow!("transcript load task panicked: {e}"))?
+            .with_context(|| format!("could not load '{title}'"))?;
         let outcome = use_case.execute(&transcript, true).await?;
         Ok(import_outcome_summary(&outcome))
     }
@@ -140,26 +147,20 @@ impl<'a> MemoryController<'a> {
         let multiple = transcripts.len() > 1;
         let total = transcripts.len();
         let mut output = String::new();
-        // Each session is one (slow) LLM extraction call. Emit live progress to
-        // stderr so the CLI doesn't look hung between the picker closing and the
-        // final report; the report itself still goes to stdout as the return
-        // value, so stderr progress never pollutes it.
+        // Each session is one (slow) LLM extraction call. Emit per-session
+        // progress via `tracing` (not raw stderr) so the CLI shows life without
+        // this connector-layer code owning terminal output; the report itself is
+        // returned to the router as the stdout value.
         for (idx, transcript) in transcripts.iter().enumerate() {
-            let title = transcript_label(transcript);
-            eprint!(
-                "\r\x1b[2KExtracting memories [{}/{}]: {} …",
+            tracing::info!(
+                "extracting memories [{}/{}]: {}",
                 idx + 1,
                 total,
-                title
+                transcript_label(transcript)
             );
-            let _ = std::io::Write::flush(&mut std::io::stderr());
-
             let outcome = use_case.execute(transcript, force).await?;
             output.push_str(&render_import_outcome(&outcome, multiple));
         }
-        // Clear the progress line so the stdout report starts clean.
-        eprint!("\r\x1b[2K");
-        let _ = std::io::Write::flush(&mut std::io::stderr());
         Ok(output)
     }
 
@@ -408,7 +409,7 @@ impl<'a> MemoryController<'a> {
 /// immediately and fills in as each source (Claude / OpenCode / Zed) reports.
 pub fn run_import_picker_ui(
     events: std::sync::mpsc::Receiver<ImportEvent>,
-    import_tx: std::sync::mpsc::Sender<ImportRequest>,
+    import_tx: tokio::sync::mpsc::UnboundedSender<ImportRequest>,
 ) -> Result<()> {
     let now = now_secs();
     let (tx, rx) = std::sync::mpsc::channel::<Vec<DiscoveredSession>>();

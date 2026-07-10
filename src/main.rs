@@ -326,8 +326,10 @@ async fn main() -> Result<()> {
             use codesearch::tui::import_picker::{ImportEvent, ImportRequest};
 
             // Two channels bridge the (blocking) picker UI and the (async)
-            // import worker: requests flow UI → worker, progress flows back.
-            let (req_tx, req_rx) = std::sync::mpsc::channel::<ImportRequest>();
+            // import worker: requests flow UI → worker (a tokio channel so the
+            // worker `recv().await`s instead of pinning a runtime thread),
+            // progress flows back over a std channel the picker drains by poll.
+            let (req_tx, req_rx) = tokio::sync::mpsc::unbounded_channel::<ImportRequest>();
             let (evt_tx, evt_rx) = std::sync::mpsc::channel::<ImportEvent>();
 
             // Worker: build the container (loads models) in the background, then

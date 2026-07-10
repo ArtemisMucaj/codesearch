@@ -13,10 +13,9 @@ use crate::domain::{
     SessionTranscript,
 };
 
-use super::{home_dir, tail_preview, truncate_chars};
+use super::{home_dir, truncate_chars};
 
 const MAX_TITLE_CHARS: usize = 80;
-const PREVIEW_MESSAGES: usize = 6;
 
 /// Open the OpenCode database read-only, or `Ok(None)` when it is absent.
 fn open_db() -> Result<Option<Connection>, DomainError> {
@@ -38,11 +37,23 @@ pub fn discover() -> Result<Vec<DiscoveredSession>, DomainError> {
         .to_string_lossy()
         .to_string();
 
-    // `time_updated` is milliseconds since the epoch. Skip archived sessions.
+    // Discovery lists sessions CHEAPLY, like the Zed source: a single query over
+    // the `session` table, with no message/part reads. `message_count` comes from
+    // an index-backed COUNT subquery; the message body (needed only for the
+    // right-pane transcript) is materialized lazily by `load_transcript` when a
+    // session is actually highlighted. This avoids the previous per-session
+    // message/part queries that made OpenCode discovery slow for large histories.
+    //
+    // `time_updated` is milliseconds since the epoch. Skip archived sessions and
+    // sessions with no messages at all.
     let mut stmt = conn
         .prepare(
-            "SELECT id, title, directory, time_updated \
-             FROM session WHERE time_archived IS NULL ORDER BY time_updated DESC",
+            "SELECT s.id, s.title, s.directory, s.time_updated, \
+                    (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id) AS msg_count \
+             FROM session s \
+             WHERE s.time_archived IS NULL \
+               AND EXISTS (SELECT 1 FROM message m WHERE m.session_id = s.id) \
+             ORDER BY s.time_updated DESC",
         )
         .map_err(|e| DomainError::storage(format!("opencode query prepare failed: {e}")))?;
 
@@ -53,34 +64,25 @@ pub fn discover() -> Result<Vec<DiscoveredSession>, DomainError> {
                 row.get::<_, String>(1).unwrap_or_default(),
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, i64>(3).unwrap_or(0),
+                row.get::<_, i64>(4).unwrap_or(0),
             ))
         })
         .map_err(|e| DomainError::storage(format!("opencode query failed: {e}")))?;
 
     let mut sessions = Vec::new();
     for row in rows {
-        let (id, title, directory, time_updated_ms) =
+        let (id, title, directory, time_updated_ms, msg_count) =
             row.map_err(|e| DomainError::storage(format!("opencode row read failed: {e}")))?;
-
-        let texts = message_texts(&conn, &id)?;
-        if texts.is_empty() {
-            continue;
-        }
-        let tail: Vec<String> = texts
-            .iter()
-            .rev()
-            .take(PREVIEW_MESSAGES)
-            .rev()
-            .cloned()
-            .collect();
 
         sessions.push(DiscoveredSession {
             source: SessionSource::OpenCode,
             title: truncate_chars(title.trim(), MAX_TITLE_CHARS),
             cwd: directory,
             updated_at: time_updated_ms / 1000,
-            message_count: texts.len(),
-            tail_preview: tail_preview(&tail),
+            message_count: msg_count.max(0) as usize,
+            // Preview is not shown in the picker; leave it empty and let the
+            // full transcript load lazily on selection.
+            tail_preview: String::new(),
             locator: SessionLocator::Sqlite {
                 db_path: db_path.clone(),
                 session_id: id.clone(),
@@ -113,100 +115,108 @@ pub fn load_transcript(db_path: &str, session_id: &str) -> Result<SessionTranscr
     })
 }
 
-/// The plain text of each message in a session, ordered oldest→newest, used
-/// for previews and counting (tool activity elided).
-fn message_texts(conn: &Connection, session_id: &str) -> Result<Vec<String>, DomainError> {
-    Ok(ordered_messages(conn, session_id)?
-        .into_iter()
-        .map(|m| m.content)
-        .filter(|c| !c.trim().is_empty())
-        .collect())
-}
-
-/// Build the ordered `SessionMessage` list: one per `message` row, its text the
-/// concatenation of that message's `text` parts, with tool calls summarized.
+/// Build the ordered `SessionMessage` list in a SINGLE query: join `message`
+/// to its `part`s, ordered by (message time, part time), and group rows into
+/// messages in one pass. This avoids the N+1 pattern of one `part` query per
+/// message — important for OpenCode histories with many messages.
 fn ordered_messages(
     conn: &Connection,
     session_id: &str,
 ) -> Result<Vec<SessionMessage>, DomainError> {
-    // Roles per message, ordered.
-    let mut msg_stmt = conn
-        .prepare("SELECT id, data FROM message WHERE session_id = ?1 ORDER BY time_created ASC")
+    let mut stmt = conn
+        .prepare(
+            "SELECT m.id, m.data, p.data \
+             FROM message m \
+             LEFT JOIN part p ON p.message_id = m.id \
+             WHERE m.session_id = ?1 \
+             ORDER BY m.time_created ASC, p.time_created ASC",
+        )
         .map_err(|e| DomainError::storage(format!("opencode message prepare failed: {e}")))?;
-    let msg_rows = msg_stmt
+    let rows = stmt
         .query_map([session_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,         // message id
+                row.get::<_, String>(1)?,         // message data (role)
+                row.get::<_, Option<String>>(2)?, // part data (NULL if none)
+            ))
         })
         .map_err(|e| DomainError::storage(format!("opencode message query failed: {e}")))?;
 
+    // Group consecutive rows by message id (the ORDER BY keeps them contiguous).
     let mut messages = Vec::new();
-    for row in msg_rows {
-        let (msg_id, data) =
-            row.map_err(|e| DomainError::storage(format!("opencode message read failed: {e}")))?;
-        let role = serde_json::from_str::<Value>(&data)
-            .ok()
-            .and_then(|v| v.get("role").and_then(Value::as_str).map(str::to_string))
-            .unwrap_or_else(|| "assistant".to_string());
+    let mut current_id: Option<String> = None;
+    let mut role = String::new();
+    let mut parts: Vec<String> = Vec::new();
 
-        let text = message_part_text(conn, &msg_id)?;
-        if text.trim().is_empty() {
-            continue;
+    let flush = |messages: &mut Vec<SessionMessage>, role: &str, parts: &[String]| {
+        let content = parts.join("\n");
+        if !content.trim().is_empty() {
+            messages.push(SessionMessage {
+                role: role.to_string(),
+                content,
+                timestamp: None,
+            });
         }
-        messages.push(SessionMessage {
-            role,
-            content: text,
-            timestamp: None,
-        });
+    };
+
+    for row in rows {
+        let (msg_id, msg_data, part_data) =
+            row.map_err(|e| DomainError::storage(format!("opencode row read failed: {e}")))?;
+        if current_id.as_deref() != Some(&msg_id) {
+            if current_id.is_some() {
+                flush(&mut messages, &role, &parts);
+            }
+            current_id = Some(msg_id);
+            role = serde_json::from_str::<Value>(&msg_data)
+                .ok()
+                .and_then(|v| v.get("role").and_then(Value::as_str).map(str::to_string))
+                .unwrap_or_else(|| "assistant".to_string());
+            parts.clear();
+        }
+        if let Some(data) = part_data {
+            if let Some(rendered) = render_part(&data) {
+                parts.push(rendered);
+            }
+        }
+    }
+    if current_id.is_some() {
+        flush(&mut messages, &role, &parts);
     }
     Ok(messages)
 }
 
-/// Concatenate the renderable text of a message's parts.
-fn message_part_text(conn: &Connection, message_id: &str) -> Result<String, DomainError> {
-    let mut stmt = conn
-        .prepare("SELECT data FROM part WHERE message_id = ?1 ORDER BY time_created ASC")
-        .map_err(|e| DomainError::storage(format!("opencode part prepare failed: {e}")))?;
-    let rows = stmt
-        .query_map([message_id], |row| row.get::<_, String>(0))
-        .map_err(|e| DomainError::storage(format!("opencode part query failed: {e}")))?;
-
-    let mut parts = Vec::new();
-    for row in rows {
-        let data = row.map_err(|e| DomainError::storage(format!("opencode part read: {e}")))?;
-        let Ok(value) = serde_json::from_str::<Value>(&data) else {
-            continue;
-        };
-        match value.get("type").and_then(Value::as_str) {
-            Some("text") => {
-                if let Some(t) = value.get("text").and_then(Value::as_str) {
-                    if !t.trim().is_empty() {
-                        parts.push(t.trim().to_string());
-                    }
-                }
-            }
-            Some("tool") => {
-                let name = value
-                    .get("tool")
-                    .and_then(Value::as_str)
-                    .or_else(|| value.get("name").and_then(Value::as_str))
-                    .unwrap_or("tool");
-                // The tool's arguments live in `state.input`; render them
-                // compactly so the transcript shows *what* the tool was asked
-                // to do, matching the Claude parser's `ToolCall:` format.
-                let input = value
-                    .get("state")
-                    .and_then(|s| s.get("input"))
-                    .map(render_tool_input)
-                    .filter(|s| !s.is_empty());
-                match input {
-                    Some(args) => parts.push(format!("ToolCall: name={name}; input={args}")),
-                    None => parts.push(format!("ToolCall: name={name}")),
-                }
-            }
-            _ => {}
+/// Render one `part` row's JSON into transcript text, or `None` to skip it.
+/// `text` parts contribute their trimmed text; `tool` parts become a compact
+/// `ToolCall:` line matching the Claude parser's format.
+fn render_part(data: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(data).ok()?;
+    match value.get("type").and_then(Value::as_str) {
+        Some("text") => value
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string),
+        Some("tool") => {
+            let name = value
+                .get("tool")
+                .and_then(Value::as_str)
+                .or_else(|| value.get("name").and_then(Value::as_str))
+                .unwrap_or("tool");
+            // The tool's arguments live in `state.input`; render them compactly
+            // so the transcript shows *what* the tool was asked to do.
+            let input = value
+                .get("state")
+                .and_then(|s| s.get("input"))
+                .map(render_tool_input)
+                .filter(|s| !s.is_empty());
+            Some(match input {
+                Some(args) => format!("ToolCall: name={name}; input={args}"),
+                None => format!("ToolCall: name={name}"),
+            })
         }
+        _ => None,
     }
-    Ok(parts.join("\n"))
 }
 
 /// Maximum characters of a rendered tool input (matches the Claude parser).

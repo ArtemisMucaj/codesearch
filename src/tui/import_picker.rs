@@ -14,7 +14,7 @@
 //! importing → ✓). Already-imported sessions are marked ✓ on open.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -24,6 +24,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::domain::{DiscoveredSession, SessionMessage};
 use crate::tui::widgets::markdown;
@@ -115,7 +116,7 @@ enum Loaded {
 pub fn run(
     incoming: Receiver<Vec<DiscoveredSession>>,
     events: Receiver<ImportEvent>,
-    import_tx: Sender<ImportRequest>,
+    import_tx: UnboundedSender<ImportRequest>,
     now_secs: i64,
     load: &TranscriptLoader<'_>,
 ) -> Result<()> {
@@ -246,7 +247,7 @@ fn drain_events(state: &mut PickerState, events: &Receiver<ImportEvent>) -> bool
 /// Queue the highlighted session for import, sending it to the worker. No-op
 /// when the worker isn't ready, the session is missing, or it is already
 /// importing/queued.
-fn import_selected(state: &mut PickerState, import_tx: &Sender<ImportRequest>) {
+fn import_selected(state: &mut PickerState, import_tx: &UnboundedSender<ImportRequest>) {
     if !matches!(state.worker, WorkerState::Ready) {
         return;
     }
@@ -279,7 +280,7 @@ fn run_loop(
     terminal: &mut ratatui::DefaultTerminal,
     incoming: Receiver<Vec<DiscoveredSession>>,
     events: Receiver<ImportEvent>,
-    import_tx: Sender<ImportRequest>,
+    import_tx: UnboundedSender<ImportRequest>,
     now_secs: i64,
     load: &TranscriptLoader<'_>,
 ) -> Result<()> {
@@ -409,10 +410,18 @@ fn render(frame: &mut Frame, state: &mut PickerState) {
 }
 
 fn render_header(frame: &mut Frame, area: Rect, state: &PickerState) {
+    // Count only sessions actually shown in the list: `status` is seeded with
+    // every stored session (some may no longer be discoverable on this machine),
+    // so counting it directly would over-report.
     let imported = state
-        .status
-        .values()
-        .filter(|s| matches!(s, ImportStatus::Done | ImportStatus::AlreadyImported))
+        .sessions
+        .iter()
+        .filter(|s| {
+            matches!(
+                state.status.get(&session_key(s)),
+                Some(ImportStatus::Done | ImportStatus::AlreadyImported)
+            )
+        })
         .count();
 
     let mut notes = String::new();
@@ -819,7 +828,7 @@ mod tests {
     fn import_selected_queues_only_when_worker_ready() {
         let mut state = empty_state();
         state.sessions = vec![session("a", 100)];
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Worker still loading — nothing is queued or sent.
         import_selected(&mut state, &tx);

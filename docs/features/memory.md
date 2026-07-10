@@ -108,7 +108,7 @@ filesystem. Every node bundles three context levels for one location:
 The tree has three top-level kinds — `memory` / `session` / `resource`
 context types:
 
-```
+```text
 memory://memory                 ← the whole-memory rollup ("read this first")
 memory://sessions/<id>          ← one imported session (transcript = L2)
 memory://resources/...          ← files/URLs added explicitly (reserved)
