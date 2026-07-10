@@ -66,7 +66,7 @@ struct StreamDelta {
 /// | Variable          | Default                    |
 /// |-------------------|----------------------------|
 /// | `OPENAI_BASE_URL` | `http://localhost:1234`    |
-/// | `OPENAI_MODEL`    | `openai-chat`              |
+/// | `OPENAI_MODEL`    | `google/gemma-4-e2b`       |
 /// | `OPENAI_API_KEY`  | `""` (not required locally)|
 pub struct OpenAiChatClient {
     client: reqwest::Client,
@@ -79,7 +79,8 @@ impl OpenAiChatClient {
         let base =
             std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         let url = format!("{}{}", base.trim_end_matches('/'), CHAT_PATH);
-        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "openai-chat".to_string());
+        let model =
+            std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "google/gemma-4-e2b".to_string());
 
         debug!("OpenAiChatClient: endpoint={}, model={}", url, model);
 
