@@ -11,11 +11,12 @@ pub use application::{
     DeleteRepositoryUseCase, EmbeddingService, ExecutionFeaturesUseCase, ExplainResult,
     ExplainUseCase, ExtractionReport, FileHashRepository, FileRelationshipUseCase,
     GraphExpansionUseCase, ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode, ImportOutcome,
-    ImportSessionUseCase, IndexRepositoryUseCase, ListRepositoriesUseCase, MemoryExtractionUseCase,
-    MemoryRepository, MemorySearchUseCase, MetadataRepository, ParserService, QueryExpander,
-    RerankingService, ResolveChannelsUseCase, ResolvedConfigValue, Scip, SearchCodeUseCase,
-    SnippetLookupUseCase, SummarizeMemoryUseCase, SymbolClusterDetectionUseCase, SymbolContext,
-    SymbolContextUseCase, VectorRepository, MEMORY_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
+    ImportSessionUseCase, IndexRepositoryUseCase, ListRepositoriesUseCase, MemoryBrowseUseCase,
+    MemoryEntry, MemoryExtractionUseCase, MemoryRepository, MemorySearchUseCase,
+    MetadataRepository, ParserService, QueryExpander, RerankingService, ResolveChannelsUseCase,
+    ResolvedConfigValue, Scip, SearchCodeUseCase, SnippetLookupUseCase, SummarizeMemoryUseCase,
+    SymbolClusterDetectionUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
+    MEMORY_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
 };
 
 pub use application::resource_slug;

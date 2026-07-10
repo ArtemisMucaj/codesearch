@@ -1,4 +1,5 @@
 use crate::application::ImpactAnalysis;
+use crate::application::MemoryEntry;
 use crate::application::SymbolContext;
 use crate::domain::{CodeChunk, SearchResult};
 use crate::tui::cache::SnippetKey;
@@ -9,6 +10,15 @@ pub enum ActiveMode {
     Search,
     Impact,
     Context,
+    Memory,
+}
+
+/// Which pane in the memory view has keyboard focus.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum MemoryPane {
+    #[default]
+    List,
+    Detail,
 }
 
 /// Which pane in the search view has keyboard focus.
@@ -126,6 +136,29 @@ pub struct ContextState {
     pub tree_pane_height: std::cell::Cell<u16>,
 }
 
+#[derive(Debug, Default)]
+pub struct MemoryState {
+    pub input: String,
+    /// Cursor position within `input`, measured in characters (not bytes).
+    pub cursor: usize,
+    /// Unified list of memory items and filesystem nodes (search or browse).
+    pub entries: Vec<MemoryEntry>,
+    pub selected: usize,
+    pub loading: bool,
+    pub error: Option<String>,
+    /// Vertical scroll offset for the detail panel.
+    pub detail_scroll: u16,
+    /// Cache key of the most recently dispatched request.
+    pub pending_key: Option<String>,
+    /// Cache key of the last request that returned an error.
+    pub errored_key: Option<String>,
+    /// Which pane currently has keyboard focus.
+    pub focused_pane: MemoryPane,
+    /// `true` once the initial browse (empty query) has been dispatched, so it
+    /// only fires once when the mode is first entered.
+    pub browsed: bool,
+}
+
 // ── Top-level app state ───────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -134,6 +167,7 @@ pub struct AppState {
     pub search: SearchState,
     pub impact: ImpactState,
     pub context: ContextState,
+    pub memory: MemoryState,
     pub should_quit: bool,
     /// `false` while the ONNX models are still loading in the background.
     /// The status bar displays a hint and `Enter` is held until this is `true`.
@@ -161,6 +195,7 @@ impl AppState {
                 repository,
                 ..Default::default()
             },
+            memory: MemoryState::default(),
             should_quit: false,
             models_ready,
         };
@@ -178,6 +213,10 @@ impl AppState {
                     state.context.cursor = query.chars().count();
                     state.context.input = query;
                 }
+                ActiveMode::Memory => {
+                    state.memory.cursor = query.chars().count();
+                    state.memory.input = query;
+                }
             }
         }
         state
@@ -190,6 +229,7 @@ impl AppState {
             ActiveMode::Search => self.search.focused_pane == SearchPane::Code,
             ActiveMode::Impact => self.impact.focused_pane == ImpactPane::Chain,
             ActiveMode::Context => self.context.focused_pane == ContextPane::Tree,
+            ActiveMode::Memory => self.memory.focused_pane == MemoryPane::Detail,
         }
     }
 
@@ -199,6 +239,7 @@ impl AppState {
             ActiveMode::Search => &self.search.input,
             ActiveMode::Impact => &self.impact.input,
             ActiveMode::Context => &self.context.input,
+            ActiveMode::Memory => &self.memory.input,
         }
     }
 
@@ -207,6 +248,7 @@ impl AppState {
             ActiveMode::Search => &mut self.search.input,
             ActiveMode::Impact => &mut self.impact.input,
             ActiveMode::Context => &mut self.context.input,
+            ActiveMode::Memory => &mut self.memory.input,
         }
     }
 
@@ -215,6 +257,7 @@ impl AppState {
             ActiveMode::Search => self.search.cursor,
             ActiveMode::Impact => self.impact.cursor,
             ActiveMode::Context => self.context.cursor,
+            ActiveMode::Memory => self.memory.cursor,
         }
     }
 
@@ -223,6 +266,7 @@ impl AppState {
             ActiveMode::Search => &mut self.search.cursor,
             ActiveMode::Impact => &mut self.impact.cursor,
             ActiveMode::Context => &mut self.context.cursor,
+            ActiveMode::Memory => &mut self.memory.cursor,
         }
     }
 
@@ -231,6 +275,7 @@ impl AppState {
             ActiveMode::Search => self.search.loading,
             ActiveMode::Impact => self.impact.loading,
             ActiveMode::Context => self.context.loading,
+            ActiveMode::Memory => self.memory.loading,
         }
     }
 }

@@ -7,19 +7,22 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::application::{
-    ImpactAnalysisUseCase, SearchCodeUseCase, SnippetLookupUseCase, SymbolContextUseCase,
+    ImpactAnalysisUseCase, MemoryBrowseUseCase, SearchCodeUseCase, SnippetLookupUseCase,
+    SymbolContextUseCase,
 };
 use crate::domain::SearchQuery;
 
 use super::cache::TuiCache;
 use super::event::TuiEvent;
-use super::state::{ActiveMode, AppState, ContextPane, ImpactPane, SearchPane};
+use super::state::{ActiveMode, AppState, ContextPane, ImpactPane, MemoryPane, SearchPane};
 use super::views;
 use super::views::context::{build_flat_tree_for_selected, leaf_caller_nodes};
 use crate::cli::TuiMode;
 
 const SEARCH_LIMIT: usize = 20;
 const SCROLL_STEP: u16 = 5;
+/// Maximum entries returned by a memory search/browse.
+const MEMORY_LIMIT: usize = 50;
 
 pub struct TuiApp {
     state: AppState,
@@ -32,10 +35,13 @@ pub struct TuiApp {
     snippet_uc: Option<Arc<SnippetLookupUseCase>>,
     /// `None` while the background container task is still running.
     context_uc: Option<Arc<SymbolContextUseCase>>,
+    /// `None` while the background container task is still running.
+    memory_uc: Option<Arc<MemoryBrowseUseCase>>,
     event_tx: mpsc::UnboundedSender<TuiEvent>,
     event_rx: mpsc::UnboundedReceiver<TuiEvent>,
     impact_task: Option<tokio::task::JoinHandle<()>>,
     context_task: Option<tokio::task::JoinHandle<()>>,
+    memory_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl TuiApp {
@@ -62,10 +68,12 @@ impl TuiApp {
             impact_uc: None,
             snippet_uc: None,
             context_uc: None,
+            memory_uc: None,
             event_tx,
             event_rx,
             impact_task: None,
             context_task: None,
+            memory_task: None,
         }
     }
 
@@ -91,10 +99,12 @@ impl TuiApp {
             impact_uc: Some(impact_uc),
             snippet_uc: Some(snippet_uc),
             context_uc: None,
+            memory_uc: None,
             event_tx: tx,
             event_rx: rx,
             impact_task: None,
             context_task: None,
+            memory_task: None,
         }
     }
 
@@ -183,8 +193,14 @@ impl TuiApp {
                 self.state.mode = match self.state.mode {
                     ActiveMode::Search => ActiveMode::Impact,
                     ActiveMode::Impact => ActiveMode::Context,
-                    ActiveMode::Context => ActiveMode::Search,
+                    ActiveMode::Context => ActiveMode::Memory,
+                    ActiveMode::Memory => ActiveMode::Search,
                 };
+                // Entering Memory for the first time: browse everything so the
+                // list isn't empty before the user types a query.
+                if self.state.mode == ActiveMode::Memory && !self.state.memory.browsed {
+                    self.dispatch_memory();
+                }
             }
             KeyCode::Enter => self.dispatch_current(),
             KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -276,6 +292,13 @@ impl TuiApp {
                     self.state.context.chain_snippet_pending_key = None;
                     self.state.context.chain_snippet_scroll = 0;
                 }
+                // Typing in Memory mode returns focus to the list so results
+                // reflect the query as it changes.
+                if self.state.mode == ActiveMode::Memory
+                    && self.state.memory.focused_pane == MemoryPane::Detail
+                {
+                    self.state.memory.focused_pane = MemoryPane::List;
+                }
             }
             _ => {}
         }
@@ -294,6 +317,9 @@ impl TuiApp {
             ActiveMode::Context => {
                 self.state.context.focused_pane = ContextPane::EntryPoints;
             }
+            ActiveMode::Memory => {
+                self.state.memory.focused_pane = MemoryPane::List;
+            }
         }
     }
 
@@ -310,6 +336,10 @@ impl TuiApp {
             ActiveMode::Context => {
                 self.state.context.focused_pane = ContextPane::Tree;
                 self.state.context.chain_selected = 0;
+            }
+            ActiveMode::Memory => {
+                self.state.memory.focused_pane = MemoryPane::Detail;
+                self.state.memory.detail_scroll = 0;
             }
         }
     }
@@ -451,6 +481,20 @@ impl TuiApp {
                     self.state.context.chain_snippet_scroll = 0;
                 }
             }
+            ActiveMode::Memory => {
+                // Detail pane focused → scroll the detail panel.
+                if self.state.memory.focused_pane == MemoryPane::Detail {
+                    self.state.memory.detail_scroll =
+                        bounded_scroll(self.state.memory.detail_scroll, delta * SCROLL_STEP as i32);
+                    return;
+                }
+                let len = self.state.memory.entries.len();
+                if len == 0 {
+                    return;
+                }
+                self.state.memory.selected = bounded_add(self.state.memory.selected, delta, len);
+                self.state.memory.detail_scroll = 0;
+            }
         }
     }
 
@@ -496,6 +540,10 @@ impl TuiApp {
                     self.state.context.tree_scroll =
                         bounded_scroll(self.state.context.tree_scroll, delta);
                 }
+            }
+            ActiveMode::Memory => {
+                self.state.memory.detail_scroll =
+                    bounded_scroll(self.state.memory.detail_scroll, delta);
             }
         }
     }
@@ -597,6 +645,7 @@ impl TuiApp {
                     }
                 }
             },
+            ActiveMode::Memory => self.dispatch_memory(),
         }
     }
 
@@ -903,6 +952,60 @@ impl TuiApp {
         });
     }
 
+    fn dispatch_memory(&mut self) {
+        let uc = match &self.memory_uc {
+            Some(uc) => Arc::clone(uc),
+            None => return, // models not yet ready
+        };
+
+        // Empty input is valid here — it is the "browse everything" request.
+        let input = self.state.memory.input.trim().to_string();
+        // Mark that the initial browse has happened so entering Memory again
+        // doesn't re-dispatch it.
+        self.state.memory.browsed = true;
+
+        let key = TuiCache::memory_key(&input);
+
+        if let Some(cached) = self.cache.memories.get(&key).cloned() {
+            self.state.memory.entries = cached;
+            self.state.memory.selected = 0;
+            self.state.memory.detail_scroll = 0;
+            self.state.memory.error = None;
+            self.state.memory.loading = false;
+            self.state.memory.pending_key = None;
+            return;
+        }
+
+        if self.state.memory.pending_key.as_deref() == Some(&key) {
+            return;
+        }
+        if self.state.memory.errored_key.as_deref() == Some(&key) {
+            return;
+        }
+
+        self.state.memory.loading = true;
+        self.state.memory.error = None;
+        self.state.memory.selected = 0;
+        self.state.memory.detail_scroll = 0;
+        self.state.memory.pending_key = Some(key.clone());
+        self.state.memory.errored_key = None;
+
+        let tx = self.event_tx.clone();
+
+        if let Some(handle) = self.memory_task.take() {
+            handle.abort();
+        }
+        self.memory_task = Some(tokio::spawn(async move {
+            let result = uc
+                .execute(&input, MEMORY_LIMIT)
+                .await
+                .map_err(|e| e.to_string());
+            if let Err(e) = tx.send(TuiEvent::MemoryDone { key, result }) {
+                debug!("MemoryDone send failed (app already exited): {}", e);
+            }
+        }));
+    }
+
     // ── Handle results ────────────────────────────────────────────────────────
 
     fn handle_app_event(&mut self, event: TuiEvent) {
@@ -914,6 +1017,14 @@ impl TuiApp {
                         self.impact_uc = Some(Arc::new(container.impact_use_case()));
                         self.snippet_uc = Some(Arc::new(container.snippet_lookup_use_case()));
                         self.context_uc = Some(Arc::new(container.context_use_case()));
+                        // Memory browse is optional — if the store can't be
+                        // opened, Memory mode simply stays empty rather than
+                        // failing the whole TUI.
+                        self.memory_uc = container
+                            .memory_browse_use_case()
+                            .map(Arc::new)
+                            .map_err(|e| warn!("memory store unavailable in TUI: {e}"))
+                            .ok();
                         self.state.models_ready = true;
                         // If the user had pre-typed a query (via --query CLI arg),
                         // auto-dispatch it now that models are ready.
@@ -927,6 +1038,8 @@ impl TuiApp {
                             ActiveMode::Context if !self.state.context.input.is_empty() => {
                                 self.dispatch_context();
                             }
+                            // Memory mode browses on entry (even with no query).
+                            ActiveMode::Memory => self.dispatch_memory(),
                             _ => {}
                         }
                     }
@@ -942,6 +1055,9 @@ impl TuiApp {
                             }
                             ActiveMode::Context => {
                                 self.state.context.error = Some(format!("Model load error: {e}"));
+                            }
+                            ActiveMode::Memory => {
+                                self.state.memory.error = Some(format!("Model load error: {e}"));
                             }
                         }
                     }
@@ -1035,6 +1151,25 @@ impl TuiApp {
                     }
                     Err(e) => {
                         warn!("context snippet lookup failed: {}", e);
+                    }
+                }
+            }
+            TuiEvent::MemoryDone { key, result } => {
+                if self.state.memory.pending_key.as_deref() != Some(&key) {
+                    return;
+                }
+                self.state.memory.pending_key = None;
+                self.state.memory.loading = false;
+                match result {
+                    Ok(entries) => {
+                        self.cache.memories.insert(key, entries.clone());
+                        self.state.memory.entries = entries;
+                        self.state.memory.selected = 0;
+                        self.state.memory.detail_scroll = 0;
+                    }
+                    Err(e) => {
+                        self.state.memory.errored_key = Some(key);
+                        self.state.memory.error = Some(e);
                     }
                 }
             }

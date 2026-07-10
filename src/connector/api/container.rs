@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 
 use crate::application::{
     AnalysisRepository, CallGraphRepository, CallGraphUseCase, ChannelEndpointRepository,
-    ChannelLinkUseCase, ChatClient, FileHashRepository, ImportSessionUseCase,
+    ChannelLinkUseCase, ChatClient, FileHashRepository, ImportSessionUseCase, MemoryBrowseUseCase,
     MemoryExtractionUseCase, MemoryRepository, MemorySearchUseCase, MetadataRepository,
     QueryExpander, SummarizeMemoryUseCase,
 };
@@ -793,6 +793,15 @@ impl Container {
 
     pub fn memory_search_use_case(&self) -> Result<MemorySearchUseCase> {
         Ok(MemorySearchUseCase::new(
+            self.memory_repository()?,
+            self.embedding_service.clone(),
+        ))
+    }
+
+    /// Unified memory search/browse over items + filesystem nodes (used by the
+    /// TUI's Memory mode).
+    pub fn memory_browse_use_case(&self) -> Result<MemoryBrowseUseCase> {
+        Ok(MemoryBrowseUseCase::new(
             self.memory_repository()?,
             self.embedding_service.clone(),
         ))

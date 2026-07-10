@@ -12,9 +12,9 @@ use tokio::sync::Mutex;
 use codesearch::resource_slug;
 use codesearch::{
     parse_transcript, ChatClient, DomainError, DuckdbMemoryRepository, EmbeddingService,
-    ImportOutcome, ImportSessionUseCase, MemoryExtractionUseCase, MemoryKind, MemoryRepository,
-    MemorySearchUseCase, MockEmbedding, NoEmbedding, NodeKind, SessionMessage, SessionTranscript,
-    SummarizeMemoryUseCase, MEMORY_ROOT_URI, SESSIONS_ROOT_URI,
+    ImportOutcome, ImportSessionUseCase, MemoryBrowseUseCase, MemoryEntry, MemoryExtractionUseCase,
+    MemoryKind, MemoryRepository, MemorySearchUseCase, MockEmbedding, NoEmbedding, NodeKind,
+    SessionMessage, SessionTranscript, SummarizeMemoryUseCase, MEMORY_ROOT_URI, SESSIONS_ROOT_URI,
 };
 
 /// A canned `{abstract, overview}` reply for the summarization calls the
@@ -476,6 +476,85 @@ async fn add_resource_stores_node_with_full_text() {
         .unwrap();
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].uri(), node.uri());
+}
+
+#[tokio::test]
+async fn browse_shows_filesystem_then_search_filters() {
+    // Seed a store with an item (via import) and two nodes (a session from the
+    // import + a resource) so the unified browse/search has both to work with.
+    let harness = Harness::new();
+    let chat = Arc::new(ScriptedChatClient::new(vec![
+        r#"{"preferences": [], "experiences": [], "skills": [],
+            "facts": [{"name": "storage_engine", "content": "The project uses DuckDB for storage"}],
+            "delete": []}"#,
+    ]));
+    harness
+        .import_use_case(chat)
+        .execute(
+            &transcript(
+                "browse-session",
+                &[("user", "we use duckdb"), ("assistant", "noted")],
+            ),
+            false,
+        )
+        .await
+        .unwrap();
+
+    let summary = SummarizeMemoryUseCase::new(
+        Arc::new(ScriptedChatClient::new(vec![])) as Arc<dyn ChatClient>,
+        Arc::clone(&harness.memory_repo),
+        Arc::clone(&harness.embedding),
+    );
+    summary
+        .summarize_resource(
+            "duckdb_guide",
+            "https://x.dev/duckdb",
+            "DuckDB locking uses a fixed read-only snapshot.",
+        )
+        .await
+        .unwrap();
+
+    let browse = MemoryBrowseUseCase::new(
+        Arc::clone(&harness.memory_repo),
+        Arc::clone(&harness.embedding),
+    );
+
+    // Empty query = browse: the whole virtual filesystem is shown, filesystem
+    // first (the rollup node leads), with items after.
+    let all = browse.execute("", 50).await.unwrap();
+    assert!(
+        matches!(&all[0], MemoryEntry::Node { node, .. } if node.uri() == "memory://memory"),
+        "rollup node should be the first browse entry"
+    );
+    let has_session = all
+        .iter()
+        .any(|e| matches!(e, MemoryEntry::Node { node, .. } if node.kind() == NodeKind::Session));
+    let has_resource = all
+        .iter()
+        .any(|e| matches!(e, MemoryEntry::Node { node, .. } if node.kind() == NodeKind::Resource));
+    let has_item = all.iter().any(|e| matches!(e, MemoryEntry::Item { .. }));
+    assert!(
+        has_session && has_resource && has_item,
+        "browse shows the whole store"
+    );
+
+    // Non-empty query = search: results are ranked by relevance rather than
+    // shown in filesystem order. Unlike browse, the rollup no longer leads —
+    // the query's relevant entries rank first. (With mock embeddings we assert
+    // ranking, not a smaller count, since the mock's cosine matches broadly.)
+    let hits = browse.execute("duckdb storage engine", 50).await.unwrap();
+    assert!(!hits.is_empty());
+    let top_is_rollup =
+        matches!(&hits[0], MemoryEntry::Node { node, .. } if node.uri() == "memory://memory");
+    assert!(
+        !top_is_rollup,
+        "search should rank by relevance, not lead with the rollup like browse does"
+    );
+    // Every returned entry carries a positive relevance score (browse scores 0).
+    assert!(
+        hits.iter().all(|e| e.score() > 0.0),
+        "search entries are scored"
+    );
 }
 
 #[tokio::test]

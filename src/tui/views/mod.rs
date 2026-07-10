@@ -1,6 +1,7 @@
 pub(crate) mod context;
 mod format;
 mod impact;
+mod memory;
 mod search;
 
 use ratatui::layout::{Constraint, Layout};
@@ -8,7 +9,7 @@ use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
-use crate::tui::state::{ActiveMode, AppState, ContextPane, ImpactPane, SearchPane};
+use crate::tui::state::{ActiveMode, AppState, ContextPane, ImpactPane, MemoryPane, SearchPane};
 use crate::tui::widgets::input_bar;
 
 /// Entry point called on every terminal draw cycle.
@@ -26,6 +27,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         ActiveMode::Search => search::render(frame, areas[1], state),
         ActiveMode::Impact => impact::render(frame, areas[1], state),
         ActiveMode::Context => context::render(frame, areas[1], state),
+        ActiveMode::Memory => memory::render(frame, areas[1], state),
     }
 
     render_status(frame, areas[2], state);
@@ -74,6 +76,14 @@ fn render_status(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppStat
                 } else {
                     " ↑↓: navigate nodes  Enter: view code  PgUp/Dn: scroll fast  Ctrl+←: focus list  Tab: switch  q: quit"
                 }
+            }
+        },
+        ActiveMode::Memory => match state.memory.focused_pane {
+            MemoryPane::List => {
+                " Enter/type: search  (empty: browse all)  ↑↓: navigate  Ctrl+→: detail  Tab: switch"
+            }
+            MemoryPane::Detail => {
+                " ↑↓/PgUp/Dn: scroll  Ctrl+←: focus list  Tab: switch  q: quit"
             }
         },
     };
