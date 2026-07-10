@@ -180,8 +180,13 @@ impl TuiApp {
 
     fn handle_key(&mut self, key: KeyEvent) {
         match key.code {
+            // `q` quits from a focused detail pane in the code-navigation modes.
+            // Memory's detail pane shows scrollable prose (transcripts), where a
+            // stray `q` quitting mid-read is a footgun — there, use Ctrl+C.
             KeyCode::Char('q')
-                if key.modifiers == KeyModifiers::NONE && self.state.detail_pane_focused() =>
+                if key.modifiers == KeyModifiers::NONE
+                    && self.state.mode != ActiveMode::Memory
+                    && self.state.detail_pane_focused() =>
             {
                 self.state.should_quit = true;
             }
@@ -253,6 +258,12 @@ impl TuiApp {
                     };
                     let _ = byte_idx;
                     *self.state.active_cursor_mut() -= 1;
+                    // Memory searches as you type — re-run on delete too (an
+                    // empty input falls back to the filesystem browse).
+                    if self.state.mode == ActiveMode::Memory {
+                        self.state.memory.focused_pane = MemoryPane::List;
+                        self.dispatch_memory();
+                    }
                 }
             }
             KeyCode::Char(c)
@@ -292,12 +303,12 @@ impl TuiApp {
                     self.state.context.chain_snippet_pending_key = None;
                     self.state.context.chain_snippet_scroll = 0;
                 }
-                // Typing in Memory mode returns focus to the list so results
-                // reflect the query as it changes.
-                if self.state.mode == ActiveMode::Memory
-                    && self.state.memory.focused_pane == MemoryPane::Detail
-                {
+                // Memory mode searches as you type: return focus to the list
+                // and re-run the query so results track the input live. This
+                // frees Enter to focus the detail pane instead.
+                if self.state.mode == ActiveMode::Memory {
                     self.state.memory.focused_pane = MemoryPane::List;
+                    self.dispatch_memory();
                 }
             }
             _ => {}
@@ -360,6 +371,12 @@ impl TuiApp {
             self.state.context.chain_snippet_loading = false;
             self.state.context.chain_snippet_pending_key = None;
             self.state.context.chain_snippet_scroll = 0;
+        }
+        if self.state.mode == ActiveMode::Memory
+            && self.state.memory.focused_pane == MemoryPane::Detail
+        {
+            // Return from the detail pane to the filesystem tree.
+            self.state.memory.focused_pane = MemoryPane::List;
         }
     }
 
@@ -645,7 +662,17 @@ impl TuiApp {
                     }
                 }
             },
-            ActiveMode::Memory => self.dispatch_memory(),
+            // Memory searches live as you type, so Enter is free to drill in:
+            // from the list it focuses the detail pane; from the detail pane it
+            // is a no-op (Esc returns to the list).
+            ActiveMode::Memory => {
+                if self.state.memory.focused_pane == MemoryPane::List
+                    && !self.state.memory.entries.is_empty()
+                {
+                    self.state.memory.focused_pane = MemoryPane::Detail;
+                    self.state.memory.detail_scroll = 0;
+                }
+            }
         }
     }
 
