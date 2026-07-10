@@ -34,6 +34,7 @@ mod ort_embedding;
 mod ort_reranking;
 mod resource_fetch;
 pub mod scip;
+mod session_discovery;
 mod tree_sitter_channels;
 mod treesitter_parser;
 
@@ -59,5 +60,6 @@ pub use openai_reranking::*;
 pub use ort_embedding::*;
 pub use ort_reranking::*;
 pub use resource_fetch::*;
+pub use session_discovery::{discover_all_sessions, load_transcript};
 pub use tree_sitter_channels::*;
 pub use treesitter_parser::*;

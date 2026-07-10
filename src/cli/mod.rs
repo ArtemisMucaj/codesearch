@@ -225,15 +225,20 @@ impl From<MemoryKindArg> for crate::domain::MemoryKind {
 pub enum MemorySubcommand {
     /// Import a finished session transcript and extract memories from it.
     ///
-    /// Accepts Claude Code session logs (~/.claude/projects/<project>/<id>.jsonl)
-    /// or generic JSONL chat logs ({"role": "...", "content": "..."} per line).
-    /// Extraction calls the configured LLM — point ANTHROPIC_BASE_URL /
-    /// ANTHROPIC_MODEL / ANTHROPIC_API_KEY (or the OPENAI_* equivalents with
-    /// --llm open-ai) at a small model; extraction is a summarization-style
-    /// task that does not need a frontier model.
+    /// With no PATH, opens an interactive picker that discovers Claude Code,
+    /// OpenCode, and Zed sessions on this machine — shown with their names, how
+    /// long ago they ran, and a preview from the end of the conversation — and
+    /// imports the ones you select.
+    ///
+    /// With a PATH, imports that transcript directly: a Claude Code session log
+    /// (~/.claude/projects/<project>/<id>.jsonl) or a generic JSONL chat log
+    /// ({"role": "...", "content": "..."} per line). Extraction calls the
+    /// configured LLM — point ANTHROPIC_BASE_URL / ANTHROPIC_MODEL /
+    /// ANTHROPIC_API_KEY (or the OPENAI_* equivalents with --llm open-ai) at a
+    /// small model; extraction is a summarization-style task.
     Import {
-        /// Path to the transcript file (JSONL).
-        path: String,
+        /// Path to a transcript file (JSONL). Omit to open the session picker.
+        path: Option<String>,
 
         /// LLM provider for extraction: 'anthropic' (default) or 'open-ai'
         #[arg(long, value_enum, default_value = "anthropic")]

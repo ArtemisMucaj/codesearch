@@ -9,7 +9,8 @@ use crate::application::{
 };
 use crate::cli::{LlmTarget, MemoryKindArg, OutputFormatTextJson};
 use crate::connector::adapter::{
-    fetch_resource, parse_transcript_file, AnthropicClient, OpenAiChatClient,
+    discover_all_sessions, fetch_resource, load_transcript as load_discovered_transcript,
+    parse_transcript_file, AnthropicClient, OpenAiChatClient,
 };
 use crate::domain::{MemoryItem, MemoryKind, MemoryNode, MemoryOperation};
 
@@ -38,52 +39,98 @@ impl<'a> MemoryController<'a> {
         })
     }
 
-    pub async fn import(&self, path: String, llm: LlmTarget, force: bool) -> Result<String> {
-        let chat_client = Self::chat_client(llm)?;
+    pub async fn import(
+        &self,
+        path: Option<String>,
+        llm: LlmTarget,
+        force: bool,
+    ) -> Result<String> {
+        match path {
+            Some(path) => {
+                let transcript = parse_transcript_file(Path::new(&path))?;
+                self.import_transcripts(vec![transcript], llm, force).await
+            }
+            None => self.import_via_picker(llm, force).await,
+        }
+    }
 
-        let transcript = parse_transcript_file(Path::new(&path))?;
-        let use_case = self.container.memory_import_use_case(chat_client)?;
-        let outcome = use_case.execute(&transcript, force).await?;
+    /// Discover local sessions, show the interactive picker, and import the
+    /// ones the user selects.
+    async fn import_via_picker(&self, llm: LlmTarget, force: bool) -> Result<String> {
+        let sessions = discover_all_sessions();
+        if sessions.is_empty() {
+            return Ok(
+                "No sessions found from Claude Code, OpenCode, or Zed on this machine.\n\
+                       Pass a transcript path to import one directly."
+                    .to_string(),
+            );
+        }
 
-        match outcome {
-            ImportOutcome::AlreadyImported { session } => Ok(format!(
-                "Session '{}' was already imported ({} messages, {} items written). \
-                 Use --force to re-import.",
-                session.id, session.message_count, session.items_written
-            )),
-            ImportOutcome::Imported { session, report } => {
-                let mut output = format!(
-                    "Imported session '{}' ({} messages).\n",
-                    session.id, session.message_count
-                );
-                if report.applied.is_empty() {
-                    output.push_str("No memories extracted — nothing durable in this session.\n");
-                } else {
-                    output.push_str(&format!(
-                        "{} memory operations applied:\n",
-                        report.applied.len()
-                    ));
-                    for op in &report.applied {
-                        match op {
-                            MemoryOperation::Upsert { kind, name, .. } => {
-                                output.push_str(&format!("  + [{kind}] {name}\n"));
-                            }
-                            MemoryOperation::Delete { kind, name } => {
-                                output.push_str(&format!("  - [{kind}] {name}\n"));
-                            }
-                        }
-                    }
-                }
-                for (op, reason) in &report.skipped {
-                    let (kind, name) = match op {
-                        MemoryOperation::Upsert { kind, name, .. }
-                        | MemoryOperation::Delete { kind, name } => (kind, name),
-                    };
-                    output.push_str(&format!("  ~ [{kind}] {name} skipped: {reason}\n"));
-                }
-                Ok(output)
+        // The picker takes over the terminal; run it on a blocking thread so it
+        // never shares the async runtime's reactor with the terminal loop. The
+        // loader materializes a session's transcript on demand for the right
+        // pane (lazy-loaded + cached inside the picker).
+        let now = now_secs();
+        let chosen = tokio::task::spawn_blocking(move || {
+            let loader = |s: &crate::domain::DiscoveredSession| {
+                load_discovered_transcript(s)
+                    .map(|t| t.messages)
+                    .map_err(|e| e.to_string())
+            };
+            crate::tui::import_picker::run(sessions, now, &loader)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("session picker task panicked: {e}"))??;
+
+        if chosen.is_empty() {
+            return Ok("Nothing selected — no sessions imported.".to_string());
+        }
+
+        // Materialize each chosen session's transcript, skipping any that fail
+        // to load rather than aborting the whole batch.
+        let mut transcripts = Vec::new();
+        let mut load_errors = Vec::new();
+        for session in &chosen {
+            match load_discovered_transcript(session) {
+                Ok(t) => transcripts.push(t),
+                Err(e) => load_errors.push(format!(
+                    "  ! {} ({}): {e}",
+                    session.display_title(),
+                    session.source
+                )),
             }
         }
+
+        let mut out = self.import_transcripts(transcripts, llm, force).await?;
+        if !load_errors.is_empty() {
+            out.push_str("\nSkipped (could not load):\n");
+            out.push_str(&load_errors.join("\n"));
+            out.push('\n');
+        }
+        Ok(out)
+    }
+
+    /// Run a batch of transcripts through the import pipeline, formatting a
+    /// combined report.
+    async fn import_transcripts(
+        &self,
+        transcripts: Vec<crate::domain::SessionTranscript>,
+        llm: LlmTarget,
+        force: bool,
+    ) -> Result<String> {
+        if transcripts.is_empty() {
+            return Ok("Nothing to import.".to_string());
+        }
+        let chat_client = Self::chat_client(llm)?;
+        let use_case = self.container.memory_import_use_case(chat_client)?;
+
+        let multiple = transcripts.len() > 1;
+        let mut output = String::new();
+        for transcript in &transcripts {
+            let outcome = use_case.execute(transcript, force).await?;
+            output.push_str(&render_import_outcome(&outcome, multiple));
+        }
+        Ok(output)
     }
 
     pub async fn add_resource(
@@ -304,6 +351,71 @@ impl<'a> MemoryController<'a> {
                 }
                 Ok(output)
             }
+        }
+    }
+}
+
+/// Current Unix time in seconds.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Format one import outcome. When `multiple`, each session is prefixed so a
+/// batch report stays readable.
+fn render_import_outcome(outcome: &ImportOutcome, multiple: bool) -> String {
+    match outcome {
+        ImportOutcome::AlreadyImported { session } => {
+            if multiple {
+                format!("• {} — already imported (use --force)\n", session.id)
+            } else {
+                format!(
+                    "Session '{}' was already imported ({} messages, {} items written). \
+                     Use --force to re-import.\n",
+                    session.id, session.message_count, session.items_written
+                )
+            }
+        }
+        ImportOutcome::Imported { session, report } => {
+            let mut output = if multiple {
+                format!(
+                    "• {} ({} messages) — {} operation(s)\n",
+                    session.id,
+                    session.message_count,
+                    report.applied.len()
+                )
+            } else {
+                format!(
+                    "Imported session '{}' ({} messages).\n",
+                    session.id, session.message_count
+                )
+            };
+            if report.applied.is_empty() && !multiple {
+                output.push_str("No memories extracted — nothing durable in this session.\n");
+            }
+            let indent = if multiple { "    " } else { "  " };
+            if !multiple || !report.applied.is_empty() {
+                for op in &report.applied {
+                    match op {
+                        MemoryOperation::Upsert { kind, name, .. } => {
+                            output.push_str(&format!("{indent}+ [{kind}] {name}\n"));
+                        }
+                        MemoryOperation::Delete { kind, name } => {
+                            output.push_str(&format!("{indent}- [{kind}] {name}\n"));
+                        }
+                    }
+                }
+            }
+            for (op, reason) in &report.skipped {
+                let (kind, name) = match op {
+                    MemoryOperation::Upsert { kind, name, .. }
+                    | MemoryOperation::Delete { kind, name } => (kind, name),
+                };
+                output.push_str(&format!("{indent}~ [{kind}] {name} skipped: {reason}\n"));
+            }
+            output
         }
     }
 }

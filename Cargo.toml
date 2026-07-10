@@ -36,6 +36,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Database
 duckdb = { version = "1.4", features = ["bundled"] }
 
+# SQLite access for agent-session discovery (OpenCode / Zed store sessions in
+# SQLite); zstd decompresses Zed's compressed thread bodies.
+rusqlite = { version = "0.32", features = ["bundled"] }
+zstd = "0.13"
+
 # Tree-sitter for AST parsing
 tree-sitter = "0.26.3"
 tree-sitter-rust = "*"

@@ -28,6 +28,10 @@ pub use cli::{
     RerankingTarget, SymbolClustersSubcommand, TuiMode,
 };
 
+pub use connector::adapter::{
+    discover_all_sessions, load_transcript as load_discovered_transcript,
+};
+
 pub use connector::{
     parse_transcript, parse_transcript_file, AnthropicClient, AnthropicReranking,
     DuckdbAnalysisRepository, DuckdbCallGraphRepository, DuckdbChannelEndpointRepository,
@@ -40,11 +44,11 @@ pub use connector::{
 
 pub use domain::{
     compute_file_hash, ChannelEdge, ChannelEndpoint, ChannelRole, Cluster, ClusterGraph, CodeChunk,
-    DomainError, Embedding, EmbeddingConfig, EndpointSource, ExecutionFeature, FeatureNode,
-    FileHash, ImportedSession, IndexingStatus, Language, MemoryItem, MemoryKind, MemoryNode,
-    MemoryOperation, NodeKind, NodeType, Protocol, ReferenceKind, Repository, SearchQuery,
-    SearchResult, SessionMessage, SessionTranscript, SymbolCommunity, SymbolCommunityGraph,
-    SymbolReference, VectorStore,
+    DiscoveredSession, DomainError, Embedding, EmbeddingConfig, EndpointSource, ExecutionFeature,
+    FeatureNode, FileHash, ImportedSession, IndexingStatus, Language, MemoryItem, MemoryKind,
+    MemoryNode, MemoryOperation, NodeKind, NodeType, Protocol, ReferenceKind, Repository,
+    SearchQuery, SearchResult, SessionLocator, SessionMessage, SessionSource, SessionTranscript,
+    SymbolCommunity, SymbolCommunityGraph, SymbolReference, VectorStore,
 };
 
 pub use domain::{CommunityMeta, GraphEdge, GraphLevel, GraphNode, GraphView};
