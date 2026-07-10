@@ -123,11 +123,17 @@ impl<'a> MemoryController<'a> {
     }
 
     /// The identity set (`source`, `id`) of sessions already in the store, used
-    /// to seed the picker's ✓ marks.
+    /// to seed the picker's ✓ marks. The stored `source` is the transcript
+    /// source string (`"opencode:<id>"`, a Claude file path, …); it is
+    /// normalized to the bare source name (`"opencode"`, `"claude"`, `"zed"`)
+    /// so the keys match the picker's `(source, id)` identity.
     async fn imported_session_ids(&self) -> Result<std::collections::HashSet<(String, String)>> {
         let repo = self.container.memory_repository()?;
         let sessions = repo.list_sessions().await?;
-        Ok(sessions.into_iter().map(|s| (s.source, s.id)).collect())
+        Ok(sessions
+            .into_iter()
+            .map(|s| (normalize_source(&s.source), s.id))
+            .collect())
     }
 
     /// Run a batch of transcripts through the import pipeline, formatting a
@@ -450,6 +456,21 @@ fn import_outcome_summary(outcome: &ImportOutcome) -> String {
     }
 }
 
+/// Normalize a stored transcript `source` to the bare discovery source name so
+/// it matches the picker's `(source, id)` key. Discovery sources prefix the
+/// source (`"opencode:<id>"`, `"zed:<id>"`); Claude imports store a file path.
+fn normalize_source(source: &str) -> String {
+    if source.starts_with("opencode:") {
+        "opencode".to_string()
+    } else if source.starts_with("zed:") {
+        "zed".to_string()
+    } else {
+        // Claude sessions store the transcript file path (or a raw id); the
+        // picker keys Claude sessions as "claude".
+        "claude".to_string()
+    }
+}
+
 /// Short, human-readable label for a transcript, used in progress output.
 /// Prefers the first non-empty user message; falls back to the session id.
 fn transcript_label(transcript: &crate::domain::SessionTranscript) -> String {
@@ -579,4 +600,24 @@ fn preview(content: &str, max_chars: usize) -> String {
         .take(max_chars.saturating_sub(3))
         .collect();
     format!("{truncated}...")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_source_maps_to_bare_names() {
+        // Matches the picker's `(source, id)` key derived from
+        // SessionSource::as_str(): "claude" / "opencode" / "zed".
+        assert_eq!(normalize_source("opencode:ses_abc123"), "opencode");
+        assert_eq!(normalize_source("zed:thread-xyz"), "zed");
+        // Claude imports store the transcript file path.
+        assert_eq!(
+            normalize_source("/Users/me/.claude/projects/-proj/uuid.jsonl"),
+            "claude"
+        );
+        // A bare / unknown source defaults to claude.
+        assert_eq!(normalize_source("uuid-only"), "claude");
+    }
 }
