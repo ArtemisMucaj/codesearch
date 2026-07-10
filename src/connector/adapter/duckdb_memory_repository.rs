@@ -289,6 +289,22 @@ impl MemoryRepository for DuckdbMemoryRepository {
         }
     }
 
+    async fn find_item_by_id(&self, id: &str) -> Result<Option<MemoryItem>, DomainError> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {ITEM_COLUMNS} FROM memory_items WHERE id = ?1"
+            ))
+            .map_err(|e| DomainError::storage(format!("Failed to prepare find_item_by_id: {e}")))?;
+        match stmt.query_row(params![id], Self::item_from_row) {
+            Ok(item) => Ok(Some(item)),
+            Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(DomainError::storage(format!(
+                "Failed to query memory item by id: {e}"
+            ))),
+        }
+    }
+
     async fn delete_item(&self, kind: MemoryKind, name: &str) -> Result<bool, DomainError> {
         let conn = self.conn.lock().await;
         conn.execute(

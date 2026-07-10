@@ -46,7 +46,12 @@ impl<'a> MemoryController<'a> {
     /// is built, and the worker imports selected sessions on demand while it
     /// stays open.
     pub async fn import(&self, path: String, llm: LlmTarget, force: bool) -> Result<String> {
-        let transcript = parse_transcript_file(Path::new(&path))?;
+        // Reading + parsing the transcript is blocking file I/O; keep it off the
+        // async runtime thread.
+        let transcript =
+            tokio::task::spawn_blocking(move || parse_transcript_file(Path::new(&path)))
+                .await
+                .map_err(|e| anyhow::anyhow!("transcript parse task panicked: {e}"))??;
         self.import_transcripts(vec![transcript], llm, force).await
     }
 
@@ -298,9 +303,8 @@ impl<'a> MemoryController<'a> {
             }
         }
 
-        let items = repo.list_items(None).await?;
-        match items.iter().find(|i| i.id() == id) {
-            Some(item) => Ok(render_item(item)),
+        match repo.find_item_by_id(&id).await? {
+            Some(item) => Ok(render_item(&item)),
             None => Ok(format!("No memory item found with ID '{id}'.")),
         }
     }
@@ -352,6 +356,17 @@ impl<'a> MemoryController<'a> {
 
     pub async fn delete(&self, id: String) -> Result<String> {
         let repo = self.container.memory_repository()?;
+
+        // Accept '<kind>/<name>' as an alternative to the item ID, matching
+        // `show`, so `memory delete preference/tabs_vs_spaces` works.
+        if let Some((kind_str, name)) = id.split_once('/') {
+            if let Some(kind) = MemoryKind::parse(kind_str) {
+                if repo.delete_item(kind, name).await? {
+                    return Ok(format!("Deleted memory item '{id}'."));
+                }
+            }
+        }
+
         if repo.delete_item_by_id(&id).await? {
             Ok(format!("Deleted memory item '{id}'."))
         } else {

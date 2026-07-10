@@ -25,6 +25,9 @@ pub trait MemoryRepository: Send + Sync {
         name: &str,
     ) -> Result<Option<MemoryItem>, DomainError>;
 
+    /// Find an item by its ID.
+    async fn find_item_by_id(&self, id: &str) -> Result<Option<MemoryItem>, DomainError>;
+
     /// Delete by `(kind, name)`. Returns `true` when an item was removed.
     async fn delete_item(&self, kind: MemoryKind, name: &str) -> Result<bool, DomainError>;
 

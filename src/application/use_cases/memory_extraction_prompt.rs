@@ -150,12 +150,20 @@ pub fn format_retry_prompt() -> &'static str {
 /// Render `[idx][role]: content` lines, eliding the middle of transcripts
 /// that exceed [`MAX_CONVERSATION_CHARS`].
 fn render_conversation(transcript: &SessionTranscript) -> String {
+    // Cap any single message before the head/tail fitting so one oversized
+    // message (a pasted code block or a huge error log) can neither monopolize
+    // the budget nor be dropped whole — the head/tail windows fit at least a
+    // few messages, each contributing a truncated snippet.
+    let max_per_message = MAX_CONVERSATION_CHARS / 3;
     let lines: Vec<String> = transcript
         .messages
         .iter()
         .enumerate()
         .filter(|(_, m)| !m.content.trim().is_empty())
-        .map(|(idx, m)| format!("[{}][{}]: {}", idx, m.role, m.content.trim()))
+        .map(|(idx, m)| {
+            let content = truncate_chars(m.content.trim(), max_per_message);
+            format!("[{}][{}]: {}", idx, m.role, content)
+        })
         .collect();
 
     let total: usize = lines.iter().map(|l| l.len() + 2).sum();

@@ -282,6 +282,51 @@ async fn delete_operation_removes_existing_item() {
 }
 
 #[tokio::test]
+async fn find_item_by_id_round_trips() {
+    let harness = Harness::new();
+    let chat = Arc::new(ScriptedChatClient::new(vec![&extraction_json((
+        "tabs_over_spaces",
+        "Prefers tabs",
+    ))]));
+    harness
+        .import_use_case(chat)
+        .execute(
+            &transcript(
+                "session-id",
+                &[("user", "I like tabs"), ("assistant", "ok")],
+            ),
+            false,
+        )
+        .await
+        .unwrap();
+
+    let stored = harness
+        .memory_repo
+        .find_item(MemoryKind::Preference, "tabs_over_spaces")
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Look the same item up by its ID.
+    let by_id = harness
+        .memory_repo
+        .find_item_by_id(stored.id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_id.name(), "tabs_over_spaces");
+    assert_eq!(by_id.id(), stored.id());
+
+    // A missing ID yields None (not an error, not a scan).
+    assert!(harness
+        .memory_repo
+        .find_item_by_id("no-such-id")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
 async fn hybrid_search_finds_stored_memories() {
     let harness = Harness::new();
     let chat = Arc::new(ScriptedChatClient::new(vec![
@@ -305,11 +350,17 @@ async fn hybrid_search_finds_stored_memories() {
     assert!(!results.is_empty());
     assert_eq!(results[0].0.name(), "python_typing");
 
-    // Kind filter excludes non-matching kinds.
+    // Kind filter restricts results to the requested kind. Query for the
+    // fact's own content so the filter is exercised on a non-empty result set
+    // (otherwise `all(...)` would pass vacuously on zero rows).
     let facts_only = search
-        .execute("type hints", Some(MemoryKind::Fact), 5)
+        .execute("github actions ci", Some(MemoryKind::Fact), 5)
         .await
         .unwrap();
+    assert!(
+        facts_only.iter().any(|(i, _)| i.name() == "ci_provider"),
+        "kind-filtered search should find the seeded fact"
+    );
     assert!(facts_only.iter().all(|(i, _)| i.kind() == MemoryKind::Fact));
 }
 
