@@ -112,6 +112,8 @@ pub fn load_transcript(db_path: &str, session_id: &str) -> Result<SessionTranscr
     Ok(SessionTranscript {
         id: session_id.to_string(),
         source: format!("zed:{session_id}"),
+        // Scope is set by the discovery dispatcher from the session's cwd.
+        project: None,
         messages,
     })
 }

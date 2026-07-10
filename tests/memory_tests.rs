@@ -77,6 +77,7 @@ fn transcript(id: &str, messages: &[(&str, &str)]) -> SessionTranscript {
     SessionTranscript {
         id: id.to_string(),
         source: format!("{id}.jsonl"),
+        project: None,
         messages: messages
             .iter()
             .map(|(role, content)| SessionMessage {
@@ -546,7 +547,28 @@ async fn browse_shows_filesystem_then_search_filters() {
     };
     assert!(has_dir("sessions/"), "sessions directory header present");
     assert!(has_dir("resources/"), "resources directory header present");
-    assert!(has_dir("items/"), "items directory header present");
+    // Items are grouped by category; the seeded fact lands in a `facts/`
+    // sub-directory nested under the `memory://memory` rollup (depth 1),
+    // alongside the rollup's L0/L1 levels — not in a separate top-level dir.
+    assert!(has_dir("facts/"), "facts category sub-directory present");
+
+    let rollup_at = all
+        .iter()
+        .position(|r| matches!(&r.target, RowTarget::Node(n) if n.uri() == "memory://memory"))
+        .unwrap();
+    let facts_at = all
+        .iter()
+        .position(|r| matches!(&r.target, RowTarget::Directory) && r.label == "facts/")
+        .unwrap();
+    let item_at = all
+        .iter()
+        .position(|r| matches!(&r.target, RowTarget::Item(_)))
+        .unwrap();
+    // Order: rollup → its category dir → the item, all before sessions/.
+    assert!(rollup_at < facts_at && facts_at < item_at, "nesting order");
+    assert_eq!(all[rollup_at].depth, 0, "rollup at root");
+    assert_eq!(all[facts_at].depth, 1, "category nested under the rollup");
+    assert_eq!(all[item_at].depth, 2, "item under its category");
 
     let has_session_node = all
         .iter()

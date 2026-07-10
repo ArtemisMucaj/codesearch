@@ -24,8 +24,8 @@ pub use application::resource_slug;
 pub use application::{aggregate, render, VizFormat, DEFAULT_NODE_LIMIT};
 
 pub use cli::{
-    ClustersSubcommand, Commands, EmbeddingTarget, FeaturesSubcommand, LlmTarget, OutputFormat,
-    RerankingTarget, SymbolClustersSubcommand, TuiMode,
+    ClustersSubcommand, Commands, EmbeddingTarget, FeaturesSubcommand, LlmTarget, MemorySubcommand,
+    OutputFormat, RerankingTarget, SymbolClustersSubcommand, TuiMode,
 };
 
 pub use connector::adapter::{
@@ -54,6 +54,6 @@ pub use domain::{
 pub use domain::{CommunityMeta, GraphEdge, GraphLevel, GraphNode, GraphView};
 
 pub use connector::api::{
-    namespace_embedding_config, resolve_repo_context, Container, ContainerConfig, ResolvedContext,
-    Router,
+    namespace_embedding_config, resolve_repo_context, run_import_picker_ui, Container,
+    ContainerConfig, MemoryController, ResolvedContext, Router,
 };

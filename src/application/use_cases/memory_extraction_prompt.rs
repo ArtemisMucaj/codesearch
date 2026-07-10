@@ -23,11 +23,13 @@ pub fn system_prompt() -> String {
 ## Memory kinds
 
 ### preferences — "what the user likes/dislikes or is accustomed to"
+A LASTING habit or taste that will hold across many future sessions — not a one-off goal for THIS session.
 Extract specific preferences the user expressed (explicitly or through repeated corrections).
 Each preference covers ONE topic: code style, communication style, tools, workflow, testing habits, etc.
 Do NOT mix unrelated preferences into one item; store different topics as separate items.
 Name: lowercase snake_case topic, max 4 words (e.g. "rust_error_handling_style", "commit_message_style").
 Content: Markdown describing what the user prefers/is accustomed to, with enough context to act on it.
+A preference is NOT a task the user is doing. "User is upgrading X to v2" / "user wants to fix the failing test" are goals, not preferences — do NOT store them. Only store a preference when the user reveals a durable way they like to work.
 
 ### experiences — a generalizable, reusable insight distilled from the session — not a process record
 Captures a transferable pattern: what situation triggers it, what approach works, and why.
@@ -56,30 +58,40 @@ Name: snake_case verb phrase (e.g. "cross_compile_release", "bisect_flaky_test")
 Content: Markdown with these sections when known: "Best for" (when to use it), "Flow" (numbered steps), "Prerequisites", "Common failures", "Recommendation".
 
 ### facts — durable declarative information worth remembering
-Project facts, environment details, architectural decisions and their rationale, names/versions of tools in use.
+Stable project facts, environment details, and architectural decisions WITH THEIR RATIONALE — things that will still be true and useful months from now.
 Only include facts likely to still be true and useful in future sessions. No transient state.
 Name: snake_case, max 5 words. Content: short Markdown statement of the fact plus context.
 
+A fact must OUTLIVE the current task. Apply this test before emitting one — if it will be stale once this session's work merges, DROP it:
+- DO store: an architectural decision and WHY ("logging goes to stderr in MCP mode because stdout carries the protocol"), a stable tooling choice ("the project pins DuckDB via the bundled Cargo feature").
+- Do NOT store: a version number being bumped to ("upgrading matter.js to 0.17.4"), which packages a PR touched, "the current failure is caused by X", or any snapshot of in-flight work. These are session logs, not durable facts.
+- A bare version number or a list of changed files is almost never a durable fact on its own.
+- Do NOT restate what an experience already captures. If the durable lesson is "how X broke and how to fix it", that is an EXPERIENCE, not a fact.
+
 ## Critical rules
 - Extract only DURABLE information. Skip anything session-specific with no future value.
-- Quality over quantity: an empty result is better than noise. If the session contains nothing worth remembering, return all fields as empty arrays.
+- The bar is high: prefer FEWER, higher-value memories. An empty result is better than noise. If the session contains nothing worth remembering long-term, return all fields as empty arrays.
+- Before emitting any item, apply the "still useful in 3 months?" test. If it is a snapshot of what this session did (versions bumped, files changed, the current bug), DROP it.
 - User-authored messages are the source of truth for preferences and facts about the user; assistant/tool activity is the source for experiences and skills.
 - When an "Existing memories" section is provided and the session adds to or contradicts one of those items, output the SAME kind and name with the full REWRITTEN content (existing knowledge merged with the new information). Never output a fragment or a diff.
 - To remove an existing memory that the session proves wrong or obsolete, add an entry to "delete".
 - Never invent information that is not supported by the transcript.
 
+## Project scope
+Each item has a `"project_specific"` boolean. Set it to `true` when the memory only makes sense inside THIS session's project — a fix for this codebase's SDK, a quirk of this repo's build, a fact about this project's architecture. Set it to `false` (the default) for insights that generalize across ALL projects — a language idiom, a general debugging technique, a personal preference of the user. When unsure, prefer `true` for facts/experiences tied to specific libraries or repos, and `false` for user preferences and universal techniques. (You do not name the project — the system fills that in.)
+
 ## Output format
 Respond with ONLY a JSON object — no prose, no markdown fence:
 
 {
-  "preferences": [{"name": "...", "content": "..."}],
-  "experiences": [{"name": "...", "content": "..."}],
-  "skills": [{"name": "...", "content": "..."}],
-  "facts": [{"name": "...", "content": "..."}],
+  "preferences": [{"name": "...", "content": "...", "project_specific": false}],
+  "experiences": [{"name": "...", "content": "...", "project_specific": true}],
+  "skills": [{"name": "...", "content": "...", "project_specific": false}],
+  "facts": [{"name": "...", "content": "...", "project_specific": true}],
   "delete": [{"kind": "preference|experience|skill|fact", "name": "..."}]
 }
 
-All five fields must be present; use empty arrays when there is nothing to output."#
+All five fields must be present; use empty arrays when there is nothing to output. Every item object must include "project_specific"."#
         .to_string()
 }
 
@@ -103,6 +115,11 @@ pub fn user_prompt(transcript: &SessionTranscript, existing: &[MemoryItem]) -> S
     }
 
     prompt.push_str("## Conversation history\n");
+    if let Some(project) = transcript.project.as_deref() {
+        prompt.push_str(&format!(
+            "**Project:** {project} — mark items `project_specific: true` when they only apply to this project.\n"
+        ));
+    }
     if let (Some(start), Some(end)) = (transcript.started_at(), transcript.ended_at()) {
         if start == end {
             prompt.push_str(&format!("**Session time:** {start}\n"));

@@ -71,6 +71,11 @@ struct RawItem {
     name: String,
     #[serde(default)]
     content: String,
+    /// Optional project scope: `true`/the project name marks this item as
+    /// specific to the session's project; absent/`false` means global. The
+    /// model is told to set it only for project-specific insights.
+    #[serde(default)]
+    project_specific: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -158,14 +163,15 @@ impl MemoryExtractionUseCase {
         let system = prompt::system_prompt();
         let user = prompt::user_prompt(transcript, existing);
 
+        let project = transcript.project.as_deref();
         let response = self.chat_client.complete(&system, &user).await?;
-        match parse_operations(&response) {
+        match parse_operations(&response, project) {
             Ok(ops) => Ok(ops),
             Err(first_err) => {
                 debug!("extraction output unparseable, retrying once: {first_err}");
                 let retry_user = format!("{user}\n\n{}", prompt::format_retry_prompt());
                 let response = self.chat_client.complete(&system, &retry_user).await?;
-                parse_operations(&response).map_err(|e| {
+                parse_operations(&response, project).map_err(|e| {
                     DomainError::parse(format!(
                         "extraction model returned unparseable output twice: {e}"
                     ))
@@ -195,6 +201,7 @@ impl MemoryExtractionUseCase {
                     kind,
                     ref name,
                     ref content,
+                    ref scope,
                 } => {
                     let existing = self.memory_repo.find_item(kind, name).await?;
                     let item = match existing {
@@ -204,6 +211,7 @@ impl MemoryExtractionUseCase {
                             name.clone(),
                             content.clone(),
                             Some(transcript.id.clone()),
+                            scope.clone(),
                             prev.created_at(),
                             now,
                             prev.update_count() + 1,
@@ -214,6 +222,7 @@ impl MemoryExtractionUseCase {
                             name.clone(),
                             content.clone(),
                             Some(transcript.id.clone()),
+                            scope.clone(),
                             now,
                             now,
                             0,
@@ -257,12 +266,27 @@ impl MemoryExtractionUseCase {
 /// Parse the model's JSON response into validated, normalized operations.
 ///
 /// Tolerates surrounding prose or a markdown fence by extracting the first
-/// balanced top-level JSON object.
-fn parse_operations(response: &str) -> Result<Vec<MemoryOperation>, DomainError> {
+/// balanced top-level JSON object. `project` is the session's project name; an
+/// item the model flagged `project_specific` is scoped to it (items stay global
+/// when the session had no known project, since there is nothing to scope to).
+fn parse_operations(
+    response: &str,
+    project: Option<&str>,
+) -> Result<Vec<MemoryOperation>, DomainError> {
     let json = extract_json_object(response)
         .ok_or_else(|| DomainError::parse("no JSON object found in extraction output"))?;
-    let output: ExtractionOutput = serde_json::from_str(json)
-        .map_err(|e| DomainError::parse(format!("invalid extraction JSON: {e}")))?;
+    // Small local models routinely emit markdown content with invalid JSON
+    // escapes (`\_`, `\(`, a raw newline inside a string, a stray trailing
+    // `\`). Try strict parsing first so well-formed output is untouched, then
+    // fall back to a repaired copy before giving up.
+    let output: ExtractionOutput = match serde_json::from_str(json) {
+        Ok(output) => output,
+        Err(strict_err) => {
+            let repaired = repair_json_string_escapes(json);
+            serde_json::from_str(&repaired)
+                .map_err(|_| DomainError::parse(format!("invalid extraction JSON: {strict_err}")))?
+        }
+    };
 
     let mut operations = Vec::new();
     let groups = [
@@ -280,10 +304,18 @@ fn parse_operations(response: &str) -> Result<Vec<MemoryOperation>, DomainError>
             if content.is_empty() {
                 continue;
             }
+            // Scope only when the model marked the item project-specific AND we
+            // actually know the project; otherwise keep it global.
+            let scope = if item.project_specific {
+                project.map(str::to_string)
+            } else {
+                None
+            };
             operations.push(MemoryOperation::Upsert {
                 kind,
                 name,
                 content: content.to_string(),
+                scope,
             });
         }
     }
@@ -297,6 +329,55 @@ fn parse_operations(response: &str) -> Result<Vec<MemoryOperation>, DomainError>
         operations.push(MemoryOperation::Delete { kind, name });
     }
     Ok(operations)
+}
+
+/// Repair invalid backslash escapes inside JSON string literals.
+///
+/// Small local models frequently emit markdown content with escapes that are
+/// valid in Markdown but invalid in JSON — `\_`, `\(`, `\<`, a trailing `\`,
+/// or raw control characters (a literal newline/tab) inside a string. Strict
+/// `serde_json` rejects all of these. This walks the text tracking string
+/// context and, inside strings, passes valid JSON escapes through untouched
+/// while escaping anything else so the result parses. Text outside strings is
+/// left exactly as-is.
+fn repair_json_string_escapes(json: &str) -> String {
+    let mut out = String::with_capacity(json.len() + json.len() / 16);
+    let mut in_string = false;
+    let mut chars = json.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if !in_string {
+            if ch == '"' {
+                in_string = true;
+            }
+            out.push(ch);
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_string = false;
+                out.push(ch);
+            }
+            '\\' => match chars.peek() {
+                // Valid JSON escape — copy the pair through verbatim.
+                Some(&next @ ('"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u')) => {
+                    out.push('\\');
+                    out.push(next);
+                    chars.next();
+                }
+                // Invalid escape (`\_`, `\(`, …) or a trailing backslash:
+                // escape the backslash itself so it becomes a literal.
+                _ => out.push_str("\\\\"),
+            },
+            // Raw control characters are illegal inside a JSON string; escape
+            // the common ones and drop anything else unrepresentable.
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Extract the first balanced `{ ... }` object from mixed model output.
@@ -372,7 +453,7 @@ mod tests {
  "experiences": [], "skills": [], "facts": [],
  "delete": [{"kind": "fact", "name": "old_fact"}]}
 ```"#;
-        let ops = parse_operations(response).unwrap();
+        let ops = parse_operations(response, None).unwrap();
         assert_eq!(ops.len(), 2);
         assert_eq!(
             ops[0],
@@ -380,6 +461,7 @@ mod tests {
                 kind: MemoryKind::Preference,
                 name: "rust_style".to_string(),
                 content: "Prefers ? over unwrap".to_string(),
+                scope: None,
             }
         );
         assert_eq!(
@@ -396,20 +478,113 @@ mod tests {
         let response = r#"{"preferences": [{"name": "", "content": "x"},
             {"name": "ok", "content": "  "}], "experiences": [], "skills": [],
             "facts": [], "delete": []}"#;
-        let ops = parse_operations(response).unwrap();
+        let ops = parse_operations(response, None).unwrap();
         assert!(ops.is_empty());
     }
 
     #[test]
     fn rejects_output_without_json() {
-        assert!(parse_operations("I cannot help with that").is_err());
+        assert!(parse_operations("I cannot help with that", None).is_err());
     }
 
     #[test]
     fn extracts_json_with_braces_inside_strings() {
         let response = r#"{"preferences": [{"name": "a", "content": "code: fn x() { y() }"}],
             "experiences": [], "skills": [], "facts": [], "delete": []}"#;
-        let ops = parse_operations(response).unwrap();
+        let ops = parse_operations(response, None).unwrap();
         assert_eq!(ops.len(), 1);
+    }
+
+    #[test]
+    fn repairs_invalid_markdown_escapes() {
+        // `\_` and `\(` are valid Markdown but invalid JSON escapes — the kind
+        // of output small local models emit. Strict parsing fails; the repair
+        // pass rescues it.
+        let response = "{\"facts\": [{\"name\": \"paths\", \"content\": \
+            \"use my\\_var and call foo\\(bar\\)\"}], \
+            \"preferences\": [], \"experiences\": [], \"skills\": [], \"delete\": []}";
+        let ops = parse_operations(response, None).unwrap();
+        assert_eq!(ops.len(), 1);
+        let MemoryOperation::Upsert { content, .. } = &ops[0] else {
+            panic!("expected upsert");
+        };
+        assert_eq!(content, "use my\\_var and call foo\\(bar\\)");
+    }
+
+    #[test]
+    fn repairs_lone_backslash_in_string() {
+        // A lone backslash followed by a normal char (`\ `, a path separator
+        // written raw, …) is an invalid JSON escape the repair pass rescues.
+        let response = "{\"facts\": [{\"name\": \"n\", \"content\": \"path C:\\Users\\me\"}], \
+            \"preferences\": [], \"experiences\": [], \"skills\": [], \"delete\": []}";
+        let ops = parse_operations(response, None).unwrap();
+        assert_eq!(ops.len(), 1);
+        let MemoryOperation::Upsert { content, .. } = &ops[0] else {
+            panic!("expected upsert");
+        };
+        assert_eq!(content, "path C:\\Users\\me");
+    }
+
+    #[test]
+    fn repairs_raw_newline_inside_string() {
+        // A literal newline inside a string value (no escaping) is invalid JSON.
+        let response = "{\"facts\": [{\"name\": \"n\", \"content\": \"line one\nline two\"}], \
+            \"preferences\": [], \"experiences\": [], \"skills\": [], \"delete\": []}";
+        let ops = parse_operations(response, None).unwrap();
+        assert_eq!(ops.len(), 1);
+        let MemoryOperation::Upsert { content, .. } = &ops[0] else {
+            panic!("expected upsert");
+        };
+        assert_eq!(content, "line one\nline two");
+    }
+
+    #[test]
+    fn repair_leaves_valid_escapes_untouched() {
+        let valid = r#"{"a": "tab\there \"quoted\" and \\ slash and \n newline"}"#;
+        assert_eq!(repair_json_string_escapes(valid), valid);
+    }
+
+    #[test]
+    fn project_specific_item_is_scoped_to_the_project() {
+        let response = r#"{"facts": [
+            {"name": "sdk_quirk", "content": "matter transport needs a wrapper", "project_specific": true},
+            {"name": "prefers_short_fns", "content": "keep functions small", "project_specific": false}
+        ], "preferences": [], "experiences": [], "skills": [], "delete": []}"#;
+        let ops = parse_operations(response, Some("home-framework")).unwrap();
+        let scopes: Vec<Option<&str>> = ops
+            .iter()
+            .map(|op| match op {
+                MemoryOperation::Upsert { scope, .. } => scope.as_deref(),
+                _ => None,
+            })
+            .collect();
+        // First is project-specific → scoped; second is global → None.
+        assert_eq!(scopes, vec![Some("home-framework"), None]);
+    }
+
+    #[test]
+    fn project_specific_stays_global_when_project_unknown() {
+        // Even when flagged project_specific, an item stays global if the
+        // session had no known project — there is nothing to scope it to.
+        let response = r#"{"facts": [
+            {"name": "sdk_quirk", "content": "x", "project_specific": true}
+        ], "preferences": [], "experiences": [], "skills": [], "delete": []}"#;
+        let ops = parse_operations(response, None).unwrap();
+        let MemoryOperation::Upsert { scope, .. } = &ops[0] else {
+            panic!("expected upsert");
+        };
+        assert_eq!(*scope, None);
+    }
+
+    #[test]
+    fn missing_project_specific_defaults_to_global() {
+        // Older/looser model output without the field parses as global.
+        let response = r#"{"facts": [{"name": "n", "content": "c"}],
+            "preferences": [], "experiences": [], "skills": [], "delete": []}"#;
+        let ops = parse_operations(response, Some("proj")).unwrap();
+        let MemoryOperation::Upsert { scope, .. } = &ops[0] else {
+            panic!("expected upsert");
+        };
+        assert_eq!(*scope, None);
     }
 }

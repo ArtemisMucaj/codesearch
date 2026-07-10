@@ -201,9 +201,14 @@ impl<'a> Router<'a> {
                     .await
             }
             Commands::Memory { subcommand } => match subcommand {
-                MemorySubcommand::Import { path, llm, force } => {
-                    self.memory_controller.import(path, llm, force).await
-                }
+                MemorySubcommand::Import { path, llm, force } => match path {
+                    Some(path) => self.memory_controller.import(path, llm, force).await,
+                    // The no-path picker flow runs the TUI before the container
+                    // is built, so it is handled in main.rs, not here.
+                    None => Err(anyhow::anyhow!(
+                        "interactive memory import is handled separately in main"
+                    )),
+                },
                 MemorySubcommand::Search {
                     query,
                     num,

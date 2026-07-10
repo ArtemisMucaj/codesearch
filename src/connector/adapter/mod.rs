@@ -60,6 +60,8 @@ pub use openai_reranking::*;
 pub use ort_embedding::*;
 pub use ort_reranking::*;
 pub use resource_fetch::*;
-pub use session_discovery::{discover_all_sessions, load_transcript};
+pub use session_discovery::{
+    discover_all_sessions, discover_all_sessions_streaming, load_transcript,
+};
 pub use tree_sitter_channels::*;
 pub use treesitter_parser::*;

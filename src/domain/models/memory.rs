@@ -83,6 +83,11 @@ pub struct MemoryItem {
     content: String,
     /// Identifier of the session this memory was last extracted from.
     source_session_id: Option<String>,
+    /// Project this memory is scoped to (e.g. a repository directory name), or
+    /// `None` when it applies globally across all projects. Project-specific
+    /// insights (a fix for one codebase's SDK, a repo's build quirk) carry a
+    /// scope so they don't surface as advice in unrelated projects.
+    scope: Option<String>,
     created_at: i64,
     updated_at: i64,
     /// Number of times this item has been re-extracted/updated.
@@ -97,6 +102,7 @@ impl MemoryItem {
         name: String,
         content: String,
         source_session_id: Option<String>,
+        scope: Option<String>,
         created_at: i64,
         updated_at: i64,
         update_count: u32,
@@ -107,6 +113,7 @@ impl MemoryItem {
             name,
             content,
             source_session_id,
+            scope,
             created_at,
             updated_at,
             update_count,
@@ -131,6 +138,11 @@ impl MemoryItem {
 
     pub fn source_session_id(&self) -> Option<&str> {
         self.source_session_id.as_deref()
+    }
+
+    /// Project scope, or `None` for a global memory.
+    pub fn scope(&self) -> Option<&str> {
+        self.scope.as_deref()
     }
 
     pub fn created_at(&self) -> i64 {
@@ -166,6 +178,12 @@ pub struct SessionTranscript {
     pub id: String,
     /// Where the transcript came from (file path or external ID).
     pub source: String,
+    /// Project the session ran in — the repository/working-directory name (not
+    /// the full path), when known. Passed to extraction so project-specific
+    /// memories can be scoped to it. `None` when the source did not record a
+    /// working directory.
+    #[serde(default)]
+    pub project: Option<String>,
     pub messages: Vec<SessionMessage>,
 }
 
@@ -343,6 +361,9 @@ pub enum MemoryOperation {
         kind: MemoryKind,
         name: String,
         content: String,
+        /// Project this memory is specific to, or `None` if it applies
+        /// globally. Set by the extraction model per item.
+        scope: Option<String>,
     },
     /// Remove the item identified by `(kind, name)`.
     Delete { kind: MemoryKind, name: String },

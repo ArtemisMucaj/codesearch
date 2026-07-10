@@ -42,6 +42,7 @@ pub fn parse_transcript(
     source: &str,
 ) -> Result<SessionTranscript, DomainError> {
     let mut session_id: Option<String> = None;
+    let mut cwd: Option<String> = None;
     let mut messages = Vec::new();
     let mut parsed_lines = 0usize;
 
@@ -60,6 +61,14 @@ pub fn parse_transcript(
                 session_id = Some(id.to_string());
             }
         }
+        // Claude Code records the working directory per event; keep the first
+        // one so `memory import <path>` (which bypasses discovery) is still
+        // scoped to the project the session ran in.
+        if cwd.is_none() {
+            if let Some(dir) = value.get("cwd").and_then(Value::as_str) {
+                cwd = Some(dir.to_string());
+            }
+        }
 
         if let Some(message) = parse_line(&value) {
             messages.push(message);
@@ -75,8 +84,18 @@ pub fn parse_transcript(
     Ok(SessionTranscript {
         id: session_id.unwrap_or_else(|| fallback_id.to_string()),
         source: source.to_string(),
+        project: cwd.as_deref().and_then(project_from_cwd),
         messages,
     })
+}
+
+/// Reduce a working-directory path to a short project name (its last non-empty
+/// path component).
+fn project_from_cwd(cwd: &str) -> Option<String> {
+    cwd.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .find(|c| !c.is_empty())
+        .map(str::to_string)
 }
 
 /// Parse one JSONL line into a normalized message, or `None` when the line

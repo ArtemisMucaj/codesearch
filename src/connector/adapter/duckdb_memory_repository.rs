@@ -70,6 +70,7 @@ impl DuckdbMemoryRepository {
                 name TEXT NOT NULL,
                 content TEXT NOT NULL,
                 source_session_id TEXT,
+                scope TEXT,
                 created_at BIGINT NOT NULL,
                 updated_at BIGINT NOT NULL,
                 update_count BIGINT NOT NULL DEFAULT 0,
@@ -103,6 +104,11 @@ impl DuckdbMemoryRepository {
             "#
         ))
         .map_err(|e| DomainError::storage(format!("Failed to initialize memory schema: {e}")))?;
+
+        // Migration: add the project `scope` column to databases created before
+        // scoping existed. Idempotent — a no-op once the column is present.
+        conn.execute_batch("ALTER TABLE memory_items ADD COLUMN IF NOT EXISTS scope TEXT")
+            .map_err(|e| DomainError::storage(format!("Failed to add memory scope column: {e}")))?;
 
         Self::check_meta(&conn, "dimensions", &dimensions.to_string())?;
         Self::check_meta(&conn, "embedding_model", embedding_model)?;
@@ -181,9 +187,10 @@ impl DuckdbMemoryRepository {
             row.get(2)?,
             row.get(3)?,
             row.get::<_, Option<String>>(4)?,
-            row.get(5)?,
+            row.get::<_, Option<String>>(5)?,
             row.get(6)?,
-            row.get::<_, i64>(7)? as u32,
+            row.get(7)?,
+            row.get::<_, i64>(8)? as u32,
         ))
     }
 
@@ -204,7 +211,7 @@ impl DuckdbMemoryRepository {
 }
 
 const ITEM_COLUMNS: &str =
-    "id, kind, name, content, source_session_id, created_at, updated_at, update_count";
+    "id, kind, name, content, source_session_id, scope, created_at, updated_at, update_count";
 
 const NODE_COLUMNS: &str =
     "uri, kind, parent_uri, abstract, overview, content, created_at, updated_at";
@@ -235,7 +242,8 @@ impl MemoryRepository for DuckdbMemoryRepository {
 
         conn.execute(
             &format!(
-                "INSERT INTO memory_items ({ITEM_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+                "INSERT INTO memory_items ({ITEM_COLUMNS}) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
             ),
             params![
                 item.id(),
@@ -243,6 +251,7 @@ impl MemoryRepository for DuckdbMemoryRepository {
                 item.name(),
                 item.content(),
                 item.source_session_id(),
+                item.scope(),
                 item.created_at(),
                 item.updated_at(),
                 item.update_count() as i64,
@@ -365,7 +374,8 @@ impl MemoryRepository for DuckdbMemoryRepository {
         let rows = stmt
             .query_map([], |row| {
                 let item = Self::item_from_row(row)?;
-                let score: f32 = row.get(8)?;
+                // Score is the column appended after ITEM_COLUMNS' 9 fields.
+                let score: f32 = row.get(ITEM_COLUMNS.split(", ").count())?;
                 Ok((item, score))
             })
             .map_err(|e| DomainError::storage(format!("Semantic memory search failed: {e}")))?;
@@ -425,7 +435,8 @@ impl MemoryRepository for DuckdbMemoryRepository {
         let rows = stmt
             .query_map([], |row| {
                 let item = Self::item_from_row(row)?;
-                let score: f64 = row.get(8)?;
+                // Score is the column appended after ITEM_COLUMNS' 9 fields.
+                let score: f64 = row.get(ITEM_COLUMNS.split(", ").count())?;
                 Ok((item, score as f32))
             })
             .map_err(|e| DomainError::storage(format!("Keyword memory search failed: {e}")))?;

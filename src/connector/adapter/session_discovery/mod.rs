@@ -23,6 +23,15 @@ use crate::domain::{
 /// Characters of end-of-session preview surfaced in the picker.
 pub(crate) const PREVIEW_CHARS: usize = 240;
 
+/// The discovery sources, each as a `(name, discover_fn)` pair. Iterating this
+/// keeps the streaming and blocking entry points in sync.
+type SourceFn = fn() -> Result<Vec<DiscoveredSession>, DomainError>;
+const SOURCES: [(&str, SourceFn); 3] = [
+    ("claude", claude::discover),
+    ("opencode", opencode::discover),
+    ("zed", zed::discover),
+];
+
 /// Discover sessions from every available source, newest first.
 ///
 /// A source that is not installed (its store is absent) simply contributes
@@ -30,26 +39,47 @@ pub(crate) const PREVIEW_CHARS: usize = 240;
 /// never blocks the picker.
 pub fn discover_all_sessions() -> Vec<DiscoveredSession> {
     let mut sessions = Vec::new();
-
-    for (name, result) in [
-        ("claude", claude::discover()),
-        ("opencode", opencode::discover()),
-        ("zed", zed::discover()),
-    ] {
-        match result {
+    for (name, discover) in SOURCES {
+        match discover() {
             Ok(mut found) => sessions.append(&mut found),
             Err(e) => tracing::warn!("session discovery for {name} failed: {e}"),
         }
     }
-
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     sessions
 }
 
+/// Discover sessions incrementally, running each source on its own thread and
+/// pushing that source's results to `sink` as soon as they are ready. Returns
+/// once every source thread has finished (or the receiver was dropped).
+///
+/// This lets the picker open immediately and fill in as sources report, rather
+/// than blocking on the slowest store (Claude reads every JSONL up front).
+pub fn discover_all_sessions_streaming(sink: std::sync::mpsc::Sender<Vec<DiscoveredSession>>) {
+    let handles: Vec<_> = SOURCES
+        .into_iter()
+        .map(|(name, discover)| {
+            let sink = sink.clone();
+            std::thread::spawn(move || match discover() {
+                Ok(found) if !found.is_empty() => {
+                    // A send error means the picker closed; stop quietly.
+                    let _ = sink.send(found);
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("session discovery for {name} failed: {e}"),
+            })
+        })
+        .collect();
+    for handle in handles {
+        let _ = handle.join();
+    }
+}
+
 /// Materialize the full transcript for a discovered session, so it can be run
-/// through the import pipeline.
+/// through the import pipeline. The session's working directory (when known) is
+/// carried into the transcript as its `project` scope.
 pub fn load_transcript(session: &DiscoveredSession) -> Result<SessionTranscript, DomainError> {
-    match (&session.source, &session.locator) {
+    let mut transcript = match (&session.source, &session.locator) {
         (SessionSource::Claude, SessionLocator::File(path)) => {
             crate::connector::adapter::parse_transcript_file(std::path::Path::new(path))
         }
@@ -70,7 +100,21 @@ pub fn load_transcript(session: &DiscoveredSession) -> Result<SessionTranscript,
         (source, locator) => Err(DomainError::invalid_input(format!(
             "mismatched session source {source} and locator {locator:?}"
         ))),
-    }
+    }?;
+
+    // The discovery layer knows the session's cwd; reduce it to a project name
+    // (the last path component) so extracted memories can be scoped to it.
+    transcript.project = session.cwd.as_deref().and_then(project_from_cwd);
+    Ok(transcript)
+}
+
+/// Reduce a working-directory path to a short project name (its last non-empty
+/// path component). `None` for an empty or root-only path.
+pub(crate) fn project_from_cwd(cwd: &str) -> Option<String> {
+    cwd.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .find(|c| !c.is_empty())
+        .map(str::to_string)
 }
 
 /// The absolute path to `$HOME`, or an error when it cannot be determined.

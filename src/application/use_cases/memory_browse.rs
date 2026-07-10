@@ -1,11 +1,13 @@
 //! Unified memory recall for the TUI, as a navigable virtual filesystem.
 //!
 //! - **Browse** (empty query) returns the whole store as a flattened *tree* of
-//!   [`MemoryRow`]s: directory headers (`sessions/`, `resources/`, `items/`),
-//!   each node under them, and — nested one level deeper — that node's L0/L1/L2
-//!   levels as their own selectable rows. Selecting a level row shows just that
-//!   level on the right; selecting the node row shows its L0+L1 summary (the
-//!   full L2 body is reached via the node's "L2 · detail" child row).
+//!   [`MemoryRow`]s: the `memory://memory` rollup (with its L0/L1 levels and the
+//!   memory items grouped by category beneath it), then directory headers
+//!   (`sessions/`, `resources/`) with each node under them, and — nested one
+//!   level deeper — that node's L0/L1/L2 levels as their own selectable rows.
+//!   Selecting a level row shows just that level on the right; selecting the
+//!   node row shows its L0+L1 summary (the full L2 body is reached via the
+//!   node's "L2 · detail" child row).
 //! - **Search** (non-empty query) returns a flat, ranked list of rows (depth 0)
 //!   from hybrid semantic + keyword recall over both items and nodes.
 //!
@@ -20,7 +22,7 @@ use crate::application::use_cases::memory_search::MemorySearchUseCase;
 use crate::application::use_cases::memory_summary::{
     MEMORY_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
 };
-use crate::domain::{DomainError, MemoryItem, MemoryNode, NodeKind};
+use crate::domain::{DomainError, MemoryItem, MemoryKind, MemoryNode, NodeKind};
 
 /// RRF dampening constant (matches [`MemorySearchUseCase`]).
 const RRF_K: f32 = 60.0;
@@ -185,6 +187,10 @@ impl MemoryBrowseUseCase {
     /// memory://memory            (rollup node)
     ///   L0 · abstract
     ///   L1 · overview
+    ///   preferences/             (item categories nest under the rollup)
+    ///     [preference] commit_style
+    ///   facts/
+    ///     [fact] duckdb_locks
     /// sessions/                  (directory)
     ///   memory://sessions/<id>
     ///     L0 · abstract
@@ -193,9 +199,9 @@ impl MemoryBrowseUseCase {
     /// resources/                 (directory)
     ///   memory://resources/<slug>
     ///     L0 · abstract  …
-    /// items/                     (directory)
-    ///   [fact] duckdb_locks
     /// ```
+    /// Before the first rollup exists, items fall back to a top-level
+    /// `memory/` directory so they are never orphaned.
     async fn browse_tree(&self) -> Result<Vec<MemoryRow>, DomainError> {
         let items = self.memory_repo.list_items(None).await?;
         let mut nodes = self.memory_repo.list_nodes(None).await?;
@@ -210,13 +216,30 @@ impl MemoryBrowseUseCase {
         let mut rows: Vec<MemoryRow> = Vec::new();
 
         // The rollup sits at the filesystem root (depth 0), with its levels
-        // nested directly beneath it.
+        // (L0/L1) and the grouped memory items nested directly beneath it, so
+        // everything durable lives under one `memory` root.
         let rollup: Vec<&MemoryNode> = nodes
             .iter()
             .filter(|n| n.kind() == NodeKind::Memory)
             .collect();
+        let has_rollup = !rollup.is_empty();
         for node in rollup {
             push_node_with_levels(&mut rows, node, 0);
+        }
+
+        // Items grouped by kind: one sub-directory per category
+        // (preferences/experiences/skills/facts), each holding its items, empty
+        // categories omitted. Nest them under the rollup (depth 1/2) when it
+        // exists; otherwise fall back to a top-level `memory/` dir so items are
+        // never orphaned before the first rollup is generated.
+        if !items.is_empty() {
+            let base_depth = if has_rollup {
+                1
+            } else {
+                rows.push(dir_row("memory/", 0));
+                1
+            };
+            push_item_groups(&mut rows, &items, base_depth);
         }
 
         // Sessions and resources each get a directory header, with their nodes
@@ -236,15 +259,22 @@ impl MemoryBrowseUseCase {
             &nodes,
         );
 
-        // Flat items under an `items/` header.
-        if !items.is_empty() {
-            rows.push(dir_row("items/", 0));
-            for item in &items {
-                rows.push(item_row(item, 1, None));
-            }
-        }
-
         Ok(rows)
+    }
+}
+
+/// Append one category sub-directory per non-empty memory kind (at
+/// `category_depth`) with its items nested one level deeper.
+fn push_item_groups(rows: &mut Vec<MemoryRow>, items: &[MemoryItem], category_depth: u8) {
+    for kind in MemoryKind::ALL {
+        let group: Vec<&MemoryItem> = items.iter().filter(|i| i.kind() == kind).collect();
+        if group.is_empty() {
+            continue;
+        }
+        rows.push(dir_row(&format!("{}/", kind.plural()), category_depth));
+        for item in group {
+            rows.push(item_row(item, category_depth + 1, None));
+        }
     }
 }
 
@@ -392,5 +422,54 @@ mod tests {
         // Child rows are nested one level deeper than the node row.
         assert_eq!(rows[0].depth, 1);
         assert_eq!(rows[1].depth, 2);
+    }
+
+    fn item(kind: MemoryKind, name: &str) -> MemoryItem {
+        MemoryItem::new(
+            name.into(),
+            kind,
+            name.into(),
+            "content".into(),
+            None,
+            None,
+            0,
+            0,
+            0,
+        )
+    }
+
+    #[test]
+    fn push_item_groups_nests_items_by_category() {
+        let items = vec![
+            item(MemoryKind::Fact, "duckdb_locks"),
+            item(MemoryKind::Preference, "commit_style"),
+            item(MemoryKind::Fact, "storage_engine"),
+        ];
+        let mut rows = Vec::new();
+        // Category dirs at depth 1, items at depth 2 (as when nested under the
+        // rollup).
+        push_item_groups(&mut rows, &items, 1);
+
+        // Categories follow MemoryKind::ALL order (preferences before facts);
+        // the empty experience/skill kinds are omitted entirely.
+        let dirs: Vec<&str> = rows
+            .iter()
+            .filter(|r| matches!(r.target, RowTarget::Directory))
+            .map(|r| r.label.as_str())
+            .collect();
+        assert_eq!(dirs, vec!["preferences/", "facts/"]);
+
+        // Every dir is at depth 1 and every item at depth 2, and both facts are
+        // grouped under the single `facts/` header.
+        assert!(rows.iter().all(|r| match r.target {
+            RowTarget::Directory => r.depth == 1,
+            RowTarget::Item(_) => r.depth == 2,
+            _ => false,
+        }));
+        let item_count = rows
+            .iter()
+            .filter(|r| matches!(r.target, RowTarget::Item(_)))
+            .count();
+        assert_eq!(item_count, 3);
     }
 }

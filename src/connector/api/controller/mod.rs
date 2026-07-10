@@ -22,7 +22,7 @@ pub use explain_controller::ExplainController;
 pub use impact_controller::ImpactController;
 pub use index_controller::IndexController;
 pub use list_repositories_controller::ListRepositoriesController;
-pub use memory_controller::MemoryController;
+pub use memory_controller::{run_import_picker_ui, MemoryController};
 pub use search_controller::SearchController;
 pub use stats_controller::StatsController;
 pub use symbol_clusters_controller::SymbolClustersController;

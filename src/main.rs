@@ -127,6 +127,16 @@ async fn main() -> Result<()> {
         _ => (false, None, false),
     };
     let is_tui = matches!(&cli.command, Commands::Tui { .. });
+    // `memory import` with no PATH opens an interactive picker (a full-screen
+    // TUI) before any container is built. It owns the terminal like the TUI, so
+    // it needs the same file-based logging and the same "open first, build the
+    // heavy container only afterwards" treatment.
+    let is_import_picker = matches!(
+        &cli.command,
+        Commands::Memory {
+            subcommand: codesearch::MemorySubcommand::Import { path: None, .. },
+        }
+    );
 
     // For MCP stdio mode, log to stderr (stdout is for MCP protocol)
     // For HTTP mode, we can log to stdout since HTTP uses a different channel
@@ -137,7 +147,7 @@ async fn main() -> Result<()> {
         EnvFilter::new("warn,codesearch=info")
     };
 
-    if is_tui {
+    if is_tui || is_import_picker {
         // Ratatui owns the terminal; any write to stderr corrupts the display.
         // Redirect logs to ~/.codesearch/tui.log so they are still accessible.
         let log_dir = expand_tilde(&cli.data_dir);
@@ -302,6 +312,59 @@ async fn main() -> Result<()> {
             service.waiting().await?;
         }
         return Ok(());
+    }
+
+    // Interactive `memory import`: open the picker BEFORE building the
+    // container so the TUI appears instantly instead of waiting for ONNX models
+    // to load. Discovery streams into the picker on background threads. Only if
+    // the user selects sessions do we build the (heavy) container and extract.
+    if is_import_picker {
+        if let Commands::Memory {
+            subcommand: codesearch::MemorySubcommand::Import { llm, .. },
+        } = cli.command
+        {
+            use codesearch::tui::import_picker::{ImportEvent, ImportRequest};
+
+            // Two channels bridge the (blocking) picker UI and the (async)
+            // import worker: requests flow UI → worker, progress flows back.
+            let (req_tx, req_rx) = std::sync::mpsc::channel::<ImportRequest>();
+            let (evt_tx, evt_rx) = std::sync::mpsc::channel::<ImportEvent>();
+
+            // Worker: build the container (loads models) in the background, then
+            // serve import requests until the picker closes the request channel.
+            // The picker is already interactive while this runs.
+            let worker = tokio::spawn(async move {
+                let container = match Container::new(config).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = evt_tx.send(ImportEvent::ContainerFailed {
+                            error: e.to_string(),
+                        });
+                        return;
+                    }
+                };
+                let controller = codesearch::MemoryController::new(&container);
+                if let Err(e) = controller.serve_import_requests(req_rx, evt_tx, llm).await {
+                    tracing::error!("import worker failed: {e}");
+                }
+            });
+
+            // The picker owns the terminal; run it on a blocking thread so it
+            // never contends with the async runtime's reactor. Dropping req_tx
+            // when it returns signals the worker to finish.
+            let ui = tokio::task::spawn_blocking(move || {
+                codesearch::run_import_picker_ui(evt_rx, req_tx)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("session picker task panicked: {e}"))?;
+            ui?;
+
+            // The picker closed; the request channel is dropped, so the worker
+            // loop ends. Wait for any in-flight import to finish cleanly.
+            let _ = worker.await;
+            return Ok(());
+        }
+        unreachable!("is_import_picker is only set for Memory::Import with no path")
     }
 
     let container = if is_tui {

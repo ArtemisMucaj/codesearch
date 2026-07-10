@@ -4,15 +4,16 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use crate::application::{
-    resource_slug, ChatClient, ImportOutcome, MEMORY_ROOT_URI, RESOURCES_ROOT_URI,
-    SESSIONS_ROOT_URI,
+    resource_slug, ChatClient, ImportOutcome, ImportSessionUseCase, MEMORY_ROOT_URI,
+    RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
 };
 use crate::cli::{LlmTarget, MemoryKindArg, OutputFormatTextJson};
 use crate::connector::adapter::{
-    discover_all_sessions, fetch_resource, load_transcript as load_discovered_transcript,
-    parse_transcript_file, AnthropicClient, OpenAiChatClient,
+    fetch_resource, load_transcript as load_discovered_transcript, parse_transcript_file,
+    AnthropicClient, OpenAiChatClient,
 };
-use crate::domain::{MemoryItem, MemoryKind, MemoryNode, MemoryOperation};
+use crate::domain::{DiscoveredSession, MemoryItem, MemoryKind, MemoryNode, MemoryOperation};
+use crate::tui::import_picker::{ImportEvent, ImportRequest};
 
 use super::super::Container;
 
@@ -39,75 +40,82 @@ impl<'a> MemoryController<'a> {
         })
     }
 
-    pub async fn import(
-        &self,
-        path: Option<String>,
-        llm: LlmTarget,
-        force: bool,
-    ) -> Result<String> {
-        match path {
-            Some(path) => {
-                let transcript = parse_transcript_file(Path::new(&path))?;
-                self.import_transcripts(vec![transcript], llm, force).await
-            }
-            None => self.import_via_picker(llm, force).await,
-        }
+    /// Import a single transcript file directly (the `memory import <path>`
+    /// path). The no-path picker flow lives in [`run_import_picker_ui`] +
+    /// [`Self::serve_import_requests`]: the picker opens *before* the container
+    /// is built, and the worker imports selected sessions on demand while it
+    /// stays open.
+    pub async fn import(&self, path: String, llm: LlmTarget, force: bool) -> Result<String> {
+        let transcript = parse_transcript_file(Path::new(&path))?;
+        self.import_transcripts(vec![transcript], llm, force).await
     }
 
-    /// Discover local sessions, show the interactive picker, and import the
-    /// ones the user selects.
-    async fn import_via_picker(&self, llm: LlmTarget, force: bool) -> Result<String> {
-        let sessions = discover_all_sessions();
-        if sessions.is_empty() {
-            return Ok(
-                "No sessions found from Claude Code, OpenCode, or Zed on this machine.\n\
-                       Pass a transcript path to import one directly."
-                    .to_string(),
-            );
+    /// Service import requests from the interactive picker until the request
+    /// channel closes (the user quit the picker).
+    ///
+    /// Runs as a background worker: it first reports the set of already-imported
+    /// sessions (for the ✓ marks), then, for each request, materializes the
+    /// transcript, runs extraction, and reports progress — all over `events`,
+    /// so the picker stays open and live throughout.
+    pub async fn serve_import_requests(
+        &self,
+        requests: std::sync::mpsc::Receiver<ImportRequest>,
+        events: std::sync::mpsc::Sender<ImportEvent>,
+        llm: LlmTarget,
+    ) -> Result<()> {
+        // Announce readiness with the current imported-session set, so the
+        // picker can mark them. A repo hiccup here just means no ✓ marks.
+        let imported = self.imported_session_ids().await.unwrap_or_default();
+        // If the picker already closed, there is nothing to serve.
+        if events.send(ImportEvent::Ready { imported }).is_err() {
+            return Ok(());
         }
 
-        // The picker takes over the terminal; run it on a blocking thread so it
-        // never shares the async runtime's reactor with the terminal loop. The
-        // loader materializes a session's transcript on demand for the right
-        // pane (lazy-loaded + cached inside the picker).
-        let now = now_secs();
-        let chosen = tokio::task::spawn_blocking(move || {
-            let loader = |s: &crate::domain::DiscoveredSession| {
-                load_discovered_transcript(s)
-                    .map(|t| t.messages)
-                    .map_err(|e| e.to_string())
-            };
-            crate::tui::import_picker::run(sessions, now, &loader)
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("session picker task panicked: {e}"))??;
+        let chat_client = Self::chat_client(llm)?;
+        let use_case = self.container.memory_import_use_case(chat_client)?;
 
-        if chosen.is_empty() {
-            return Ok("Nothing selected — no sessions imported.".to_string());
-        }
+        // The picker sends requests one at a time (import-highlighted), so a
+        // simple sequential loop keeps memory writes serialized and progress
+        // easy to follow. `recv` blocks the worker thread, not the UI.
+        while let Ok(ImportRequest { session }) = requests.recv() {
+            let id = (session.source.as_str().to_string(), session.id.clone());
+            let _ = events.send(ImportEvent::Started { id: id.clone() });
 
-        // Materialize each chosen session's transcript, skipping any that fail
-        // to load rather than aborting the whole batch.
-        let mut transcripts = Vec::new();
-        let mut load_errors = Vec::new();
-        for session in &chosen {
-            match load_discovered_transcript(session) {
-                Ok(t) => transcripts.push(t),
-                Err(e) => load_errors.push(format!(
-                    "  ! {} ({}): {e}",
-                    session.display_title(),
-                    session.source
-                )),
+            match self.import_one_discovered(&use_case, &session).await {
+                Ok(summary) => {
+                    let _ = events.send(ImportEvent::Done { id, summary });
+                }
+                Err(e) => {
+                    let _ = events.send(ImportEvent::Failed {
+                        id,
+                        error: e.to_string(),
+                    });
+                }
             }
         }
+        Ok(())
+    }
 
-        let mut out = self.import_transcripts(transcripts, llm, force).await?;
-        if !load_errors.is_empty() {
-            out.push_str("\nSkipped (could not load):\n");
-            out.push_str(&load_errors.join("\n"));
-            out.push('\n');
-        }
-        Ok(out)
+    /// Materialize one discovered session and run it through extraction,
+    /// returning a one-line result summary. Re-imports are forced (the TUI
+    /// re-runs extraction on demand).
+    async fn import_one_discovered(
+        &self,
+        use_case: &ImportSessionUseCase,
+        session: &DiscoveredSession,
+    ) -> Result<String> {
+        let transcript = load_discovered_transcript(session)
+            .with_context(|| format!("could not load '{}'", session.display_title()))?;
+        let outcome = use_case.execute(&transcript, true).await?;
+        Ok(import_outcome_summary(&outcome))
+    }
+
+    /// The identity set (`source`, `id`) of sessions already in the store, used
+    /// to seed the picker's ✓ marks.
+    async fn imported_session_ids(&self) -> Result<std::collections::HashSet<(String, String)>> {
+        let repo = self.container.memory_repository()?;
+        let sessions = repo.list_sessions().await?;
+        Ok(sessions.into_iter().map(|s| (s.source, s.id)).collect())
     }
 
     /// Run a batch of transcripts through the import pipeline, formatting a
@@ -125,11 +133,28 @@ impl<'a> MemoryController<'a> {
         let use_case = self.container.memory_import_use_case(chat_client)?;
 
         let multiple = transcripts.len() > 1;
+        let total = transcripts.len();
         let mut output = String::new();
-        for transcript in &transcripts {
+        // Each session is one (slow) LLM extraction call. Emit live progress to
+        // stderr so the CLI doesn't look hung between the picker closing and the
+        // final report; the report itself still goes to stdout as the return
+        // value, so stderr progress never pollutes it.
+        for (idx, transcript) in transcripts.iter().enumerate() {
+            let title = transcript_label(transcript);
+            eprint!(
+                "\r\x1b[2KExtracting memories [{}/{}]: {} …",
+                idx + 1,
+                total,
+                title
+            );
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+
             let outcome = use_case.execute(transcript, force).await?;
             output.push_str(&render_import_outcome(&outcome, multiple));
         }
+        // Clear the progress line so the stdout report starts clean.
+        eprint!("\r\x1b[2K");
+        let _ = std::io::Write::flush(&mut std::io::stderr());
         Ok(output)
     }
 
@@ -200,10 +225,11 @@ impl<'a> MemoryController<'a> {
                 let mut output = String::new();
                 for (item, score) in &results {
                     output.push_str(&format!(
-                        "[{:.3}] [{}] {} ({})\n",
+                        "[{:.3}] [{}] {}{} ({})\n",
                         score,
                         item.kind(),
                         item.name(),
+                        scope_tag(item),
                         item.id()
                     ));
                     output.push_str(&format!(
@@ -235,9 +261,10 @@ impl<'a> MemoryController<'a> {
                 let mut output = format!("{} memories:\n\n", items.len());
                 for item in &items {
                     output.push_str(&format!(
-                        "[{}] {} ({})\n",
+                        "[{}] {}{} ({})\n",
                         item.kind(),
                         item.name(),
+                        scope_tag(item),
                         item.id()
                     ));
                     output.push_str(&format!(
@@ -355,6 +382,73 @@ impl<'a> MemoryController<'a> {
     }
 }
 
+/// Run the interactive session-import picker to completion.
+///
+/// This is a free function — it needs **no** [`Container`] — so `main.rs` can
+/// open the picker before building the container (and loading ONNX models). The
+/// picker imports the highlighted session on demand by sending an
+/// [`ImportRequest`] over `import_tx`; a background worker (see
+/// [`MemoryController::serve_import_requests`]) processes it and reports back on
+/// `events`. Discovery streams in on background threads, so the picker opens
+/// immediately and fills in as each source (Claude / OpenCode / Zed) reports.
+pub fn run_import_picker_ui(
+    events: std::sync::mpsc::Receiver<ImportEvent>,
+    import_tx: std::sync::mpsc::Sender<ImportRequest>,
+) -> Result<()> {
+    let now = now_secs();
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<DiscoveredSession>>();
+
+    // Kick off discovery; the picker drains `rx` as batches arrive. The thread
+    // exits on its own when every source is done (or the receiver is dropped).
+    std::thread::spawn(move || {
+        crate::connector::adapter::discover_all_sessions_streaming(tx);
+    });
+
+    let loader = |s: &DiscoveredSession| {
+        load_discovered_transcript(s)
+            .map(|t| t.messages)
+            .map_err(|e| e.to_string())
+    };
+    crate::tui::import_picker::run(rx, events, import_tx, now, &loader)
+}
+
+/// A one-line summary of an import outcome, for the picker footer.
+fn import_outcome_summary(outcome: &ImportOutcome) -> String {
+    match outcome {
+        ImportOutcome::AlreadyImported { session } => {
+            format!("{}: already imported", session.id)
+        }
+        ImportOutcome::Imported { session, report } => {
+            let written = report.items_written();
+            if written == 0 {
+                format!("{}: nothing durable to remember", session.id)
+            } else {
+                format!(
+                    "{}: {} memor{} written",
+                    session.id,
+                    written,
+                    if written == 1 { "y" } else { "ies" }
+                )
+            }
+        }
+    }
+}
+
+/// Short, human-readable label for a transcript, used in progress output.
+/// Prefers the first non-empty user message; falls back to the session id.
+fn transcript_label(transcript: &crate::domain::SessionTranscript) -> String {
+    const LABEL_CHARS: usize = 60;
+    let first_user = transcript
+        .messages
+        .iter()
+        .find(|m| m.role == "user" && !m.content.trim().is_empty())
+        .map(|m| m.content.trim());
+    match first_user {
+        Some(text) => preview(text, LABEL_CHARS),
+        None => transcript.id.clone(),
+    }
+}
+
 /// Current Unix time in seconds.
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
@@ -421,13 +515,18 @@ fn render_import_outcome(outcome: &ImportOutcome, multiple: bool) -> String {
 }
 
 fn render_item(item: &MemoryItem) -> String {
+    let scope = match item.scope() {
+        Some(project) => format!(", scope: {project}"),
+        None => ", scope: global".to_string(),
+    };
     format!(
-        "[{}] {} ({})\nupdated {} time(s), source session: {}\n\n{}\n",
+        "[{}] {} ({})\nupdated {} time(s), source session: {}{}\n\n{}\n",
         item.kind(),
         item.name(),
         item.id(),
         item.update_count(),
         item.source_session_id().unwrap_or("(unknown)"),
+        scope,
         item.content()
     )
 }
@@ -444,6 +543,14 @@ fn render_node(node: &MemoryNode) -> String {
         out.push_str(&format!("## Detail (L2)\n{}\n", node.content()));
     }
     out
+}
+
+/// A compact ` @project` suffix for a scoped memory, or empty for a global one.
+fn scope_tag(item: &MemoryItem) -> String {
+    match item.scope() {
+        Some(project) => format!(" @{project}"),
+        None => String::new(),
+    }
 }
 
 fn preview(content: &str, max_chars: usize) -> String {
