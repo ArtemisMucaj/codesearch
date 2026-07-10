@@ -274,8 +274,8 @@ pub enum MemorySubcommand {
 
     /// Show the full content of one memory item or virtual-filesystem node.
     Show {
-        /// Memory item ID, a 'kind/name' item reference, or a 'viking://' node
-        /// URI (e.g. 'viking://memory', 'viking://sessions/<id>').
+        /// Memory item ID, a 'kind/name' item reference, or a 'memory://' node
+        /// URI (e.g. 'memory://memory', 'memory://sessions/<id>').
         id: String,
     },
 
@@ -292,6 +292,26 @@ pub enum MemorySubcommand {
         format: OutputFormatTextJson,
     },
 
+    /// Add a resource (a file or a URL) to the memory virtual filesystem.
+    ///
+    /// Fetches the content (URLs and HTML are decluttered to Markdown via the
+    /// `defuddle` CLI; plain files are read as-is), generates an L0 abstract +
+    /// L1 overview, and stores it at 'memory://resources/<name>' with the full
+    /// text as L2. Like `import`, this uses the configured LLM for the summary.
+    AddResource {
+        /// A local file path or an http(s):// URL.
+        source: String,
+
+        /// Name (slug) for the resource node; derived from the source when
+        /// omitted. Reusing a name overwrites that resource.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// LLM provider for the summary: 'anthropic' (default) or 'open-ai'.
+        #[arg(long, value_enum, default_value = "anthropic")]
+        llm: LlmTarget,
+    },
+
     /// Browse the memory virtual filesystem (L0/L1 abstracts).
     ///
     /// With no URI, lists the top-level roots (the whole-memory rollup and the
@@ -299,7 +319,7 @@ pub enum MemorySubcommand {
     /// children with their one-line abstracts — the "read this first" view
     /// before drilling into a node with `memory show <uri>`.
     Tree {
-        /// Directory URI to list (e.g. 'viking://sessions'). Omit for the root.
+        /// Directory URI to list (e.g. 'memory://sessions'). Omit for the root.
         uri: Option<String>,
 
         /// Output format: text or json.

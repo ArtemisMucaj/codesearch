@@ -222,6 +222,9 @@ impl<'a> Router<'a> {
                 MemorySubcommand::Sessions { format } => {
                     self.memory_controller.sessions(format).await
                 }
+                MemorySubcommand::AddResource { source, name, llm } => {
+                    self.memory_controller.add_resource(source, name, llm).await
+                }
                 MemorySubcommand::Tree { uri, format } => {
                     self.memory_controller.tree(uri, format).await
                 }

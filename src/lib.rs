@@ -18,6 +18,8 @@ pub use application::{
     SymbolContextUseCase, VectorRepository, MEMORY_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
 };
 
+pub use application::resource_slug;
+
 pub use application::{aggregate, render, VizFormat, DEFAULT_NODE_LIMIT};
 
 pub use cli::{

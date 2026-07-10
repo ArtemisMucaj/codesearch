@@ -203,12 +203,12 @@ pub struct ImportedSession {
 /// L1 overview so an agent can read the summary first and drill into detail
 /// (`content`, the L2 layer) only when needed.
 ///
-/// - `Memory` — the whole-memory rollup (`viking://memory`): a regenerated
+/// - `Memory` — the whole-memory rollup (`memory://memory`): a regenerated
 ///   abstract + overview over every stored [`MemoryItem`], read first before
 ///   drilling into individual memories.
-/// - `Session` — one imported session (`viking://sessions/<id>`): its L2 is
+/// - `Session` — one imported session (`memory://sessions/<id>`): its L2 is
 ///   the full normalized transcript, kept so the conversation can be re-read.
-/// - `Resource` — a file or URL added explicitly (`viking://resources/...`).
+/// - `Resource` — a file or URL added explicitly (`memory://resources/...`).
 ///   Reserved for a future `memory add-resource` flow; the slot exists so the
 ///   filesystem is ready for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -245,7 +245,7 @@ impl std::fmt::Display for NodeKind {
     }
 }
 
-/// A node in the memory virtual filesystem, addressed by a `viking://` URI.
+/// A node in the memory virtual filesystem, addressed by a `memory://` URI.
 ///
 /// Each node bundles the three OpenViking context levels for one location:
 /// L0 `abstract` (the one-line summary retrieval ranks on), L1 `overview`
@@ -254,7 +254,7 @@ impl std::fmt::Display for NodeKind {
 /// nodes such as the memory rollup, whose value is entirely in L0/L1.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryNode {
-    /// `viking://` URI uniquely identifying this node (also the primary key).
+    /// `memory://` URI uniquely identifying this node (also the primary key).
     uri: String,
     kind: NodeKind,
     /// URI of the parent directory, or `None` for a filesystem root.

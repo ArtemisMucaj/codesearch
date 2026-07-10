@@ -4,10 +4,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use crate::application::{
-    ChatClient, ImportOutcome, MEMORY_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
+    resource_slug, ChatClient, ImportOutcome, MEMORY_ROOT_URI, RESOURCES_ROOT_URI,
+    SESSIONS_ROOT_URI,
 };
 use crate::cli::{LlmTarget, MemoryKindArg, OutputFormatTextJson};
-use crate::connector::adapter::{parse_transcript_file, AnthropicClient, OpenAiChatClient};
+use crate::connector::adapter::{
+    fetch_resource, parse_transcript_file, AnthropicClient, OpenAiChatClient,
+};
 use crate::domain::{MemoryItem, MemoryKind, MemoryNode, MemoryOperation};
 
 use super::super::Container;
@@ -24,14 +27,19 @@ impl<'a> MemoryController<'a> {
         Self { container }
     }
 
-    pub async fn import(&self, path: String, llm: LlmTarget, force: bool) -> Result<String> {
-        let chat_client: Arc<dyn ChatClient> = match llm {
+    /// Build the chat client for the requested LLM provider.
+    fn chat_client(llm: LlmTarget) -> Result<Arc<dyn ChatClient>> {
+        Ok(match llm {
             LlmTarget::Anthropic => Arc::new(AnthropicClient::from_env()),
             LlmTarget::OpenAi => Arc::new(
                 OpenAiChatClient::from_env()
-                    .context("Failed to initialise OpenAI chat client for memory import")?,
+                    .context("Failed to initialise OpenAI chat client for memory")?,
             ),
-        };
+        })
+    }
+
+    pub async fn import(&self, path: String, llm: LlmTarget, force: bool) -> Result<String> {
+        let chat_client = Self::chat_client(llm)?;
 
         let transcript = parse_transcript_file(Path::new(&path))?;
         let use_case = self.container.memory_import_use_case(chat_client)?;
@@ -76,6 +84,41 @@ impl<'a> MemoryController<'a> {
                 Ok(output)
             }
         }
+    }
+
+    pub async fn add_resource(
+        &self,
+        source: String,
+        name: Option<String>,
+        llm: LlmTarget,
+    ) -> Result<String> {
+        // Fetch first — a bad path/URL should fail before we spin up the LLM.
+        let fetched = fetch_resource(&source)
+            .await
+            .with_context(|| format!("failed to fetch resource '{source}'"))?;
+
+        // Name the node: an explicit --name wins, else derive from the title.
+        let slug = resource_slug(name.as_deref().unwrap_or(&fetched.title));
+
+        let chat_client = Self::chat_client(llm)?;
+        let summary = self.container.memory_summary_use_case(chat_client)?;
+
+        let node = summary
+            .summarize_resource(&slug, &fetched.source, &fetched.text)
+            .await?;
+        // Keep the whole-memory rollup in sync (best-effort — the resource is
+        // already stored, so a rollup hiccup must not fail the command).
+        if let Err(e) = summary.regenerate_rollup().await {
+            tracing::warn!("failed to regenerate memory rollup after add-resource: {e}");
+        }
+
+        Ok(format!(
+            "Added resource '{}' ({} chars) at {}\n\n{}",
+            fetched.source,
+            fetched.text.len(),
+            node.uri(),
+            node.abstract_()
+        ))
     }
 
     pub async fn search(
@@ -163,9 +206,9 @@ impl<'a> MemoryController<'a> {
     pub async fn show(&self, id: String) -> Result<String> {
         let repo = self.container.memory_repository()?;
 
-        // A 'viking://' URI addresses a virtual-filesystem node (the memory
+        // A 'memory://' URI addresses a virtual-filesystem node (the memory
         // rollup, a stored session, …) rather than a flat item.
-        if id.starts_with("viking://") {
+        if id.starts_with("memory://") {
             return match repo.find_node(&id).await? {
                 Some(node) => Ok(render_node(&node)),
                 None => Ok(format!("No memory node found at '{id}'.")),

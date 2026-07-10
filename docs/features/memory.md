@@ -97,7 +97,7 @@ codesearch memory import session.jsonl --llm open-ai
 ## Virtual filesystem (L0 / L1 / L2)
 
 Beyond the flat items, memory is also navigable as an OpenViking-style
-`viking://` virtual filesystem. Every node bundles the three OpenViking
+`memory://` virtual filesystem. Every node bundles the three OpenViking
 context levels for one location:
 
 | Level | Field | What it holds |
@@ -110,19 +110,19 @@ The tree has three top-level kinds, mirroring OpenViking's `memory` /
 `session` / `resource` context types:
 
 ```
-viking://memory                 ← the whole-memory rollup ("read this first")
-viking://sessions/<id>          ← one imported session (transcript = L2)
-viking://resources/...          ← files/URLs added explicitly (reserved)
+memory://memory                 ← the whole-memory rollup ("read this first")
+memory://sessions/<id>          ← one imported session (transcript = L2)
+memory://resources/...          ← files/URLs added explicitly (reserved)
 ```
 
 Two things are summarized on **every import**, each with one small LLM call
 (the same chat model extraction uses), a single format-recovery retry, and a
 deterministic fallback so a flaky model never blocks the import or loses data:
 
-1. **The session** → a node at `viking://sessions/<id>` whose L2 is the full
+1. **The session** → a node at `memory://sessions/<id>` whose L2 is the full
    normalized transcript (so the conversation can be re-read later), plus a
    generated L0 abstract and L1 overview.
-2. **The whole memory store** → the `viking://memory` rollup is regenerated
+2. **The whole memory store** → the `memory://memory` rollup is regenerated
    from the current set of items: an abstract + overview meant to be read
    first, before drilling into individual memories. With fewer than two items
    this is a deterministic placeholder (no LLM call).
@@ -135,9 +135,9 @@ Browse and drill in from the CLI:
 
 ```bash
 codesearch memory tree                        # roots: rollup + sessions
-codesearch memory tree viking://sessions      # list stored sessions (L0 lines)
-codesearch memory show viking://memory        # the rollup abstract + overview
-codesearch memory show viking://sessions/<id> # a session's abstract + transcript
+codesearch memory tree memory://sessions      # list stored sessions (L0 lines)
+codesearch memory show memory://memory        # the rollup abstract + overview
+codesearch memory show memory://sessions/<id> # a session's abstract + transcript
 ```
 
 ## Recalling memories
@@ -175,7 +175,7 @@ AI tools alongside code search:
 |------|-------------|
 | `search_memory` | Hybrid recall over the memory store. Accepts `query`, optional `kind`, and `limit`. Returns full item content with fused scores. |
 | `list_memories` | List stored memories, newest first. Accepts optional `kind` — e.g. `kind="preference"` at session start to load every known user preference. |
-| `read_memory` | Read the virtual filesystem level by level. Call with no args (or `uri="viking://memory"`) first for the whole-memory rollup, then drill into a directory (`viking://sessions`) or a leaf (`viking://sessions/<id>`). Returns the node's L0/L1/L2 plus its children's abstracts. |
+| `read_memory` | Read the virtual filesystem level by level. Call with no args (or `uri="memory://memory"`) first for the whole-memory rollup, then drill into a directory (`memory://sessions`) or a leaf (`memory://sessions/<id>`). Returns the node's L0/L1/L2 plus its children's abstracts. |
 
 This gives agents the recall half of the loop: import sessions with the CLI
 (e.g. from a session-end hook), then at task start let the agent call

@@ -263,13 +263,13 @@ codesearch memory list --kind preference
 
 # Browse the memory virtual filesystem (OpenViking-style L0/L1 abstracts)
 codesearch memory tree                     # roots: the rollup + stored sessions
-codesearch memory show viking://memory     # the "read this first" summary
-codesearch memory show viking://sessions/<id>   # one session's transcript
+codesearch memory show memory://memory     # the "read this first" summary
+codesearch memory show memory://sessions/<id>   # one session's transcript
 ```
 
-Each import also stores the session as a node in a `viking://` virtual
+Each import also stores the session as a node in a `memory://` virtual
 filesystem (with a generated L0 abstract, L1 overview, and its full transcript)
-and regenerates a whole-memory rollup at `viking://memory` — a summary an agent
+and regenerates a whole-memory rollup at `memory://memory` — a summary an agent
 reads first before drilling into individual memories.
 
 See [Long-Term Memory](docs/features/memory.md) for the memory kinds, the
@@ -473,7 +473,7 @@ The HTTP server exposes the MCP endpoint at `/mcp`.
 | `get_symbol_cluster` | The symbol community a given symbol belongs to. Accepts `symbol` and `repository_id`. |
 | `search_memory` | Recall long-term memories (preferences, experiences, skills, facts) extracted from imported sessions. Accepts `query`, `kind`, and `limit`. |
 | `list_memories` | List stored memories, newest first. Accepts `kind`. |
-| `read_memory` | Read the memory virtual filesystem. Call with no args first for the whole-memory rollup, then drill into `viking://` nodes (sessions, resources). Accepts `uri`. |
+| `read_memory` | Read the memory virtual filesystem. Call with no args first for the whole-memory rollup, then drill into `memory://` nodes (sessions, resources). Accepts `uri`. |
 
 The `query_graph` tool supports eight intention-named relationship `pattern`s, returning
 only the requested edge type instead of every relationship at once:

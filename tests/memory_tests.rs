@@ -9,6 +9,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
+use codesearch::resource_slug;
 use codesearch::{
     parse_transcript, ChatClient, DomainError, DuckdbMemoryRepository, EmbeddingService,
     ImportOutcome, ImportSessionUseCase, MemoryExtractionUseCase, MemoryKind, MemoryRepository,
@@ -45,9 +46,11 @@ impl ScriptedChatClient {
 }
 
 /// Whether a `complete` call is a summarization call rather than extraction.
-/// The summarization system prompts describe summarizing a session / index.
+/// The summarization system prompts describe summarizing a session / resource
+/// / index.
 fn is_summary_call(system: &str) -> bool {
     system.contains("summarize a finished coding-assistant session")
+        || system.contains("summarize a document or web page")
         || system.contains("top-level index")
 }
 
@@ -390,7 +393,7 @@ async fn import_stores_session_node_with_full_transcript() {
     );
     use_case.execute(&transcript, false).await.unwrap();
 
-    // The session is stored as a node under viking://sessions with the full
+    // The session is stored as a node under memory://sessions with the full
     // transcript as its L2 detail and a generated L0 abstract.
     let uri = format!("{SESSIONS_ROOT_URI}/session-node-1");
     let node = harness
@@ -430,7 +433,7 @@ async fn import_regenerates_whole_memory_rollup() {
     );
     use_case.execute(&transcript, false).await.unwrap();
 
-    // With ≥2 items the model-generated rollup is written at viking://memory.
+    // With ≥2 items the model-generated rollup is written at memory://memory.
     let rollup = harness
         .memory_repo
         .find_node(MEMORY_ROOT_URI)
@@ -440,6 +443,39 @@ async fn import_regenerates_whole_memory_rollup() {
     assert_eq!(rollup.kind(), NodeKind::Memory);
     assert_eq!(rollup.parent_uri(), None);
     assert!(!rollup.abstract_().is_empty());
+}
+
+#[tokio::test]
+async fn add_resource_stores_node_with_full_text() {
+    let harness = Harness::new();
+    let chat = Arc::new(ScriptedChatClient::new(vec![]));
+    let summary = SummarizeMemoryUseCase::new(
+        chat as Arc<dyn ChatClient>,
+        Arc::clone(&harness.memory_repo),
+        Arc::clone(&harness.embedding),
+    );
+
+    let slug = resource_slug("Rust Error Handling Guide");
+    let text = "# Error handling\n\nPrefer ? over unwrap in library code.";
+    let node = summary
+        .summarize_resource(&slug, "https://example.dev/guide", text)
+        .await
+        .unwrap();
+
+    assert_eq!(node.kind(), NodeKind::Resource);
+    assert_eq!(node.uri(), "memory://resources/rust_error_handling_guide");
+    assert_eq!(node.parent_uri(), Some("memory://resources"));
+    // Full text is preserved as L2.
+    assert!(node.content().contains("Prefer ? over unwrap"));
+
+    // The resource is listed under the resources directory.
+    let children = harness
+        .memory_repo
+        .list_child_nodes("memory://resources")
+        .await
+        .unwrap();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].uri(), node.uri());
 }
 
 #[tokio::test]

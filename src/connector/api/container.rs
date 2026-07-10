@@ -798,6 +798,19 @@ impl Container {
         ))
     }
 
+    /// Summarization use case (session/resource nodes + rollup), driven by the
+    /// given chat model. Used to add resources and regenerate the rollup.
+    pub fn memory_summary_use_case(
+        &self,
+        chat_client: Arc<dyn ChatClient>,
+    ) -> Result<SummarizeMemoryUseCase> {
+        Ok(SummarizeMemoryUseCase::new(
+            chat_client,
+            self.memory_repository()?,
+            self.embedding_service.clone(),
+        ))
+    }
+
     pub fn data_dir(&self) -> &str {
         &self.config.data_dir
     }

@@ -73,7 +73,7 @@ pub trait MemoryRepository: Send + Sync {
         vector: Option<&[f32]>,
     ) -> Result<(), DomainError>;
 
-    /// Fetch a single node by its `viking://` URI.
+    /// Fetch a single node by its `memory://` URI.
     async fn find_node(&self, uri: &str) -> Result<Option<MemoryNode>, DomainError>;
 
     /// List the direct children of a directory URI (its immediate members in

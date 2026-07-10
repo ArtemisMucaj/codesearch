@@ -316,17 +316,17 @@ pub struct ListMemoriesInput {
 /// Input parameters for the read_memory tool
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadMemoryInput {
-    /// A `viking://` node URI. Omit (or pass "viking://memory") to read the
+    /// A `memory://` node URI. Omit (or pass "memory://memory") to read the
     /// whole-memory rollup — the "read this first" summary of everything
-    /// stored. Use "viking://sessions" to see stored sessions, or a specific
-    /// "viking://sessions/<id>" to read one session's transcript.
+    /// stored. Use "memory://sessions" to see stored sessions, or a specific
+    /// "memory://sessions/<id>" to read one session's transcript.
     pub uri: Option<String>,
 }
 
 /// A virtual-filesystem node returned by read_memory
 #[derive(Debug, Serialize)]
 pub struct MemoryNodeOutput {
-    /// The node's `viking://` URI
+    /// The node's `memory://` URI
     pub uri: String,
     /// Node kind: memory, session, or resource
     pub kind: String,
@@ -1106,11 +1106,11 @@ impl CodesearchMcpServer {
     }
 
     /// Read the memory virtual filesystem, level by level. Call this FIRST at
-    /// the start of a task with no arguments (or uri="viking://memory") to get
+    /// the start of a task with no arguments (or uri="memory://memory") to get
     /// the whole-memory rollup — a single abstract + overview of everything
     /// known about the user and project — then drill in only where relevant.
-    /// A directory URI (e.g. "viking://sessions") returns its children with
-    /// one-line abstracts; a leaf URI (e.g. "viking://sessions/<id>") returns
+    /// A directory URI (e.g. "memory://sessions") returns its children with
+    /// one-line abstracts; a leaf URI (e.g. "memory://sessions/<id>") returns
     /// the node's full detail, such as a session transcript.
     #[tool(name = "read_memory")]
     async fn read_memory(
@@ -1151,7 +1151,7 @@ impl CodesearchMcpServer {
                 content: node.content().to_string(),
                 children,
             },
-            // A directory URI (e.g. viking://sessions) may have no node record
+            // A directory URI (e.g. memory://sessions) may have no node record
             // of its own but still list children.
             None if !children.is_empty() => MemoryNodeOutput {
                 uri: uri.clone(),
@@ -1260,7 +1260,7 @@ impl ServerHandler for CodesearchMcpServer {
                    facts) extracted from previous sessions\n\
                  • list_memories — list stored memories, optionally filtered by kind\n\
                  • read_memory — read the memory virtual filesystem; call with no args first for \
-                   the whole-memory rollup, then drill into viking:// nodes (sessions, resources)"
+                   the whole-memory rollup, then drill into memory:// nodes (sessions, resources)"
                     .into(),
             ),
         }
