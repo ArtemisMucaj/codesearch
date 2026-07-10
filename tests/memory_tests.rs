@@ -12,9 +12,10 @@ use tokio::sync::Mutex;
 use codesearch::resource_slug;
 use codesearch::{
     parse_transcript, ChatClient, DomainError, DuckdbMemoryRepository, EmbeddingService,
-    ImportOutcome, ImportSessionUseCase, MemoryBrowseUseCase, MemoryEntry, MemoryExtractionUseCase,
-    MemoryKind, MemoryRepository, MemorySearchUseCase, MockEmbedding, NoEmbedding, NodeKind,
-    SessionMessage, SessionTranscript, SummarizeMemoryUseCase, MEMORY_ROOT_URI, SESSIONS_ROOT_URI,
+    ImportOutcome, ImportSessionUseCase, MemoryBrowseUseCase, MemoryExtractionUseCase, MemoryKind,
+    MemoryLevel, MemoryRepository, MemorySearchUseCase, MockEmbedding, NoEmbedding, NodeKind,
+    RowTarget, SessionMessage, SessionTranscript, SummarizeMemoryUseCase, MEMORY_ROOT_URI,
+    SESSIONS_ROOT_URI,
 };
 
 /// A canned `{abstract, overview}` reply for the summarization calls the
@@ -519,41 +520,73 @@ async fn browse_shows_filesystem_then_search_filters() {
         Arc::clone(&harness.embedding),
     );
 
-    // Empty query = browse: the whole virtual filesystem is shown, filesystem
-    // first (the rollup node leads), with items after.
+    // Empty query = browse: the whole virtual filesystem as a tree. The rollup
+    // leads at depth 0, with its L0/L1 as nested child rows; sessions and
+    // resources each get a directory header with node rows + level children.
     let all = browse.execute("", 50).await.unwrap();
     assert!(
-        matches!(&all[0], MemoryEntry::Node { node, .. } if node.uri() == "memory://memory"),
-        "rollup node should be the first browse entry"
+        matches!(&all[0].target, RowTarget::Node(node) if node.uri() == "memory://memory"),
+        "rollup node should be the first browse row"
     );
-    let has_session = all
-        .iter()
-        .any(|e| matches!(e, MemoryEntry::Node { node, .. } if node.kind() == NodeKind::Session));
-    let has_resource = all
-        .iter()
-        .any(|e| matches!(e, MemoryEntry::Node { node, .. } if node.kind() == NodeKind::Resource));
-    let has_item = all.iter().any(|e| matches!(e, MemoryEntry::Item { .. }));
+    // The rollup's level rows are nested directly beneath it.
     assert!(
-        has_session && has_resource && has_item,
-        "browse shows the whole store"
+        matches!(
+            &all[1].target,
+            RowTarget::NodeLevel {
+                level: MemoryLevel::Abstract,
+                ..
+            }
+        ) && all[1].depth == all[0].depth + 1,
+        "the row after the rollup is its nested L0 level"
     );
 
-    // Non-empty query = search: results are ranked by relevance rather than
-    // shown in filesystem order. Unlike browse, the rollup no longer leads —
-    // the query's relevant entries rank first. (With mock embeddings we assert
-    // ranking, not a smaller count, since the mock's cosine matches broadly.)
+    let has_dir = |name: &str| {
+        all.iter()
+            .any(|r| matches!(&r.target, RowTarget::Directory) && r.label == name)
+    };
+    assert!(has_dir("sessions/"), "sessions directory header present");
+    assert!(has_dir("resources/"), "resources directory header present");
+    assert!(has_dir("items/"), "items directory header present");
+
+    let has_session_node = all
+        .iter()
+        .any(|r| matches!(&r.target, RowTarget::Node(n) if n.kind() == NodeKind::Session));
+    let has_resource_node = all
+        .iter()
+        .any(|r| matches!(&r.target, RowTarget::Node(n) if n.kind() == NodeKind::Resource));
+    let has_l2 = all.iter().any(|r| {
+        matches!(
+            &r.target,
+            RowTarget::NodeLevel {
+                level: MemoryLevel::Detail,
+                ..
+            }
+        )
+    });
+    let has_item = all.iter().any(|r| matches!(&r.target, RowTarget::Item(_)));
+    assert!(
+        has_session_node && has_resource_node && has_l2 && has_item,
+        "browse tree includes session/resource nodes, an L2 level, and items"
+    );
+
+    // Non-empty query = search: a flat ranked list (no directory rows, no tree
+    // depth), scored, and not led by the rollup like browse is.
     let hits = browse.execute("duckdb storage engine", 50).await.unwrap();
     assert!(!hits.is_empty());
-    let top_is_rollup =
-        matches!(&hits[0], MemoryEntry::Node { node, .. } if node.uri() == "memory://memory");
     assert!(
-        !top_is_rollup,
-        "search should rank by relevance, not lead with the rollup like browse does"
+        hits.iter().all(|r| r.depth == 0),
+        "search rows are flat (depth 0)"
     );
-    // Every returned entry carries a positive relevance score (browse scores 0).
     assert!(
-        hits.iter().all(|e| e.score() > 0.0),
-        "search entries are scored"
+        hits.iter().all(|r| !matches!(
+            &r.target,
+            RowTarget::Directory | RowTarget::NodeLevel { .. }
+        )),
+        "search rows are nodes/items, not directories or level rows"
+    );
+    assert!(
+        hits.iter().all(|r| r.score.is_some_and(|s| s > 0.0)),
+        "search rows are scored"
     );
 }
 

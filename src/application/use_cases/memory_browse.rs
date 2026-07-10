@@ -1,20 +1,24 @@
-//! Unified memory recall for the TUI: search (or browse) both the flat memory
-//! items and the virtual-filesystem nodes in one ranked list.
+//! Unified memory recall for the TUI, as a navigable virtual filesystem.
 //!
-//! - A **query** runs hybrid semantic + keyword recall over items *and* nodes,
-//!   fuses each modality with RRF, and interleaves the two into one list.
-//! - An **empty query** browses everything: all items and all nodes, newest
-//!   first — the "show me everything" view.
+//! - **Browse** (empty query) returns the whole store as a flattened *tree* of
+//!   [`MemoryRow`]s: directory headers (`sessions/`, `resources/`, `items/`),
+//!   each node under them, and — nested one level deeper — that node's L0/L1/L2
+//!   levels as their own selectable rows. Selecting a level row shows just that
+//!   level on the right; selecting the node row shows all three.
+//! - **Search** (non-empty query) returns a flat, ranked list of rows (depth 0)
+//!   from hybrid semantic + keyword recall over both items and nodes.
 //!
-//! The result is a flat `Vec<MemoryEntry>` the TUI renders as a single list,
-//! where each entry is either a memory item or a filesystem node.
+//! The TUI renders the rows with indentation and drives a single flat cursor
+//! over them, mirroring the call-context tree.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::application::interfaces::{EmbeddingService, MemoryRepository};
 use crate::application::use_cases::memory_search::MemorySearchUseCase;
-use crate::application::use_cases::memory_summary::MEMORY_ROOT_URI;
+use crate::application::use_cases::memory_summary::{
+    MEMORY_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
+};
 use crate::domain::{DomainError, MemoryItem, MemoryNode, NodeKind};
 
 /// RRF dampening constant (matches [`MemorySearchUseCase`]).
@@ -23,8 +27,8 @@ const RRF_K: f32 = 60.0;
 /// How many candidates the node legs retrieve before fusion.
 const NODE_CANDIDATES_PER_LEG: usize = 20;
 
-/// Sort rank for a node kind in the browse (default) view, so the virtual
-/// filesystem reads top-down: the rollup first, then sessions, then resources.
+/// Sort rank for a node kind in the browse view, so the filesystem reads
+/// top-down: the rollup first, then sessions, then resources.
 fn node_kind_rank(kind: NodeKind) -> u8 {
     match kind {
         NodeKind::Memory => 0,
@@ -33,35 +37,59 @@ fn node_kind_rank(kind: NodeKind) -> u8 {
     }
 }
 
-/// One entry in the unified memory list: a flat item or a filesystem node.
-#[derive(Debug, Clone)]
-pub enum MemoryEntry {
-    Item { item: MemoryItem, score: f32 },
-    Node { node: MemoryNode, score: f32 },
+/// Which of a node's three levels a level row addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryLevel {
+    /// L0 — the one-line abstract.
+    Abstract,
+    /// L1 — the overview.
+    Overview,
+    /// L2 — the full detail (transcript / resource text).
+    Detail,
 }
 
-impl MemoryEntry {
-    pub fn score(&self) -> f32 {
+impl MemoryLevel {
+    pub fn tag(&self) -> &'static str {
         match self {
-            MemoryEntry::Item { score, .. } | MemoryEntry::Node { score, .. } => *score,
+            MemoryLevel::Abstract => "L0 · abstract",
+            MemoryLevel::Overview => "L1 · overview",
+            MemoryLevel::Detail => "L2 · detail",
         }
     }
+}
 
-    /// Short kind label for the list (`preference`, `session`, …).
-    pub fn kind_label(&self) -> String {
-        match self {
-            MemoryEntry::Item { item, .. } => item.kind().to_string(),
-            MemoryEntry::Node { node, .. } => node.kind().to_string(),
-        }
-    }
+/// The payload a row points at — what the detail pane shows when it is selected.
+#[derive(Debug, Clone)]
+pub enum RowTarget {
+    /// A directory header (`sessions/`, …) — not itself content.
+    Directory,
+    /// A whole node: the detail pane shows all its levels.
+    Node(MemoryNode),
+    /// A single level of a node: the detail pane shows just that level.
+    NodeLevel {
+        node: MemoryNode,
+        level: MemoryLevel,
+    },
+    /// A flat memory item.
+    Item(MemoryItem),
+}
 
-    /// Primary label shown in the list: the item name or the node URI.
-    pub fn label(&self) -> String {
-        match self {
-            MemoryEntry::Item { item, .. } => item.name().to_string(),
-            MemoryEntry::Node { node, .. } => node.uri().to_string(),
-        }
-    }
+/// One rendered row in the memory tree/list.
+#[derive(Debug, Clone)]
+pub struct MemoryRow {
+    /// Indentation depth (0 = top level).
+    pub depth: u8,
+    /// Kind label shown in the row (`session`, `resource`, `preference`, …), or
+    /// empty for level rows / directories.
+    pub kind_label: String,
+    /// Primary text of the row (a URI, an item name, a level tag, a dir name).
+    pub label: String,
+    /// One-line preview shown under the label (abstracts / content snippets).
+    pub preview: Option<String>,
+    /// Relevance score, `Some` only for search-result rows.
+    pub score: Option<f32>,
+    /// What selecting this row shows in the detail pane.
+    pub target: RowTarget,
 }
 
 /// Combined search/browse over memory items and virtual-filesystem nodes.
@@ -85,40 +113,33 @@ impl MemoryBrowseUseCase {
         }
     }
 
-    /// Search (non-empty query) or browse (empty query) the whole store.
-    /// Returns up to `limit` entries, best first.
-    pub async fn execute(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<MemoryEntry>, DomainError> {
+    /// Produce the rows to display: the filesystem tree when `query` is empty,
+    /// a ranked flat list of hits otherwise.
+    pub async fn execute(&self, query: &str, limit: usize) -> Result<Vec<MemoryRow>, DomainError> {
         let query = query.trim();
         if query.is_empty() {
-            return self.browse(limit).await;
+            self.browse_tree().await
+        } else {
+            self.search(query, limit).await
         }
+    }
 
-        // Items: reuse the existing hybrid (semantic+keyword+RRF) recall.
+    /// Hybrid semantic + keyword recall over items *and* nodes, fused per
+    /// modality and interleaved by score into a flat list of depth-0 rows.
+    async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryRow>, DomainError> {
         let items = self.item_search.execute(query, None, limit).await?;
-        // Nodes: run the same two legs and fuse them here.
         let nodes = self.search_nodes(query, limit).await?;
 
-        // Interleave the two ranked lists by score so items and nodes mix.
-        let mut entries: Vec<MemoryEntry> = items
-            .into_iter()
-            .map(|(item, score)| MemoryEntry::Item { item, score })
-            .chain(
-                nodes
-                    .into_iter()
-                    .map(|(node, score)| MemoryEntry::Node { node, score }),
-            )
-            .collect();
-        entries.sort_by(|a, b| {
-            b.score()
-                .partial_cmp(&a.score())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        entries.truncate(limit);
-        Ok(entries)
+        let mut scored: Vec<(f32, MemoryRow)> = Vec::new();
+        for (item, score) in items {
+            scored.push((score, item_row(&item, 0, Some(score))));
+        }
+        for (node, score) in nodes {
+            scored.push((score, node_row(&node, 0, Some(score))));
+        }
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        Ok(scored.into_iter().map(|(_, row)| row).collect())
     }
 
     /// Hybrid semantic + keyword recall over nodes, fused with RRF.
@@ -156,65 +177,219 @@ impl MemoryBrowseUseCase {
         Ok(results)
     }
 
-    /// Browse the whole virtual filesystem (empty query — the default view).
+    /// Browse the whole virtual filesystem as a flattened tree.
     ///
-    /// Shows the filesystem first, in tree order (the `memory://memory` rollup,
-    /// then sessions, then resources), followed by the flat memory items. No
-    /// relevance ranking is applied; this is a structural view, not a search.
-    async fn browse(&self, limit: usize) -> Result<Vec<MemoryEntry>, DomainError> {
+    /// Layout (always fully expanded):
+    /// ```text
+    /// memory://memory            (rollup node)
+    ///   L0 · abstract
+    ///   L1 · overview
+    /// sessions/                  (directory)
+    ///   memory://sessions/<id>
+    ///     L0 · abstract
+    ///     L1 · overview
+    ///     L2 · detail
+    /// resources/                 (directory)
+    ///   memory://resources/<slug>
+    ///     L0 · abstract  …
+    /// items/                     (directory)
+    ///   [fact] duckdb_locks
+    /// ```
+    async fn browse_tree(&self) -> Result<Vec<MemoryRow>, DomainError> {
         let items = self.memory_repo.list_items(None).await?;
         let mut nodes = self.memory_repo.list_nodes(None).await?;
 
-        // Order the filesystem top-down: rollup → sessions → resources, and
-        // within a kind keep newest-first (list_nodes already returns that), so
-        // the rollup ("read this first") is always the first entry.
         nodes.sort_by(|a, b| {
             node_kind_rank(a.kind())
                 .cmp(&node_kind_rank(b.kind()))
-                .then_with(|| {
-                    // Keep the canonical rollup URI pinned to the very top.
-                    (b.uri() == MEMORY_ROOT_URI).cmp(&(a.uri() == MEMORY_ROOT_URI))
-                })
+                .then_with(|| (b.uri() == MEMORY_ROOT_URI).cmp(&(a.uri() == MEMORY_ROOT_URI)))
                 .then_with(|| b.updated_at().cmp(&a.updated_at()))
         });
 
-        // Score 0.0 in browse mode — the list is structural, not ranked.
-        let mut entries: Vec<MemoryEntry> = Vec::with_capacity(items.len() + nodes.len());
-        entries.extend(
-            nodes
-                .into_iter()
-                .map(|node| MemoryEntry::Node { node, score: 0.0 }),
+        let mut rows: Vec<MemoryRow> = Vec::new();
+
+        // The rollup sits at the filesystem root (depth 0), with its levels
+        // nested directly beneath it.
+        let rollup: Vec<&MemoryNode> = nodes
+            .iter()
+            .filter(|n| n.kind() == NodeKind::Memory)
+            .collect();
+        for node in rollup {
+            push_node_with_levels(&mut rows, node, 0);
+        }
+
+        // Sessions and resources each get a directory header, with their nodes
+        // (and each node's levels) nested underneath.
+        push_dir_group(
+            &mut rows,
+            "sessions/",
+            SESSIONS_ROOT_URI,
+            NodeKind::Session,
+            &nodes,
         );
-        entries.extend(
-            items
-                .into_iter()
-                .map(|item| MemoryEntry::Item { item, score: 0.0 }),
+        push_dir_group(
+            &mut rows,
+            "resources/",
+            RESOURCES_ROOT_URI,
+            NodeKind::Resource,
+            &nodes,
         );
-        entries.truncate(limit);
-        Ok(entries)
+
+        // Flat items under an `items/` header.
+        if !items.is_empty() {
+            rows.push(dir_row("items/", 0));
+            for item in &items {
+                rows.push(item_row(item, 1, None));
+            }
+        }
+
+        Ok(rows)
+    }
+}
+
+/// Append a directory header row plus each node of `kind` (with its levels).
+fn push_dir_group(
+    rows: &mut Vec<MemoryRow>,
+    dir_label: &str,
+    _dir_uri: &str,
+    kind: NodeKind,
+    nodes: &[MemoryNode],
+) {
+    let group: Vec<&MemoryNode> = nodes.iter().filter(|n| n.kind() == kind).collect();
+    if group.is_empty() {
+        return;
+    }
+    rows.push(dir_row(dir_label, 0));
+    for node in group {
+        push_node_with_levels(rows, node, 1);
+    }
+}
+
+/// Append a node row followed by one child row per present level.
+fn push_node_with_levels(rows: &mut Vec<MemoryRow>, node: &MemoryNode, depth: u8) {
+    rows.push(node_row(node, depth, None));
+    let child_depth = depth + 1;
+    // L0 always exists.
+    rows.push(level_row(node, MemoryLevel::Abstract, child_depth));
+    if !node.overview().trim().is_empty() {
+        rows.push(level_row(node, MemoryLevel::Overview, child_depth));
+    }
+    if !node.content().trim().is_empty() {
+        rows.push(level_row(node, MemoryLevel::Detail, child_depth));
+    }
+}
+
+fn dir_row(label: &str, depth: u8) -> MemoryRow {
+    MemoryRow {
+        depth,
+        kind_label: String::new(),
+        label: label.to_string(),
+        preview: None,
+        score: None,
+        target: RowTarget::Directory,
+    }
+}
+
+fn node_row(node: &MemoryNode, depth: u8, score: Option<f32>) -> MemoryRow {
+    MemoryRow {
+        depth,
+        kind_label: node.kind().to_string(),
+        label: node.uri().to_string(),
+        preview: one_line(node.abstract_()),
+        score,
+        target: RowTarget::Node(node.clone()),
+    }
+}
+
+fn level_row(node: &MemoryNode, level: MemoryLevel, depth: u8) -> MemoryRow {
+    let text = match level {
+        MemoryLevel::Abstract => node.abstract_(),
+        MemoryLevel::Overview => node.overview(),
+        MemoryLevel::Detail => node.content(),
+    };
+    MemoryRow {
+        depth,
+        kind_label: String::new(),
+        label: level.tag().to_string(),
+        preview: one_line(text),
+        score: None,
+        target: RowTarget::NodeLevel {
+            node: node.clone(),
+            level,
+        },
+    }
+}
+
+fn item_row(item: &MemoryItem, depth: u8, score: Option<f32>) -> MemoryRow {
+    MemoryRow {
+        depth,
+        kind_label: item.kind().to_string(),
+        label: item.name().to_string(),
+        preview: one_line(item.content()),
+        score,
+        target: RowTarget::Item(item.clone()),
+    }
+}
+
+/// Collapse whitespace to a single-line preview, or `None` when empty.
+fn one_line(text: &str) -> Option<String> {
+    let s: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::MemoryKind;
+
+    fn node(uri: &str, kind: NodeKind, overview: &str, content: &str) -> MemoryNode {
+        MemoryNode::new(
+            uri.into(),
+            kind,
+            None,
+            "an abstract".into(),
+            overview.into(),
+            content.into(),
+            0,
+            0,
+        )
+    }
 
     #[test]
-    fn entry_accessors() {
-        let item = MemoryItem::new(
-            "id1".into(),
-            MemoryKind::Fact,
-            "duckdb_locks".into(),
-            "content".into(),
-            None,
-            0,
-            0,
-            0,
+    fn push_node_with_levels_emits_present_levels_only() {
+        let mut rows = Vec::new();
+        // Only L0 present (no overview, no content).
+        push_node_with_levels(
+            &mut rows,
+            &node("memory://x", NodeKind::Resource, "", ""),
+            1,
         );
-        let e = MemoryEntry::Item { item, score: 0.5 };
-        assert_eq!(e.kind_label(), "fact");
-        assert_eq!(e.label(), "duckdb_locks");
-        assert_eq!(e.score(), 0.5);
+        assert_eq!(rows.len(), 2); // node + L0
+        assert!(matches!(rows[0].target, RowTarget::Node(_)));
+        assert!(matches!(
+            rows[1].target,
+            RowTarget::NodeLevel {
+                level: MemoryLevel::Abstract,
+                ..
+            }
+        ));
+
+        // All three levels present.
+        let mut rows = Vec::new();
+        push_node_with_levels(
+            &mut rows,
+            &node("memory://y", NodeKind::Session, "ov", "detail"),
+            1,
+        );
+        assert_eq!(rows.len(), 4); // node + L0 + L1 + L2
+        assert_eq!(rows[1].label, "L0 · abstract");
+        assert_eq!(rows[2].label, "L1 · overview");
+        assert_eq!(rows[3].label, "L2 · detail");
+        // Child rows are nested one level deeper than the node row.
+        assert_eq!(rows[0].depth, 1);
+        assert_eq!(rows[1].depth, 2);
     }
 }

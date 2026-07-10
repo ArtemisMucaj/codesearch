@@ -80,10 +80,10 @@ fn render_status(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppStat
         },
         ActiveMode::Memory => match state.memory.focused_pane {
             MemoryPane::List => {
-                " Enter/type: search  (empty: browse all)  ↑↓: navigate  Ctrl+→: detail  Tab: switch"
+                " type: search  (empty: filesystem tree)  ↑↓: navigate rows/levels  Ctrl+→: detail  Tab: switch"
             }
             MemoryPane::Detail => {
-                " ↑↓/PgUp/Dn: scroll  Ctrl+←: focus list  Tab: switch  q: quit"
+                " ↑↓/PgUp/Dn: scroll  Ctrl+←: focus tree  Tab: switch  q: quit"
             }
         },
     };

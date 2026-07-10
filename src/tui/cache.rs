@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::application::ImpactAnalysis;
-use crate::application::MemoryEntry;
+use crate::application::MemoryRow;
 use crate::application::SymbolContext;
 use crate::domain::{CodeChunk, SearchResult};
 
@@ -21,7 +21,7 @@ pub struct TuiCache {
     pub impacts: HashMap<String, ImpactAnalysis>,
     pub contexts: HashMap<String, SymbolContext>,
     pub snippets: HashMap<SnippetKey, Option<CodeChunk>>,
-    pub memories: HashMap<String, Vec<MemoryEntry>>,
+    pub memories: HashMap<String, Vec<MemoryRow>>,
 }
 
 impl TuiCache {

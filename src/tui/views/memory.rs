@@ -4,23 +4,30 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::application::MemoryEntry;
+use crate::application::{MemoryLevel, MemoryRow, RowTarget};
 use crate::tui::state::{AppState, MemoryPane};
 use crate::tui::widgets::markdown;
-use crate::tui::widgets::result_list;
-use crate::tui::widgets::result_list::ListEntry;
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
     // Match the other modes' pane split so tabbing between views is seamless.
     let panes =
         Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).split(area);
 
-    render_list(frame, panes[0], state);
+    render_tree(frame, panes[0], state);
     render_detail(frame, panes[1], state);
 }
 
-fn render_list(frame: &mut Frame, area: Rect, state: &AppState) {
+// ── Left pane: the filesystem tree (browse) or ranked hits (search) ───────────
+
+fn render_tree(frame: &mut Frame, area: Rect, state: &AppState) {
     let m = &state.memory;
+
+    let searching = !m.input.trim().is_empty();
+    let title = if searching {
+        format!(" Memory (search) ({}) ", m.entries.len())
+    } else {
+        format!(" Memory filesystem ({}) ", m.entries.len())
+    };
 
     if let Some(err) = &m.error {
         let block = Block::default()
@@ -36,39 +43,107 @@ fn render_list(frame: &mut Frame, area: Rect, state: &AppState) {
         return;
     }
 
-    // Score badge only carries meaning for a query (browse mode scores are 0).
-    let show_scores = !m.input.trim().is_empty();
-    let entries: Vec<ListEntry> = m
+    let border_style = if m.entries.is_empty() {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(border_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if m.entries.is_empty() {
+        let hint = if searching {
+            "  No matches."
+        } else {
+            "  No memories yet. Import a session or `memory add` a resource."
+        };
+        frame.render_widget(
+            Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    }
+
+    let lines: Vec<Line> = m
         .entries
         .iter()
-        .map(|e| ListEntry {
-            label: format!("[{}] {}", e.kind_label(), e.label()),
-            sub_label: entry_preview(e),
-            score: if show_scores { Some(e.score()) } else { None },
-        })
+        .enumerate()
+        .map(|(i, row)| row_line(row, i == m.selected, searching))
         .collect();
 
-    let title = if m.input.trim().is_empty() {
-        "Memory filesystem"
+    // Keep the selected row visible with a simple scroll window.
+    let height = inner.height as usize;
+    let scroll = if m.selected >= height {
+        m.selected + 1 - height
     } else {
-        "Memory (search)"
+        0
     };
-    result_list::render(frame, area, title, &entries, m.selected);
+    let visible: Vec<Line> = lines.into_iter().skip(scroll).take(height).collect();
+    frame.render_widget(Paragraph::new(visible), inner);
 }
 
-/// A one-line preview for the list sub-label.
-fn entry_preview(entry: &MemoryEntry) -> Option<String> {
-    let text = match entry {
-        MemoryEntry::Item { item, .. } => item.content(),
-        MemoryEntry::Node { node, .. } => node.abstract_(),
+/// Render one tree row: indentation + a kind glyph + label (+ score badge).
+fn row_line(row: &MemoryRow, selected: bool, searching: bool) -> Line<'static> {
+    let indent = "  ".repeat(row.depth as usize);
+    let (glyph, label_color) = match &row.target {
+        RowTarget::Directory => ("▾ ", Color::Blue),
+        RowTarget::Node(_) => (node_glyph(&row.kind_label), Color::Cyan),
+        RowTarget::NodeLevel { .. } => ("└─ ", Color::Green),
+        RowTarget::Item(_) => ("• ", Color::White),
     };
-    let single_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if single_line.is_empty() {
-        None
+
+    let bg = if selected {
+        Color::DarkGray
     } else {
-        Some(single_line)
+        Color::Reset
+    };
+    let name_style = if selected {
+        Style::default()
+            .fg(label_color)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(label_color).bg(bg)
+    };
+
+    // For nodes/items in the tree, prefix the kind; level rows already carry it.
+    let text = match &row.target {
+        RowTarget::Node(_) | RowTarget::Item(_) if !row.kind_label.is_empty() => {
+            format!("[{}] {}", row.kind_label, row.label)
+        }
+        _ => row.label.clone(),
+    };
+
+    let mut spans = vec![
+        Span::styled(
+            format!("{indent}{glyph}"),
+            Style::default().fg(Color::DarkGray).bg(bg),
+        ),
+        Span::styled(text, name_style),
+    ];
+    if searching {
+        if let Some(score) = row.score {
+            spans.push(Span::styled(
+                format!("  {:.2}", score),
+                Style::default().fg(Color::DarkGray).bg(bg),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
+fn node_glyph(kind_label: &str) -> &'static str {
+    match kind_label {
+        "memory" => "★ ", // the rollup — read this first
+        _ => "◆ ",        // session / resource node
     }
 }
+
+// ── Right pane: detail for the selected row ───────────────────────────────────
 
 fn render_detail(frame: &mut Frame, area: Rect, state: &AppState) {
     let m = &state.memory;
@@ -83,7 +158,7 @@ fn render_detail(frame: &mut Frame, area: Rect, state: &AppState) {
     let border_color = if focused { Color::Cyan } else { Color::White };
 
     let (title, body) = match selected {
-        Some(entry) => (detail_title(entry), detail_body(entry)),
+        Some(row) => (detail_title(row), detail_body(row)),
         None => {
             let block = Block::default()
                 .title("  ")
@@ -112,19 +187,26 @@ fn render_detail(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(para, inner);
 }
 
-fn detail_title(entry: &MemoryEntry) -> String {
-    match entry {
-        MemoryEntry::Item { item, .. } => format!("{} / {}", item.kind(), item.name()),
-        MemoryEntry::Node { node, .. } => node.uri().to_string(),
+fn detail_title(row: &MemoryRow) -> String {
+    match &row.target {
+        RowTarget::Directory => row.label.clone(),
+        RowTarget::Node(node) => node.uri().to_string(),
+        RowTarget::NodeLevel { node, level } => format!("{}  ·  {}", node.uri(), level.tag()),
+        RowTarget::Item(item) => format!("{} / {}", item.kind(), item.name()),
     }
 }
 
-/// Build the styled detail body. Items render their Markdown content; nodes
-/// render their L0/L1/L2 as separate, labelled sections (child levels) rather
-/// than one raw Markdown blob.
-fn detail_body(entry: &MemoryEntry) -> Vec<Line<'static>> {
-    match entry {
-        MemoryEntry::Item { item, .. } => {
+/// Build the styled detail for the selected row. A level row shows just that
+/// level; a node row shows all three; an item shows its content.
+fn detail_body(row: &MemoryRow) -> Vec<Line<'static>> {
+    match &row.target {
+        RowTarget::Directory => {
+            vec![Line::from(Span::styled(
+                "Directory — select a child to view it.",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        }
+        RowTarget::Item(item) => {
             let mut lines = vec![
                 meta_line(&format!(
                     "updated {}×  ·  source: {}",
@@ -136,33 +218,36 @@ fn detail_body(entry: &MemoryEntry) -> Vec<Line<'static>> {
             lines.extend(markdown::render(item.content()));
             lines
         }
-        MemoryEntry::Node { node, .. } => {
+        RowTarget::NodeLevel { node, level } => {
+            let (tag, text) = match level {
+                MemoryLevel::Abstract => ("L0 · Abstract", node.abstract_()),
+                MemoryLevel::Overview => ("L1 · Overview", node.overview()),
+                MemoryLevel::Detail => ("L2 · Detail", node.content()),
+            };
+            let mut lines = vec![section_header(tag), Line::from("")];
+            lines.extend(markdown::render(text));
+            lines
+        }
+        RowTarget::Node(node) => {
             let mut lines = Vec::new();
-
-            // L0 — Abstract (always present).
             lines.push(section_header("L0 · Abstract"));
             lines.extend(markdown::render(node.abstract_()));
-
-            // L1 — Overview (when present).
             if !node.overview().trim().is_empty() {
                 lines.push(Line::from(""));
                 lines.push(section_header("L1 · Overview"));
                 lines.extend(markdown::render(node.overview()));
             }
-
-            // L2 — Detail (when present, e.g. a session transcript or resource).
             if !node.content().trim().is_empty() {
                 lines.push(Line::from(""));
                 lines.push(section_header("L2 · Detail"));
                 lines.extend(markdown::render(node.content()));
             }
-
             lines
         }
     }
 }
 
-/// A styled section header used to delineate the L0/L1/L2 child levels.
+/// A styled section header delineating an L0/L1/L2 level.
 fn section_header(label: &str) -> Line<'static> {
     Line::from(Span::styled(
         format!("▍ {label}"),
@@ -172,10 +257,126 @@ fn section_header(label: &str) -> Line<'static> {
     ))
 }
 
-/// A dim single-line metadata row.
 fn meta_line(text: &str) -> Line<'static> {
     Line::from(Span::styled(
         text.to_string(),
         Style::default().fg(Color::DarkGray),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::MemoryRow;
+    use crate::domain::{MemoryNode, NodeKind};
+    use crate::tui::state::{ActiveMode, AppState};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn node(uri: &str, kind: NodeKind, content: &str) -> MemoryNode {
+        MemoryNode::new(
+            uri.into(),
+            kind,
+            None,
+            "the abstract".into(),
+            "".into(),
+            content.into(),
+            0,
+            0,
+        )
+    }
+
+    /// Render the tree to a headless backend and return the plain-text buffer.
+    fn render_to_text(rows: Vec<MemoryRow>, selected: usize) -> String {
+        let mut state = AppState::new(None, ActiveMode::Memory, None, true);
+        state.memory.entries = rows;
+        state.memory.selected = selected;
+
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, f.area(), &state)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        // Flatten the cell grid to text, row by row.
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn renders_tree_with_nested_levels() {
+        let sess = node(
+            "memory://sessions/abc",
+            NodeKind::Session,
+            "transcript body",
+        );
+        let rows = vec![
+            MemoryRow {
+                depth: 0,
+                kind_label: String::new(),
+                label: "sessions/".into(),
+                preview: None,
+                score: None,
+                target: RowTarget::Directory,
+            },
+            MemoryRow {
+                depth: 1,
+                kind_label: "session".into(),
+                label: sess.uri().into(),
+                preview: None,
+                score: None,
+                target: RowTarget::Node(sess.clone()),
+            },
+            MemoryRow {
+                depth: 2,
+                kind_label: String::new(),
+                label: "L0 · abstract".into(),
+                preview: None,
+                score: None,
+                target: RowTarget::NodeLevel {
+                    node: sess.clone(),
+                    level: MemoryLevel::Abstract,
+                },
+            },
+        ];
+
+        // Selecting the L0 level row shows only that level on the right.
+        let text = render_to_text(rows, 2);
+        assert!(text.contains("Memory filesystem"), "list title present");
+        assert!(text.contains("sessions/"), "directory row rendered");
+        assert!(text.contains("memory://sessions/abc"), "node row rendered");
+        assert!(text.contains("L0"), "nested level row rendered");
+        // Detail pane shows the abstract for the selected L0 level.
+        assert!(
+            text.contains("the abstract"),
+            "L0 detail shown on the right"
+        );
+        // And NOT the L2 transcript, since only L0 is selected.
+        assert!(
+            !text.contains("transcript body"),
+            "L2 content should not appear when only L0 is selected"
+        );
+    }
+
+    #[test]
+    fn selecting_node_row_shows_all_levels() {
+        let sess = node("memory://sessions/xyz", NodeKind::Session, "the transcript");
+        let rows = vec![MemoryRow {
+            depth: 0,
+            kind_label: "session".into(),
+            label: sess.uri().into(),
+            preview: None,
+            score: None,
+            target: RowTarget::Node(sess.clone()),
+        }];
+        let text = render_to_text(rows, 0);
+        // Node row selected → detail shows L0 and L2 sections.
+        assert!(text.contains("L0"), "L0 section header");
+        assert!(text.contains("L2"), "L2 section header");
+        assert!(text.contains("the transcript"), "L2 body shown");
+    }
 }

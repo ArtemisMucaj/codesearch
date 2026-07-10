@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::application::ImpactAnalysis;
-use crate::application::MemoryEntry;
+use crate::application::MemoryRow;
 use crate::application::SymbolContext;
 use crate::connector::api::container::Container;
 use crate::domain::{CodeChunk, SearchResult};
@@ -40,6 +40,6 @@ pub enum TuiEvent {
     /// Unified memory search/browse completed.
     MemoryDone {
         key: String,
-        result: Result<Vec<MemoryEntry>, String>,
+        result: Result<Vec<MemoryRow>, String>,
     },
 }

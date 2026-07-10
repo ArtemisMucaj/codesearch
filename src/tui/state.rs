@@ -1,5 +1,5 @@
 use crate::application::ImpactAnalysis;
-use crate::application::MemoryEntry;
+use crate::application::MemoryRow;
 use crate::application::SymbolContext;
 use crate::domain::{CodeChunk, SearchResult};
 use crate::tui::cache::SnippetKey;
@@ -141,8 +141,8 @@ pub struct MemoryState {
     pub input: String,
     /// Cursor position within `input`, measured in characters (not bytes).
     pub cursor: usize,
-    /// Unified list of memory items and filesystem nodes (search or browse).
-    pub entries: Vec<MemoryEntry>,
+    /// Rows to display: the filesystem tree (browse) or ranked hits (search).
+    pub entries: Vec<MemoryRow>,
     pub selected: usize,
     pub loading: bool,
     pub error: Option<String>,
