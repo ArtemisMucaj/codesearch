@@ -194,35 +194,29 @@ impl TuiApp {
                 self.state.should_quit = true;
             }
             KeyCode::Esc => self.handle_esc(),
+            // Tab cycles modes forward; Shift+Tab (BackTab) cycles backward.
             KeyCode::Tab => {
-                self.state.mode = match self.state.mode {
-                    ActiveMode::Search => ActiveMode::Impact,
-                    ActiveMode::Impact => ActiveMode::Context,
-                    ActiveMode::Context => ActiveMode::Memory,
-                    ActiveMode::Memory => ActiveMode::Search,
-                };
-                // Entering Memory for the first time: browse everything so the
-                // list isn't empty before the user types a query.
-                if self.state.mode == ActiveMode::Memory && !self.state.memory.browsed {
-                    self.dispatch_memory();
-                }
+                self.cycle_mode(1);
             }
-            KeyCode::Enter => self.dispatch_current(),
-            KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::BackTab => {
+                self.cycle_mode(-1);
+            }
+            // Shift+i / Shift+x (capital I / X) jump the selected symbol to
+            // Impact / Context. Active on any non-input (right/detail) pane, so
+            // they never collide with typing a capitalized query — in a
+            // query-input pane the letters fall through and type normally. Plain
+            // Shift only, reliable on macOS unlike Ctrl/Alt.
+            KeyCode::Char('I') if self.state.detail_pane_focused() => {
                 self.jump_to_impact();
             }
-            KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('X') if self.state.detail_pane_focused() => {
                 self.jump_to_context();
             }
+            // Enter drills into the focused pane (search → code, analyze, load
+            // snippet); Esc backs out one level.
+            KeyCode::Enter => self.dispatch_current(),
             KeyCode::Up if key.modifiers == KeyModifiers::NONE => self.navigate(-1),
             KeyCode::Down if key.modifiers == KeyModifiers::NONE => self.navigate(1),
-            // Ctrl+←/→ switch panes; plain ←/→ move the text cursor.
-            KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.focus_left();
-            }
-            KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.focus_right();
-            }
             KeyCode::Left if key.modifiers == KeyModifiers::NONE => {
                 let c = self.state.active_cursor_mut();
                 *c = c.saturating_sub(1);
@@ -258,6 +252,7 @@ impl TuiApp {
                     };
                     let _ = byte_idx;
                     *self.state.active_cursor_mut() -= 1;
+                    self.invalidate_on_edit();
                     // Memory searches as you type — re-run on delete too (an
                     // empty input falls back to the filesystem browse).
                     if self.state.mode == ActiveMode::Memory {
@@ -280,29 +275,7 @@ impl TuiApp {
                     input.insert(byte_idx, c);
                 }
                 *self.state.active_cursor_mut() += 1;
-                // Typing new text in Impact mode while the Chain pane is
-                // focused would cause Enter to dispatch a chain-snippet load
-                // rather than a new impact analysis.  Reset to the entry-point
-                // pane so the next Enter searches correctly.
-                if self.state.mode == ActiveMode::Impact
-                    && self.state.impact.focused_pane == ImpactPane::Chain
-                {
-                    self.state.impact.focused_pane = ImpactPane::EntryPoints;
-                    self.state.impact.chain_snippet = None;
-                    self.state.impact.chain_snippet_loading = false;
-                    self.state.impact.chain_snippet_pending_key = None;
-                    self.state.impact.chain_snippet_scroll = 0;
-                }
-                // Same for Context mode.
-                if self.state.mode == ActiveMode::Context
-                    && self.state.context.focused_pane == ContextPane::Tree
-                {
-                    self.state.context.focused_pane = ContextPane::EntryPoints;
-                    self.state.context.chain_snippet = None;
-                    self.state.context.chain_snippet_loading = false;
-                    self.state.context.chain_snippet_pending_key = None;
-                    self.state.context.chain_snippet_scroll = 0;
-                }
+                self.invalidate_on_edit();
                 // Memory mode searches as you type: return focus to the list
                 // and re-run the query so results track the input live. This
                 // frees Enter to focus the detail pane instead.
@@ -315,7 +288,28 @@ impl TuiApp {
         }
     }
 
-    // ── Pane focus switching ──────────────────────────────────────────────────
+    // ── Mode + pane switching ─────────────────────────────────────────────────
+
+    /// Cycle the active mode forward (`delta > 0`) or backward.
+    fn cycle_mode(&mut self, delta: i32) {
+        let order = [
+            ActiveMode::Search,
+            ActiveMode::Impact,
+            ActiveMode::Context,
+            ActiveMode::Memory,
+        ];
+        let cur = order
+            .iter()
+            .position(|m| *m == self.state.mode)
+            .unwrap_or(0);
+        let next = (cur as i32 + delta).rem_euclid(order.len() as i32) as usize;
+        self.state.mode = order[next].clone();
+        // Entering Memory for the first time: browse everything so the list
+        // isn't empty before the user types a query.
+        if self.state.mode == ActiveMode::Memory && !self.state.memory.browsed {
+            self.dispatch_memory();
+        }
+    }
 
     fn focus_left(&mut self) {
         match self.state.mode {
@@ -355,28 +349,73 @@ impl TuiApp {
         }
     }
 
+    /// After the query text changes, discard the stale results and return focus
+    /// to the input/list pane, so the next Enter re-runs the analysis (rather
+    /// than drilling into a now-outdated right pane). Memory is excluded — it
+    /// searches live on every keystroke.
+    fn invalidate_on_edit(&mut self) {
+        match self.state.mode {
+            ActiveMode::Search => {
+                self.state.search.focused_pane = SearchPane::List;
+            }
+            ActiveMode::Impact => {
+                self.state.impact.analysis = None;
+                self.state.impact.focused_pane = ImpactPane::EntryPoints;
+                self.state.impact.chain_snippet = None;
+                self.state.impact.chain_snippet_loading = false;
+                self.state.impact.chain_snippet_pending_key = None;
+                self.state.impact.chain_snippet_scroll = 0;
+            }
+            ActiveMode::Context => {
+                self.state.context.context = None;
+                self.state.context.focused_pane = ContextPane::EntryPoints;
+                self.state.context.chain_snippet = None;
+                self.state.context.chain_snippet_loading = false;
+                self.state.context.chain_snippet_pending_key = None;
+                self.state.context.chain_snippet_scroll = 0;
+            }
+            ActiveMode::Memory => {}
+        }
+    }
+
     // ── Esc ───────────────────────────────────────────────────────────────────
 
+    /// Esc backs out one level: an open code snippet closes first, otherwise the
+    /// right/detail pane hands focus back to the left/list pane.
     fn handle_esc(&mut self) {
-        if self.state.mode == ActiveMode::Impact && self.state.impact.chain_snippet.is_some() {
-            // Return from chain code view to chain navigation.
-            self.state.impact.chain_snippet = None;
-            self.state.impact.chain_snippet_loading = false;
-            self.state.impact.chain_snippet_pending_key = None;
-            self.state.impact.chain_snippet_scroll = 0;
-        }
-        if self.state.mode == ActiveMode::Context && self.state.context.chain_snippet.is_some() {
-            // Return from context code view to tree navigation.
-            self.state.context.chain_snippet = None;
-            self.state.context.chain_snippet_loading = false;
-            self.state.context.chain_snippet_pending_key = None;
-            self.state.context.chain_snippet_scroll = 0;
-        }
-        if self.state.mode == ActiveMode::Memory
-            && self.state.memory.focused_pane == MemoryPane::Detail
-        {
-            // Return from the detail pane to the filesystem tree.
-            self.state.memory.focused_pane = MemoryPane::List;
+        match self.state.mode {
+            ActiveMode::Impact => {
+                if self.state.impact.chain_snippet.is_some() {
+                    // Close the chain code view, back to chain navigation.
+                    self.state.impact.chain_snippet = None;
+                    self.state.impact.chain_snippet_loading = false;
+                    self.state.impact.chain_snippet_pending_key = None;
+                    self.state.impact.chain_snippet_scroll = 0;
+                } else if self.state.impact.focused_pane == ImpactPane::Chain {
+                    self.focus_left();
+                }
+            }
+            ActiveMode::Context => {
+                if self.state.context.chain_snippet.is_some() {
+                    // Close the context code view, back to tree navigation.
+                    self.state.context.chain_snippet = None;
+                    self.state.context.chain_snippet_loading = false;
+                    self.state.context.chain_snippet_pending_key = None;
+                    self.state.context.chain_snippet_scroll = 0;
+                } else if self.state.context.focused_pane == ContextPane::Tree {
+                    self.focus_left();
+                }
+            }
+            ActiveMode::Search => {
+                if self.state.search.focused_pane == SearchPane::Code {
+                    self.focus_left();
+                }
+            }
+            ActiveMode::Memory => {
+                if self.state.memory.focused_pane == MemoryPane::Detail {
+                    self.focus_left();
+                }
+            }
         }
     }
 
@@ -516,6 +555,9 @@ impl TuiApp {
     }
 
     fn navigate_chain(&mut self, delta: i32) {
+        // Selectable rows = the caller path plus the root ◉ node at the end, so
+        // `+ 1`. The root (the analysed symbol) is selectable too, mirroring the
+        // Context tree.
         let len = self
             .state
             .impact
@@ -524,7 +566,7 @@ impl TuiApp {
             .and_then(|a| {
                 let leaves = a.leaf_nodes();
                 let leaf = leaves.get(self.state.impact.selected).copied()?;
-                Some(a.path_for_leaf(leaf).len())
+                Some(a.path_for_leaf(leaf).len() + 1)
             })
             .unwrap_or(0);
         if len == 0 {
@@ -565,69 +607,92 @@ impl TuiApp {
         }
     }
 
-    // ── Jump search → impact ──────────────────────────────────────────────────
+    // ── Jump to impact / context ──────────────────────────────────────────────
+
+    /// The call-graph symbol currently selected in the focused detail pane, if
+    /// any — used as the target for the I / X jump keys. Resolves the selection
+    /// per mode: a search result, or the selected node of an impact chain /
+    /// context tree.
+    fn selected_symbol(&self) -> Option<String> {
+        match self.state.mode {
+            ActiveMode::Search => self
+                .state
+                .search
+                .results
+                .get(self.state.search.selected)
+                .and_then(|r| r.chunk().call_graph_name()),
+            ActiveMode::Impact => {
+                let analysis = self.state.impact.analysis.as_ref()?;
+                let leaves = analysis.leaf_nodes();
+                let leaf = leaves.get(self.state.impact.selected)?;
+                let path = analysis.path_for_leaf(leaf);
+                // The row after the caller path is the root ◉ (the analysed
+                // symbol itself).
+                if self.state.impact.chain_selected == path.len() {
+                    Some(analysis.root_symbol.clone())
+                } else {
+                    path.get(self.state.impact.chain_selected)
+                        .map(|n| n.symbol.clone())
+                }
+            }
+            ActiveMode::Context => {
+                let ctx = self.state.context.context.as_ref()?;
+                let flat = build_flat_tree_for_selected(ctx, self.state.context.selected);
+                flat.get(self.state.context.chain_selected)
+                    .map(|n| n.symbol.clone())
+            }
+            ActiveMode::Memory => None,
+        }
+    }
 
     fn jump_to_impact(&mut self) {
-        if self.state.mode != ActiveMode::Search {
+        let Some(sym) = self.selected_symbol() else {
             return;
-        }
-        let symbol = self
-            .state
-            .search
-            .results
-            .get(self.state.search.selected)
-            .and_then(|r| r.chunk().call_graph_name());
-
-        if let Some(sym) = symbol {
-            self.state.impact.cursor = sym.chars().count();
-            self.state.impact.input = sym;
-            self.state.impact.analysis = None;
-            self.state.impact.selected = 0;
-            self.state.impact.flame_scroll = 0;
-            self.state.impact.chain_selected = 0;
-            self.state.impact.chain_snippet = None;
-            self.state.impact.chain_snippet_loading = false;
-            self.state.impact.chain_snippet_pending_key = None;
-            self.state.impact.chain_snippet_scroll = 0;
-            self.state.impact.focused_pane = ImpactPane::EntryPoints;
-            self.state.mode = ActiveMode::Impact;
-            self.dispatch_impact();
-        }
+        };
+        self.state.impact.cursor = sym.chars().count();
+        self.state.impact.input = sym;
+        self.state.impact.analysis = None;
+        self.state.impact.selected = 0;
+        self.state.impact.flame_scroll = 0;
+        self.state.impact.chain_selected = 0;
+        self.state.impact.chain_snippet = None;
+        self.state.impact.chain_snippet_loading = false;
+        self.state.impact.chain_snippet_pending_key = None;
+        self.state.impact.chain_snippet_scroll = 0;
+        self.state.impact.focused_pane = ImpactPane::EntryPoints;
+        self.state.mode = ActiveMode::Impact;
+        self.dispatch_impact();
     }
 
     // ── Jump search → context ─────────────────────────────────────────────────
 
     fn jump_to_context(&mut self) {
-        if self.state.mode != ActiveMode::Search {
+        let Some(sym) = self.selected_symbol() else {
             return;
-        }
-        let (symbol, result_repo) = {
-            let result = self.state.search.results.get(self.state.search.selected);
-            let sym = result.and_then(|r| r.chunk().call_graph_name());
-            let repo = result.map(|r| r.chunk().repository_id().to_owned());
-            (sym, repo)
         };
-
-        if let Some(sym) = symbol {
-            self.state.context.cursor = sym.chars().count();
-            self.state.context.input = sym;
-            self.state.context.context = None;
-            self.state.context.selected = 0;
-            self.state.context.tree_scroll = 0;
-            self.state.context.chain_selected = 0;
-            self.state.context.chain_snippet = None;
-            self.state.context.chain_snippet_loading = false;
-            self.state.context.chain_snippet_pending_key = None;
-            self.state.context.chain_snippet_scroll = 0;
-            self.state.context.focused_pane = ContextPane::EntryPoints;
-            // Only seed the context repository from the result when no explicit
-            // search-level repository filter is active; avoid overwriting it.
-            if self.state.search.repository.is_none() {
-                self.state.context.repository = result_repo;
-            }
-            self.state.mode = ActiveMode::Context;
-            self.dispatch_context();
+        // When jumping from a Search result, seed the context repository from
+        // that result (unless a search-level filter is already active).
+        if self.state.mode == ActiveMode::Search && self.state.search.repository.is_none() {
+            self.state.context.repository = self
+                .state
+                .search
+                .results
+                .get(self.state.search.selected)
+                .map(|r| r.chunk().repository_id().to_owned());
         }
+        self.state.context.cursor = sym.chars().count();
+        self.state.context.input = sym;
+        self.state.context.context = None;
+        self.state.context.selected = 0;
+        self.state.context.tree_scroll = 0;
+        self.state.context.chain_selected = 0;
+        self.state.context.chain_snippet = None;
+        self.state.context.chain_snippet_loading = false;
+        self.state.context.chain_snippet_pending_key = None;
+        self.state.context.chain_snippet_scroll = 0;
+        self.state.context.focused_pane = ContextPane::EntryPoints;
+        self.state.mode = ActiveMode::Context;
+        self.dispatch_context();
     }
 
     // ── Dispatch (cache-first) ────────────────────────────────────────────────
@@ -638,22 +703,45 @@ impl TuiApp {
             return;
         }
         match self.state.mode {
-            ActiveMode::Search => self.dispatch_search(),
-            ActiveMode::Impact => {
-                match self.state.impact.focused_pane {
-                    ImpactPane::EntryPoints => self.dispatch_impact(),
-                    ImpactPane::Chain => {
-                        // Enter in the chain pane loads the selected node's code.
-                        if self.state.impact.chain_snippet.is_none()
-                            && !self.state.impact.chain_snippet_loading
-                        {
-                            self.dispatch_chain_snippet();
-                        }
-                    }
+            // Search runs live as you type. From the results list, Enter drills
+            // into the code pane (to read/scroll the selected result); from the
+            // code pane it re-runs the search (a manual refresh).
+            ActiveMode::Search => {
+                if self.state.search.focused_pane == SearchPane::List
+                    && !self.state.search.results.is_empty()
+                {
+                    self.focus_right();
+                } else {
+                    self.dispatch_search();
                 }
             }
+            // From the entry-points pane, Enter runs the analysis; once it has
+            // results, Enter focuses the chain pane (to walk callers/callees).
+            // In the chain pane, Enter loads the selected node's code.
+            ActiveMode::Impact => match self.state.impact.focused_pane {
+                ImpactPane::EntryPoints => {
+                    if self.state.impact.analysis.is_some() {
+                        self.focus_right();
+                    } else {
+                        self.dispatch_impact();
+                    }
+                }
+                ImpactPane::Chain => {
+                    if self.state.impact.chain_snippet.is_none()
+                        && !self.state.impact.chain_snippet_loading
+                    {
+                        self.dispatch_chain_snippet();
+                    }
+                }
+            },
             ActiveMode::Context => match self.state.context.focused_pane {
-                ContextPane::EntryPoints => self.dispatch_context(),
+                ContextPane::EntryPoints => {
+                    if self.state.context.context.is_some() {
+                        self.focus_right();
+                    } else {
+                        self.dispatch_context();
+                    }
+                }
                 ContextPane::Tree => {
                     if self.state.context.chain_snippet.is_none()
                         && !self.state.context.chain_snippet_loading
@@ -799,7 +887,9 @@ impl TuiApp {
         };
 
         // Extract the (repo_id, file_path, line) for the selected chain node.
-        let node_coords = {
+        // The row after the caller path is the root ◉ (the analysed symbol); it
+        // has no call-site location, so look it up by symbol name (line 0).
+        let (node_coords, by_symbol) = {
             let analysis = match &self.state.impact.analysis {
                 Some(a) => a,
                 None => return,
@@ -810,17 +900,31 @@ impl TuiApp {
                 None => return,
             };
             let path = analysis.path_for_leaf(leaf);
-            let node = match path.get(self.state.impact.chain_selected) {
-                Some(n) => *n,
-                None => return,
-            };
-            (
-                node.repository_id.clone(),
-                node.file_path.clone(),
-                node.line,
-            )
+            if self.state.impact.chain_selected == path.len() {
+                // Root node: repo borrowed from the leaf, symbol as the "path".
+                let repo = path
+                    .first()
+                    .map(|n| n.repository_id.clone())
+                    .unwrap_or_default();
+                ((repo, analysis.root_symbol.clone(), 0), true)
+            } else {
+                let node = match path.get(self.state.impact.chain_selected) {
+                    Some(n) => *n,
+                    None => return,
+                };
+                (
+                    (
+                        node.repository_id.clone(),
+                        node.file_path.clone(),
+                        node.line,
+                    ),
+                    false,
+                )
+            }
         };
 
+        // For the root node, `node_coords.1` is the symbol name (line 0); for a
+        // caller node it's a file path + line.
         let key = TuiCache::snippet_key(&node_coords.0, &node_coords.1, node_coords.2);
 
         if let Some(cached) = self.cache.snippets.get(&key).cloned() {
@@ -839,10 +943,12 @@ impl TuiApp {
         let (repo_id, file_path, line) = node_coords;
 
         tokio::spawn(async move {
-            let result = uc
-                .get_snippet(&repo_id, &file_path, line)
-                .await
-                .map_err(|e| e.to_string());
+            let result = if by_symbol {
+                uc.get_snippet_for_symbol(&repo_id, &file_path).await
+            } else {
+                uc.get_snippet(&repo_id, &file_path, line).await
+            }
+            .map_err(|e| e.to_string());
             if let Err(e) = tx.send(TuiEvent::ChainSnippetDone { key, result }) {
                 debug!("ChainSnippetDone send failed (app already exited): {}", e);
             }

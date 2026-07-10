@@ -407,9 +407,12 @@ pub enum Commands {
         no_embeddings: bool,
     },
 
+    /// Index a repository: parse, embed, and store its code for search
     Index {
+        /// Path to the repository (or file) to index
         path: String,
 
+        /// Namespace to index into (defaults to the global --namespace value)
         #[arg(short, long)]
         name: Option<String>,
 
@@ -418,7 +421,9 @@ pub enum Commands {
         force: bool,
     },
 
+    /// Search indexed code by natural-language query (hybrid semantic + keyword)
     Search {
+        /// Natural-language query describing what the code does
         query: String,
 
         #[arg(long, default_value = "10")]
@@ -442,12 +447,16 @@ pub enum Commands {
         text_search: bool,
     },
 
+    /// List the repositories indexed in the current namespace
     List,
 
+    /// Delete an indexed repository by its ID or path
     Delete {
+        /// Repository ID or path to delete
         id_or_path: String,
     },
 
+    /// Show index statistics (chunks, embeddings, call-graph size) for the namespace
     Stats,
 
     /// Show the blast radius of changing a symbol (BFS over the call graph)

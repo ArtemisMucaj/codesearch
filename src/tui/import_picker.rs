@@ -1,17 +1,21 @@
 //! Interactive session-import picker.
 //!
 //! A self-contained TUI screen (separate from the main tabbed app) shown when
-//! `codesearch memory import` is run with no path. The left pane lists sessions
-//! discovered from Claude Code / OpenCode / Zed — friendly name, how long ago,
-//! and source — and the right pane shows the highlighted session's full
-//! conversation, per turn, scrollable.
+//! `codesearch memory import` is run with no path. It shows ONE full-screen
+//! view at a time:
+//! - **List** (default): the sessions discovered from Claude Code / OpenCode /
+//!   Zed — friendly name, how long ago, source, and a rough token estimate.
+//! - **Transcript**: the highlighted session's full conversation, per turn.
+//!
+//! Navigation: in the list, `Tab` opens the highlighted session's chat and `↑↓`
+//! moves the cursor; in the chat, `↑↓` flips to the previous/next session's
+//! chat, `PgUp/PgDn` scrolls, and `Esc`/`Tab` returns to the list. `Enter`
+//! indexes the highlighted session from either view.
 //!
 //! Transcripts are **lazy-loaded** the first time a session is highlighted and
-//! **cached**, so scrolling the list stays responsive and re-visiting a session
-//! is instant. Pressing `i` imports the highlighted session: the request is
-//! sent to a background worker that runs extraction and reports progress back,
-//! so the picker stays open and each row shows its live status (queued →
-//! importing → ✓). Already-imported sessions are marked ✓ on open.
+//! **cached**. Indexing is handled by a background worker that reports progress
+//! back, so the picker stays open and each session shows its live status
+//! (queued → importing → ✓). Already-imported sessions are marked ✓ on open.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -90,10 +94,12 @@ enum WorkerState {
     Failed(String),
 }
 
-/// Which pane has keyboard focus.
+/// Which single view is shown (the picker displays one at a time).
 #[derive(PartialEq, Eq)]
-enum Pane {
+enum View {
+    /// The scrollable session list (the default).
     List,
+    /// The highlighted session's full-screen chat transcript.
     Transcript,
 }
 
@@ -132,7 +138,8 @@ struct PickerState {
     list_scroll: usize,
     transcript_scroll: u16,
     now_secs: i64,
-    focus: Pane,
+    /// Which single view is currently shown.
+    view: View,
     /// Lazily-loaded, cached transcript per session index.
     cache: HashMap<usize, Loaded>,
     /// True while at least one discovery source is still reporting.
@@ -290,7 +297,7 @@ fn run_loop(
         list_scroll: 0,
         transcript_scroll: 0,
         now_secs,
-        focus: Pane::List,
+        view: View::List,
         cache: HashMap::new(),
         discovering: true,
         status: HashMap::new(),
@@ -316,45 +323,42 @@ fn run_loop(
             continue;
         }
 
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        match (&state.view, key.code) {
+            (_, KeyCode::Char('c')) if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return Ok(());
             }
-            KeyCode::Esc | KeyCode::Char('q') => {
-                // Esc from the transcript returns to the list; from the list it quits.
-                if state.focus == Pane::Transcript {
-                    state.focus = Pane::List;
-                } else {
-                    return Ok(());
+            // ── List view ──────────────────────────────────────────────────
+            (View::List, KeyCode::Esc | KeyCode::Char('q')) => return Ok(()),
+            // Tab opens the highlighted session's chat as a full-screen view.
+            (View::List, KeyCode::Tab) => {
+                if !state.sessions.is_empty() {
+                    state.view = View::Transcript;
+                    state.transcript_scroll = 0;
                 }
             }
-            KeyCode::Tab => {
-                state.focus = match state.focus {
-                    Pane::List => Pane::Transcript,
-                    Pane::Transcript => Pane::List,
-                };
+            (View::List, KeyCode::Up | KeyCode::Char('k')) => move_selection(&mut state, -1),
+            (View::List, KeyCode::Down | KeyCode::Char('j')) => move_selection(&mut state, 1),
+
+            // ── Transcript (chat) view ─────────────────────────────────────
+            // Esc / Tab return to the list; the cursor stays where it was.
+            (View::Transcript, KeyCode::Esc | KeyCode::Tab) => {
+                state.view = View::List;
             }
-            KeyCode::Up | KeyCode::Char('k') => match state.focus {
-                Pane::List => move_selection(&mut state, -1),
-                Pane::Transcript => {
-                    state.transcript_scroll = state.transcript_scroll.saturating_sub(SCROLL_STEP)
-                }
-            },
-            KeyCode::Down | KeyCode::Char('j') => match state.focus {
-                Pane::List => move_selection(&mut state, 1),
-                Pane::Transcript => {
-                    state.transcript_scroll = state.transcript_scroll.saturating_add(SCROLL_STEP)
-                }
-            },
-            KeyCode::PageUp => {
+            // ↑↓ flip to the previous/next session's chat (not scroll).
+            (View::Transcript, KeyCode::Up | KeyCode::Char('k')) => move_selection(&mut state, -1),
+            (View::Transcript, KeyCode::Down | KeyCode::Char('j')) => move_selection(&mut state, 1),
+            // Scroll the transcript with PgUp/PgDn.
+            (View::Transcript, KeyCode::PageUp) => {
                 state.transcript_scroll = state.transcript_scroll.saturating_sub(SCROLL_STEP * 4)
             }
-            KeyCode::PageDown => {
+            (View::Transcript, KeyCode::PageDown) => {
                 state.transcript_scroll = state.transcript_scroll.saturating_add(SCROLL_STEP * 4)
             }
-            // Import the highlighted session (Enter or `i`); the picker stays
-            // open and the row shows a spinner → ✓ as the worker reports back.
-            KeyCode::Enter | KeyCode::Char('i') => {
+
+            // ── Both views: import the highlighted session ─────────────────
+            // The picker stays open; the row shows in-progress → ✓ as the
+            // worker reports back.
+            (_, KeyCode::Enter | KeyCode::Char('i')) => {
                 import_selected(&mut state, &import_tx);
             }
             _ => {}
@@ -394,17 +398,18 @@ fn ensure_loaded(state: &mut PickerState, load: &TranscriptLoader<'_>) {
 fn render(frame: &mut Frame, state: &mut PickerState) {
     let rows = Layout::vertical([
         Constraint::Length(1), // header
-        Constraint::Min(0),    // split panes
+        Constraint::Min(0),    // the single active view
         Constraint::Length(1), // footer
     ])
     .split(frame.area());
 
     render_header(frame, rows[0], state);
 
-    let panes =
-        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(rows[1]);
-    render_list(frame, panes[0], state);
-    render_transcript(frame, panes[1], state);
+    // One view at a time: the session list, or the highlighted session's chat.
+    match state.view {
+        View::List => render_list(frame, rows[1], state),
+        View::Transcript => render_transcript(frame, rows[1], state),
+    }
 
     render_footer(frame, rows[2], state);
 }
@@ -464,11 +469,10 @@ fn status_marker(status: &ImportStatus) -> (&'static str, Color) {
 }
 
 fn render_list(frame: &mut Frame, area: Rect, state: &mut PickerState) {
-    let focused = state.focus == Pane::List;
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Sessions ")
-        .border_style(Style::default().fg(if focused { Color::Cyan } else { Color::White }));
+        .border_style(Style::default().fg(Color::Cyan));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -519,7 +523,11 @@ fn render_list(frame: &mut Frame, area: Rect, state: &mut PickerState) {
                 Style::default().fg(Color::DarkGray).bg(bg),
             ),
             Span::styled(
-                truncate(s.display_title(), inner.width.saturating_sub(22) as usize),
+                format!("{:>6}  ", fmt_tokens(s.approx_tokens)),
+                Style::default().fg(Color::Yellow).bg(bg),
+            ),
+            Span::styled(
+                truncate(s.display_title(), inner.width.saturating_sub(30) as usize),
                 Style::default()
                     .fg(if is_cursor { Color::White } else { Color::Gray })
                     .bg(bg)
@@ -535,7 +543,6 @@ fn render_list(frame: &mut Frame, area: Rect, state: &mut PickerState) {
 }
 
 fn render_transcript(frame: &mut Frame, area: Rect, state: &PickerState) {
-    let focused = state.focus == Pane::Transcript;
     let title = state
         .sessions
         .get(state.selected)
@@ -544,7 +551,7 @@ fn render_transcript(frame: &mut Frame, area: Rect, state: &PickerState) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .border_style(Style::default().fg(if focused { Color::Cyan } else { Color::White }));
+        .border_style(Style::default().fg(Color::Cyan));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -621,15 +628,18 @@ fn role_static(role: &str) -> &'static str {
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, state: &PickerState) {
-    // Prefer showing the most recent import result; fall back to key hints.
+    // Prefer showing the most recent import result; else per-view key hints.
     let (text, color) = match &state.last_result {
         Some(msg) => (format!(" {msg}"), Color::Green),
-        None => (
-            " ↑↓/jk: move  i/Enter: import highlighted  Tab: focus transcript  \
-             PgUp/Dn: scroll  Esc/Ctrl+C: quit"
-                .to_string(),
-            Color::DarkGray,
-        ),
+        None => {
+            let hint = match state.view {
+                View::List => " ↑↓/jk: move  Enter: index  Tab: view chat  Esc/q: quit",
+                View::Transcript => {
+                    " ↑↓: prev/next session  PgUp/Dn: scroll  Enter: index  Esc: back"
+                }
+            };
+            (hint.to_string(), Color::DarkGray)
+        }
     };
     frame.render_widget(Paragraph::new(text).style(Style::default().fg(color)), area);
 }
@@ -658,6 +668,24 @@ fn truncate(text: &str, max: usize) -> String {
     }
     let kept: String = text.chars().take(max.saturating_sub(1)).collect();
     format!("{kept}…")
+}
+
+/// Compact, right-aligned token estimate for the list: `~450`, `~12k`, `~1.2M`.
+/// Empty when the count is zero/unknown so a bare estimate never misleads.
+fn fmt_tokens(tokens: usize) -> String {
+    match tokens {
+        0 => String::new(),
+        n if n < 1_000 => format!("~{n}"),
+        n if n < 1_000_000 => {
+            // One decimal below 10k (e.g. ~1.2k), whole thousands above.
+            if n < 10_000 {
+                format!("~{:.1}k", n as f64 / 1_000.0)
+            } else {
+                format!("~{}k", n / 1_000)
+            }
+        }
+        n => format!("~{:.1}M", n as f64 / 1_000_000.0),
+    }
 }
 
 #[cfg(test)]
@@ -701,6 +729,15 @@ mod tests {
         assert!(truncate("hello world", 5).ends_with('…'));
     }
 
+    #[test]
+    fn fmt_tokens_buckets() {
+        assert_eq!(fmt_tokens(0), "");
+        assert_eq!(fmt_tokens(450), "~450");
+        assert_eq!(fmt_tokens(1_200), "~1.2k");
+        assert_eq!(fmt_tokens(48_000), "~48k");
+        assert_eq!(fmt_tokens(1_500_000), "~1.5M");
+    }
+
     fn session(id: &str, updated_at: i64) -> DiscoveredSession {
         DiscoveredSession {
             source: crate::domain::SessionSource::Claude,
@@ -709,6 +746,7 @@ mod tests {
             cwd: None,
             updated_at,
             message_count: 1,
+            approx_tokens: 0,
             tail_preview: String::new(),
             locator: crate::domain::SessionLocator::File(format!("{id}.jsonl")),
         }
@@ -721,7 +759,7 @@ mod tests {
             list_scroll: 0,
             transcript_scroll: 0,
             now_secs: 0,
-            focus: Pane::List,
+            view: View::List,
             cache: HashMap::new(),
             discovering: true,
             status: HashMap::new(),

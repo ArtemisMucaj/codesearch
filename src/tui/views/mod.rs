@@ -9,7 +9,7 @@ use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
-use crate::tui::state::{ActiveMode, AppState, ContextPane, ImpactPane, MemoryPane, SearchPane};
+use crate::tui::state::{ActiveMode, AppState};
 use crate::tui::widgets::input_bar;
 
 /// Entry point called on every terminal draw cycle.
@@ -45,50 +45,14 @@ fn render_status(frame: &mut Frame, area: ratatui::layout::Rect, state: &AppStat
         return;
     }
 
-    let hints: &str = match state.mode {
-        ActiveMode::Search => match state.search.focused_pane {
-            SearchPane::List => {
-                " Enter: search  ↑↓: navigate  ←→: cursor  Ctrl+→: code  Ctrl+↑: impact  Ctrl+↓: context  Tab: switch"
-            }
-            SearchPane::Code => {
-                " Ctrl+←: focus list  ↑↓/PgUp/Dn: scroll  ←→: cursor  Tab: switch  q: quit"
-            }
-        },
-        ActiveMode::Impact => match state.impact.focused_pane {
-            ImpactPane::EntryPoints => {
-                " Enter: analyse  ↑↓: navigate  ←→: cursor  Ctrl+→: focus chain  Tab: switch"
-            }
-            ImpactPane::Chain => {
-                if state.impact.chain_snippet.is_some() {
-                    " ↑↓/PgUp/Dn: scroll  Esc: back to chain  q: quit"
-                } else {
-                    " ↑↓: select node  Enter: view code  Ctrl+←: focus list  Tab: switch  q: quit"
-                }
-            }
-        },
-        ActiveMode::Context => match state.context.focused_pane {
-            ContextPane::EntryPoints => {
-                " Enter: analyse  ↑↓: navigate  ←→: cursor  Ctrl+→: focus tree  Tab: switch"
-            }
-            ContextPane::Tree => {
-                if state.context.chain_snippet.is_some() {
-                    " ↑↓/PgUp/Dn: scroll  Esc: back to tree  q: quit"
-                } else {
-                    " ↑↓: navigate nodes  Enter: view code  PgUp/Dn: scroll fast  Ctrl+←: focus list  Tab: switch  q: quit"
-                }
-            }
-        },
-        ActiveMode::Memory => match state.memory.focused_pane {
-            MemoryPane::List => {
-                " type: search (live)  ↑↓: navigate rows/levels  Enter: open detail  Tab: switch mode  Ctrl+C: quit"
-            }
-            MemoryPane::Detail => {
-                " ↑↓/PgUp/Dn: scroll  Esc: back to tree  Tab: switch mode  Ctrl+C: quit"
-            }
-        },
-    };
+    // One consistent shortcut bar across every mode and pane, so the footer
+    // never shifts under the user. The keys mean the analogous thing everywhere:
+    // Enter = primary action (open/analyze/view), Esc = back, Tab = switch mode.
+    // In Search's code pane, `I`/`X` additionally jump to Impact/Context.
+    const HINTS: &str =
+        " Tab: mode  ↑↓: navigate  Enter: open/analyze  Esc: back  I/X: impact/context  PgUp/Dn: scroll  Ctrl+C: quit";
 
-    let status = Paragraph::new(hints)
+    let status = Paragraph::new(HINTS)
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::NONE));
     frame.render_widget(status, area);

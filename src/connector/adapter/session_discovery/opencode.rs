@@ -9,8 +9,8 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::domain::{
-    DiscoveredSession, DomainError, SessionLocator, SessionMessage, SessionSource,
-    SessionTranscript,
+    approx_tokens_from_chars, DiscoveredSession, DomainError, SessionLocator, SessionMessage,
+    SessionSource, SessionTranscript,
 };
 
 use super::{home_dir, truncate_chars};
@@ -46,10 +46,19 @@ pub fn discover() -> Result<Vec<DiscoveredSession>, DomainError> {
     //
     // `time_updated` is milliseconds since the epoch. Skip archived sessions and
     // sessions with no messages at all.
+    // `total_chars` sums the length of each part's actual `text` field (via
+    // json_extract), NOT the raw part blob — the blob is dominated by tool
+    // state/metadata and overcounts text ~10x. Summing only the text gives an
+    // estimate that tracks the real conversation prefill and is cheaper (it
+    // skips large tool payloads). Tool calls, rendered as one-line `ToolCall:`
+    // summaries at import, contribute negligibly and are intentionally omitted.
     let mut stmt = conn
         .prepare(
             "SELECT s.id, s.title, s.directory, s.time_updated, \
-                    (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id) AS msg_count \
+                    (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id) AS msg_count, \
+                    (SELECT COALESCE(SUM(LENGTH(json_extract(p.data, '$.text'))), 0) \
+                       FROM message m JOIN part p ON p.message_id = m.id \
+                       WHERE m.session_id = s.id) AS total_chars \
              FROM session s \
              WHERE s.time_archived IS NULL \
                AND EXISTS (SELECT 1 FROM message m WHERE m.session_id = s.id) \
@@ -65,13 +74,14 @@ pub fn discover() -> Result<Vec<DiscoveredSession>, DomainError> {
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, i64>(3).unwrap_or(0),
                 row.get::<_, i64>(4).unwrap_or(0),
+                row.get::<_, i64>(5).unwrap_or(0),
             ))
         })
         .map_err(|e| DomainError::storage(format!("opencode query failed: {e}")))?;
 
     let mut sessions = Vec::new();
     for row in rows {
-        let (id, title, directory, time_updated_ms, msg_count) =
+        let (id, title, directory, time_updated_ms, msg_count, total_chars) =
             row.map_err(|e| DomainError::storage(format!("opencode row read failed: {e}")))?;
 
         sessions.push(DiscoveredSession {
@@ -80,6 +90,10 @@ pub fn discover() -> Result<Vec<DiscoveredSession>, DomainError> {
             cwd: directory,
             updated_at: time_updated_ms / 1000,
             message_count: msg_count.max(0) as usize,
+            approx_tokens: approx_tokens_from_chars(
+                SessionSource::OpenCode,
+                total_chars.max(0) as usize,
+            ),
             // Preview is not shown in the picker; leave it empty and let the
             // full transcript load lazily on selection.
             tail_preview: String::new(),

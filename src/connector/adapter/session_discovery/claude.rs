@@ -5,7 +5,9 @@ use std::path::Path;
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use crate::domain::{DiscoveredSession, DomainError, SessionLocator, SessionSource};
+use crate::domain::{
+    approx_tokens_from_chars, DiscoveredSession, DomainError, SessionLocator, SessionSource,
+};
 
 use super::{home_dir, parse_iso8601_secs, tail_preview, truncate_chars};
 
@@ -50,6 +52,7 @@ fn summarize_file(path: &Path) -> Result<Option<DiscoveredSession>, DomainError>
     let mut first_user: Option<String> = None;
     let mut last_texts: Vec<String> = Vec::new();
     let mut message_count = 0usize;
+    let mut total_text_chars = 0usize;
     let mut last_timestamp: Option<String> = None;
 
     for line in content.lines() {
@@ -93,6 +96,7 @@ fn summarize_file(path: &Path) -> Result<Option<DiscoveredSession>, DomainError>
         }
 
         message_count += 1;
+        total_text_chars += text.chars().count();
         if let Some(ts) = value.get("timestamp").and_then(Value::as_str) {
             last_timestamp = Some(ts.to_string());
         }
@@ -136,6 +140,7 @@ fn summarize_file(path: &Path) -> Result<Option<DiscoveredSession>, DomainError>
         cwd,
         updated_at,
         message_count,
+        approx_tokens: approx_tokens_from_chars(SessionSource::Claude, total_text_chars),
         tail_preview: tail_preview(&last_texts),
         locator: SessionLocator::File(path.to_string_lossy().to_string()),
     }))

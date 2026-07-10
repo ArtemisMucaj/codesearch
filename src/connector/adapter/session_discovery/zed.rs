@@ -10,8 +10,8 @@ use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 
 use crate::domain::{
-    DiscoveredSession, DomainError, SessionLocator, SessionMessage, SessionSource,
-    SessionTranscript,
+    approx_tokens_from_chars, DiscoveredSession, DomainError, SessionLocator, SessionMessage,
+    SessionSource, SessionTranscript,
 };
 
 use super::{home_dir, parse_iso8601_secs, tail_preview, truncate_chars};
@@ -66,6 +66,7 @@ pub fn discover() -> Result<Vec<DiscoveredSession>, DomainError> {
         if texts.is_empty() {
             continue;
         }
+        let total_chars: usize = texts.iter().map(|t| t.chars().count()).sum();
         let tail: Vec<String> = texts
             .iter()
             .rev()
@@ -80,6 +81,7 @@ pub fn discover() -> Result<Vec<DiscoveredSession>, DomainError> {
             cwd: None,
             updated_at: parse_iso8601_secs(&updated_at).unwrap_or(0),
             message_count: texts.len(),
+            approx_tokens: approx_tokens_from_chars(SessionSource::Zed, total_chars),
             tail_preview: tail_preview(&tail),
             locator: SessionLocator::Sqlite {
                 db_path: db_path_str.clone(),
