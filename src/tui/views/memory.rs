@@ -1,16 +1,19 @@
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::application::MemoryEntry;
 use crate::tui::state::{AppState, MemoryPane};
+use crate::tui::widgets::markdown;
 use crate::tui::widgets::result_list;
 use crate::tui::widgets::result_list::ListEntry;
 
 pub fn render(frame: &mut Frame, area: Rect, state: &AppState) {
+    // Match the other modes' pane split so tabbing between views is seamless.
     let panes =
-        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(area);
+        Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).split(area);
 
     render_list(frame, panes[0], state);
     render_detail(frame, panes[1], state);
@@ -116,29 +119,63 @@ fn detail_title(entry: &MemoryEntry) -> String {
     }
 }
 
-/// Full detail body: item content, or the node's L0/L1/L2 sections.
-fn detail_body(entry: &MemoryEntry) -> String {
+/// Build the styled detail body. Items render their Markdown content; nodes
+/// render their L0/L1/L2 as separate, labelled sections (child levels) rather
+/// than one raw Markdown blob.
+fn detail_body(entry: &MemoryEntry) -> Vec<Line<'static>> {
     match entry {
         MemoryEntry::Item { item, .. } => {
-            format!(
-                "[{}] {}\nupdated {} time(s), source session: {}\n\n{}",
-                item.kind(),
-                item.name(),
-                item.update_count(),
-                item.source_session_id().unwrap_or("(unknown)"),
-                item.content()
-            )
+            let mut lines = vec![
+                meta_line(&format!(
+                    "updated {}×  ·  source: {}",
+                    item.update_count(),
+                    item.source_session_id().unwrap_or("(unknown)")
+                )),
+                Line::from(""),
+            ];
+            lines.extend(markdown::render(item.content()));
+            lines
         }
         MemoryEntry::Node { node, .. } => {
-            let mut out = format!("[{}] {}\n\n", node.kind(), node.uri());
-            out.push_str(&format!("## Abstract (L0)\n{}\n", node.abstract_()));
+            let mut lines = Vec::new();
+
+            // L0 — Abstract (always present).
+            lines.push(section_header("L0 · Abstract"));
+            lines.extend(markdown::render(node.abstract_()));
+
+            // L1 — Overview (when present).
             if !node.overview().trim().is_empty() {
-                out.push_str(&format!("\n## Overview (L1)\n{}\n", node.overview()));
+                lines.push(Line::from(""));
+                lines.push(section_header("L1 · Overview"));
+                lines.extend(markdown::render(node.overview()));
             }
+
+            // L2 — Detail (when present, e.g. a session transcript or resource).
             if !node.content().trim().is_empty() {
-                out.push_str(&format!("\n## Detail (L2)\n{}\n", node.content()));
+                lines.push(Line::from(""));
+                lines.push(section_header("L2 · Detail"));
+                lines.extend(markdown::render(node.content()));
             }
-            out
+
+            lines
         }
     }
+}
+
+/// A styled section header used to delineate the L0/L1/L2 child levels.
+fn section_header(label: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("▍ {label}"),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+/// A dim single-line metadata row.
+fn meta_line(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        text.to_string(),
+        Style::default().fg(Color::DarkGray),
+    ))
 }
