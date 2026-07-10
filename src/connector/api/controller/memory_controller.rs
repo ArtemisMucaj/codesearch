@@ -109,7 +109,7 @@ impl<'a> MemoryController<'a> {
         // Keep the whole-memory rollup in sync (best-effort — the resource is
         // already stored, so a rollup hiccup must not fail the command).
         if let Err(e) = summary.regenerate_rollup().await {
-            tracing::warn!("failed to regenerate memory rollup after add-resource: {e}");
+            tracing::warn!("failed to regenerate memory rollup after `memory add`: {e}");
         }
 
         Ok(format!(

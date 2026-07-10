@@ -208,9 +208,8 @@ pub struct ImportedSession {
 ///   drilling into individual memories.
 /// - `Session` — one imported session (`memory://sessions/<id>`): its L2 is
 ///   the full normalized transcript, kept so the conversation can be re-read.
-/// - `Resource` — a file or URL added explicitly (`memory://resources/...`).
-///   Reserved for a future `memory add-resource` flow; the slot exists so the
-///   filesystem is ready for it.
+/// - `Resource` — a file or URL added explicitly via `memory add`
+///   (`memory://resources/...`); its L2 is the fetched text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NodeKind {

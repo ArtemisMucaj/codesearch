@@ -261,6 +261,10 @@ codesearch memory import ~/.claude/projects/<project>/<session-id>.jsonl
 codesearch memory search "how do we handle lock conflicts"
 codesearch memory list --kind preference
 
+# Add a file or URL as a resource (fetched, summarized, stored)
+codesearch memory add ./docs/design.md
+codesearch memory add https://example.com/guide --name guide
+
 # Browse the memory virtual filesystem (OpenViking-style L0/L1 abstracts)
 codesearch memory tree                     # roots: the rollup + stored sessions
 codesearch memory show memory://memory     # the "read this first" summary
@@ -270,7 +274,9 @@ codesearch memory show memory://sessions/<id>   # one session's transcript
 Each import also stores the session as a node in a `memory://` virtual
 filesystem (with a generated L0 abstract, L1 overview, and its full transcript)
 and regenerates a whole-memory rollup at `memory://memory` — a summary an agent
-reads first before drilling into individual memories.
+reads first before drilling into individual memories. `memory add` stores files
+and URLs the same way under `memory://resources` (URLs and HTML are decluttered
+with the [`defuddle`](https://github.com/kepano/defuddle-cli) CLI).
 
 See [Long-Term Memory](docs/features/memory.md) for the memory kinds, the
 virtual filesystem, update semantics, and model configuration.

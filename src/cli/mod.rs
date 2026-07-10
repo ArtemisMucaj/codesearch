@@ -298,7 +298,7 @@ pub enum MemorySubcommand {
     /// `defuddle` CLI; plain files are read as-is), generates an L0 abstract +
     /// L1 overview, and stores it at 'memory://resources/<name>' with the full
     /// text as L2. Like `import`, this uses the configured LLM for the summary.
-    AddResource {
+    Add {
         /// A local file path or an http(s):// URL.
         source: String,
 

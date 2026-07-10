@@ -127,9 +127,18 @@ deterministic fallback so a flaky model never blocks the import or loses data:
    first, before drilling into individual memories. With fewer than two items
    this is a deterministic placeholder (no LLM call).
 
-`resources/` (explicitly-added files and website links) is reserved: the URI
-slot and storage exist, but a `memory add-resource` command is a separate,
-future feature.
+Resources — files and website links — are added explicitly with `memory add`.
+The content is fetched (URLs and HTML are decluttered to Markdown via the
+[`defuddle`](https://github.com/kepano/defuddle-cli) CLI; plain text files are
+read as-is), summarized into an L0/L1 the same way, and stored at
+`memory://resources/<name>` with the full text as L2:
+
+```bash
+codesearch memory add ./notes/architecture.md           # a local file
+codesearch memory add https://example.com/guide --name guide   # a URL
+```
+
+`defuddle` must be on `PATH` for URLs and HTML (`npm install -g defuddle`).
 
 Browse and drill in from the CLI:
 
