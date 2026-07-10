@@ -3,10 +3,10 @@
 CodeSearch can import **finished assistant sessions** (e.g. Claude Code
 transcripts) and distill them into durable, searchable memories: user
 preferences, reusable experiences, procedural skills, and project facts. The
-design follows OpenViking's session-memory architecture — declarative memory
-kinds, an LLM extraction pass over the transcript with existing memories
-prefetched for in-place merging, and per-field merge semantics — adapted to
-CodeSearch's hexagonal layering and DuckDB storage.
+design uses declarative memory kinds, an LLM extraction pass over the
+transcript with existing memories prefetched for in-place merging, and
+rewrite-merge semantics, all fitted to CodeSearch's hexagonal layering and
+DuckDB storage.
 
 ## Storage
 
@@ -96,9 +96,8 @@ codesearch memory import session.jsonl --llm open-ai
 
 ## Virtual filesystem (L0 / L1 / L2)
 
-Beyond the flat items, memory is also navigable as an OpenViking-style
-`memory://` virtual filesystem. Every node bundles the three OpenViking
-context levels for one location:
+Beyond the flat items, memory is also navigable as a `memory://` virtual
+filesystem. Every node bundles three context levels for one location:
 
 | Level | Field | What it holds |
 |---|---|---|
@@ -106,8 +105,8 @@ context levels for one location:
 | **L1** | `overview` | a paragraph/outline to orient before reading |
 | **L2** | `content` | the full detail (e.g. a session's transcript) |
 
-The tree has three top-level kinds, mirroring OpenViking's `memory` /
-`session` / `resource` context types:
+The tree has three top-level kinds — `memory` / `session` / `resource`
+context types:
 
 ```
 memory://memory                 ← the whole-memory rollup ("read this first")
@@ -195,14 +194,11 @@ tool calls do not contend for DuckDB's single-writer lock.
 
 ## Update semantics
 
-OpenViking merges memory fields with per-field `merge_op`s (`patch`, `sum`,
-`replace`, `immutable`). CodeSearch keeps the same *outcome* with a simpler
-mechanism suited to a single-model pass: the extraction prompt includes the
-current content of related existing items, and the model must re-emit the
-**full rewritten content** under the same `(kind, name)` to update an item
-(a rewrite-merge, equivalent to OpenViking's patch-by-rewrite path).
-Contradicted or obsolete items are removed via the `delete` list in the same
-response.
+Updates use a rewrite-merge suited to a single-model pass: the extraction
+prompt includes the current content of related existing items, and the model
+must re-emit the **full rewritten content** under the same `(kind, name)` to
+update an item. Contradicted or obsolete items are removed via the `delete`
+list in the same response.
 
 ## Architecture
 

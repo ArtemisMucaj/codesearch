@@ -1,8 +1,6 @@
-//! Session memory extraction — the codesearch port of OpenViking's
-//! `ExtractLoop`.
+//! Session memory extraction.
 //!
-//! Flow (single LLM call with one format-recovery retry, mirroring the
-//! simplified ReAct orchestrator in OpenViking):
+//! Flow (single LLM call with one format-recovery retry):
 //!
 //! 1. **Prefetch** — embed a compact query built from the transcript and
 //!    fetch the most similar existing memories, so the model can merge new
@@ -155,6 +153,12 @@ impl MemoryExtractionUseCase {
 
     /// Call the extraction model and parse its JSON output, retrying once
     /// with a format-correction message when parsing fails.
+    ///
+    /// The request is sent via [`ChatClient::complete_json`] with the extraction
+    /// schema, so backends that support structured decoding return
+    /// schema-conforming JSON directly. Backends without it fall back to
+    /// free-form output; the tolerant [`parse_operations`] (fence stripping +
+    /// escape repair) and the one-shot format retry cover that case.
     async fn extract(
         &self,
         transcript: &SessionTranscript,
@@ -162,15 +166,22 @@ impl MemoryExtractionUseCase {
     ) -> Result<Vec<MemoryOperation>, DomainError> {
         let system = prompt::system_prompt();
         let user = prompt::user_prompt(transcript, existing);
+        let schema = extraction_schema();
 
         let project = transcript.project.as_deref();
-        let response = self.chat_client.complete(&system, &user).await?;
+        let response = self
+            .chat_client
+            .complete_json(&system, &user, "memory_extraction", &schema)
+            .await?;
         match parse_operations(&response, project) {
             Ok(ops) => Ok(ops),
             Err(first_err) => {
                 debug!("extraction output unparseable, retrying once: {first_err}");
                 let retry_user = format!("{user}\n\n{}", prompt::format_retry_prompt());
-                let response = self.chat_client.complete(&system, &retry_user).await?;
+                let response = self
+                    .chat_client
+                    .complete_json(&system, &retry_user, "memory_extraction", &schema)
+                    .await?;
                 parse_operations(&response, project).map_err(|e| {
                     DomainError::parse(format!(
                         "extraction model returned unparseable output twice: {e}"
@@ -261,6 +272,49 @@ impl MemoryExtractionUseCase {
             }
         }
     }
+}
+
+/// JSON Schema for [`ExtractionOutput`], passed to structured-output backends
+/// so the model's response is grammar-constrained to the exact shape we parse.
+/// Kept in sync with the `ExtractionOutput` / `RawItem` / `RawDelete` structs.
+fn extraction_schema() -> serde_json::Value {
+    let item = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string" },
+            "content": { "type": "string" },
+            "project_specific": { "type": "boolean" }
+        },
+        "required": ["name", "content", "project_specific"],
+        "additionalProperties": false
+    });
+    let item_array = serde_json::json!({ "type": "array", "items": item });
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "preferences": item_array,
+            "experiences": item_array,
+            "skills": item_array,
+            "facts": item_array,
+            "delete": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["preference", "experience", "skill", "fact"]
+                        },
+                        "name": { "type": "string" }
+                    },
+                    "required": ["kind", "name"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["preferences", "experiences", "skills", "facts", "delete"],
+        "additionalProperties": false
+    })
 }
 
 /// Parse the model's JSON response into validated, normalized operations.
@@ -444,6 +498,46 @@ fn unix_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extraction_schema_declares_the_parsed_fields() {
+        let schema = extraction_schema();
+        let props = schema["properties"].as_object().unwrap();
+        // Every kind array plus `delete` is declared and required.
+        for field in ["preferences", "experiences", "skills", "facts", "delete"] {
+            assert!(props.contains_key(field), "schema missing '{field}'");
+        }
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(required.contains(&"facts"));
+        // Item objects require the fields RawItem reads, including the scope flag.
+        let item_props = &schema["properties"]["facts"]["items"]["properties"];
+        assert!(item_props.get("name").is_some());
+        assert!(item_props.get("content").is_some());
+        assert!(item_props.get("project_specific").is_some());
+    }
+
+    #[test]
+    fn schema_conforming_output_parses() {
+        // A response shaped exactly as the schema mandates must parse cleanly.
+        let response = r#"{
+            "preferences": [{"name": "tabs", "content": "prefers tabs", "project_specific": false}],
+            "experiences": [], "skills": [],
+            "facts": [{"name": "sdk", "content": "uses matter.js", "project_specific": true}],
+            "delete": [{"kind": "fact", "name": "old"}]
+        }"#;
+        let ops = parse_operations(response, Some("home-framework")).unwrap();
+        // 2 upserts + 1 delete; the project-specific fact is scoped.
+        assert_eq!(ops.len(), 3);
+        let scoped = ops.iter().any(|op| {
+            matches!(op, MemoryOperation::Upsert { scope: Some(s), .. } if s == "home-framework")
+        });
+        assert!(scoped, "project_specific fact should be scoped");
+    }
 
     #[test]
     fn parses_fenced_json_with_prose() {

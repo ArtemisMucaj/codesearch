@@ -2,8 +2,8 @@
 //!
 //! Where [`memory_extraction`](super::memory_extraction) distills a session
 //! into flat [`MemoryItem`]s, this use case builds the *navigable* layer over
-//! them: OpenViking-style nodes carrying an L0 abstract and an L1 overview so
-//! an agent reads a summary first and drills into detail only when needed.
+//! them: nodes carrying an L0 abstract and an L1 overview so an agent reads a
+//! summary first and drills into detail only when needed.
 //!
 //! Three things get summarized:
 //!

@@ -14,6 +14,26 @@ pub trait ChatClient: Send + Sync {
     /// the assistant's response text.
     async fn complete(&self, system: &str, user: &str) -> Result<String, DomainError>;
 
+    /// Like [`Self::complete`], but constrains the response to conform to the
+    /// given JSON Schema. Backends that support structured/grammar-constrained
+    /// decoding (e.g. an OpenAI-compatible server's `response_format`) return
+    /// JSON that is guaranteed to match the schema, which is far more robust
+    /// than parsing free-form output — especially with small local models.
+    ///
+    /// `schema_name` is a short identifier for the schema; `schema` is the JSON
+    /// Schema object. The default implementation ignores the schema and falls
+    /// back to [`Self::complete`], so providers without structured output still
+    /// satisfy the contract (the caller must then tolerate best-effort JSON).
+    async fn complete_json(
+        &self,
+        system: &str,
+        user: &str,
+        _schema_name: &str,
+        _schema: &serde_json::Value,
+    ) -> Result<String, DomainError> {
+        self.complete(system, user).await
+    }
+
     /// Stream the assistant's response token by token.
     ///
     /// Each token chunk is sent to `token_tx` as it arrives.  The method

@@ -2,8 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Category of a long-term memory item extracted from a session.
 ///
-/// Mirrors the memory-type taxonomy used by OpenViking's session memory
-/// system, reduced to the kinds that matter for a coding assistant:
+/// The taxonomy is reduced to the kinds that matter for a coding assistant:
 ///
 /// - `Preference` — what the user likes/dislikes or is accustomed to
 ///   (code style, communication style, tooling, workflow).
@@ -215,11 +214,11 @@ pub struct ImportedSession {
 
 /// Kind of a node in the memory virtual filesystem.
 ///
-/// Mirrors OpenViking's three top-level context types (`memory`, `session`,
-/// `resource`). Nodes are the *navigable* layer over the flat
-/// [`MemoryItem`] store: each node carries a short L0 abstract and a longer
-/// L1 overview so an agent can read the summary first and drill into detail
-/// (`content`, the L2 layer) only when needed.
+/// There are three top-level context types (`memory`, `session`, `resource`).
+/// Nodes are the *navigable* layer over the flat [`MemoryItem`] store: each
+/// node carries a short L0 abstract and a longer L1 overview so an agent can
+/// read the summary first and drill into detail (`content`, the L2 layer) only
+/// when needed.
 ///
 /// - `Memory` — the whole-memory rollup (`memory://memory`): a regenerated
 ///   abstract + overview over every stored [`MemoryItem`], read first before
@@ -264,7 +263,7 @@ impl std::fmt::Display for NodeKind {
 
 /// A node in the memory virtual filesystem, addressed by a `memory://` URI.
 ///
-/// Each node bundles the three OpenViking context levels for one location:
+/// Each node bundles three context levels for one location:
 /// L0 `abstract` (the one-line summary retrieval ranks on), L1 `overview`
 /// (a paragraph/outline to orient before reading), and L2 `content` (the full
 /// detail — e.g. a session's transcript). `content` is empty for pure index

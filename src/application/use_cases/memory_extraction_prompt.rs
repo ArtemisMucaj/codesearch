@@ -1,9 +1,8 @@
 //! Prompt construction for session memory extraction.
 //!
-//! The memory-kind descriptions below are adapted from OpenViking's memory
-//! type templates (`preferences.yaml`, `experiences.yaml`, `skills.yaml`):
-//! each kind tells the extraction model what qualifies, how to name items,
-//! and the exact content structure expected.
+//! The memory-kind descriptions below tell the extraction model what qualifies
+//! for each kind (preference, experience, skill, fact), how to name items, and
+//! the exact content structure expected.
 
 use crate::domain::{MemoryItem, SessionTranscript};
 
@@ -35,16 +34,10 @@ A preference is NOT a task the user is doing. "User is upgrading X to v2" / "use
 Captures a transferable pattern: what situation triggers it, what approach works, and why.
 Name the generalizable pattern, not the specific instance (snake_case, max 5 words).
 Good: "duckdb_lock_conflict_fix", "pytest_asyncio_cancel_hang_fix".
-Content MUST use EXACTLY this 3-section format:
-
-## Situation
-<markdown bullets: entry conditions — the generalized context or scenario that makes this rule relevant>
-
-## Approach
-<markdown bullets: the step-by-step optimized path to success. Direct imperative commands and explicit IF/THEN/ELSE branches. No negative constraints here.>
-
-## Reflect
-<markdown bullets: hard guardrails — strict negative rules ("NEVER do Z"), boundary conditions, failure-prevention heuristics from past mistakes.>
+Content MUST have EXACTLY these three markdown sections, each a short bullet list. Write real bullets — never copy this instruction text into the output:
+- `## Situation` — the generalized entry conditions: the context or scenario that makes this rule relevant.
+- `## Approach` — the step-by-step path to success, as direct imperative commands (and explicit IF/THEN branches when useful). No negative constraints here.
+- `## Reflect` — the hard guardrails: strict negative rules ("NEVER do Z"), boundary conditions, and failure-prevention heuristics from mistakes made in the session.
 
 Rules for experiences:
 - Strip specific entities, IDs, paths, and raw text; use generalized descriptions so the rule applies universally.
@@ -56,6 +49,7 @@ Rules for experiences:
 A repeatable multi-step flow the user (or an agent) will likely run again: a release process, a debugging recipe, a setup procedure, a data-migration routine.
 Name: snake_case verb phrase (e.g. "cross_compile_release", "bisect_flaky_test").
 Content: Markdown with these sections when known: "Best for" (when to use it), "Flow" (numbered steps), "Prerequisites", "Common failures", "Recommendation".
+Only emit a skill if you can write real, concrete steps. If the content would just repeat the name or be a vague one-liner, it is NOT a skill — drop it.
 
 ### facts — durable declarative information worth remembering
 Stable project facts, environment details, and architectural decisions WITH THEIR RATIONALE — things that will still be true and useful months from now.
@@ -68,17 +62,33 @@ A fact must OUTLIVE the current task. Apply this test before emitting one — if
 - A bare version number or a list of changed files is almost never a durable fact on its own.
 - Do NOT restate what an experience already captures. If the durable lesson is "how X broke and how to fix it", that is an EXPERIENCE, not a fact.
 
+## Choosing the kind
+Every insight belongs to EXACTLY ONE kind. The SAME insight must NEVER appear under two kinds — before you output an item, check that no other item you are emitting describes the same thing under a different kind. Choose with this test:
+- preference — a durable taste or habit of the USER ("prefers tabs", "wants tool-call args shown").
+- fact — a durable, declarative truth about the PROJECT or environment ("logging goes to stderr in MCP mode").
+- experience — a reusable lesson about HOW something breaks and how to fix it (Situation/Approach/Reflect).
+- skill — a repeatable multi-step PROCEDURE an agent would run again (a release flow, a debug recipe).
+
+The two boundaries that get confused most — resolve them like this:
+- experience vs skill: a one-off fix or debugging lesson (what went wrong plus how it was solved) is an EXPERIENCE only. A generic, repeatable procedure you would run again from scratch (independent of any one bug) is a SKILL only. Implementing a feature once is an EXPERIENCE, not a skill. If in doubt, it is an experience — do NOT also emit it as a skill.
+- preference vs fact: a statement about what the USER likes or does is a PREFERENCE only. A statement about how the CODE or PROJECT is built is a FACT only. "The user set the default model to X" is a preference; "the project's default model is X" is a fact — pick ONE, never both.
+
 ## Critical rules
 - Extract only DURABLE information. Skip anything session-specific with no future value.
 - The bar is high: prefer FEWER, higher-value memories. An empty result is better than noise. If the session contains nothing worth remembering long-term, return all fields as empty arrays.
 - Before emitting any item, apply the "still useful in 3 months?" test. If it is a snapshot of what this session did (versions bumped, files changed, the current bug), DROP it.
+- Keep content tight and scannable: a fact is at most 2 sentences; an experience or skill is at most ~8 bullets total. Prefer the essential over the exhaustive.
+- `content` must be a real, self-contained statement — NEVER just the item's name, a placeholder, or a restatement of these instructions. If you cannot write meaningful content, omit the item.
 - User-authored messages are the source of truth for preferences and facts about the user; assistant/tool activity is the source for experiences and skills.
 - When an "Existing memories" section is provided and the session adds to or contradicts one of those items, output the SAME kind and name with the full REWRITTEN content (existing knowledge merged with the new information). Never output a fragment or a diff.
 - To remove an existing memory that the session proves wrong or obsolete, add an entry to "delete".
 - Never invent information that is not supported by the transcript.
 
 ## Project scope
-Each item has a `"project_specific"` boolean. Set it to `true` when the memory only makes sense inside THIS session's project — a fix for this codebase's SDK, a quirk of this repo's build, a fact about this project's architecture. Set it to `false` (the default) for insights that generalize across ALL projects — a language idiom, a general debugging technique, a personal preference of the user. When unsure, prefer `true` for facts/experiences tied to specific libraries or repos, and `false` for user preferences and universal techniques. (You do not name the project — the system fills that in.)
+Each item has a `"project_specific"` boolean:
+- `true` — the memory is useless outside THIS repo (its SDK, build quirk, architecture, a fact about its code).
+- `false` — it generalizes across all projects (a user taste/habit, a language idiom, a general technique).
+User preferences and universal techniques are almost always `false`. (You never name the project — the system fills that in from `true`.)
 
 ## Output format
 Respond with ONLY a JSON object — no prose, no markdown fence:
@@ -117,14 +127,14 @@ pub fn user_prompt(transcript: &SessionTranscript, existing: &[MemoryItem]) -> S
     prompt.push_str("## Conversation history\n");
     if let Some(project) = transcript.project.as_deref() {
         prompt.push_str(&format!(
-            "**Project:** {project} — mark items `project_specific: true` when they only apply to this project.\n"
+            "Project: {project} — mark items project_specific: true when they only apply to this project.\n"
         ));
     }
     if let (Some(start), Some(end)) = (transcript.started_at(), transcript.ended_at()) {
         if start == end {
-            prompt.push_str(&format!("**Session time:** {start}\n"));
+            prompt.push_str(&format!("Session time: {start}\n"));
         } else {
-            prompt.push_str(&format!("**Session time:** {start} - {end}\n"));
+            prompt.push_str(&format!("Session time: {start} - {end}\n"));
         }
         prompt.push_str(
             "Relative times mentioned in the conversation are based on the session time.\n",
@@ -139,8 +149,8 @@ pub fn user_prompt(transcript: &SessionTranscript, existing: &[MemoryItem]) -> S
     prompt
 }
 
-/// Retry message appended after an unparseable model response
-/// (same recovery step OpenViking's ExtractLoop performs once per run).
+/// Retry message appended after an unparseable model response, giving the
+/// model one chance to correct its output format.
 pub fn format_retry_prompt() -> &'static str {
     "Your previous output could not be parsed as valid JSON. Output ONLY a valid JSON object \
      with the fields preferences, experiences, skills, facts, and delete (all present, arrays). \
@@ -207,8 +217,8 @@ fn render_conversation(transcript: &SessionTranscript) -> String {
 }
 
 /// Build a compact semantic query from the transcript for prefetching
-/// related existing memories (mirrors OpenViking's prefetch search query:
-/// user messages first, assistant text as supporting signal).
+/// related existing memories: user messages first, assistant text as
+/// supporting signal.
 pub fn prefetch_query(transcript: &SessionTranscript) -> String {
     const MAX_QUERY_CHARS: usize = 4_000;
     const USER_PART_CHARS: usize = 800;

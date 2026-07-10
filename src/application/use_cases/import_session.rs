@@ -1,7 +1,7 @@
 //! Import a finished session transcript into the memory store.
 //!
-//! Orchestrates the OpenViking "session commit" flow: idempotence check,
-//! memory extraction, and recording of the imported-session marker.
+//! Orchestrates the session-commit flow: idempotence check, memory extraction,
+//! and recording of the imported-session marker.
 
 use std::sync::Arc;
 

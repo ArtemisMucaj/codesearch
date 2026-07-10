@@ -19,6 +19,27 @@ struct ChatRequest {
     messages: Vec<ChatMessage>,
     temperature: f32,
     stream: bool,
+    /// Optional structured-output constraint (OpenAI-compatible
+    /// `response_format`). Omitted from the request body when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<ResponseFormat>,
+}
+
+/// `response_format: { type: "json_schema", json_schema: { … } }` — asks an
+/// OpenAI-compatible server to grammar-constrain output to the given schema.
+#[derive(Serialize)]
+struct ResponseFormat {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    json_schema: JsonSchemaSpec,
+}
+
+#[derive(Serialize)]
+struct JsonSchemaSpec {
+    name: String,
+    /// Reject any output that does not match the schema exactly.
+    strict: bool,
+    schema: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -39,7 +60,22 @@ struct ChatChoice {
 
 #[derive(Deserialize)]
 struct ChatResponseMessage {
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
+    /// Some reasoning models (e.g. Qwen3.5) route the whole answer into a
+    /// separate `reasoning_content` channel and leave `content` empty. We fall
+    /// back to it so the response isn't lost.
+    #[serde(default)]
+    reasoning_content: Option<String>,
+}
+
+impl ChatResponseMessage {
+    /// The assistant's text: `content` when present and non-empty, else the
+    /// reasoning channel (for reasoning models that leave `content` empty).
+    fn into_text(self) -> Option<String> {
+        let content = self.content.filter(|c| !c.trim().is_empty());
+        content.or_else(|| self.reasoning_content.filter(|c| !c.trim().is_empty()))
+    }
 }
 
 /// A single chunk from an OpenAI-compatible streaming response.
@@ -133,9 +169,21 @@ fn mask_key(key: &str) -> String {
     format!("{}{}{}", prefix, "*".repeat(chars.len() - 8), suffix)
 }
 
-#[async_trait]
-impl ChatClient for OpenAiChatClient {
-    async fn complete(&self, system: &str, user: &str) -> Result<String, DomainError> {
+impl OpenAiChatClient {
+    /// Shared non-streaming completion: POST the request (optionally with a
+    /// `response_format` constraint) and return the assistant's text.
+    ///
+    /// When a `response_format` was requested and the server rejects it with a
+    /// client error (4xx) — as some engines do when a model's grammar cannot
+    /// honor the schema — this returns [`CompletionError::FormatUnsupported`] so
+    /// the caller can retry without the constraint.
+    async fn complete_with_format(
+        &self,
+        system: &str,
+        user: &str,
+        response_format: Option<ResponseFormat>,
+    ) -> Result<String, CompletionError> {
+        let constrained = response_format.is_some();
         let body = ChatRequest {
             model: self.model.clone(),
             messages: vec![
@@ -150,6 +198,7 @@ impl ChatClient for OpenAiChatClient {
             ],
             temperature: 0.0,
             stream: false,
+            response_format,
         };
 
         let resp = self
@@ -158,7 +207,11 @@ impl ChatClient for OpenAiChatClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| DomainError::internal(format!("OpenAI chat request failed: {e}")))?;
+            .map_err(|e| {
+                CompletionError::Fatal(DomainError::internal(format!(
+                    "OpenAI chat request failed: {e}"
+                )))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -169,20 +222,102 @@ impl ChatClient for OpenAiChatClient {
                     format!("<failed to read body: {e}>")
                 }
             };
-            return Err(DomainError::internal(format!(
+            // A 4xx on a constrained request means the backend/model could not
+            // honor the schema; signal a retry without it rather than failing.
+            if constrained && status.is_client_error() {
+                return Err(CompletionError::FormatUnsupported);
+            }
+            return Err(CompletionError::Fatal(DomainError::internal(format!(
                 "OpenAI chat API returned {status}: {body}"
-            )));
+            ))));
         }
 
         let chat: ChatResponse = resp.json().await.map_err(|e| {
-            DomainError::internal(format!("Failed to parse OpenAI chat response: {e}"))
+            CompletionError::Fatal(DomainError::internal(format!(
+                "Failed to parse OpenAI chat response: {e}"
+            )))
         })?;
 
-        chat.choices
+        let message = chat
+            .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
-            .ok_or_else(|| DomainError::internal("OpenAI chat returned no choices"))
+            .map(|c| c.message)
+            .ok_or_else(|| {
+                CompletionError::Fatal(DomainError::internal("OpenAI chat returned no choices"))
+            })?;
+        message.into_text().ok_or_else(|| {
+            CompletionError::Fatal(DomainError::internal("OpenAI chat returned empty content"))
+        })
+    }
+}
+
+/// Outcome of a completion attempt that can distinguish a schema rejection
+/// (retryable without the constraint) from a genuine failure.
+enum CompletionError {
+    /// The backend rejected the `response_format`; retry unconstrained.
+    FormatUnsupported,
+    /// Any other error — propagate.
+    Fatal(DomainError),
+}
+
+impl CompletionError {
+    /// Collapse into a `DomainError`. A `FormatUnsupported` reaching here means
+    /// an unconstrained call somehow produced it (it shouldn't); surface it as
+    /// an internal error rather than silently swallowing.
+    fn into_fatal(self) -> DomainError {
+        match self {
+            CompletionError::Fatal(e) => e,
+            CompletionError::FormatUnsupported => {
+                DomainError::internal("unexpected response_format rejection on unconstrained call")
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl ChatClient for OpenAiChatClient {
+    async fn complete(&self, system: &str, user: &str) -> Result<String, DomainError> {
+        // No response_format ⇒ FormatUnsupported is impossible here.
+        self.complete_with_format(system, user, None)
+            .await
+            .map_err(CompletionError::into_fatal)
+    }
+
+    async fn complete_json(
+        &self,
+        system: &str,
+        user: &str,
+        schema_name: &str,
+        schema: &serde_json::Value,
+    ) -> Result<String, DomainError> {
+        let response_format = ResponseFormat {
+            kind: "json_schema",
+            json_schema: JsonSchemaSpec {
+                name: schema_name.to_string(),
+                strict: true,
+                schema: schema.clone(),
+            },
+        };
+        match self
+            .complete_with_format(system, user, Some(response_format))
+            .await
+        {
+            Ok(text) => Ok(text),
+            // The backend can't grammar-constrain to this schema (e.g. gemma-4's
+            // engine on some LM Studio builds). Fall back to free-form output;
+            // the caller's tolerant parser + repair pass handle it.
+            Err(CompletionError::FormatUnsupported) => {
+                warn!(
+                    "OpenAiChatClient: backend rejected response_format for '{schema_name}'; \
+                     retrying without structured output"
+                );
+                self.complete_with_format(system, user, None)
+                    .await
+                    .map_err(CompletionError::into_fatal)
+            }
+            Err(e) => Err(e.into_fatal()),
+        }
     }
 
     async fn complete_stream(
@@ -205,6 +340,7 @@ impl ChatClient for OpenAiChatClient {
             ],
             temperature: 0.0,
             stream: true,
+            response_format: None,
         };
 
         let resp = self

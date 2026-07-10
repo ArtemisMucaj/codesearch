@@ -265,7 +265,7 @@ codesearch memory list --kind preference
 codesearch memory add ./docs/design.md
 codesearch memory add https://example.com/guide --name guide
 
-# Browse the memory virtual filesystem (OpenViking-style L0/L1 abstracts)
+# Browse the memory virtual filesystem (L0/L1 abstracts)
 codesearch memory tree                     # roots: the rollup + stored sessions
 codesearch memory show memory://memory     # the "read this first" summary
 codesearch memory show memory://sessions/<id>   # one session's transcript
