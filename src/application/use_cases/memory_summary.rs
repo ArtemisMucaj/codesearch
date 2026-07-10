@@ -1,0 +1,443 @@
+//! Virtual-filesystem summarization — the L0/L1 half of the memory system.
+//!
+//! Where [`memory_extraction`](super::memory_extraction) distills a session
+//! into flat [`MemoryItem`]s, this use case builds the *navigable* layer over
+//! them: OpenViking-style nodes carrying an L0 abstract and an L1 overview so
+//! an agent reads a summary first and drills into detail only when needed.
+//!
+//! Two things get summarized:
+//!
+//! 1. **Each imported session** → `viking://sessions/<id>` with its full
+//!    normalized transcript as L2, plus a generated abstract + overview.
+//! 2. **The whole memory store** → the `viking://memory` rollup: a regenerated
+//!    abstract + overview over every stored item, meant to be read first.
+//!
+//! Both use one small LLM call each (the same [`ChatClient`] extraction uses),
+//! with a single format-recovery retry and a deterministic fallback so a flaky
+//! model never blocks an import.
+
+use std::sync::Arc;
+
+use serde::Deserialize;
+use tracing::{debug, warn};
+
+use crate::application::interfaces::{ChatClient, EmbeddingService, MemoryRepository};
+use crate::domain::{
+    DomainError, MemoryItem, MemoryNode, NodeKind, SessionMessage, SessionTranscript,
+};
+
+/// Root URI of the memory rollup node ("read this first").
+pub const MEMORY_ROOT_URI: &str = "viking://memory";
+/// Parent directory URI under which per-session nodes live.
+pub const SESSIONS_ROOT_URI: &str = "viking://sessions";
+/// Parent directory URI reserved for explicitly-added resources (files/URLs).
+pub const RESOURCES_ROOT_URI: &str = "viking://resources";
+
+/// Maximum characters of transcript sent to the summarization model. The full
+/// transcript is still *stored* as L2; only the summarization prompt is capped.
+const MAX_SUMMARY_INPUT_CHARS: usize = 40_000;
+
+/// Maximum characters of a single abstract (L0) kept after generation.
+const MAX_ABSTRACT_CHARS: usize = 400;
+/// Maximum characters of a single overview (L1) kept after generation.
+const MAX_OVERVIEW_CHARS: usize = 2_000;
+
+/// Builds and maintains the memory virtual filesystem's L0/L1 nodes.
+pub struct SummarizeMemoryUseCase {
+    chat_client: Arc<dyn ChatClient>,
+    memory_repo: Arc<dyn MemoryRepository>,
+    embedding_service: Arc<dyn EmbeddingService>,
+}
+
+impl SummarizeMemoryUseCase {
+    pub fn new(
+        chat_client: Arc<dyn ChatClient>,
+        memory_repo: Arc<dyn MemoryRepository>,
+        embedding_service: Arc<dyn EmbeddingService>,
+    ) -> Self {
+        Self {
+            chat_client,
+            memory_repo,
+            embedding_service,
+        }
+    }
+
+    /// Store `transcript` as a session node (`viking://sessions/<id>`) with a
+    /// generated L0 abstract + L1 overview and its full transcript as L2.
+    ///
+    /// Summarization is best-effort: on model/embedding failure the node is
+    /// still written with a deterministic fallback summary so the transcript
+    /// is never lost.
+    #[tracing::instrument(skip_all, fields(session_id = %transcript.id))]
+    pub async fn summarize_session(
+        &self,
+        transcript: &SessionTranscript,
+    ) -> Result<MemoryNode, DomainError> {
+        let content = render_transcript(&transcript.messages);
+        let (abstract_, overview) = match self
+            .generate(
+                &session_system_prompt(),
+                &session_user_prompt(transcript, &content),
+            )
+            .await
+        {
+            Some(summary) => summary,
+            None => fallback_session_summary(transcript),
+        };
+
+        let uri = format!("{SESSIONS_ROOT_URI}/{}", transcript.id);
+        let now = unix_now();
+        let created_at = match self.memory_repo.find_node(&uri).await {
+            Ok(Some(prev)) => prev.created_at(),
+            _ => now,
+        };
+        let node = MemoryNode::new(
+            uri,
+            NodeKind::Session,
+            Some(SESSIONS_ROOT_URI.to_string()),
+            clamp(&abstract_, MAX_ABSTRACT_CHARS),
+            clamp(&overview, MAX_OVERVIEW_CHARS),
+            content,
+            created_at,
+            now,
+        );
+        let vector = self.embed_node(&node).await;
+        self.memory_repo
+            .upsert_node(&node, vector.as_deref())
+            .await?;
+        Ok(node)
+    }
+
+    /// Regenerate the whole-memory rollup (`viking://memory`) from the current
+    /// set of stored items: a fresh L0 abstract + L1 overview read before
+    /// drilling into individual memories.
+    ///
+    /// With zero or one item there is nothing to summarize, so a deterministic
+    /// placeholder is written without spending an LLM call.
+    #[tracing::instrument(skip_all)]
+    pub async fn regenerate_rollup(&self) -> Result<MemoryNode, DomainError> {
+        let items = self.memory_repo.list_items(None).await?;
+        let (abstract_, overview) = if items.len() < 2 {
+            fallback_rollup_summary(&items)
+        } else {
+            match self
+                .generate(&rollup_system_prompt(), &rollup_user_prompt(&items))
+                .await
+            {
+                Some(summary) => summary,
+                None => fallback_rollup_summary(&items),
+            }
+        };
+
+        let now = unix_now();
+        let created_at = match self.memory_repo.find_node(MEMORY_ROOT_URI).await {
+            Ok(Some(prev)) => prev.created_at(),
+            _ => now,
+        };
+        let node = MemoryNode::new(
+            MEMORY_ROOT_URI.to_string(),
+            NodeKind::Memory,
+            None,
+            clamp(&abstract_, MAX_ABSTRACT_CHARS),
+            clamp(&overview, MAX_OVERVIEW_CHARS),
+            String::new(),
+            created_at,
+            now,
+        );
+        let vector = self.embed_node(&node).await;
+        self.memory_repo
+            .upsert_node(&node, vector.as_deref())
+            .await?;
+        Ok(node)
+    }
+
+    /// Run one summarization call, parsing `{abstract, overview}` JSON with a
+    /// single format-recovery retry. Returns `None` on any failure so callers
+    /// fall back to a deterministic summary instead of aborting the import.
+    async fn generate(&self, system: &str, user: &str) -> Option<(String, String)> {
+        match self.chat_client.complete(system, user).await {
+            Ok(response) => match parse_summary(&response) {
+                Some(summary) => return Some(summary),
+                None => debug!("summary output unparseable, retrying once"),
+            },
+            Err(e) => {
+                warn!("summary generation failed: {e}");
+                return None;
+            }
+        }
+        let retry_user = format!("{user}\n\n{}", SUMMARY_RETRY_PROMPT);
+        match self.chat_client.complete(system, &retry_user).await {
+            Ok(response) => parse_summary(&response),
+            Err(e) => {
+                warn!("summary generation retry failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Embed the node's L0/L1 summary for semantic recall; `None` when
+    /// embeddings are disabled or fail (the node stays keyword-searchable).
+    async fn embed_node(&self, node: &MemoryNode) -> Option<Vec<f32>> {
+        if !self.embedding_service.embeddings_enabled() {
+            return None;
+        }
+        match self
+            .embedding_service
+            .embed_query(&node.embedding_text())
+            .await
+        {
+            Ok(vector) => Some(vector),
+            Err(e) => {
+                warn!("failed to embed memory node '{}': {e}", node.uri());
+                None
+            }
+        }
+    }
+}
+
+/// Render a transcript to a stored L2 body: `[idx][role]: content` lines,
+/// full (not elided — this is the archived detail, not a prompt).
+fn render_transcript(messages: &[SessionMessage]) -> String {
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| !m.content.trim().is_empty())
+        .map(|(idx, m)| format!("[{}][{}]: {}", idx, m.role, m.content.trim()))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// JSON shape both summarization prompts must return.
+#[derive(Debug, Deserialize)]
+struct SummaryOutput {
+    #[serde(default)]
+    r#abstract: String,
+    #[serde(default)]
+    overview: String,
+}
+
+const SUMMARY_RETRY_PROMPT: &str =
+    "Your previous output could not be parsed. Output ONLY a JSON object with exactly two \
+     string fields, \"abstract\" and \"overview\". No prose, no markdown fence.";
+
+fn session_system_prompt() -> String {
+    r#"You summarize a finished coding-assistant session for a two-level index.
+Produce:
+- "abstract": ONE sentence (max ~30 words) capturing what the session was about and its outcome — this is what a reader scans first to decide whether to open the session.
+- "overview": 3-5 markdown bullet points covering the arc of the session — the goal, the key steps/decisions, and the result. No preamble.
+
+Focus on durable substance (what was done, decided, or learned), not conversational filler.
+
+Output ONLY a JSON object: {"abstract": "...", "overview": "..."}"#
+        .to_string()
+}
+
+fn session_user_prompt(transcript: &SessionTranscript, rendered: &str) -> String {
+    let mut prompt = String::new();
+    if let (Some(start), Some(end)) = (transcript.started_at(), transcript.ended_at()) {
+        if start == end {
+            prompt.push_str(&format!("Session time: {start}\n\n"));
+        } else {
+            prompt.push_str(&format!("Session time: {start} - {end}\n\n"));
+        }
+    }
+    prompt.push_str("## Transcript\n\n");
+    prompt.push_str(&clamp(rendered, MAX_SUMMARY_INPUT_CHARS));
+    prompt.push_str("\n\nSummarize this session as the specified JSON object.");
+    prompt
+}
+
+fn rollup_system_prompt() -> String {
+    r#"You maintain a top-level index of an assistant's long-term memory about a user and their project.
+You are given the full list of stored memory items (preferences, experiences, skills, facts).
+Produce a summary an agent reads FIRST, before drilling into individual memories:
+- "abstract": ONE sentence (max ~35 words) capturing who this user is and what the memory covers at a glance.
+- "overview": a markdown outline grouping what is known by theme (e.g. preferences, project facts, reusable experiences), naming the notable items so the reader knows what exists and can drill in. Keep it scannable.
+
+Do not invent anything not present in the items. Output ONLY a JSON object: {"abstract": "...", "overview": "..."}"#
+        .to_string()
+}
+
+fn rollup_user_prompt(items: &[MemoryItem]) -> String {
+    const MAX_ITEM_CHARS: usize = 400;
+    let mut prompt = String::from("## Stored memory items\n\n");
+    for item in items {
+        prompt.push_str(&format!(
+            "- [{}] {}: {}\n",
+            item.kind(),
+            item.name(),
+            clamp(&one_line(item.content()), MAX_ITEM_CHARS)
+        ));
+    }
+    prompt.push_str("\n\nSummarize the memory store as the specified JSON object.");
+    clamp(&prompt, MAX_SUMMARY_INPUT_CHARS)
+}
+
+/// Deterministic fallback used when a session cannot be summarized by the model.
+fn fallback_session_summary(transcript: &SessionTranscript) -> (String, String) {
+    let msg_count = transcript
+        .messages
+        .iter()
+        .filter(|m| !m.content.trim().is_empty())
+        .count();
+    let first_user = transcript
+        .messages
+        .iter()
+        .find(|m| m.role == "user" && !m.content.trim().is_empty())
+        .map(|m| clamp(&one_line(&m.content), 200))
+        .unwrap_or_else(|| "(no user message)".to_string());
+    (
+        format!(
+            "Imported session '{}' ({msg_count} messages).",
+            transcript.id
+        ),
+        format!(
+            "- Session id: {}\n- Messages: {msg_count}\n- Opened with: {first_user}",
+            transcript.id
+        ),
+    )
+}
+
+/// Deterministic fallback for the rollup when there is nothing to summarize or
+/// the model is unavailable.
+fn fallback_rollup_summary(items: &[MemoryItem]) -> (String, String) {
+    if items.is_empty() {
+        return (
+            "No memories stored yet.".to_string(),
+            "- The memory store is empty. Import a session to populate it.".to_string(),
+        );
+    }
+    let mut overview = String::from("Stored memories:\n");
+    for item in items {
+        overview.push_str(&format!("- [{}] {}\n", item.kind(), item.name()));
+    }
+    (
+        format!(
+            "{} stored memories about the user and project.",
+            items.len()
+        ),
+        overview,
+    )
+}
+
+/// Parse the model's `{abstract, overview}` response, tolerating prose or a
+/// markdown fence around the object. `None` when no usable object is found.
+fn parse_summary(response: &str) -> Option<(String, String)> {
+    let json = extract_json_object(response)?;
+    let output: SummaryOutput = serde_json::from_str(json).ok()?;
+    let abstract_ = output.r#abstract.trim().to_string();
+    let overview = output.overview.trim().to_string();
+    if abstract_.is_empty() && overview.is_empty() {
+        return None;
+    }
+    Some((abstract_, overview))
+}
+
+/// Extract the first balanced `{ ... }` object from mixed model output.
+fn extract_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, ch) in text[start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&text[start..start + offset + ch.len_utf8()]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn clamp(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let truncated: String = text.chars().take(max_chars.saturating_sub(3)).collect();
+    format!("{truncated}...")
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_fenced_summary() {
+        let response = r#"Here you go:
+```json
+{"abstract": "Fixed a flaky test", "overview": "- Found the race\n- Added a lock"}
+```"#;
+        let (a, o) = parse_summary(response).unwrap();
+        assert_eq!(a, "Fixed a flaky test");
+        assert!(o.contains("Found the race"));
+    }
+
+    #[test]
+    fn rejects_summary_without_json() {
+        assert!(parse_summary("I cannot help with that").is_none());
+    }
+
+    #[test]
+    fn rejects_empty_summary() {
+        assert!(parse_summary(r#"{"abstract": "", "overview": ""}"#).is_none());
+    }
+
+    #[test]
+    fn renders_transcript_skipping_empty() {
+        let messages = vec![
+            SessionMessage {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                timestamp: None,
+            },
+            SessionMessage {
+                role: "assistant".to_string(),
+                content: "  ".to_string(),
+                timestamp: None,
+            },
+            SessionMessage {
+                role: "assistant".to_string(),
+                content: "hi".to_string(),
+                timestamp: None,
+            },
+        ];
+        let rendered = render_transcript(&messages);
+        assert!(rendered.contains("[0][user]: hello"));
+        assert!(rendered.contains("[2][assistant]: hi"));
+        assert!(!rendered.contains("[1]"));
+    }
+
+    #[test]
+    fn empty_store_rollup_fallback() {
+        let (a, o) = fallback_rollup_summary(&[]);
+        assert!(a.contains("No memories"));
+        assert!(o.contains("empty"));
+    }
+}

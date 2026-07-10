@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tracing::debug;
 
 use crate::application::MemoryRepository;
-use crate::domain::{DomainError, ImportedSession, MemoryItem, MemoryKind};
+use crate::domain::{DomainError, ImportedSession, MemoryItem, MemoryKind, MemoryNode, NodeKind};
 
 /// File name of the memory database inside the data directory.
 pub const MEMORY_DB_FILE: &str = "memory.duckdb";
@@ -85,6 +85,20 @@ impl DuckdbMemoryRepository {
                 imported_at BIGINT NOT NULL,
                 message_count BIGINT NOT NULL,
                 items_written BIGINT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS memory_nodes (
+                uri TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                parent_uri TEXT,
+                abstract TEXT NOT NULL,
+                overview TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS memory_node_vectors (
+                node_uri TEXT PRIMARY KEY,
+                vector FLOAT[{dimensions}] NOT NULL
             );
             "#
         ))
@@ -172,10 +186,28 @@ impl DuckdbMemoryRepository {
             row.get::<_, i64>(7)? as u32,
         ))
     }
+
+    fn node_from_row(row: &Row<'_>) -> Result<MemoryNode, duckdb::Error> {
+        let kind_str: String = row.get(1)?;
+        let kind = NodeKind::parse(&kind_str).unwrap_or(NodeKind::Resource);
+        Ok(MemoryNode::new(
+            row.get(0)?,
+            kind,
+            row.get::<_, Option<String>>(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?,
+        ))
+    }
 }
 
 const ITEM_COLUMNS: &str =
     "id, kind, name, content, source_session_id, created_at, updated_at, update_count";
+
+const NODE_COLUMNS: &str =
+    "uri, kind, parent_uri, abstract, overview, content, created_at, updated_at";
 
 #[async_trait]
 impl MemoryRepository for DuckdbMemoryRepository {
@@ -453,6 +485,214 @@ impl MemoryRepository for DuckdbMemoryRepository {
             .map_err(|e| DomainError::storage(format!("Failed to list sessions: {e}")))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| DomainError::storage(format!("Failed to read session row: {e}")))
+    }
+
+    async fn upsert_node(
+        &self,
+        node: &MemoryNode,
+        vector: Option<&[f32]>,
+    ) -> Result<(), DomainError> {
+        let vector_literal = vector.map(|v| self.vector_literal(v)).transpose()?;
+        let conn = self.conn.lock().await;
+
+        // Replace any previous node with the same URI so both tables stay
+        // conflict-free (URI is the primary key on each).
+        conn.execute(
+            "DELETE FROM memory_node_vectors WHERE node_uri = ?1",
+            params![node.uri()],
+        )
+        .map_err(|e| DomainError::storage(format!("Failed to clear node vector: {e}")))?;
+        conn.execute(
+            "DELETE FROM memory_nodes WHERE uri = ?1",
+            params![node.uri()],
+        )
+        .map_err(|e| DomainError::storage(format!("Failed to clear node: {e}")))?;
+
+        conn.execute(
+            &format!(
+                "INSERT INTO memory_nodes ({NODE_COLUMNS}) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+            ),
+            params![
+                node.uri(),
+                node.kind().as_str(),
+                node.parent_uri(),
+                node.abstract_(),
+                node.overview(),
+                node.content(),
+                node.created_at(),
+                node.updated_at(),
+            ],
+        )
+        .map_err(|e| DomainError::storage(format!("Failed to insert node: {e}")))?;
+
+        if let Some(literal) = vector_literal {
+            conn.execute(
+                &format!(
+                    "INSERT INTO memory_node_vectors (node_uri, vector) VALUES (?1, {literal})"
+                ),
+                params![node.uri()],
+            )
+            .map_err(|e| DomainError::storage(format!("Failed to insert node vector: {e}")))?;
+        }
+        Ok(())
+    }
+
+    async fn find_node(&self, uri: &str) -> Result<Option<MemoryNode>, DomainError> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {NODE_COLUMNS} FROM memory_nodes WHERE uri = ?1"
+            ))
+            .map_err(|e| DomainError::storage(format!("Failed to prepare find_node: {e}")))?;
+        match stmt.query_row(params![uri], Self::node_from_row) {
+            Ok(node) => Ok(Some(node)),
+            Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(DomainError::storage(format!("Failed to query node: {e}"))),
+        }
+    }
+
+    async fn list_child_nodes(&self, parent_uri: &str) -> Result<Vec<MemoryNode>, DomainError> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {NODE_COLUMNS} FROM memory_nodes WHERE parent_uri = ?1 \
+                 ORDER BY updated_at DESC, uri"
+            ))
+            .map_err(|e| {
+                DomainError::storage(format!("Failed to prepare list_child_nodes: {e}"))
+            })?;
+        let rows = stmt
+            .query_map(params![parent_uri], Self::node_from_row)
+            .map_err(|e| DomainError::storage(format!("Failed to list child nodes: {e}")))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DomainError::storage(format!("Failed to read node row: {e}")))
+    }
+
+    async fn list_nodes(&self, kind: Option<NodeKind>) -> Result<Vec<MemoryNode>, DomainError> {
+        let conn = self.conn.lock().await;
+        let (sql, kind_param) = match kind {
+            Some(k) => (
+                format!(
+                    "SELECT {NODE_COLUMNS} FROM memory_nodes WHERE kind = ?1 \
+                     ORDER BY updated_at DESC, uri"
+                ),
+                Some(k.as_str().to_string()),
+            ),
+            None => (
+                format!("SELECT {NODE_COLUMNS} FROM memory_nodes ORDER BY updated_at DESC, uri"),
+                None,
+            ),
+        };
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| DomainError::storage(format!("Failed to prepare list_nodes: {e}")))?;
+        let rows = match kind_param {
+            Some(k) => stmt.query_map(params![k], Self::node_from_row),
+            None => stmt.query_map([], Self::node_from_row),
+        }
+        .map_err(|e| DomainError::storage(format!("Failed to list nodes: {e}")))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DomainError::storage(format!("Failed to read node row: {e}")))
+    }
+
+    async fn search_nodes_semantic(
+        &self,
+        vector: &[f32],
+        kind: Option<NodeKind>,
+        limit: usize,
+    ) -> Result<Vec<(MemoryNode, f32)>, DomainError> {
+        let literal = self.vector_literal(vector)?;
+        let kind_clause = match kind {
+            Some(k) => format!("WHERE n.kind = '{}'", k.as_str()),
+            None => String::new(),
+        };
+        let sql = format!(
+            "SELECT {cols}, 1.0 - array_cosine_distance(v.vector, {literal}) AS score \
+             FROM memory_nodes n \
+             JOIN memory_node_vectors v ON v.node_uri = n.uri \
+             {kind_clause} \
+             ORDER BY score DESC \
+             LIMIT {limit}",
+            cols = NODE_COLUMNS
+                .split(", ")
+                .map(|c| format!("n.{c}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            DomainError::storage(format!("Failed to prepare node semantic search: {e}"))
+        })?;
+        let rows = stmt
+            .query_map([], |row| {
+                let node = Self::node_from_row(row)?;
+                let score: f32 = row.get(8)?;
+                Ok((node, score))
+            })
+            .map_err(|e| DomainError::storage(format!("Node semantic search failed: {e}")))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DomainError::storage(format!("Failed to read node search row: {e}")))
+    }
+
+    async fn search_nodes_keyword(
+        &self,
+        query: &str,
+        kind: Option<NodeKind>,
+        limit: usize,
+    ) -> Result<Vec<(MemoryNode, f32)>, DomainError> {
+        let terms: Vec<String> = query
+            .split_whitespace()
+            .map(|t| t.to_lowercase())
+            .filter(|t| !t.is_empty())
+            .take(16)
+            .collect();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let escape = |t: &str| {
+            t.replace('\\', "\\\\")
+                .replace('\'', "''")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        };
+        // Score = fraction of query terms found in abstract or overview.
+        let match_cases: Vec<String> = terms
+            .iter()
+            .map(|t| {
+                let e = escape(t);
+                format!(
+                    "(CASE WHEN lower(abstract) LIKE '%{e}%' ESCAPE '\\' \
+                       OR lower(overview) LIKE '%{e}%' ESCAPE '\\' THEN 1 ELSE 0 END)"
+                )
+            })
+            .collect();
+        let score_expr = format!("({}) / {}.0", match_cases.join(" + "), terms.len());
+        let kind_clause = match kind {
+            Some(k) => format!("AND kind = '{}'", k.as_str()),
+            None => String::new(),
+        };
+        let sql = format!(
+            "SELECT {NODE_COLUMNS}, {score_expr} AS score \
+             FROM memory_nodes \
+             WHERE {score_expr} > 0 {kind_clause} \
+             ORDER BY score DESC, updated_at DESC \
+             LIMIT {limit}"
+        );
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(&sql).map_err(|e| {
+            DomainError::storage(format!("Failed to prepare node keyword search: {e}"))
+        })?;
+        let rows = stmt
+            .query_map([], |row| {
+                let node = Self::node_from_row(row)?;
+                let score: f64 = row.get(8)?;
+                Ok((node, score as f32))
+            })
+            .map_err(|e| DomainError::storage(format!("Node keyword search failed: {e}")))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DomainError::storage(format!("Failed to read node search row: {e}")))
     }
 }
 

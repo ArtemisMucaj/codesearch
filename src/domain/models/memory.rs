@@ -195,6 +195,147 @@ pub struct ImportedSession {
     pub items_written: usize,
 }
 
+/// Kind of a node in the memory virtual filesystem.
+///
+/// Mirrors OpenViking's three top-level context types (`memory`, `session`,
+/// `resource`). Nodes are the *navigable* layer over the flat
+/// [`MemoryItem`] store: each node carries a short L0 abstract and a longer
+/// L1 overview so an agent can read the summary first and drill into detail
+/// (`content`, the L2 layer) only when needed.
+///
+/// - `Memory` — the whole-memory rollup (`viking://memory`): a regenerated
+///   abstract + overview over every stored [`MemoryItem`], read first before
+///   drilling into individual memories.
+/// - `Session` — one imported session (`viking://sessions/<id>`): its L2 is
+///   the full normalized transcript, kept so the conversation can be re-read.
+/// - `Resource` — a file or URL added explicitly (`viking://resources/...`).
+///   Reserved for a future `memory add-resource` flow; the slot exists so the
+///   filesystem is ready for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeKind {
+    Memory,
+    Session,
+    Resource,
+}
+
+impl NodeKind {
+    /// Stable identifier used in storage.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NodeKind::Memory => "memory",
+            NodeKind::Session => "session",
+            NodeKind::Resource => "resource",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<NodeKind> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "memory" => Some(NodeKind::Memory),
+            "session" => Some(NodeKind::Session),
+            "resource" => Some(NodeKind::Resource),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for NodeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A node in the memory virtual filesystem, addressed by a `viking://` URI.
+///
+/// Each node bundles the three OpenViking context levels for one location:
+/// L0 `abstract` (the one-line summary retrieval ranks on), L1 `overview`
+/// (a paragraph/outline to orient before reading), and L2 `content` (the full
+/// detail — e.g. a session's transcript). `content` is empty for pure index
+/// nodes such as the memory rollup, whose value is entirely in L0/L1.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryNode {
+    /// `viking://` URI uniquely identifying this node (also the primary key).
+    uri: String,
+    kind: NodeKind,
+    /// URI of the parent directory, or `None` for a filesystem root.
+    parent_uri: Option<String>,
+    /// L0 — one-line summary; what recall returns and ranks on.
+    abstract_: String,
+    /// L1 — a paragraph or outline orienting the reader before L2.
+    overview: String,
+    /// L2 — full detail (e.g. a session transcript). Empty for index nodes.
+    content: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl MemoryNode {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        uri: String,
+        kind: NodeKind,
+        parent_uri: Option<String>,
+        abstract_: String,
+        overview: String,
+        content: String,
+        created_at: i64,
+        updated_at: i64,
+    ) -> Self {
+        Self {
+            uri,
+            kind,
+            parent_uri,
+            abstract_,
+            overview,
+            content,
+            created_at,
+            updated_at,
+        }
+    }
+
+    pub fn uri(&self) -> &str {
+        &self.uri
+    }
+
+    pub fn kind(&self) -> NodeKind {
+        self.kind
+    }
+
+    pub fn parent_uri(&self) -> Option<&str> {
+        self.parent_uri.as_deref()
+    }
+
+    pub fn abstract_(&self) -> &str {
+        &self.abstract_
+    }
+
+    pub fn overview(&self) -> &str {
+        &self.overview
+    }
+
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
+    pub fn created_at(&self) -> i64 {
+        self.created_at
+    }
+
+    pub fn updated_at(&self) -> i64 {
+        self.updated_at
+    }
+
+    /// Text used to build the node's L0 embedding — the abstract plus a short
+    /// tail of the overview, so semantic recall matches on the summary.
+    pub fn embedding_text(&self) -> String {
+        if self.overview.trim().is_empty() {
+            self.abstract_.clone()
+        } else {
+            format!("{}\n\n{}", self.abstract_, self.overview)
+        }
+    }
+}
+
 /// A single write/delete decided by the extraction model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemoryOperation {

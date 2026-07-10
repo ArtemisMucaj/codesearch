@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::domain::{DomainError, ImportedSession, MemoryItem, MemoryKind};
+use crate::domain::{DomainError, ImportedSession, MemoryItem, MemoryKind, MemoryNode, NodeKind};
 
 /// Persistence port for long-term memory items and imported-session records.
 ///
@@ -59,4 +59,45 @@ pub trait MemoryRepository: Send + Sync {
 
     /// List imported sessions, newest first.
     async fn list_sessions(&self) -> Result<Vec<ImportedSession>, DomainError>;
+
+    // ── Virtual filesystem nodes (L0/L1/L2) ──────────────────────────────
+
+    /// Insert or replace a node, keyed by its `uri`.
+    ///
+    /// `vector` is the embedding of the node's L0/L1 summary; `None` when
+    /// embeddings are unavailable (the node remains keyword-searchable and
+    /// browsable by URI).
+    async fn upsert_node(
+        &self,
+        node: &MemoryNode,
+        vector: Option<&[f32]>,
+    ) -> Result<(), DomainError>;
+
+    /// Fetch a single node by its `viking://` URI.
+    async fn find_node(&self, uri: &str) -> Result<Option<MemoryNode>, DomainError>;
+
+    /// List the direct children of a directory URI (its immediate members in
+    /// the virtual filesystem), newest first.
+    async fn list_child_nodes(&self, parent_uri: &str) -> Result<Vec<MemoryNode>, DomainError>;
+
+    /// List nodes, optionally restricted to one kind, newest first.
+    async fn list_nodes(&self, kind: Option<NodeKind>) -> Result<Vec<MemoryNode>, DomainError>;
+
+    /// Cosine-similarity search over node L0/L1 embeddings.
+    /// Returns `(node, score)` pairs, best first, score in `[0, 1]`.
+    async fn search_nodes_semantic(
+        &self,
+        vector: &[f32],
+        kind: Option<NodeKind>,
+        limit: usize,
+    ) -> Result<Vec<(MemoryNode, f32)>, DomainError>;
+
+    /// Case-insensitive keyword search over node abstracts and overviews.
+    /// Returns `(node, score)` pairs, best first.
+    async fn search_nodes_keyword(
+        &self,
+        query: &str,
+        kind: Option<NodeKind>,
+        limit: usize,
+    ) -> Result<Vec<(MemoryNode, f32)>, DomainError>;
 }

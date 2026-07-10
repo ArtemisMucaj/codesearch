@@ -272,9 +272,10 @@ pub enum MemorySubcommand {
         format: OutputFormatTextJson,
     },
 
-    /// Show the full content of one memory item.
+    /// Show the full content of one memory item or virtual-filesystem node.
     Show {
-        /// Memory item ID (or unique kind/name as '<kind>/<name>').
+        /// Memory item ID, a 'kind/name' item reference, or a 'viking://' node
+        /// URI (e.g. 'viking://memory', 'viking://sessions/<id>').
         id: String,
     },
 
@@ -286,6 +287,21 @@ pub enum MemorySubcommand {
 
     /// List imported sessions.
     Sessions {
+        /// Output format: text or json.
+        #[arg(short = 'F', long, value_enum, default_value = "text")]
+        format: OutputFormatTextJson,
+    },
+
+    /// Browse the memory virtual filesystem (L0/L1 abstracts).
+    ///
+    /// With no URI, lists the top-level roots (the whole-memory rollup and the
+    /// sessions/resources directories). With a directory URI, lists its
+    /// children with their one-line abstracts — the "read this first" view
+    /// before drilling into a node with `memory show <uri>`.
+    Tree {
+        /// Directory URI to list (e.g. 'viking://sessions'). Omit for the root.
+        uri: Option<String>,
+
         /// Output format: text or json.
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormatTextJson,

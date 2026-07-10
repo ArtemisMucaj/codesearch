@@ -313,6 +313,41 @@ pub struct ListMemoriesInput {
     pub kind: Option<String>,
 }
 
+/// Input parameters for the read_memory tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReadMemoryInput {
+    /// A `viking://` node URI. Omit (or pass "viking://memory") to read the
+    /// whole-memory rollup — the "read this first" summary of everything
+    /// stored. Use "viking://sessions" to see stored sessions, or a specific
+    /// "viking://sessions/<id>" to read one session's transcript.
+    pub uri: Option<String>,
+}
+
+/// A virtual-filesystem node returned by read_memory
+#[derive(Debug, Serialize)]
+pub struct MemoryNodeOutput {
+    /// The node's `viking://` URI
+    pub uri: String,
+    /// Node kind: memory, session, or resource
+    pub kind: String,
+    /// L0 — one-line abstract
+    pub r#abstract: String,
+    /// L1 — overview outline
+    pub overview: String,
+    /// L2 — full detail (e.g. a session transcript); empty for index nodes
+    pub content: String,
+    /// Child nodes (URI + abstract) when this node is a directory
+    pub children: Vec<MemoryNodeChild>,
+}
+
+/// A child entry listed under a directory node
+#[derive(Debug, Serialize)]
+pub struct MemoryNodeChild {
+    pub uri: String,
+    pub kind: String,
+    pub r#abstract: String,
+}
+
 /// A memory item returned by search_memory
 #[derive(Debug, Serialize)]
 pub struct MemorySearchResultOutput {
@@ -1070,6 +1105,76 @@ impl CodesearchMcpServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    /// Read the memory virtual filesystem, level by level. Call this FIRST at
+    /// the start of a task with no arguments (or uri="viking://memory") to get
+    /// the whole-memory rollup — a single abstract + overview of everything
+    /// known about the user and project — then drill in only where relevant.
+    /// A directory URI (e.g. "viking://sessions") returns its children with
+    /// one-line abstracts; a leaf URI (e.g. "viking://sessions/<id>") returns
+    /// the node's full detail, such as a session transcript.
+    #[tool(name = "read_memory")]
+    async fn read_memory(
+        &self,
+        params: Parameters<ReadMemoryInput>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::application::MEMORY_ROOT_URI;
+
+        let uri = params.0.uri.unwrap_or_else(|| MEMORY_ROOT_URI.to_string());
+
+        let repo = self.container.memory_repository().map_err(|e| {
+            McpError::internal_error(format!("Failed to open memory store: {}", e), None)
+        })?;
+
+        let node = repo
+            .find_node(&uri)
+            .await
+            .map_err(|e| McpError::internal_error(format!("Memory read failed: {}", e), None))?;
+
+        let children = repo
+            .list_child_nodes(&uri)
+            .await
+            .map_err(|e| McpError::internal_error(format!("Memory read failed: {}", e), None))?
+            .into_iter()
+            .map(|c| MemoryNodeChild {
+                uri: c.uri().to_string(),
+                kind: c.kind().as_str().to_string(),
+                r#abstract: c.abstract_().to_string(),
+            })
+            .collect::<Vec<_>>();
+
+        let output = match node {
+            Some(node) => MemoryNodeOutput {
+                uri: node.uri().to_string(),
+                kind: node.kind().as_str().to_string(),
+                r#abstract: node.abstract_().to_string(),
+                overview: node.overview().to_string(),
+                content: node.content().to_string(),
+                children,
+            },
+            // A directory URI (e.g. viking://sessions) may have no node record
+            // of its own but still list children.
+            None if !children.is_empty() => MemoryNodeOutput {
+                uri: uri.clone(),
+                kind: "directory".to_string(),
+                r#abstract: String::new(),
+                overview: String::new(),
+                content: String::new(),
+                children,
+            },
+            None => {
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "No memory node found at '{uri}'."
+                ))]));
+            }
+        };
+
+        let json = serde_json::to_string_pretty(&output).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize memory node: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
     /// Detect symbol communities in a repository by running Leiden community
     /// detection over its symbol call graph (one level finer than `list_clusters`,
     /// which works on files). Returns the communities with their names, dominant
@@ -1153,7 +1258,9 @@ impl ServerHandler for CodesearchMcpServer {
                  • get_symbol_cluster — the symbol community a given symbol belongs to\n\
                  • search_memory — recall long-term memories (preferences, experiences, skills, \
                    facts) extracted from previous sessions\n\
-                 • list_memories — list stored memories, optionally filtered by kind"
+                 • list_memories — list stored memories, optionally filtered by kind\n\
+                 • read_memory — read the memory virtual filesystem; call with no args first for \
+                   the whole-memory rollup, then drill into viking:// nodes (sessions, resources)"
                     .into(),
             ),
         }

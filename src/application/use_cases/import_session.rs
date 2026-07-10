@@ -5,10 +5,11 @@
 
 use std::sync::Arc;
 
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::application::interfaces::MemoryRepository;
 use crate::application::use_cases::memory_extraction::{ExtractionReport, MemoryExtractionUseCase};
+use crate::application::use_cases::memory_summary::SummarizeMemoryUseCase;
 use crate::domain::{DomainError, ImportedSession, SessionTranscript};
 
 /// Minimum number of non-empty messages a transcript must contain for
@@ -29,16 +30,19 @@ pub enum ImportOutcome {
 pub struct ImportSessionUseCase {
     memory_repo: Arc<dyn MemoryRepository>,
     extraction: MemoryExtractionUseCase,
+    summary: SummarizeMemoryUseCase,
 }
 
 impl ImportSessionUseCase {
     pub fn new(
         memory_repo: Arc<dyn MemoryRepository>,
         extraction: MemoryExtractionUseCase,
+        summary: SummarizeMemoryUseCase,
     ) -> Self {
         Self {
             memory_repo,
             extraction,
+            summary,
         }
     }
 
@@ -76,6 +80,24 @@ impl ImportSessionUseCase {
             report.applied.len(),
             report.skipped.len()
         );
+
+        // Build the virtual-filesystem layer over the flat items:
+        //   1. store this session as a node (transcript L2 + generated L0/L1),
+        //   2. regenerate the whole-memory rollup so it reflects the new items.
+        // Both are best-effort — extraction already succeeded, so a summary
+        // failure must not fail the import. Errors are logged and swallowed.
+        if let Err(e) = self.summary.summarize_session(transcript).await {
+            warn!(
+                "session '{}': failed to store session node: {e}",
+                transcript.id
+            );
+        }
+        if let Err(e) = self.summary.regenerate_rollup().await {
+            warn!(
+                "session '{}': failed to regenerate memory rollup: {e}",
+                transcript.id
+            );
+        }
 
         let session = ImportedSession {
             id: transcript.id.clone(),

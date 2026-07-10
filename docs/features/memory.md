@@ -18,6 +18,8 @@ separate from the code index (`codesearch.duckdb`):
 | `memory_items` | One row per memory (`kind`, `name`, Markdown `content`, provenance, timestamps, update count). Unique per `(kind, name)`. |
 | `memory_vectors` | `FLOAT[dims]` embedding per item for semantic search. |
 | `memory_sessions` | Imported-session markers (idempotence + audit). |
+| `memory_nodes` | Virtual-filesystem nodes (`uri`, `kind`, `parent_uri`, L0 `abstract`, L1 `overview`, L2 `content`). Holds the whole-memory rollup and one node per imported session. |
+| `memory_node_vectors` | `FLOAT[dims]` embedding per node (its L0/L1 summary) for semantic recall. |
 | `memory_meta` | Embedding model + dimensions the store was created with; mismatched opens are rejected. |
 
 Because it is a separate file, session imports never contend with indexing,
@@ -92,6 +94,52 @@ OPENAI_BASE_URL=http://localhost:1234 OPENAI_MODEL=qwen/qwen3.5-4b \
 codesearch memory import session.jsonl --llm open-ai
 ```
 
+## Virtual filesystem (L0 / L1 / L2)
+
+Beyond the flat items, memory is also navigable as an OpenViking-style
+`viking://` virtual filesystem. Every node bundles the three OpenViking
+context levels for one location:
+
+| Level | Field | What it holds |
+|---|---|---|
+| **L0** | `abstract` | a one-line summary — what recall returns and ranks on |
+| **L1** | `overview` | a paragraph/outline to orient before reading |
+| **L2** | `content` | the full detail (e.g. a session's transcript) |
+
+The tree has three top-level kinds, mirroring OpenViking's `memory` /
+`session` / `resource` context types:
+
+```
+viking://memory                 ← the whole-memory rollup ("read this first")
+viking://sessions/<id>          ← one imported session (transcript = L2)
+viking://resources/...          ← files/URLs added explicitly (reserved)
+```
+
+Two things are summarized on **every import**, each with one small LLM call
+(the same chat model extraction uses), a single format-recovery retry, and a
+deterministic fallback so a flaky model never blocks the import or loses data:
+
+1. **The session** → a node at `viking://sessions/<id>` whose L2 is the full
+   normalized transcript (so the conversation can be re-read later), plus a
+   generated L0 abstract and L1 overview.
+2. **The whole memory store** → the `viking://memory` rollup is regenerated
+   from the current set of items: an abstract + overview meant to be read
+   first, before drilling into individual memories. With fewer than two items
+   this is a deterministic placeholder (no LLM call).
+
+`resources/` (explicitly-added files and website links) is reserved: the URI
+slot and storage exist, but a `memory add-resource` command is a separate,
+future feature.
+
+Browse and drill in from the CLI:
+
+```bash
+codesearch memory tree                        # roots: rollup + sessions
+codesearch memory tree viking://sessions      # list stored sessions (L0 lines)
+codesearch memory show viking://memory        # the rollup abstract + overview
+codesearch memory show viking://sessions/<id> # a session's abstract + transcript
+```
+
 ## Recalling memories
 
 ```bash
@@ -127,10 +175,12 @@ AI tools alongside code search:
 |------|-------------|
 | `search_memory` | Hybrid recall over the memory store. Accepts `query`, optional `kind`, and `limit`. Returns full item content with fused scores. |
 | `list_memories` | List stored memories, newest first. Accepts optional `kind` — e.g. `kind="preference"` at session start to load every known user preference. |
+| `read_memory` | Read the virtual filesystem level by level. Call with no args (or `uri="viking://memory"`) first for the whole-memory rollup, then drill into a directory (`viking://sessions`) or a leaf (`viking://sessions/<id>`). Returns the node's L0/L1/L2 plus its children's abstracts. |
 
 This gives agents the recall half of the loop: import sessions with the CLI
-(e.g. from a session-end hook), then let the agent call `search_memory` at
-task start to load relevant preferences, experiences, and facts. The MCP
+(e.g. from a session-end hook), then at task start let the agent call
+`read_memory` (no args) to load the whole-memory rollup, and `search_memory`
+to pull the specific preferences, experiences, and facts a task needs. The MCP
 server holds a single shared connection to `memory.duckdb`, so concurrent
 tool calls do not contend for DuckDB's single-writer lock.
 
@@ -150,13 +200,16 @@ response.
 Following the ports & adapters layering:
 
 - `src/domain/models/memory.rs` — `MemoryKind`, `MemoryItem`,
-  `SessionTranscript`, `MemoryOperation`, `ImportedSession`.
+  `SessionTranscript`, `MemoryOperation`, `ImportedSession`, plus the
+  virtual-filesystem `MemoryNode` / `NodeKind`.
 - `src/application/interfaces/memory_repository.rs` — `MemoryRepository`
   port.
 - `src/application/use_cases/memory_extraction.rs` (+ `_prompt.rs`) —
   extraction orchestration: prefetch → LLM call → parse/validate → apply.
+- `src/application/use_cases/memory_summary.rs` — the L0/L1 layer:
+  per-session node summarization and whole-memory rollup regeneration.
 - `src/application/use_cases/import_session.rs` — idempotence + session
-  recording around extraction.
+  recording around extraction + summarization.
 - `src/application/use_cases/memory_search.rs` — hybrid recall with RRF.
 - `src/connector/adapter/claude_transcript.rs` — transcript parser.
 - `src/connector/adapter/duckdb_memory_repository.rs` — the

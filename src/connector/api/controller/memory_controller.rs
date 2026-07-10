@@ -3,10 +3,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use crate::application::{ChatClient, ImportOutcome};
+use crate::application::{
+    ChatClient, ImportOutcome, MEMORY_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
+};
 use crate::cli::{LlmTarget, MemoryKindArg, OutputFormatTextJson};
 use crate::connector::adapter::{parse_transcript_file, AnthropicClient, OpenAiChatClient};
-use crate::domain::{MemoryItem, MemoryKind, MemoryOperation};
+use crate::domain::{MemoryItem, MemoryKind, MemoryNode, MemoryOperation};
 
 use super::super::Container;
 
@@ -161,6 +163,15 @@ impl<'a> MemoryController<'a> {
     pub async fn show(&self, id: String) -> Result<String> {
         let repo = self.container.memory_repository()?;
 
+        // A 'viking://' URI addresses a virtual-filesystem node (the memory
+        // rollup, a stored session, …) rather than a flat item.
+        if id.starts_with("viking://") {
+            return match repo.find_node(&id).await? {
+                Some(node) => Ok(render_node(&node)),
+                None => Ok(format!("No memory node found at '{id}'.")),
+            };
+        }
+
         // Accept '<kind>/<name>' as an alternative to the item ID.
         if let Some((kind_str, name)) = id.split_once('/') {
             if let Some(kind) = MemoryKind::parse(kind_str) {
@@ -174,6 +185,51 @@ impl<'a> MemoryController<'a> {
         match items.iter().find(|i| i.id() == id) {
             Some(item) => Ok(render_item(item)),
             None => Ok(format!("No memory item found with ID '{id}'.")),
+        }
+    }
+
+    /// Browse the memory virtual filesystem. With no URI, show the top-level
+    /// roots (rollup abstract + sessions/resources directories). With a
+    /// directory URI, list its children and their one-line abstracts.
+    pub async fn tree(&self, uri: Option<String>, format: OutputFormatTextJson) -> Result<String> {
+        let repo = self.container.memory_repository()?;
+
+        let (children, header) = match uri.as_deref() {
+            // Root view: the rollup node plus each directory's children.
+            None => {
+                let mut nodes = Vec::new();
+                if let Some(rollup) = repo.find_node(MEMORY_ROOT_URI).await? {
+                    nodes.push(rollup);
+                }
+                nodes.extend(repo.list_child_nodes(SESSIONS_ROOT_URI).await?);
+                nodes.extend(repo.list_child_nodes(RESOURCES_ROOT_URI).await?);
+                (nodes, "Memory filesystem".to_string())
+            }
+            Some(dir) => (
+                repo.list_child_nodes(dir).await?,
+                format!("Children of {dir}"),
+            ),
+        };
+
+        match format {
+            OutputFormatTextJson::Json => Ok(serde_json::to_string_pretty(&children)?),
+            OutputFormatTextJson::Text => {
+                if children.is_empty() {
+                    return Ok("Nothing here yet. Import a session with: \
+                         codesearch memory import <transcript.jsonl>"
+                        .to_string());
+                }
+                let mut output = format!("{header}:\n\n");
+                for node in &children {
+                    output.push_str(&format!("[{}] {}\n", node.kind(), node.uri()));
+                    output.push_str(&format!(
+                        "    {}\n\n",
+                        preview(node.abstract_(), CONTENT_PREVIEW_CHARS)
+                    ));
+                }
+                output.push_str("Drill in with: codesearch memory show <uri>\n");
+                Ok(output)
+            }
         }
     }
 
@@ -219,6 +275,20 @@ fn render_item(item: &MemoryItem) -> String {
         item.source_session_id().unwrap_or("(unknown)"),
         item.content()
     )
+}
+
+/// Render a virtual-filesystem node with its L0 abstract, L1 overview, and L2
+/// detail (present only for nodes that store content, e.g. session transcripts).
+fn render_node(node: &MemoryNode) -> String {
+    let mut out = format!("[{}] {}\n\n", node.kind(), node.uri());
+    out.push_str(&format!("## Abstract (L0)\n{}\n\n", node.abstract_()));
+    if !node.overview().trim().is_empty() {
+        out.push_str(&format!("## Overview (L1)\n{}\n\n", node.overview()));
+    }
+    if !node.content().trim().is_empty() {
+        out.push_str(&format!("## Detail (L2)\n{}\n", node.content()));
+    }
+    out
 }
 
 fn preview(content: &str, max_chars: usize) -> String {

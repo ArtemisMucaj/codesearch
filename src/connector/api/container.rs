@@ -9,7 +9,7 @@ use crate::application::{
     AnalysisRepository, CallGraphRepository, CallGraphUseCase, ChannelEndpointRepository,
     ChannelLinkUseCase, ChatClient, FileHashRepository, ImportSessionUseCase,
     MemoryExtractionUseCase, MemoryRepository, MemorySearchUseCase, MetadataRepository,
-    QueryExpander,
+    QueryExpander, SummarizeMemoryUseCase,
 };
 use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::scip::ScipRunner;
@@ -771,18 +771,24 @@ impl Container {
         Ok(repo)
     }
 
-    /// Session import + memory extraction, driven by the given chat model.
+    /// Session import + memory extraction + virtual-filesystem summarization,
+    /// all driven by the given chat model.
     pub fn memory_import_use_case(
         &self,
         chat_client: Arc<dyn ChatClient>,
     ) -> Result<ImportSessionUseCase> {
         let memory_repo = self.memory_repository()?;
         let extraction = MemoryExtractionUseCase::new(
+            Arc::clone(&chat_client),
+            Arc::clone(&memory_repo),
+            self.embedding_service.clone(),
+        );
+        let summary = SummarizeMemoryUseCase::new(
             chat_client,
             Arc::clone(&memory_repo),
             self.embedding_service.clone(),
         );
-        Ok(ImportSessionUseCase::new(memory_repo, extraction))
+        Ok(ImportSessionUseCase::new(memory_repo, extraction, summary))
     }
 
     pub fn memory_search_use_case(&self) -> Result<MemorySearchUseCase> {

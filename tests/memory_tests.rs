@@ -12,10 +12,19 @@ use tokio::sync::Mutex;
 use codesearch::{
     parse_transcript, ChatClient, DomainError, DuckdbMemoryRepository, EmbeddingService,
     ImportOutcome, ImportSessionUseCase, MemoryExtractionUseCase, MemoryKind, MemoryRepository,
-    MemorySearchUseCase, MockEmbedding, NoEmbedding, SessionMessage, SessionTranscript,
+    MemorySearchUseCase, MockEmbedding, NoEmbedding, NodeKind, SessionMessage, SessionTranscript,
+    SummarizeMemoryUseCase, MEMORY_ROOT_URI, SESSIONS_ROOT_URI,
 };
 
-/// Chat client that replays a fixed sequence of responses.
+/// A canned `{abstract, overview}` reply for the summarization calls the
+/// importer makes after extraction. Kept generic so summary calls never
+/// consume the scripted *extraction* queue and never fail the import.
+const SUMMARY_REPLY: &str = r#"{"abstract": "Test session summary.", "overview": "- did a thing"}"#;
+
+/// Chat client that replays a fixed sequence of responses for *extraction*
+/// calls, while answering *summarization* calls (session L0/L1 + rollup) with
+/// a fixed valid reply. Routing is by system prompt so summary calls don't
+/// drain the extraction script; only extraction calls are recorded.
 struct ScriptedChatClient {
     responses: Mutex<Vec<String>>,
     calls: Mutex<Vec<(String, String)>>,
@@ -29,14 +38,25 @@ impl ScriptedChatClient {
         }
     }
 
+    /// Extraction calls recorded so far (summary calls are not recorded).
     async fn recorded_calls(&self) -> Vec<(String, String)> {
         self.calls.lock().await.clone()
     }
 }
 
+/// Whether a `complete` call is a summarization call rather than extraction.
+/// The summarization system prompts describe summarizing a session / index.
+fn is_summary_call(system: &str) -> bool {
+    system.contains("summarize a finished coding-assistant session")
+        || system.contains("top-level index")
+}
+
 #[async_trait]
 impl ChatClient for ScriptedChatClient {
     async fn complete(&self, system: &str, user: &str) -> Result<String, DomainError> {
+        if is_summary_call(system) {
+            return Ok(SUMMARY_REPLY.to_string());
+        }
         self.calls
             .lock()
             .await
@@ -89,11 +109,16 @@ impl Harness {
 
     fn import_use_case(&self, chat: Arc<ScriptedChatClient>) -> ImportSessionUseCase {
         let extraction = MemoryExtractionUseCase::new(
-            chat,
+            Arc::clone(&chat) as Arc<dyn ChatClient>,
             Arc::clone(&self.memory_repo),
             Arc::clone(&self.embedding),
         );
-        ImportSessionUseCase::new(Arc::clone(&self.memory_repo), extraction)
+        let summary = SummarizeMemoryUseCase::new(
+            chat as Arc<dyn ChatClient>,
+            Arc::clone(&self.memory_repo),
+            Arc::clone(&self.embedding),
+        );
+        ImportSessionUseCase::new(Arc::clone(&self.memory_repo), extraction, summary)
     }
 }
 
@@ -292,9 +317,17 @@ async fn works_without_embeddings_via_keyword_search() {
         "editor_choice",
         "Uses Neovim with Telescope",
     ))]));
-    let extraction =
-        MemoryExtractionUseCase::new(chat, Arc::clone(&memory_repo), Arc::clone(&embedding));
-    let use_case = ImportSessionUseCase::new(Arc::clone(&memory_repo), extraction);
+    let extraction = MemoryExtractionUseCase::new(
+        Arc::clone(&chat) as Arc<dyn ChatClient>,
+        Arc::clone(&memory_repo),
+        Arc::clone(&embedding),
+    );
+    let summary = SummarizeMemoryUseCase::new(
+        chat as Arc<dyn ChatClient>,
+        Arc::clone(&memory_repo),
+        Arc::clone(&embedding),
+    );
+    let use_case = ImportSessionUseCase::new(Arc::clone(&memory_repo), extraction, summary);
 
     let transcript = transcript(
         "session-6",
@@ -337,4 +370,102 @@ async fn rejects_transcripts_with_too_few_messages() {
     let transcript = transcript("session-7", &[("user", "hi")]);
     let result = use_case.execute(&transcript, false).await;
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn import_stores_session_node_with_full_transcript() {
+    let harness = Harness::new();
+    let chat = Arc::new(ScriptedChatClient::new(vec![&extraction_json((
+        "editor",
+        "Uses Neovim",
+    ))]));
+    let use_case = harness.import_use_case(chat);
+
+    let transcript = transcript(
+        "session-node-1",
+        &[
+            ("user", "I use neovim with telescope"),
+            ("assistant", "Great choice."),
+        ],
+    );
+    use_case.execute(&transcript, false).await.unwrap();
+
+    // The session is stored as a node under viking://sessions with the full
+    // transcript as its L2 detail and a generated L0 abstract.
+    let uri = format!("{SESSIONS_ROOT_URI}/session-node-1");
+    let node = harness
+        .memory_repo
+        .find_node(&uri)
+        .await
+        .unwrap()
+        .expect("session node should exist");
+    assert_eq!(node.kind(), NodeKind::Session);
+    assert_eq!(node.parent_uri(), Some(SESSIONS_ROOT_URI));
+    assert!(!node.abstract_().is_empty());
+    // L2 preserves the actual conversation text.
+    assert!(node.content().contains("neovim with telescope"));
+    assert!(node.content().contains("Great choice."));
+
+    // The session node is listed as a child of the sessions directory.
+    let children = harness
+        .memory_repo
+        .list_child_nodes(SESSIONS_ROOT_URI)
+        .await
+        .unwrap();
+    assert!(children.iter().any(|n| n.uri() == uri));
+}
+
+#[tokio::test]
+async fn import_regenerates_whole_memory_rollup() {
+    let harness = Harness::new();
+    let chat = Arc::new(ScriptedChatClient::new(vec![
+        r#"{"preferences": [{"name": "a", "content": "one"}],
+            "experiences": [], "skills": [],
+            "facts": [{"name": "b", "content": "two"}], "delete": []}"#,
+    ]));
+    let use_case = harness.import_use_case(chat);
+    let transcript = transcript(
+        "session-rollup",
+        &[("user", "remember these"), ("assistant", "ok")],
+    );
+    use_case.execute(&transcript, false).await.unwrap();
+
+    // With ≥2 items the model-generated rollup is written at viking://memory.
+    let rollup = harness
+        .memory_repo
+        .find_node(MEMORY_ROOT_URI)
+        .await
+        .unwrap()
+        .expect("rollup node should exist");
+    assert_eq!(rollup.kind(), NodeKind::Memory);
+    assert_eq!(rollup.parent_uri(), None);
+    assert!(!rollup.abstract_().is_empty());
+}
+
+#[tokio::test]
+async fn summarize_without_embeddings_still_stores_nodes() {
+    // No embeddings: nodes must still be written (keyword-searchable / browsable)
+    // even though no vector is produced.
+    let memory_repo: Arc<dyn MemoryRepository> =
+        Arc::new(DuckdbMemoryRepository::in_memory(384, "none").unwrap());
+    let embedding: Arc<dyn EmbeddingService> = Arc::new(NoEmbedding::new(384));
+    let chat = Arc::new(ScriptedChatClient::new(vec![]));
+    let summary = SummarizeMemoryUseCase::new(
+        chat as Arc<dyn ChatClient>,
+        Arc::clone(&memory_repo),
+        Arc::clone(&embedding),
+    );
+
+    let transcript = transcript(
+        "no-embed-session",
+        &[("user", "hello there"), ("assistant", "hi")],
+    );
+    let node = summary.summarize_session(&transcript).await.unwrap();
+    assert_eq!(node.kind(), NodeKind::Session);
+    assert!(node.content().contains("hello there"));
+
+    // Empty store → rollup falls back to a placeholder without an LLM call.
+    let rollup = summary.regenerate_rollup().await.unwrap();
+    assert_eq!(rollup.kind(), NodeKind::Memory);
+    assert!(!rollup.abstract_().is_empty());
 }

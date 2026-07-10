@@ -14,8 +14,8 @@ pub use application::{
     ImportSessionUseCase, IndexRepositoryUseCase, ListRepositoriesUseCase, MemoryExtractionUseCase,
     MemoryRepository, MemorySearchUseCase, MetadataRepository, ParserService, QueryExpander,
     RerankingService, ResolveChannelsUseCase, ResolvedConfigValue, Scip, SearchCodeUseCase,
-    SnippetLookupUseCase, SymbolClusterDetectionUseCase, SymbolContext, SymbolContextUseCase,
-    VectorRepository,
+    SnippetLookupUseCase, SummarizeMemoryUseCase, SymbolClusterDetectionUseCase, SymbolContext,
+    SymbolContextUseCase, VectorRepository, MEMORY_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
 };
 
 pub use application::{aggregate, render, VizFormat, DEFAULT_NODE_LIMIT};
@@ -38,9 +38,10 @@ pub use connector::{
 pub use domain::{
     compute_file_hash, ChannelEdge, ChannelEndpoint, ChannelRole, Cluster, ClusterGraph, CodeChunk,
     DomainError, Embedding, EmbeddingConfig, EndpointSource, ExecutionFeature, FeatureNode,
-    FileHash, ImportedSession, IndexingStatus, Language, MemoryItem, MemoryKind, MemoryOperation,
-    NodeType, Protocol, ReferenceKind, Repository, SearchQuery, SearchResult, SessionMessage,
-    SessionTranscript, SymbolCommunity, SymbolCommunityGraph, SymbolReference, VectorStore,
+    FileHash, ImportedSession, IndexingStatus, Language, MemoryItem, MemoryKind, MemoryNode,
+    MemoryOperation, NodeKind, NodeType, Protocol, ReferenceKind, Repository, SearchQuery,
+    SearchResult, SessionMessage, SessionTranscript, SymbolCommunity, SymbolCommunityGraph,
+    SymbolReference, VectorStore,
 };
 
 pub use domain::{CommunityMeta, GraphEdge, GraphLevel, GraphNode, GraphView};

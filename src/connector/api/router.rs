@@ -222,6 +222,9 @@ impl<'a> Router<'a> {
                 MemorySubcommand::Sessions { format } => {
                     self.memory_controller.sessions(format).await
                 }
+                MemorySubcommand::Tree { uri, format } => {
+                    self.memory_controller.tree(uri, format).await
+                }
             },
             Commands::Create { .. } => Err(anyhow::anyhow!(
                 "create command is handled separately in main"
