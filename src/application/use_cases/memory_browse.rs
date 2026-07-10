@@ -4,7 +4,8 @@
 //!   [`MemoryRow`]s: directory headers (`sessions/`, `resources/`, `items/`),
 //!   each node under them, and — nested one level deeper — that node's L0/L1/L2
 //!   levels as their own selectable rows. Selecting a level row shows just that
-//!   level on the right; selecting the node row shows all three.
+//!   level on the right; selecting the node row shows its L0+L1 summary (the
+//!   full L2 body is reached via the node's "L2 · detail" child row).
 //! - **Search** (non-empty query) returns a flat, ranked list of rows (depth 0)
 //!   from hybrid semantic + keyword recall over both items and nodes.
 //!

@@ -197,7 +197,8 @@ fn detail_title(row: &MemoryRow) -> String {
 }
 
 /// Build the styled detail for the selected row. A level row shows just that
-/// level; a node row shows all three; an item shows its content.
+/// level; a node row shows its L0+L1 summary (drill into the L2 child row for
+/// the full body); an item shows its content.
 fn detail_body(row: &MemoryRow) -> Vec<Line<'static>> {
     match &row.target {
         RowTarget::Directory => {
@@ -229,6 +230,9 @@ fn detail_body(row: &MemoryRow) -> Vec<Line<'static>> {
             lines
         }
         RowTarget::Node(node) => {
+            // The node row is the summary view: L0 + L1 only. The full L2 body
+            // (transcript / resource text) is reached by selecting its own
+            // "L2 · detail" child row, so a node preview stays scannable.
             let mut lines = Vec::new();
             lines.push(section_header("L0 · Abstract"));
             lines.extend(markdown::render(node.abstract_()));
@@ -239,8 +243,9 @@ fn detail_body(row: &MemoryRow) -> Vec<Line<'static>> {
             }
             if !node.content().trim().is_empty() {
                 lines.push(Line::from(""));
-                lines.push(section_header("L2 · Detail"));
-                lines.extend(markdown::render(node.content()));
+                lines.push(meta_line(
+                    "(select \"L2 · detail\" to read the full content)",
+                ));
             }
             lines
         }
@@ -273,13 +278,13 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    fn node(uri: &str, kind: NodeKind, content: &str) -> MemoryNode {
+    fn node(uri: &str, kind: NodeKind, overview: &str, content: &str) -> MemoryNode {
         MemoryNode::new(
             uri.into(),
             kind,
             None,
             "the abstract".into(),
-            "".into(),
+            overview.into(),
             content.into(),
             0,
             0,
@@ -312,6 +317,7 @@ mod tests {
         let sess = node(
             "memory://sessions/abc",
             NodeKind::Session,
+            "an overview",
             "transcript body",
         );
         let rows = vec![
@@ -363,8 +369,13 @@ mod tests {
     }
 
     #[test]
-    fn selecting_node_row_shows_all_levels() {
-        let sess = node("memory://sessions/xyz", NodeKind::Session, "the transcript");
+    fn selecting_node_row_shows_l0_l1_only() {
+        let sess = node(
+            "memory://sessions/xyz",
+            NodeKind::Session,
+            "the overview",
+            "the transcript",
+        );
         let rows = vec![MemoryRow {
             depth: 0,
             kind_label: "session".into(),
@@ -374,9 +385,14 @@ mod tests {
             target: RowTarget::Node(sess.clone()),
         }];
         let text = render_to_text(rows, 0);
-        // Node row selected → detail shows L0 and L2 sections.
+        // Node row selected → detail shows L0 + L1 (the summary), not the L2 body.
         assert!(text.contains("L0"), "L0 section header");
-        assert!(text.contains("L2"), "L2 section header");
-        assert!(text.contains("the transcript"), "L2 body shown");
+        assert!(text.contains("L1"), "L1 section header");
+        assert!(text.contains("the abstract"), "L0 body shown");
+        assert!(text.contains("the overview"), "L1 body shown");
+        assert!(
+            !text.contains("the transcript"),
+            "L2 body should NOT appear on the node row (drill into L2 row instead)"
+        );
     }
 }
