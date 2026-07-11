@@ -9,6 +9,8 @@
 //! command endpoints (PR2) and streaming endpoints (PR3) by extending
 //! [`server::routes`] — see that function's docs for the exact extension point.
 
+mod error;
+mod handlers;
 mod server;
 
 pub use server::{routes, run_management_server, AppState};

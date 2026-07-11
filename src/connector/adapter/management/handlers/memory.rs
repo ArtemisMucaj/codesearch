@@ -1,0 +1,175 @@
+//! Read-only memory query endpoints — long-term memory extracted from finished
+//! assistant sessions (mutating memory operations are out of scope for the API).
+//!
+//! - `GET /api/memory`            — list stored memory items (optional `?kind=`)
+//! - `GET /api/memory/search`     — hybrid semantic + keyword search (`?query=`)
+//! - `GET /api/memory/stats`      — item / session counts
+//! - `GET /api/memory/sessions`   — imported sessions
+//! - `GET /api/memory/tree`       — browse the memory virtual filesystem (`?uri=`)
+//! - `GET /api/memory/:id`        — one memory item (ID, `kind/name`, or URI node)
+
+use axum::extract::{Path, Query, State};
+use axum::Json;
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use crate::application::{MEMORY_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI};
+use crate::domain::MemoryKind;
+
+use super::super::error::{ApiError, ApiResult};
+use super::super::server::AppState;
+
+/// Default number of results for `GET /api/memory/search`.
+const DEFAULT_MEMORY_SEARCH_LIMIT: usize = 10;
+
+/// Parse an optional `kind` string into a [`MemoryKind`], rejecting unknowns.
+fn parse_kind(kind: Option<&str>) -> ApiResult<Option<MemoryKind>> {
+    match kind {
+        None => Ok(None),
+        Some(k) => MemoryKind::parse(k)
+            .map(Some)
+            .ok_or_else(|| ApiError::bad_request(format!("unknown memory kind: '{k}'"))),
+    }
+}
+
+/// Query params for `GET /api/memory` (list).
+#[derive(Debug, Deserialize)]
+pub struct MemoryListParams {
+    /// Restrict to one memory kind (preference, experience, skill, fact).
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// `GET /api/memory` — list stored memory items, optionally filtered by kind.
+pub async fn list(
+    State(state): State<AppState>,
+    Query(params): Query<MemoryListParams>,
+) -> ApiResult<Json<Value>> {
+    let kind = parse_kind(params.kind.as_deref())?;
+    let repo = state.container.memory_repository()?;
+    let items = repo.list_items(kind).await?;
+    Ok(Json(json!({ "count": items.len(), "items": items })))
+}
+
+/// Query params for `GET /api/memory/search`.
+#[derive(Debug, Deserialize)]
+pub struct MemorySearchParams {
+    /// Search query (hybrid semantic + keyword).
+    pub query: String,
+    /// Maximum number of results.
+    #[serde(default = "default_memory_limit")]
+    pub num: usize,
+    /// Restrict to one memory kind.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+fn default_memory_limit() -> usize {
+    DEFAULT_MEMORY_SEARCH_LIMIT
+}
+
+/// `GET /api/memory/search?query=...` — hybrid search over stored memories.
+/// Each result carries its relevance `score` alongside the item fields.
+pub async fn search(
+    State(state): State<AppState>,
+    Query(params): Query<MemorySearchParams>,
+) -> ApiResult<Json<Value>> {
+    let kind = parse_kind(params.kind.as_deref())?;
+    let use_case = state.container.memory_search_use_case()?;
+    let results = use_case.execute(&params.query, kind, params.num).await?;
+
+    let items: Vec<Value> = results
+        .iter()
+        .map(|(item, score)| {
+            let mut value = serde_json::to_value(item).unwrap_or_default();
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("score".to_string(), json!(score));
+            }
+            value
+        })
+        .collect();
+
+    Ok(Json(json!({ "count": items.len(), "results": items })))
+}
+
+/// `GET /api/memory/stats` — counts of stored items and imported sessions.
+pub async fn stats(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let repo = state.container.memory_repository()?;
+    let items = repo.list_items(None).await?;
+    let sessions = repo.list_sessions().await?;
+    Ok(Json(json!({
+        "total_items": items.len(),
+        "total_sessions": sessions.len(),
+    })))
+}
+
+/// `GET /api/memory/sessions` — sessions that have been imported into memory.
+pub async fn sessions(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let repo = state.container.memory_repository()?;
+    let sessions = repo.list_sessions().await?;
+    Ok(Json(
+        json!({ "count": sessions.len(), "sessions": sessions }),
+    ))
+}
+
+/// Query params for `GET /api/memory/tree`.
+#[derive(Debug, Deserialize)]
+pub struct MemoryTreeParams {
+    /// Directory URI to list (e.g. `memory://sessions`). Omit for the root view.
+    #[serde(default)]
+    pub uri: Option<String>,
+}
+
+/// `GET /api/memory/tree` — browse the memory virtual filesystem. With no
+/// `uri`, returns the rollup node plus the sessions/resources directories.
+pub async fn tree(
+    State(state): State<AppState>,
+    Query(params): Query<MemoryTreeParams>,
+) -> ApiResult<Json<Value>> {
+    let repo = state.container.memory_repository()?;
+    let children = match params.uri.as_deref() {
+        None => {
+            let mut nodes = Vec::new();
+            if let Some(rollup) = repo.find_node(MEMORY_ROOT_URI).await? {
+                nodes.push(rollup);
+            }
+            nodes.extend(repo.list_child_nodes(SESSIONS_ROOT_URI).await?);
+            nodes.extend(repo.list_child_nodes(RESOURCES_ROOT_URI).await?);
+            nodes
+        }
+        Some(dir) => repo.list_child_nodes(dir).await?,
+    };
+    Ok(Json(json!({ "count": children.len(), "nodes": children })))
+}
+
+/// `GET /api/memory/:id` — resolve one memory item or virtual-filesystem node.
+///
+/// `:id` accepts a memory item UUID, a `kind/name` reference, or a
+/// `memory://…` node URI (matching the CLI `memory show`).
+pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    let repo = state.container.memory_repository()?;
+
+    // `memory://` addresses a virtual-filesystem node rather than a flat item.
+    if id.starts_with("memory://") {
+        return match repo.find_node(&id).await? {
+            Some(node) => Ok(Json(json!({ "node": node }))),
+            None => Err(ApiError::not_found(format!("no memory node at '{id}'"))),
+        };
+    }
+
+    // Accept `<kind>/<name>` as an alternative to the item ID.
+    if let Some((kind_str, name)) = id.split_once('/') {
+        if let Some(kind) = MemoryKind::parse(kind_str) {
+            if let Some(item) = repo.find_item(kind, name).await? {
+                return Ok(Json(json!({ "item": item })));
+            }
+        }
+    }
+
+    match repo.find_item_by_id(&id).await? {
+        Some(item) => Ok(Json(json!({ "item": item }))),
+        None => Err(ApiError::not_found(format!(
+            "no memory item with ID '{id}'"
+        ))),
+    }
+}
