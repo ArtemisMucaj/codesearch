@@ -80,12 +80,17 @@ pub async fn search(
 
     let items: Vec<Value> = results
         .iter()
-        .map(|(item, score)| {
-            let mut value = serde_json::to_value(item).unwrap_or_default();
-            if let Some(obj) = value.as_object_mut() {
-                obj.insert("score".to_string(), json!(score));
+        .filter_map(|(item, score)| match serde_json::to_value(item) {
+            Ok(mut value) => {
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("score".to_string(), json!(score));
+                }
+                Some(value)
             }
-            value
+            Err(err) => {
+                tracing::warn!("failed to serialize memory item, skipping: {err}");
+                None
+            }
         })
         .collect();
 
@@ -157,12 +162,17 @@ pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> ApiRe
         };
     }
 
-    // Accept `<kind>/<name>` as an alternative to the item ID.
+    // Accept `<kind>/<name>` as an alternative to the item ID. A valid kind is
+    // an unambiguous reference, so report against it rather than falling through
+    // to the ID lookup (which would give a misleading "no item with ID" error).
     if let Some((kind_str, name)) = id.split_once('/') {
         if let Some(kind) = MemoryKind::parse(kind_str) {
-            if let Some(item) = repo.find_item(kind, name).await? {
-                return Ok(Json(json!({ "item": item })));
-            }
+            return match repo.find_item(kind, name).await? {
+                Some(item) => Ok(Json(json!({ "item": item }))),
+                None => Err(ApiError::not_found(format!(
+                    "no memory item '{name}' of kind '{kind_str}'"
+                ))),
+            };
         }
     }
 

@@ -50,6 +50,24 @@ impl IntoResponse for ApiError {
     }
 }
 
+impl ApiError {
+    /// Build an `ApiError` from a status and the underlying failure.
+    ///
+    /// A `NotFound` carries its message to the client (it names the missing
+    /// resource and is safe to expose). Any other failure is an internal error:
+    /// the full detail is logged server-side and the client receives a generic
+    /// message, so binding with `--public` cannot leak paths or backend error
+    /// text over the network.
+    fn from_status(status: StatusCode, err: impl std::fmt::Display) -> Self {
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            tracing::error!("management API internal error: {err}");
+            Self::new(status, "internal server error")
+        } else {
+            Self::new(status, err.to_string())
+        }
+    }
+}
+
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
         // Map a NotFound domain error (possibly nested in the anyhow chain) to a
@@ -59,7 +77,7 @@ impl From<anyhow::Error> for ApiError {
             .filter(|e| e.is_not_found())
             .map(|_| StatusCode::NOT_FOUND)
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        Self::new(status, err.to_string())
+        Self::from_status(status, err)
     }
 }
 
@@ -70,6 +88,6 @@ impl From<DomainError> for ApiError {
         } else {
             StatusCode::INTERNAL_SERVER_ERROR
         };
-        Self::new(status, err.to_string())
+        Self::from_status(status, err)
     }
 }
