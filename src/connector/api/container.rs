@@ -635,6 +635,18 @@ impl Container {
         self.repo_adapter.clone()
     }
 
+    /// The channel-endpoint repository (Kafka/HTTP/MQTT endpoints).
+    pub fn channel_endpoint_repository(
+        &self,
+    ) -> Arc<dyn crate::application::ChannelEndpointRepository> {
+        self.channel_endpoint_repo.clone()
+    }
+
+    /// The analysis cache (Leiden clusters, symbol communities, execution features).
+    pub fn analysis_repository(&self) -> Arc<dyn crate::application::AnalysisRepository> {
+        self.analysis_repo.clone()
+    }
+
     /// Resolve a repository name or UUID to the UUID stored in the metadata DB.
     ///
     /// When `name_or_id` is `None`, auto-detects from the current working

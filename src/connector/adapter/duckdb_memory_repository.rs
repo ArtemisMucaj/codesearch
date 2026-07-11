@@ -13,7 +13,7 @@ use duckdb::{params, Connection, Row};
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::application::MemoryRepository;
+use crate::application::{MemoryRepository, MemoryStats};
 use crate::domain::{DomainError, ImportedSession, MemoryItem, MemoryKind, MemoryNode, NodeKind};
 
 /// File name of the memory database inside the data directory.
@@ -720,6 +720,43 @@ impl MemoryRepository for DuckdbMemoryRepository {
             .map_err(|e| DomainError::storage(format!("Node keyword search failed: {e}")))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| DomainError::storage(format!("Failed to read node search row: {e}")))
+    }
+
+    async fn stats(&self) -> Result<MemoryStats, DomainError> {
+        let conn = self.conn.lock().await;
+
+        // Count items by kind
+        let mut items_by_kind: Vec<(String, u64)> = Vec::new();
+        for kind in MemoryKind::ALL {
+            let kind_str = kind.as_str();
+            let sql = format!("SELECT COUNT(*) FROM memory_items WHERE kind = '{kind_str}'");
+            let count: u64 = conn.query_row(&sql, [], |row| row.get(0)).unwrap_or(0);
+            items_by_kind.push((kind_str.to_string(), count));
+        }
+        let total_items: u64 = items_by_kind.iter().map(|(_, c)| c).sum();
+
+        // Count sessions
+        let total_sessions: u64 = conn
+            .query_row("SELECT COUNT(*) FROM memory_sessions", [], |row| row.get(0))
+            .unwrap_or(0);
+
+        // Count nodes by kind
+        let mut nodes_by_kind: Vec<(String, u64)> = Vec::new();
+        for kind in NodeKind::ALL {
+            let kind_str = kind.as_str();
+            let sql = format!("SELECT COUNT(*) FROM memory_nodes WHERE kind = '{kind_str}'");
+            let count: u64 = conn.query_row(&sql, [], |row| row.get(0)).unwrap_or(0);
+            nodes_by_kind.push((kind_str.to_string(), count));
+        }
+        let total_nodes: u64 = nodes_by_kind.iter().map(|(_, c)| c).sum();
+
+        Ok(MemoryStats {
+            total_items,
+            items_by_kind,
+            total_sessions,
+            total_nodes,
+            nodes_by_kind,
+        })
     }
 }
 
