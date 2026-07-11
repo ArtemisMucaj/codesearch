@@ -328,6 +328,10 @@ async fn main() -> Result<()> {
     // `tokio::select!` so ctrl-c (each server shuts down gracefully on it) or
     // an error in either one tears the whole command down.
     if is_serve {
+        if serve_mcp_port == serve_mgmt_port {
+            anyhow::bail!("--mcp-port and --mgmt-port must differ (both were {serve_mcp_port})");
+        }
+
         let container = Arc::new(Container::new(config).await?);
 
         let mcp = run_http_server(container.clone(), serve_mcp_port, serve_public);

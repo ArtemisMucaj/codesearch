@@ -174,6 +174,7 @@ async fn openapi() -> impl IntoResponse {
 ///
 /// This intentionally mirrors the MCP HTTP server's lifecycle so both can be
 /// driven concurrently from `main` (e.g. via `tokio::select!`).
+#[tracing::instrument(skip(container), fields(port, public))]
 pub async fn run_management_server(
     container: Arc<Container>,
     port: u16,
@@ -195,7 +196,9 @@ pub async fn run_management_server(
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            tokio::signal::ctrl_c().await.ok();
+            if let Err(e) = tokio::signal::ctrl_c().await {
+                tracing::warn!("failed to install ctrl-c handler: {e}");
+            }
             tracing::info!("Shutting down management API");
         })
         .await
