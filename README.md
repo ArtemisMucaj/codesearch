@@ -98,6 +98,9 @@ codesearch mcp
 
 # Start MCP server over HTTP
 codesearch mcp --http 8080
+
+# Run the MCP server AND the REST/JSON management API together
+codesearch serve
 ```
 
 ### Configuration Options
@@ -486,6 +489,33 @@ only the requested edge type instead of every relationship at once:
 
 `callers_of`, `callees_of`, `imports_of`, `importers_of`, `inheritors_of`,
 `children_of`, `tests_for`, and `file_summary`.
+
+### Combined Server (`serve`)
+
+`codesearch serve` runs **both** servers side by side in one process: the MCP
+HTTP server (as above) and a new REST/JSON **management API**. Both shut down
+gracefully on ctrl-c.
+
+```bash
+# MCP on 8677, management API on 8676 (defaults), bound to 127.0.0.1
+codesearch serve
+
+# Custom ports
+codesearch serve --mcp-port 3000 --mgmt-port 3001
+
+# Bind both on all interfaces (public)
+codesearch serve --public
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--mcp-port` | `8677` | Port for the MCP HTTP server (endpoint at `/mcp`). |
+| `--mgmt-port` | `8676` | Port for the REST/JSON management API. |
+| `--public` | off | Bind to `0.0.0.0` instead of `127.0.0.1`. |
+
+The management API currently exposes `GET /health`
+(`{"status":"ok","version":"…"}`) and a `GET /` (or `/api`) index. Per-command
+REST endpoints and streaming are being added in follow-up work.
 
 ### Storage Backends
 

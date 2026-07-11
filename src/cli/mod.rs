@@ -1,5 +1,11 @@
 use clap::{Subcommand, ValueEnum};
 
+/// Default port for the MCP HTTP server started by `codesearch serve`.
+pub const DEFAULT_MCP_PORT: u16 = 8677;
+
+/// Default port for the REST/JSON management API started by `codesearch serve`.
+pub const DEFAULT_MGMT_PORT: u16 = 8676;
+
 /// Validates a namespace for use as a DuckDB schema name.
 ///
 /// Schema names are always double-quoted in generated SQL, so almost any
@@ -614,6 +620,22 @@ pub enum Commands {
         http: Option<u16>,
 
         /// Bind to 0.0.0.0 instead of 127.0.0.1, exposing the server on all network interfaces
+        #[arg(long)]
+        public: bool,
+    },
+
+    /// Run both the MCP server (HTTP) and the REST/JSON management API together
+    Serve {
+        /// Port for the MCP HTTP server (Model Context Protocol endpoint at /mcp)
+        #[arg(long, default_value_t = DEFAULT_MCP_PORT)]
+        mcp_port: u16,
+
+        /// Port for the REST/JSON management API server
+        #[arg(long, default_value_t = DEFAULT_MGMT_PORT)]
+        mgmt_port: u16,
+
+        /// Bind to 0.0.0.0 instead of 127.0.0.1, exposing both servers on all
+        /// network interfaces
         #[arg(long)]
         public: bool,
     },

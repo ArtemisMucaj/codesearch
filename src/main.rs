@@ -126,6 +126,15 @@ async fn main() -> Result<()> {
         Commands::Mcp { http, public } => (true, *http, *public),
         _ => (false, None, false),
     };
+    // `serve` runs BOTH the MCP HTTP server and the management API together.
+    let (is_serve, serve_mcp_port, serve_mgmt_port, serve_public) = match &cli.command {
+        Commands::Serve {
+            mcp_port,
+            mgmt_port,
+            public,
+        } => (true, *mcp_port, *mgmt_port, *public),
+        _ => (false, 0, 0, false),
+    };
     let is_tui = matches!(&cli.command, Commands::Tui { .. });
     // `memory import` with no PATH opens an interactive picker (a full-screen
     // TUI) before any container is built. It owns the terminal like the TUI, so
@@ -310,6 +319,29 @@ async fn main() -> Result<()> {
             let server = CodesearchMcpServer::new(container);
             let service = server.serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
+        }
+        return Ok(());
+    }
+
+    // `serve` runs the MCP HTTP server and the REST/JSON management API
+    // concurrently. Neither blocks the other: both are driven under a single
+    // `tokio::select!` so ctrl-c (each server shuts down gracefully on it) or
+    // an error in either one tears the whole command down.
+    if is_serve {
+        let container = Arc::new(Container::new(config).await?);
+
+        let mcp = run_http_server(container.clone(), serve_mcp_port, serve_public);
+        let mgmt = codesearch::run_management_server(container, serve_mgmt_port, serve_public);
+
+        tracing::info!(
+            "codesearch serve: MCP on port {}, management API on port {}",
+            serve_mcp_port,
+            serve_mgmt_port
+        );
+
+        tokio::select! {
+            res = mcp => res?,
+            res = mgmt => res?,
         }
         return Ok(());
     }

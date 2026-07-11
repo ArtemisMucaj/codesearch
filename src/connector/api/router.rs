@@ -243,6 +243,9 @@ impl<'a> Router<'a> {
             Commands::Tui { .. } => {
                 Err(anyhow::anyhow!("TUI command is handled separately in main"))
             }
+            Commands::Serve { .. } => Err(anyhow::anyhow!(
+                "serve command is handled separately in main"
+            )),
         }
     }
 }
