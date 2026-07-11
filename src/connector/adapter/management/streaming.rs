@@ -139,13 +139,16 @@ pub async fn explain_stream(
     body: Option<Json<ExplainStreamRequest>>,
 ) -> impl IntoResponse {
     let req = body.map(|Json(b)| b).unwrap_or_default();
-    let container = state.container.clone();
+    // Build the use case up front so the spawned task owns only what it needs;
+    // the `Arc<Container>` can then drop when this handler returns rather than
+    // staying alive for the whole (potentially long) SSE stream.
+    let use_case = state.container.explain_use_case();
 
     // Channel of ready-to-send SSE events feeding the HTTP response.
     let (event_tx, event_rx) = mpsc::unbounded_channel::<Event>();
 
     tokio::spawn(async move {
-        run_explain_stream(container, symbol, req, event_tx).await;
+        run_explain_stream(use_case, symbol, req, event_tx).await;
     });
 
     Sse::new(receiver_stream(event_rx)).keep_alive(KeepAlive::default())
@@ -153,7 +156,7 @@ pub async fn explain_stream(
 
 /// Drive the explain use case and forward its output as SSE events on `event_tx`.
 async fn run_explain_stream(
-    container: Arc<crate::connector::api::Container>,
+    use_case: crate::application::ExplainUseCase,
     symbol: String,
     req: ExplainStreamRequest,
     event_tx: mpsc::UnboundedSender<Event>,
@@ -176,7 +179,6 @@ async fn run_explain_stream(
     // Per-token channel from the use case; we relay each token as an SSE frame.
     let (token_tx, mut token_rx) = mpsc::unbounded_channel::<String>();
 
-    let use_case = container.explain_use_case();
     let symbol_c = symbol.clone();
     let repo_c = req.repository.clone();
     let is_regex = req.regex;

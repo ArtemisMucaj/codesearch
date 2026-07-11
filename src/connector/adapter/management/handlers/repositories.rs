@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use crate::domain::{DomainError, Repository};
 
-use super::super::error::{ApiError, ApiResult};
+use super::super::error::ApiResult;
 use super::super::server::AppState;
 
 /// Serialize a [`Repository`] into a stable JSON object for API responses.
@@ -53,10 +53,7 @@ pub async fn list(State(state): State<AppState>) -> ApiResult<Json<Value>> {
 /// resolves `--repository`).
 pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let repos = state.container.list_use_case().execute().await?;
-    let repo = repos
-        .iter()
-        .find(|r| r.id() == id || r.name().eq_ignore_ascii_case(&id))
-        .ok_or_else(|| ApiError::not_found(format!("repository not found: '{id}'")))?;
+    let repo = super::resolve_repo(&id, &repos)?;
 
     // Architecture overview is best-effort: a repository with no call graph
     // (never SCIP-indexed) has no clusters, which is not an error.

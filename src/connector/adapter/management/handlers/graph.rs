@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::domain::Repository;
 
-use super::super::error::{ApiError, ApiResult};
+use super::super::error::ApiResult;
 use super::super::server::AppState;
 
 /// Default number of features returned by `GET /api/features`.
@@ -88,22 +88,10 @@ pub async fn uses(
 ) -> ApiResult<Json<serde_json::Value>> {
     let all_repos: Vec<Repository> = state.container.list_use_case().execute().await?;
 
-    let resolve = |key: &str| -> Option<(String, String)> {
-        all_repos
-            .iter()
-            .find(|r| r.id() == key)
-            .or_else(|| {
-                all_repos
-                    .iter()
-                    .find(|r| r.name().eq_ignore_ascii_case(key))
-            })
-            .map(|r| (r.id().to_string(), r.name().to_string()))
-    };
-
-    let (from_id, from_name) = resolve(&params.from)
-        .ok_or_else(|| ApiError::not_found(format!("repository not found: '{}'", params.from)))?;
-    let (to_id, to_name) = resolve(&params.to)
-        .ok_or_else(|| ApiError::not_found(format!("repository not found: '{}'", params.to)))?;
+    let from = super::resolve_repo(&params.from, &all_repos)?;
+    let (from_id, from_name) = (from.id().to_string(), from.name().to_string());
+    let to = super::resolve_repo(&params.to, &all_repos)?;
+    let (to_id, to_name) = (to.id().to_string(), to.name().to_string());
 
     let graph = state
         .container

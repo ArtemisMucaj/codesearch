@@ -58,17 +58,7 @@ pub async fn channels(
         Some(keys) => {
             let mut ids = Vec::new();
             for key in keys {
-                let id = all_repos
-                    .iter()
-                    .find(|r| r.id() == key)
-                    .or_else(|| {
-                        all_repos
-                            .iter()
-                            .find(|r| r.name().eq_ignore_ascii_case(&key))
-                    })
-                    .map(|r| r.id().to_string())
-                    .ok_or_else(|| ApiError::not_found(format!("repository not found: '{key}'")))?;
-                ids.push(id);
+                ids.push(super::resolve_repo(&key, &all_repos)?.id().to_string());
             }
             Some(ids)
         }
