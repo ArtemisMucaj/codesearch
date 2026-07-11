@@ -4,11 +4,13 @@
 //! from the MCP protocol server. Both run side by side under the `serve`
 //! subcommand (see `src/main.rs`).
 //!
-//! This PR (1/3) ships the skeleton only: bootstrap, shared state, a `/health`
-//! endpoint, an API index, and graceful shutdown. Later PRs attach the actual
-//! command endpoints (PR2) and streaming endpoints (PR3) by extending
-//! [`server::routes`] — see that function's docs for the exact extension point.
+//! PR1 shipped the skeleton (bootstrap, shared state, `/health`, API index,
+//! graceful shutdown). PR2 attaches non-streaming command endpoints. This
+//! module also carries PR3's streaming layer: [`streaming`] holds the SSE
+//! handlers (explain / index) mounted under `/api/stream/...`, plus the
+//! `/api/openapi.json` document, all wired in [`server::routes`].
 
 mod server;
+mod streaming;
 
 pub use server::{routes, run_management_server, AppState};
