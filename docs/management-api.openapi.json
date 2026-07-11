@@ -3,7 +3,7 @@
   "info": {
     "title": "CodeSearch Management API",
     "version": "0.1.0",
-    "description": "HTTP management API for the `codesearch serve` command. Exposes codesearch operations over REST/JSON and Server-Sent Events (SSE), separate from the MCP protocol server.\n\nThis document is checked in at `docs/management-api.openapi.json` and served verbatim at `GET /api/openapi.json`.\n\n## Streaming (SSE) endpoints\n\nPaths under `/api/stream/` respond with `text/event-stream`. Each frame is a named SSE event (`event:`) with a JSON `data:` payload. A terminal `done` or `error` event is always the last frame; clients treat either as end-of-stream. If the client disconnects, the server drops the in-flight work. The precise `event` names and payloads are documented per-path below and, because OpenAPI cannot express SSE frame shapes natively, mirrored in the `SseEvent*` component schemas.\n\n## REST endpoints (stacked PR #2)\n\nThe non-streaming `/api/...` REST endpoints (search, repositories, stats, etc.) are added by the sibling PR and are described generically here under `See `x-note``. Their exact request/response schemas should be reconciled into this document once that PR merges."
+    "description": "HTTP management API for the `codesearch serve` command. Exposes codesearch operations over REST/JSON and Server-Sent Events (SSE), separate from the MCP protocol server.\n\nThis document is checked in at `docs/management-api.openapi.json` and served verbatim at `GET /api/openapi.json`.\n\n## Errors\n\nEvery endpoint returns errors as `{ \"error\": \"<message>\" }` with an appropriate status: `400` for malformed input (unknown protocol / memory kind, bad body), `404` when a named repository, symbol, or memory item is not found, and `500` for any other use-case failure.\n\n## REST endpoints\n\nPaths under `/api/...` (excluding `/api/stream/...`) are request/response JSON. Query-string filters are documented per path.\n\n## Streaming (SSE) endpoints\n\nPaths under `/api/stream/` respond with `text/event-stream`. Each frame is a named SSE event (`event:`) with a JSON `data:` payload. A terminal `done` or `error` event is always the last frame; clients treat either as end-of-stream. If the client disconnects, the server drops the in-flight work. Because OpenAPI cannot express SSE frame shapes natively, the `event` names and payloads are mirrored in the `SseEvent*` component schemas.\n\n## Domain response shapes\n\nSeveral endpoints return a domain value serialized directly (impact analysis, symbol context, cluster graphs, the channel-link report, memory items). Their documented top-level fields are precise; nested objects are marked `additionalProperties: true` and reference the owning Rust domain type, since pinning every nested field here would be brittle against domain refactors."
   },
   "servers": [
     {
@@ -11,16 +11,21 @@
       "description": "Local management server (default bind). Use 0.0.0.0 when started with --public.",
       "variables": {
         "port": {
-          "default": "0",
-          "description": "Port passed to `codesearch serve`."
+          "default": "8676",
+          "description": "Management port passed to `codesearch serve --mgmt-port` (default 8676)."
         }
       }
     }
   ],
   "tags": [
     { "name": "meta", "description": "Server metadata and health." },
-    { "name": "stream", "description": "Long-running / token-streaming operations over SSE." },
-    { "name": "rest", "description": "Non-streaming command endpoints (owned by stacked PR #2)." }
+    { "name": "repositories", "description": "Indexed repositories and index-wide statistics." },
+    { "name": "search", "description": "Hybrid semantic + keyword code search." },
+    { "name": "graph", "description": "Call-graph queries: impact, context, cross-repo uses, execution features." },
+    { "name": "clusters", "description": "Architectural (file-level) and symbol-level community detection." },
+    { "name": "channels", "description": "Cross-service channel links." },
+    { "name": "memory", "description": "Read-only queries over long-term memory." },
+    { "name": "stream", "description": "Long-running / token-streaming operations over SSE." }
   ],
   "paths": {
     "/health": {
@@ -68,6 +73,670 @@
           "200": {
             "description": "This OpenAPI 3.1 document.",
             "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    },
+    "/api/repositories": {
+      "get": {
+        "tags": ["repositories"],
+        "summary": "List indexed repositories",
+        "operationId": "listRepositories",
+        "responses": {
+          "200": {
+            "description": "Every repository indexed in the current namespace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["repositories"],
+                  "properties": {
+                    "repositories": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Repository" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/repositories/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "description": "Repository name or UUID.",
+          "schema": { "type": "string" }
+        }
+      ],
+      "get": {
+        "tags": ["repositories"],
+        "summary": "Get one repository plus its architecture overview",
+        "description": "Returns the repository fields plus `architecture_overview`, a best-effort Markdown cluster summary (empty string when the repository has no call graph).",
+        "operationId": "getRepository",
+        "responses": {
+          "200": {
+            "description": "The repository.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/Repository" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "architecture_overview": {
+                          "type": "string",
+                          "description": "Markdown cluster summary; empty when unavailable."
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No repository matches the id/name.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      },
+      "delete": {
+        "tags": ["repositories"],
+        "summary": "Delete a repository",
+        "description": "Deletes by ID, falling back to deletion by path when the ID is not found.",
+        "operationId": "deleteRepository",
+        "responses": {
+          "200": {
+            "description": "The repository was deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["deleted", "id"],
+                  "properties": {
+                    "deleted": { "type": "boolean", "enum": [true] },
+                    "id": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No repository matches the id or path.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    },
+    "/api/stats": {
+      "get": {
+        "tags": ["repositories"],
+        "summary": "Index-wide statistics",
+        "operationId": "stats",
+        "responses": {
+          "200": {
+            "description": "Aggregate counts across all repositories in the namespace.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Stats" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/search": {
+      "post": {
+        "tags": ["search"],
+        "summary": "Hybrid semantic + keyword code search",
+        "operationId": "search",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SearchRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Ranked search hits.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["count", "results"],
+                  "properties": {
+                    "count": { "type": "integer" },
+                    "results": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/SearchHit" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/impact": {
+      "post": {
+        "tags": ["graph"],
+        "summary": "Blast radius of changing a symbol",
+        "description": "BFS up the call graph from the given symbol. Returns the serialized `ImpactAnalysis` domain value.",
+        "operationId": "impact",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ImpactRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Impact analysis for the symbol.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ImpactAnalysis" }
+              }
+            }
+          },
+          "404": {
+            "description": "The symbol was not found in the call graph.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    },
+    "/api/context/{symbol}": {
+      "parameters": [
+        {
+          "name": "symbol",
+          "in": "path",
+          "required": true,
+          "description": "Symbol name, or regex when `regex=true`.",
+          "schema": { "type": "string" }
+        },
+        {
+          "name": "repository",
+          "in": "query",
+          "required": false,
+          "description": "Restrict to a repository (name or UUID).",
+          "schema": { "type": "string" }
+        },
+        {
+          "name": "regex",
+          "in": "query",
+          "required": false,
+          "description": "Interpret `{symbol}` as a regular expression.",
+          "schema": { "type": "boolean", "default": false }
+        }
+      ],
+      "get": {
+        "tags": ["graph"],
+        "summary": "Callers and callees of a symbol",
+        "description": "Returns the serialized `SymbolContext` domain value (callers up to entry points, callees down to leaves).",
+        "operationId": "context",
+        "responses": {
+          "200": {
+            "description": "Symbol context.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SymbolContext" }
+              }
+            }
+          },
+          "404": {
+            "description": "The symbol was not found.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    },
+    "/api/uses": {
+      "get": {
+        "tags": ["graph"],
+        "summary": "Cross-repo file dependencies",
+        "description": "Files in `from` that reference symbols defined in `to`.",
+        "operationId": "uses",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "description": "Repository doing the using (name or UUID).",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "description": "Repository being used (name or UUID).",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cross-repo edges from `from` to `to`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["from", "to", "edges"],
+                  "properties": {
+                    "from": { "$ref": "#/components/schemas/RepoRef" },
+                    "to": { "$ref": "#/components/schemas/RepoRef" },
+                    "edges": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/FileEdge" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Either repository was not found.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    },
+    "/api/features": {
+      "get": {
+        "tags": ["graph"],
+        "summary": "Entry-point execution features by criticality",
+        "operationId": "features",
+        "parameters": [
+          {
+            "name": "repository",
+            "in": "query",
+            "required": false,
+            "description": "Repository to analyse (name or UUID). Omit to auto-detect.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum number of features to return.",
+            "schema": { "type": "integer", "default": 20 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Execution features sorted by criticality.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["repository_id", "count", "features"],
+                  "properties": {
+                    "repository_id": { "type": "string" },
+                    "count": { "type": "integer" },
+                    "features": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/ExecutionFeature" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/clusters": {
+      "get": {
+        "tags": ["clusters"],
+        "summary": "File-dependency Leiden clusters",
+        "description": "Architectural clusters over the file dependency graph. Returns the serialized `ClusterGraph` domain value.",
+        "operationId": "clusters",
+        "parameters": [
+          {
+            "name": "repository",
+            "in": "query",
+            "required": false,
+            "description": "Repository to analyse (name or UUID). Omit to auto-detect.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The cluster graph.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ClusterGraph" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/symbol-clusters": {
+      "get": {
+        "tags": ["clusters"],
+        "summary": "Symbol call-graph communities",
+        "description": "Leiden communities over the symbol call graph. Returns the serialized `SymbolCommunityGraph` domain value.",
+        "operationId": "symbolClusters",
+        "parameters": [
+          {
+            "name": "repository",
+            "in": "query",
+            "required": false,
+            "description": "Repository to analyse (name or UUID). Omit to auto-detect.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The symbol community graph.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SymbolCommunityGraph" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/channels": {
+      "get": {
+        "tags": ["channels"],
+        "summary": "Cross-service channel links",
+        "description": "Matched producer→consumer links (Kafka topics, HTTP routes, MQTT/AMQP topics, gRPC methods). Returns the serialized `ChannelLinkReport` domain value. With no `repository`, scoped to the current namespace's repositories.",
+        "operationId": "channels",
+        "parameters": [
+          {
+            "name": "repository",
+            "in": "query",
+            "required": false,
+            "description": "Restrict to specific repositories (name or UUID). Repeatable.",
+            "schema": { "type": "array", "items": { "type": "string" } },
+            "style": "form",
+            "explode": true
+          },
+          {
+            "name": "protocol",
+            "in": "query",
+            "required": false,
+            "description": "Filter by protocol.",
+            "schema": { "type": "string", "enum": ["kafka", "http", "mqtt", "amqp", "grpc"] }
+          },
+          {
+            "name": "min_confidence",
+            "in": "query",
+            "required": false,
+            "description": "Drop edges below this confidence (0.0–1.0).",
+            "schema": { "type": "number", "format": "float" }
+          },
+          {
+            "name": "exclude_channel",
+            "in": "query",
+            "required": false,
+            "description": "Exclude channels matching these globs. Repeatable.",
+            "schema": { "type": "array", "items": { "type": "string" } },
+            "style": "form",
+            "explode": true
+          },
+          {
+            "name": "include_tests",
+            "in": "query",
+            "required": false,
+            "description": "Include endpoints from test files (excluded by default).",
+            "schema": { "type": "boolean", "default": false }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The channel-link report.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ChannelLinkReport" }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown protocol.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          },
+          "404": {
+            "description": "A named repository was not found.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    },
+    "/api/memory": {
+      "get": {
+        "tags": ["memory"],
+        "summary": "List stored memory items",
+        "operationId": "memoryList",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "description": "Restrict to one memory kind.",
+            "schema": { "type": "string", "enum": ["preference", "experience", "skill", "fact"] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stored memory items.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["count", "items"],
+                  "properties": {
+                    "count": { "type": "integer" },
+                    "items": { "type": "array", "items": { "$ref": "#/components/schemas/MemoryItem" } }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown memory kind.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    },
+    "/api/memory/search": {
+      "get": {
+        "tags": ["memory"],
+        "summary": "Search stored memories",
+        "description": "Hybrid semantic + keyword search. Each result carries a `score` alongside the memory-item fields.",
+        "operationId": "memorySearch",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "description": "Search query.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "num",
+            "in": "query",
+            "required": false,
+            "description": "Maximum number of results.",
+            "schema": { "type": "integer", "default": 10 }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "description": "Restrict to one memory kind.",
+            "schema": { "type": "string", "enum": ["preference", "experience", "skill", "fact"] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Scored memory results.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["count", "results"],
+                  "properties": {
+                    "count": { "type": "integer" },
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "allOf": [
+                          { "$ref": "#/components/schemas/MemoryItem" },
+                          {
+                            "type": "object",
+                            "properties": { "score": { "type": "number", "format": "float" } }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown memory kind.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+          }
+        }
+      }
+    },
+    "/api/memory/stats": {
+      "get": {
+        "tags": ["memory"],
+        "summary": "Memory item/session counts",
+        "operationId": "memoryStats",
+        "responses": {
+          "200": {
+            "description": "Counts of stored items and imported sessions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["total_items", "total_sessions"],
+                  "properties": {
+                    "total_items": { "type": "integer" },
+                    "total_sessions": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/sessions": {
+      "get": {
+        "tags": ["memory"],
+        "summary": "Imported sessions",
+        "operationId": "memorySessions",
+        "responses": {
+          "200": {
+            "description": "Sessions imported into memory.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["count", "sessions"],
+                  "properties": {
+                    "count": { "type": "integer" },
+                    "sessions": { "type": "array", "items": { "$ref": "#/components/schemas/ImportedSession" } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/tree": {
+      "get": {
+        "tags": ["memory"],
+        "summary": "Browse the memory virtual filesystem",
+        "description": "With no `uri`, returns the rollup node plus the sessions and resources directories. With a `uri`, returns that directory's children.",
+        "operationId": "memoryTree",
+        "parameters": [
+          {
+            "name": "uri",
+            "in": "query",
+            "required": false,
+            "description": "Directory URI to list (e.g. `memory://sessions`).",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Nodes under the requested URI.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["count", "nodes"],
+                  "properties": {
+                    "count": { "type": "integer" },
+                    "nodes": { "type": "array", "items": { "$ref": "#/components/schemas/MemoryNode" } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "description": "A memory item UUID, a `kind/name` reference, or a `memory://…` node URI.",
+          "schema": { "type": "string" }
+        }
+      ],
+      "get": {
+        "tags": ["memory"],
+        "summary": "Get one memory item or virtual-filesystem node",
+        "description": "Returns `{ \"item\": MemoryItem }` for an item address, or `{ \"node\": MemoryNode }` when the id is a `memory://` URI.",
+        "operationId": "memoryGet",
+        "responses": {
+          "200": {
+            "description": "The resolved item or node.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "required": ["item"],
+                      "properties": { "item": { "$ref": "#/components/schemas/MemoryItem" } }
+                    },
+                    {
+                      "type": "object",
+                      "required": ["node"],
+                      "properties": { "node": { "$ref": "#/components/schemas/MemoryNode" } }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No item or node at the given address.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
           }
         }
       }
@@ -152,6 +821,14 @@
   },
   "components": {
     "schemas": {
+      "Error": {
+        "type": "object",
+        "description": "Uniform error body returned with a 4xx/5xx status.",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string", "description": "Human-readable failure message." }
+        }
+      },
       "Health": {
         "type": "object",
         "required": ["status", "version"],
@@ -178,6 +855,133 @@
             }
           }
         }
+      },
+      "Repository": {
+        "type": "object",
+        "description": "An indexed repository.",
+        "required": ["id", "name", "path", "file_count", "chunk_count", "store", "languages"],
+        "properties": {
+          "id": { "type": "string", "description": "Repository UUID." },
+          "name": { "type": "string" },
+          "path": { "type": "string" },
+          "file_count": { "type": "integer" },
+          "chunk_count": { "type": "integer" },
+          "store": { "type": "string", "description": "Backing store identifier (e.g. duckdb)." },
+          "namespace": { "type": ["string", "null"] },
+          "languages": {
+            "type": "object",
+            "description": "Map of language name → per-language stats.",
+            "additionalProperties": {
+              "type": "object",
+              "properties": { "file_count": { "type": "integer" } }
+            }
+          }
+        }
+      },
+      "Stats": {
+        "type": "object",
+        "required": ["repositories", "total_files", "total_chunks", "data_dir"],
+        "properties": {
+          "repositories": { "type": "integer" },
+          "total_files": { "type": "integer" },
+          "total_chunks": { "type": "integer" },
+          "data_dir": { "type": "string" },
+          "namespace": { "type": ["string", "null"] }
+        }
+      },
+      "RepoRef": {
+        "type": "object",
+        "description": "A minimal repository reference (id + name).",
+        "required": ["id", "name"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" }
+        }
+      },
+      "SearchRequest": {
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+          "query": { "type": "string", "description": "Natural-language query describing what the code does." },
+          "limit": { "type": "integer", "default": 10, "description": "Maximum number of results." },
+          "min_score": { "type": ["number", "null"], "format": "float", "description": "Optional minimum relevance score." },
+          "languages": { "type": ["array", "null"], "items": { "type": "string" }, "description": "Optional language filter." },
+          "repositories": { "type": ["array", "null"], "items": { "type": "string" }, "description": "Optional repository filter (names or UUIDs)." },
+          "text_search": { "type": "boolean", "default": true, "description": "Include the keyword (BM25) leg." }
+        }
+      },
+      "SearchHit": {
+        "type": "object",
+        "required": ["file_path", "start_line", "end_line", "score", "language", "node_type", "content"],
+        "properties": {
+          "file_path": { "type": "string" },
+          "start_line": { "type": "integer" },
+          "end_line": { "type": "integer" },
+          "score": { "type": "number", "format": "float" },
+          "language": { "type": "string" },
+          "node_type": { "type": "string", "description": "AST node type (function, class, method, …)." },
+          "symbol_name": { "type": ["string", "null"] },
+          "content": { "type": "string", "description": "Source snippet." }
+        }
+      },
+      "ImpactRequest": {
+        "type": "object",
+        "required": ["symbol"],
+        "properties": {
+          "symbol": { "type": "string", "description": "Symbol name or regex pattern." },
+          "repository": { "type": ["string", "null"], "description": "Restrict to a repository (name or UUID)." },
+          "regex": { "type": "boolean", "default": false, "description": "Treat `symbol` as a literal regex." }
+        }
+      },
+      "ImpactAnalysis": {
+        "type": "object",
+        "description": "Serialized `ImpactAnalysis` domain value: the blast radius of changing a symbol. Nested affected-symbol entries carry the symbol name, repository, file, line, and depth.",
+        "additionalProperties": true
+      },
+      "SymbolContext": {
+        "type": "object",
+        "description": "Serialized `SymbolContext` domain value: callers (entry points → symbol) and callees (symbol → leaves) as trees.",
+        "additionalProperties": true
+      },
+      "FileEdge": {
+        "type": "object",
+        "description": "Serialized `FileEdge` domain value: one cross-file dependency edge (source/target files and repositories, reference details).",
+        "additionalProperties": true
+      },
+      "ExecutionFeature": {
+        "type": "object",
+        "description": "Serialized execution-feature domain value: an entry point with its criticality score and contributing factors.",
+        "additionalProperties": true
+      },
+      "ClusterGraph": {
+        "type": "object",
+        "description": "Serialized `ClusterGraph` domain value: Leiden clusters over the file dependency graph (clusters, members, cohesion, inter-cluster edges).",
+        "additionalProperties": true
+      },
+      "SymbolCommunityGraph": {
+        "type": "object",
+        "description": "Serialized `SymbolCommunityGraph` domain value: Leiden communities over the symbol call graph.",
+        "additionalProperties": true
+      },
+      "ChannelLinkReport": {
+        "type": "object",
+        "description": "Serialized `ChannelLinkReport` domain value: matched producer→consumer channel links with protocol, channel name, endpoints, and confidence.",
+        "additionalProperties": true
+      },
+      "MemoryItem": {
+        "type": "object",
+        "description": "Serialized memory item: a durable fact/preference/experience/skill extracted from a session.",
+        "additionalProperties": true
+      },
+      "MemoryNode": {
+        "type": "object",
+        "description": "Serialized memory virtual-filesystem node (rollup, session, or resource directory/leaf).",
+        "additionalProperties": true
+      },
+      "ImportedSession": {
+        "type": "object",
+        "description": "Serialized imported-session record.",
+        "additionalProperties": true
       },
       "ExplainStreamRequest": {
         "type": "object",
@@ -308,6 +1112,5 @@
         }
       }
     }
-  },
-  "x-note": "The non-streaming REST endpoints under `/api/...` (e.g. search, repositories, stats) are owned by stacked PR #2 and are intentionally not enumerated here to avoid churn. Once PR #2 merges, add their paths, request bodies, and response schemas to this document. The streaming endpoints and the skeleton endpoints (/health, /api, /api/openapi.json) above are precise and stable."
+  }
 }
