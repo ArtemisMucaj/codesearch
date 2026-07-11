@@ -236,6 +236,8 @@ pub enum NodeKind {
 }
 
 impl NodeKind {
+    pub const ALL: [NodeKind; 3] = [NodeKind::Memory, NodeKind::Session, NodeKind::Resource];
+
     /// Stable identifier used in storage.
     pub fn as_str(&self) -> &'static str {
         match self {

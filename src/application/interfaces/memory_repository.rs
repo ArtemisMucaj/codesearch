@@ -103,4 +103,23 @@ pub trait MemoryRepository: Send + Sync {
         kind: Option<NodeKind>,
         limit: usize,
     ) -> Result<Vec<(MemoryNode, f32)>, DomainError>;
+
+    /// Aggregate memory-store statistics: item counts by kind, session count,
+    /// and node counts by kind.
+    async fn stats(&self) -> Result<MemoryStats, DomainError>;
+}
+
+/// Statistics about the memory store.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryStats {
+    /// Total memory items across all kinds.
+    pub total_items: u64,
+    /// Breakdown of memory items by kind.
+    pub items_by_kind: Vec<(String, u64)>,
+    /// Total imported sessions.
+    pub total_sessions: u64,
+    /// Total nodes across all kinds.
+    pub total_nodes: u64,
+    /// Breakdown of nodes by kind.
+    pub nodes_by_kind: Vec<(String, u64)>,
 }
