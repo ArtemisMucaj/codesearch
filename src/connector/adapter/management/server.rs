@@ -9,10 +9,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::extract::State;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
+use super::handlers;
 use crate::connector::api::Container;
 
 /// Crate version, surfaced by `/health` and the API index so clients can
@@ -56,7 +57,36 @@ pub fn routes(state: AppState) -> Router {
         .route("/", get(index))
         .route("/api", get(index))
         .route("/health", get(health))
-        // PR2: per-command REST endpoints attach here.
+        // ── PR2: per-command REST endpoints ──────────────────────────────────
+        // Repositories + stats.
+        .route("/api/repositories", get(handlers::repositories::list))
+        .route(
+            "/api/repositories/{id}",
+            get(handlers::repositories::get).delete(handlers::repositories::delete),
+        )
+        .route("/api/stats", get(handlers::repositories::stats))
+        // Search.
+        .route("/api/search", post(handlers::search::search))
+        // Call-graph queries.
+        .route("/api/impact", post(handlers::graph::impact))
+        .route("/api/context/{symbol}", get(handlers::graph::context))
+        .route("/api/uses", get(handlers::graph::uses))
+        .route("/api/features", get(handlers::graph::features))
+        // Clusters / communities.
+        .route("/api/clusters", get(handlers::clusters::clusters))
+        .route(
+            "/api/symbol-clusters",
+            get(handlers::clusters::symbol_clusters),
+        )
+        // Cross-service channels.
+        .route("/api/channels", get(handlers::channels::channels))
+        // Read-only memory queries.
+        .route("/api/memory", get(handlers::memory::list))
+        .route("/api/memory/search", get(handlers::memory::search))
+        .route("/api/memory/stats", get(handlers::memory::stats))
+        .route("/api/memory/sessions", get(handlers::memory::sessions))
+        .route("/api/memory/tree", get(handlers::memory::tree))
+        .route("/api/memory/{id}", get(handlers::memory::get))
         // PR3: streaming endpoints attach here.
         .with_state(state)
 }
@@ -81,6 +111,24 @@ async fn index(State(_state): State<AppState>) -> Json<Value> {
         "version": API_VERSION,
         "endpoints": [
             { "method": "GET", "path": "/health", "description": "liveness probe" },
+            { "method": "GET", "path": "/api/repositories", "description": "list indexed repositories" },
+            { "method": "GET", "path": "/api/repositories/{id}", "description": "one repository + architecture overview" },
+            { "method": "DELETE", "path": "/api/repositories/{id}", "description": "delete a repository by ID or path" },
+            { "method": "GET", "path": "/api/stats", "description": "index-wide statistics" },
+            { "method": "POST", "path": "/api/search", "description": "hybrid semantic + keyword code search" },
+            { "method": "POST", "path": "/api/impact", "description": "blast radius of changing a symbol" },
+            { "method": "GET", "path": "/api/context/{symbol}", "description": "callers + callees of a symbol" },
+            { "method": "GET", "path": "/api/uses", "description": "cross-repo file dependencies (?from=&to=)" },
+            { "method": "GET", "path": "/api/features", "description": "entry-point features by criticality" },
+            { "method": "GET", "path": "/api/clusters", "description": "file-dependency Leiden clusters" },
+            { "method": "GET", "path": "/api/symbol-clusters", "description": "symbol call-graph communities" },
+            { "method": "GET", "path": "/api/channels", "description": "cross-service channel links" },
+            { "method": "GET", "path": "/api/memory", "description": "list stored memory items (?kind=)" },
+            { "method": "GET", "path": "/api/memory/search", "description": "search stored memories (?query=)" },
+            { "method": "GET", "path": "/api/memory/stats", "description": "memory item/session counts" },
+            { "method": "GET", "path": "/api/memory/sessions", "description": "imported sessions" },
+            { "method": "GET", "path": "/api/memory/tree", "description": "browse the memory filesystem (?uri=)" },
+            { "method": "GET", "path": "/api/memory/{id}", "description": "one memory item or node" },
         ],
     }))
 }
