@@ -32,6 +32,10 @@ pub use connector::adapter::{
     discover_all_sessions, load_transcript as load_discovered_transcript,
 };
 
+pub use connector::adapter::management::{
+    routes as management_routes, run_management_server, AppState as ManagementAppState,
+};
+
 pub use connector::{
     parse_transcript, parse_transcript_file, AnthropicClient, AnthropicReranking,
     DuckdbAnalysisRepository, DuckdbCallGraphRepository, DuckdbChannelEndpointRepository,

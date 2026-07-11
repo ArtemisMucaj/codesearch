@@ -23,6 +23,7 @@ mod duckdb_metadata_repository;
 mod duckdb_vector_repository;
 mod in_memory_vector_repository;
 mod llm_query_expander;
+pub mod management;
 pub mod mcp;
 mod mock_embedding;
 mod mock_reranking;
