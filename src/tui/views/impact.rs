@@ -279,8 +279,12 @@ fn render_path_tree(
         ]));
     }
 
-    // Final row: root symbol (◉) — not selectable.
+    // Final row: root symbol (◉) — selectable (the analysed symbol itself), at
+    // flat index path.len().
     {
+        let is_sel = chain_focused && selected == path.len();
+        let bg = if is_sel { Color::Red } else { Color::Reset };
+        let sym_fg = if is_sel { Color::Black } else { Color::Red };
         let depth = path.len().saturating_sub(1);
         let base_indent = "    ".repeat(depth);
         lines.push(Line::from(Span::styled(
@@ -289,13 +293,16 @@ fn render_path_tree(
         )));
         lines.push(Line::from(vec![
             Span::styled(
-                format!("{}   └── ", base_indent),
-                Style::default().fg(Color::DarkGray),
+                format!("{}   └── {}", base_indent, if is_sel { "▶ " } else { "" }),
+                Style::default().fg(Color::DarkGray).bg(bg),
             ),
-            Span::styled("◉  ", Style::default().fg(Color::Red)),
+            Span::styled("◉  ", Style::default().fg(Color::Red).bg(bg)),
             Span::styled(
                 root_symbol.to_string(),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(sym_fg)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]));
     }

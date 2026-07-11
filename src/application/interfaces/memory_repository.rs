@@ -1,0 +1,106 @@
+use async_trait::async_trait;
+
+use crate::domain::{DomainError, ImportedSession, MemoryItem, MemoryKind, MemoryNode, NodeKind};
+
+/// Persistence port for long-term memory items and imported-session records.
+///
+/// Memory lives in its own store (a dedicated DuckDB file, separate from the
+/// code index) so that importing sessions never contends with indexing and
+/// the memory database can be inspected, backed up, or wiped independently.
+#[async_trait]
+pub trait MemoryRepository: Send + Sync {
+    /// Insert or replace a memory item, keyed by `(kind, name)`.
+    ///
+    /// `vector` is the embedding of the item content; `None` when embeddings
+    /// are unavailable (the item remains keyword-searchable).
+    async fn upsert_item(
+        &self,
+        item: &MemoryItem,
+        vector: Option<&[f32]>,
+    ) -> Result<(), DomainError>;
+
+    async fn find_item(
+        &self,
+        kind: MemoryKind,
+        name: &str,
+    ) -> Result<Option<MemoryItem>, DomainError>;
+
+    /// Find an item by its ID.
+    async fn find_item_by_id(&self, id: &str) -> Result<Option<MemoryItem>, DomainError>;
+
+    /// Delete by `(kind, name)`. Returns `true` when an item was removed.
+    async fn delete_item(&self, kind: MemoryKind, name: &str) -> Result<bool, DomainError>;
+
+    /// Delete by item ID. Returns `true` when an item was removed.
+    async fn delete_item_by_id(&self, id: &str) -> Result<bool, DomainError>;
+
+    /// List items, optionally restricted to one kind, newest first.
+    async fn list_items(&self, kind: Option<MemoryKind>) -> Result<Vec<MemoryItem>, DomainError>;
+
+    /// Cosine-similarity search over item embeddings.
+    /// Returns `(item, score)` pairs, best first, score in `[0, 1]`.
+    async fn search_semantic(
+        &self,
+        vector: &[f32],
+        kind: Option<MemoryKind>,
+        limit: usize,
+    ) -> Result<Vec<(MemoryItem, f32)>, DomainError>;
+
+    /// Case-insensitive keyword search over item names and content.
+    /// Returns `(item, score)` pairs, best first.
+    async fn search_keyword(
+        &self,
+        query: &str,
+        kind: Option<MemoryKind>,
+        limit: usize,
+    ) -> Result<Vec<(MemoryItem, f32)>, DomainError>;
+
+    /// Record that a session has been imported (idempotence marker).
+    async fn record_session(&self, session: &ImportedSession) -> Result<(), DomainError>;
+
+    async fn find_session(&self, id: &str) -> Result<Option<ImportedSession>, DomainError>;
+
+    /// List imported sessions, newest first.
+    async fn list_sessions(&self) -> Result<Vec<ImportedSession>, DomainError>;
+
+    // ── Virtual filesystem nodes (L0/L1/L2) ──────────────────────────────
+
+    /// Insert or replace a node, keyed by its `uri`.
+    ///
+    /// `vector` is the embedding of the node's L0/L1 summary; `None` when
+    /// embeddings are unavailable (the node remains keyword-searchable and
+    /// browsable by URI).
+    async fn upsert_node(
+        &self,
+        node: &MemoryNode,
+        vector: Option<&[f32]>,
+    ) -> Result<(), DomainError>;
+
+    /// Fetch a single node by its `memory://` URI.
+    async fn find_node(&self, uri: &str) -> Result<Option<MemoryNode>, DomainError>;
+
+    /// List the direct children of a directory URI (its immediate members in
+    /// the virtual filesystem), newest first.
+    async fn list_child_nodes(&self, parent_uri: &str) -> Result<Vec<MemoryNode>, DomainError>;
+
+    /// List nodes, optionally restricted to one kind, newest first.
+    async fn list_nodes(&self, kind: Option<NodeKind>) -> Result<Vec<MemoryNode>, DomainError>;
+
+    /// Cosine-similarity search over node L0/L1 embeddings.
+    /// Returns `(node, score)` pairs, best first, score in `[0, 1]`.
+    async fn search_nodes_semantic(
+        &self,
+        vector: &[f32],
+        kind: Option<NodeKind>,
+        limit: usize,
+    ) -> Result<Vec<(MemoryNode, f32)>, DomainError>;
+
+    /// Case-insensitive keyword search over node abstracts and overviews.
+    /// Returns `(node, score)` pairs, best first.
+    async fn search_nodes_keyword(
+        &self,
+        query: &str,
+        kind: Option<NodeKind>,
+        limit: usize,
+    ) -> Result<Vec<(MemoryNode, f32)>, DomainError>;
+}

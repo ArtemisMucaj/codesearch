@@ -322,6 +322,20 @@ pub fn flat_tree_nodes(
 ) -> Vec<FlatNode> {
     let mut result = Vec::new();
 
+    // Repository for the root node: the root symbol isn't a caller/callee node,
+    // so borrow the repo from an adjacent node (any caller, else a callee).
+    let root_repo = path
+        .first()
+        .map(|n| n.repository_id.clone())
+        .or_else(|| {
+            callee_children
+                .values()
+                .flatten()
+                .next()
+                .map(|n| n.repository_id.clone())
+        })
+        .unwrap_or_default();
+
     if has_callers {
         // ── Caller nodes ──────────────────────────────────────────────────────
         // path[0] (leaf): lines[0]
@@ -338,7 +352,10 @@ pub fn flat_tree_nodes(
             });
         }
 
-        // ◉ root is at lines[path.len() * 2] — not selectable, skip.
+        // ◉ root sits at lines[path.len() * 2] and IS selectable. It has no
+        // call-site location (it's the analysed symbol itself), so mark it a
+        // callee-style node so its code is looked up by symbol name.
+        result.push(root_flat_node(root_symbol, &root_repo, path.len() * 2));
         // Callees start at lines[path.len() * 2 + 1].
         let callee_start_lines = path.len() * 2 + 1;
         let mut callee_offset = 0usize;
@@ -352,7 +369,8 @@ pub fn flat_tree_nodes(
             &mut visited,
         );
     } else {
-        // ◉ root is at lines[0] — not selectable.
+        // ◉ root is at lines[0] and IS selectable.
+        result.push(root_flat_node(root_symbol, &root_repo, 0));
         // Callees start at lines[1].
         let callee_start_lines = 1;
         let mut callee_offset = 0usize;
@@ -368,6 +386,20 @@ pub fn flat_tree_nodes(
     }
 
     result
+}
+
+/// A selectable flat node for the root ◉ symbol. It has no call-site location,
+/// so it is marked `is_callee` (looked up by symbol name for code display) and
+/// its file/line are left empty.
+fn root_flat_node(root_symbol: &str, repository_id: &str, lines_index: usize) -> FlatNode {
+    FlatNode {
+        symbol: root_symbol.to_string(),
+        repository_id: repository_id.to_string(),
+        file_path: String::new(),
+        line: 0,
+        lines_index,
+        is_callee: true,
+    }
 }
 
 fn collect_flat_callees(
@@ -444,8 +476,11 @@ fn render_call_context_tree(
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // callee_flat_idx: the flat index that the first callee node gets.
-    let callee_flat_base = if has_callers { path.len() } else { 0 };
+    // Flat index of the root ◉ node (right after the caller chain), and of the
+    // first callee (right after the root). These must match the order in
+    // `flat_tree_nodes`: callers…, root, callees….
+    let root_flat_idx = if has_callers { path.len() } else { 0 };
+    let callee_flat_base = root_flat_idx + 1;
 
     if has_callers {
         // ── Caller chain ──────────────────────────────────────────────────────
@@ -511,8 +546,11 @@ fn render_call_context_tree(
             ]));
         }
 
-        // Root symbol (◉) — not selectable.
+        // Root symbol (◉) — selectable (the analysed symbol itself).
         {
+            let is_sel = tree_focused && selected == root_flat_idx;
+            let bg = if is_sel { Color::Red } else { Color::Reset };
+            let sym_fg = if is_sel { Color::Black } else { Color::Red };
             let depth = path.len().saturating_sub(1);
             let base_indent = "    ".repeat(depth);
             lines.push(Line::from(Span::styled(
@@ -521,13 +559,16 @@ fn render_call_context_tree(
             )));
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("{}   └── ", base_indent),
-                    Style::default().fg(Color::DarkGray),
+                    format!("{}   └── {}", base_indent, if is_sel { "▶ " } else { "" }),
+                    Style::default().fg(Color::DarkGray).bg(bg),
                 ),
-                Span::styled("◉  ", Style::default().fg(Color::Red)),
+                Span::styled("◉  ", Style::default().fg(Color::Red).bg(bg)),
                 Span::styled(
                     root_symbol.to_string(),
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(sym_fg)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]));
 
@@ -548,12 +589,21 @@ fn render_call_context_tree(
             );
         }
     } else {
-        // No callers: just root symbol + callees.
+        // No callers: root symbol (selectable) + callees.
+        let is_sel = tree_focused && selected == root_flat_idx;
+        let bg = if is_sel { Color::Red } else { Color::Reset };
+        let sym_fg = if is_sel { Color::Black } else { Color::Red };
         lines.push(Line::from(vec![
-            Span::styled("◉  ", Style::default().fg(Color::Red)),
+            Span::styled(
+                if is_sel { "▶ ◉  " } else { "◉  " },
+                Style::default().fg(Color::Red).bg(bg),
+            ),
             Span::styled(
                 root_symbol.to_string(),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(sym_fg)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]));
         let mut visited: HashSet<String> = HashSet::new();

@@ -13,10 +13,12 @@ pub const DEFAULT_ONNX_EMBEDDING_MODEL: &str = "sentence-transformers/all-MiniLM
 mod anthropic_client;
 mod anthropic_reranking;
 mod chat_client;
+mod claude_transcript;
 mod duckdb_analysis_repository;
 mod duckdb_call_graph_repository;
 mod duckdb_channel_endpoint_repository;
 mod duckdb_file_hash_repository;
+mod duckdb_memory_repository;
 mod duckdb_metadata_repository;
 mod duckdb_vector_repository;
 mod in_memory_vector_repository;
@@ -30,17 +32,21 @@ mod openai_embedding;
 mod openai_reranking;
 mod ort_embedding;
 mod ort_reranking;
+mod resource_fetch;
 pub mod scip;
+mod session_discovery;
 mod tree_sitter_channels;
 mod treesitter_parser;
 
 pub use anthropic_client::*;
 pub use anthropic_reranking::*;
 pub use chat_client::*;
+pub use claude_transcript::*;
 pub use duckdb_analysis_repository::*;
 pub use duckdb_call_graph_repository::*;
 pub use duckdb_channel_endpoint_repository::*;
 pub use duckdb_file_hash_repository::*;
+pub use duckdb_memory_repository::*;
 pub use duckdb_metadata_repository::*;
 pub use duckdb_vector_repository::*;
 pub use in_memory_vector_repository::*;
@@ -53,5 +59,9 @@ pub use openai_embedding::*;
 pub use openai_reranking::*;
 pub use ort_embedding::*;
 pub use ort_reranking::*;
+pub use resource_fetch::*;
+pub use session_discovery::{
+    discover_all_sessions, discover_all_sessions_streaming, load_transcript,
+};
 pub use tree_sitter_channels::*;
 pub use treesitter_parser::*;

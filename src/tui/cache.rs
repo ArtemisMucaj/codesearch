@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::application::ImpactAnalysis;
+use crate::application::MemoryRow;
 use crate::application::SymbolContext;
 use crate::domain::{CodeChunk, SearchResult};
 
@@ -20,6 +21,7 @@ pub struct TuiCache {
     pub impacts: HashMap<String, ImpactAnalysis>,
     pub contexts: HashMap<String, SymbolContext>,
     pub snippets: HashMap<SnippetKey, Option<CodeChunk>>,
+    pub memories: HashMap<String, Vec<MemoryRow>>,
 }
 
 impl TuiCache {
@@ -44,5 +46,11 @@ impl TuiCache {
     /// Build the cache key for a snippet lookup.
     pub fn snippet_key(repository_id: &str, file_path: &str, line: u32) -> SnippetKey {
         (repository_id.to_string(), file_path.to_string(), line)
+    }
+
+    /// Build the cache key for a unified memory search/browse.
+    /// An empty query is the "browse everything" request.
+    pub fn memory_key(query: &str) -> String {
+        format!("mem:{query}")
     }
 }

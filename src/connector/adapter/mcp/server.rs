@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::application::{CallGraphQuery, ChannelLinkOptions};
 use crate::connector::api::Container;
-use crate::domain::{FileEdge, Protocol, SearchQuery};
+use crate::domain::{FileEdge, MemoryKind, Protocol, SearchQuery};
 
 use super::tools::SearchResultOutput;
 
@@ -287,6 +287,97 @@ pub struct GetSymbolClusterInput {
 
     /// Repository ID the symbol belongs to.
     pub repository_id: String,
+}
+
+/// Input parameters for the search_memory tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchMemoryInput {
+    /// Natural-language query describing what to recall
+    /// (e.g. "user's code style preferences", "how we fixed the flaky CI").
+    pub query: String,
+
+    /// Restrict to one memory kind: "preference", "experience", "skill", or
+    /// "fact". Omit to search across all kinds.
+    pub kind: Option<String>,
+
+    /// Maximum number of results to return (default: 10, server cap: 100)
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+}
+
+/// Input parameters for the list_memories tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListMemoriesInput {
+    /// Restrict to one memory kind: "preference", "experience", "skill", or
+    /// "fact". Omit to list all kinds.
+    pub kind: Option<String>,
+}
+
+/// Input parameters for the read_memory tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReadMemoryInput {
+    /// A `memory://` node URI. Omit (or pass "memory://memory") to read the
+    /// whole-memory rollup — the "read this first" summary of everything
+    /// stored. Use "memory://sessions" to see stored sessions, or a specific
+    /// "memory://sessions/<id>" to read one session's transcript.
+    pub uri: Option<String>,
+}
+
+/// A virtual-filesystem node returned by read_memory
+#[derive(Debug, Serialize)]
+pub struct MemoryNodeOutput {
+    /// The node's `memory://` URI
+    pub uri: String,
+    /// Node kind: memory, session, or resource
+    pub kind: String,
+    /// L0 — one-line abstract
+    pub r#abstract: String,
+    /// L1 — overview outline
+    pub overview: String,
+    /// L2 — full detail (e.g. a session transcript); empty for index nodes
+    pub content: String,
+    /// Child nodes (URI + abstract) when this node is a directory
+    pub children: Vec<MemoryNodeChild>,
+}
+
+/// A child entry listed under a directory node
+#[derive(Debug, Serialize)]
+pub struct MemoryNodeChild {
+    pub uri: String,
+    pub kind: String,
+    pub r#abstract: String,
+}
+
+/// A memory item returned by search_memory
+#[derive(Debug, Serialize)]
+pub struct MemorySearchResultOutput {
+    /// Item ID (stable across updates)
+    pub id: String,
+    /// Memory kind: preference, experience, skill, or fact
+    pub kind: String,
+    /// Snake_case topic identifier, unique per kind
+    pub name: String,
+    /// Full Markdown content of the memory
+    pub content: String,
+    /// Fused relevance score (higher is better)
+    pub score: f32,
+    /// Unix timestamp of the last update
+    pub updated_at: i64,
+}
+
+/// Parse an optional memory-kind filter, rejecting unknown values.
+fn parse_kind_filter(kind: &Option<String>) -> Result<Option<MemoryKind>, McpError> {
+    match kind {
+        None => Ok(None),
+        Some(k) => MemoryKind::parse(k).map(Some).ok_or_else(|| {
+            McpError::invalid_params(
+                format!(
+                    "Unknown memory kind '{k}' (expected preference, experience, skill, or fact)"
+                ),
+                None,
+            )
+        }),
+    }
 }
 
 // ── MCP Server ───────────────────────────────────────────────────────────────
@@ -944,6 +1035,146 @@ impl CodesearchMcpServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    /// Recall long-term memories extracted from previous assistant sessions:
+    /// user preferences, reusable experiences, procedural skills, and project
+    /// facts. Hybrid semantic + keyword search over the memory store. Call this
+    /// at the start of a task to load relevant context — e.g. the user's code
+    /// style preferences before writing code, or past experiences before
+    /// debugging a familiar problem.
+    /// Memories are created with `codesearch memory import <session.jsonl>`.
+    #[tool(name = "search_memory")]
+    async fn search_memory(
+        &self,
+        params: Parameters<SearchMemoryInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = params.0;
+        let kind = parse_kind_filter(&input.kind)?;
+        let limit = input.limit.min(MAX_LIMIT);
+
+        let use_case = self.container.memory_search_use_case().map_err(|e| {
+            McpError::internal_error(format!("Failed to open memory store: {}", e), None)
+        })?;
+        let results = use_case
+            .execute(&input.query, kind, limit)
+            .await
+            .map_err(|e| McpError::internal_error(format!("Memory search failed: {}", e), None))?;
+
+        let outputs: Vec<MemorySearchResultOutput> = results
+            .into_iter()
+            .map(|(item, score)| MemorySearchResultOutput {
+                id: item.id().to_string(),
+                kind: item.kind().as_str().to_string(),
+                name: item.name().to_string(),
+                content: item.content().to_string(),
+                score,
+                updated_at: item.updated_at(),
+            })
+            .collect();
+
+        let json = serde_json::to_string_pretty(&outputs).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize memories: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// List stored long-term memories, newest first, optionally filtered by
+    /// kind. Use kind="preference" at session start to load every known user
+    /// preference at once; use search_memory instead when looking for something
+    /// specific.
+    #[tool(name = "list_memories")]
+    async fn list_memories(
+        &self,
+        params: Parameters<ListMemoriesInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = params.0;
+        let kind = parse_kind_filter(&input.kind)?;
+
+        let repo = self.container.memory_repository().map_err(|e| {
+            McpError::internal_error(format!("Failed to open memory store: {}", e), None)
+        })?;
+        let items = repo
+            .list_items(kind)
+            .await
+            .map_err(|e| McpError::internal_error(format!("Memory listing failed: {}", e), None))?;
+
+        let json = serde_json::to_string_pretty(&items).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize memories: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Read the memory virtual filesystem, level by level. Call this FIRST at
+    /// the start of a task with no arguments (or uri="memory://memory") to get
+    /// the whole-memory rollup — a single abstract + overview of everything
+    /// known about the user and project — then drill in only where relevant.
+    /// A directory URI (e.g. "memory://sessions") returns its children with
+    /// one-line abstracts; a leaf URI (e.g. "memory://sessions/<id>") returns
+    /// the node's full detail, such as a session transcript.
+    #[tool(name = "read_memory")]
+    async fn read_memory(
+        &self,
+        params: Parameters<ReadMemoryInput>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::application::MEMORY_ROOT_URI;
+
+        let uri = params.0.uri.unwrap_or_else(|| MEMORY_ROOT_URI.to_string());
+
+        let repo = self.container.memory_repository().map_err(|e| {
+            McpError::internal_error(format!("Failed to open memory store: {}", e), None)
+        })?;
+
+        let node = repo
+            .find_node(&uri)
+            .await
+            .map_err(|e| McpError::internal_error(format!("Memory read failed: {}", e), None))?;
+
+        let children = repo
+            .list_child_nodes(&uri)
+            .await
+            .map_err(|e| McpError::internal_error(format!("Memory read failed: {}", e), None))?
+            .into_iter()
+            .map(|c| MemoryNodeChild {
+                uri: c.uri().to_string(),
+                kind: c.kind().as_str().to_string(),
+                r#abstract: c.abstract_().to_string(),
+            })
+            .collect::<Vec<_>>();
+
+        let output = match node {
+            Some(node) => MemoryNodeOutput {
+                uri: node.uri().to_string(),
+                kind: node.kind().as_str().to_string(),
+                r#abstract: node.abstract_().to_string(),
+                overview: node.overview().to_string(),
+                content: node.content().to_string(),
+                children,
+            },
+            // A directory URI (e.g. memory://sessions) may have no node record
+            // of its own but still list children.
+            None if !children.is_empty() => MemoryNodeOutput {
+                uri: uri.clone(),
+                kind: "directory".to_string(),
+                r#abstract: String::new(),
+                overview: String::new(),
+                content: String::new(),
+                children,
+            },
+            None => {
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "No memory node found at '{uri}'."
+                ))]));
+            }
+        };
+
+        let json = serde_json::to_string_pretty(&output).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize memory node: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
     /// Detect symbol communities in a repository by running Leiden community
     /// detection over its symbol call graph (one level finer than `list_clusters`,
     /// which works on files). Returns the communities with their names, dominant
@@ -1024,7 +1255,12 @@ impl ServerHandler for CodesearchMcpServer {
                  • get_file_cluster — the cluster a given file belongs to\n\
                  • architecture_overview — Markdown table summarising clusters and dependencies\n\
                  • list_symbol_clusters — symbol-level communities via Leiden over the call graph\n\
-                 • get_symbol_cluster — the symbol community a given symbol belongs to"
+                 • get_symbol_cluster — the symbol community a given symbol belongs to\n\
+                 • search_memory — recall long-term memories (preferences, experiences, skills, \
+                   facts) extracted from previous sessions\n\
+                 • list_memories — list stored memories, optionally filtered by kind\n\
+                 • read_memory — read the memory virtual filesystem; call with no args first for \
+                   the whole-memory rollup, then drill into memory:// nodes (sessions, resources)"
                     .into(),
             ),
         }

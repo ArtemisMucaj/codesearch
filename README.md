@@ -247,6 +247,40 @@ codesearch explain authenticate --llm open-ai
 
 See [Call Graph Analysis — LLM Explanation](docs/features/call-graph.md#llm-explanation-codesearch-explain) for the full flag reference, environment variables, and example output.
 
+## Long-Term Memory (`memory`)
+
+Import finished assistant sessions (Claude Code transcripts or generic JSONL
+chat logs) and distill them into durable, searchable memories — user
+preferences, reusable experiences, procedural skills, and project facts.
+Extraction uses a small LLM via the same provider configuration as `explain`;
+memories live in their own database (`~/.codesearch/memory.duckdb`), separate
+from the code index.
+
+```bash
+codesearch memory import ~/.claude/projects/<project>/<session-id>.jsonl
+codesearch memory search "how do we handle lock conflicts"
+codesearch memory list --kind preference
+
+# Add a file or URL as a resource (fetched, summarized, stored)
+codesearch memory add ./docs/design.md
+codesearch memory add https://example.com/guide --name guide
+
+# Browse the memory virtual filesystem (L0/L1 abstracts)
+codesearch memory tree                     # roots: the rollup + stored sessions + resources
+codesearch memory show memory://memory     # the "read this first" summary
+codesearch memory show memory://sessions/<id>   # one session's transcript
+```
+
+Each import also stores the session as a node in a `memory://` virtual
+filesystem (with a generated L0 abstract, L1 overview, and its full transcript)
+and regenerates a whole-memory rollup at `memory://memory` — a summary an agent
+reads first before drilling into individual memories. `memory add` stores files
+and URLs the same way under `memory://resources` (URLs and HTML are decluttered
+with the [`defuddle`](https://github.com/kepano/defuddle-cli) CLI).
+
+See [Long-Term Memory](docs/features/memory.md) for the memory kinds, the
+virtual filesystem, update semantics, and model configuration.
+
 ## Interactive TUI (`tui`)
 
 A full-screen terminal UI combining search, impact analysis, and context lookup in one interface.
@@ -443,6 +477,9 @@ The HTTP server exposes the MCP endpoint at `/mcp`.
 | `architecture_overview` | Markdown table summarising clusters and inter-cluster dependencies. Accepts `repository_id`. |
 | `list_symbol_clusters` | Symbol-level communities via Leiden over the call graph. Accepts `repository_id`. |
 | `get_symbol_cluster` | The symbol community a given symbol belongs to. Accepts `symbol` and `repository_id`. |
+| `search_memory` | Recall long-term memories (preferences, experiences, skills, facts) extracted from imported sessions. Accepts `query`, `kind`, and `limit`. |
+| `list_memories` | List stored memories, newest first. Accepts `kind`. |
+| `read_memory` | Read the memory virtual filesystem. Call with no args first for the whole-memory rollup, then drill into `memory://` nodes (sessions, resources). Accepts `uri`. |
 
 The `query_graph` tool supports eight intention-named relationship `pattern`s, returning
 only the requested edge type instead of every relationship at once:

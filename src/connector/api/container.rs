@@ -7,12 +7,15 @@ use tracing::{debug, warn};
 
 use crate::application::{
     AnalysisRepository, CallGraphRepository, CallGraphUseCase, ChannelEndpointRepository,
-    ChannelLinkUseCase, FileHashRepository, MetadataRepository, QueryExpander,
+    ChannelLinkUseCase, ChatClient, FileHashRepository, ImportSessionUseCase, MemoryBrowseUseCase,
+    MemoryExtractionUseCase, MemoryRepository, MemorySearchUseCase, MetadataRepository,
+    QueryExpander, SummarizeMemoryUseCase,
 };
 use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::scip::ScipRunner;
 use crate::connector::adapter::{
-    DuckdbAnalysisRepository, NamespaceEmbeddingConfig, NoEmbedding, NO_EMBEDDINGS_MODEL,
+    DuckdbAnalysisRepository, DuckdbMemoryRepository, NamespaceEmbeddingConfig, NoEmbedding,
+    MEMORY_DB_FILE, NO_EMBEDDINGS_MODEL,
 };
 use crate::{
     AnthropicClient, AnthropicReranking, ClusterDetectionUseCase, DeleteRepositoryUseCase,
@@ -123,6 +126,11 @@ pub struct Container {
     call_graph_use_case: Arc<CallGraphUseCase>,
     channel_endpoint_repo: Arc<dyn ChannelEndpointRepository>,
     analysis_repo: Arc<dyn AnalysisRepository>,
+    /// Lazily opened memory store, shared across calls. Caching matters for
+    /// the long-running MCP server: DuckDB allows only one writer per file,
+    /// so concurrent tool calls must reuse a single connection instead of
+    /// each opening `memory.duckdb`.
+    memory_repo: std::sync::Mutex<Option<Arc<dyn MemoryRepository>>>,
     config: ContainerConfig,
 }
 
@@ -572,6 +580,7 @@ impl Container {
             call_graph_use_case,
             channel_endpoint_repo,
             analysis_repo,
+            memory_repo: std::sync::Mutex::new(None),
             config,
         })
     }
@@ -735,6 +744,80 @@ impl Container {
     pub fn symbol_cluster_detection_use_case(&self) -> SymbolClusterDetectionUseCase {
         SymbolClusterDetectionUseCase::new(self.call_graph_use_case.clone())
             .with_storage(self.analysis_repo.clone())
+    }
+
+    /// Open the memory store — a dedicated DuckDB file (`memory.duckdb`)
+    /// separate from the code index, created on first use.
+    ///
+    /// The store is keyed to the container's embedding setup (model +
+    /// dimensions); opening it with a different setup is a hard error, since
+    /// stored memory vectors would be incomparable with new queries.
+    pub fn memory_repository(&self) -> Result<Arc<dyn MemoryRepository>> {
+        let mut cache = self
+            .memory_repo
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory repository cache lock poisoned"))?;
+        if let Some(repo) = cache.as_ref() {
+            return Ok(Arc::clone(repo));
+        }
+        let db_path = PathBuf::from(&self.config.data_dir).join(MEMORY_DB_FILE);
+        let embedding_cfg = self.embedding_service.config();
+        let repo: Arc<dyn MemoryRepository> = Arc::new(DuckdbMemoryRepository::new(
+            &db_path,
+            embedding_cfg.dimensions(),
+            embedding_cfg.model_name(),
+        )?);
+        *cache = Some(Arc::clone(&repo));
+        Ok(repo)
+    }
+
+    /// Session import + memory extraction + virtual-filesystem summarization,
+    /// all driven by the given chat model.
+    pub fn memory_import_use_case(
+        &self,
+        chat_client: Arc<dyn ChatClient>,
+    ) -> Result<ImportSessionUseCase> {
+        let memory_repo = self.memory_repository()?;
+        let extraction = MemoryExtractionUseCase::new(
+            Arc::clone(&chat_client),
+            Arc::clone(&memory_repo),
+            self.embedding_service.clone(),
+        );
+        let summary = SummarizeMemoryUseCase::new(
+            chat_client,
+            Arc::clone(&memory_repo),
+            self.embedding_service.clone(),
+        );
+        Ok(ImportSessionUseCase::new(memory_repo, extraction, summary))
+    }
+
+    pub fn memory_search_use_case(&self) -> Result<MemorySearchUseCase> {
+        Ok(MemorySearchUseCase::new(
+            self.memory_repository()?,
+            self.embedding_service.clone(),
+        ))
+    }
+
+    /// Unified memory search/browse over items + filesystem nodes (used by the
+    /// TUI's Memory mode).
+    pub fn memory_browse_use_case(&self) -> Result<MemoryBrowseUseCase> {
+        Ok(MemoryBrowseUseCase::new(
+            self.memory_repository()?,
+            self.embedding_service.clone(),
+        ))
+    }
+
+    /// Summarization use case (session/resource nodes + rollup), driven by the
+    /// given chat model. Used to add resources and regenerate the rollup.
+    pub fn memory_summary_use_case(
+        &self,
+        chat_client: Arc<dyn ChatClient>,
+    ) -> Result<SummarizeMemoryUseCase> {
+        Ok(SummarizeMemoryUseCase::new(
+            chat_client,
+            self.memory_repository()?,
+            self.embedding_service.clone(),
+        ))
     }
 
     pub fn data_dir(&self) -> &str {
