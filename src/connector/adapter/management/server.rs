@@ -9,6 +9,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::extract::State;
+use axum::http::{header, StatusCode};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
@@ -16,9 +18,17 @@ use serde_json::{json, Value};
 use super::handlers;
 use crate::connector::api::Container;
 
+use super::streaming::{explain_stream, index_stream};
+
 /// Crate version, surfaced by `/health` and the API index so clients can
 /// detect the running server's build.
 const API_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Hand-written OpenAPI 3.1 description of the management API, checked in at
+/// `docs/management-api.openapi.json` and served verbatim at
+/// `GET /api/openapi.json`. Embedded at compile time so the running server is
+/// always self-describing without a filesystem dependency.
+const OPENAPI_JSON: &str = include_str!("../../../../docs/management-api.openapi.json");
 
 /// Shared state handed to every management route handler.
 ///
@@ -57,7 +67,7 @@ pub fn routes(state: AppState) -> Router {
         .route("/", get(index))
         .route("/api", get(index))
         .route("/health", get(health))
-        // ── PR2: per-command REST endpoints ──────────────────────────────────
+        // ── Per-command REST endpoints ───────────────────────────────────────
         // Repositories + stats.
         .route("/api/repositories", get(handlers::repositories::list))
         .route(
@@ -87,7 +97,16 @@ pub fn routes(state: AppState) -> Router {
         .route("/api/memory/sessions", get(handlers::memory::sessions))
         .route("/api/memory/tree", get(handlers::memory::tree))
         .route("/api/memory/{id}", get(handlers::memory::get))
-        // PR3: streaming endpoints attach here.
+        // ── Streaming (SSE) endpoints ────────────────────────────────────────
+        // Live under the `/api/stream/...` prefix so they never clash with the
+        // `/api/...` REST routes above.
+        .route(
+            "/api/stream/explain/{symbol}",
+            get(explain_stream).post(explain_stream),
+        )
+        .route("/api/stream/index", post(index_stream))
+        // Machine-readable API description for native-app consumers.
+        .route("/api/openapi.json", get(openapi))
         .with_state(state)
 }
 
@@ -129,8 +148,23 @@ async fn index(State(_state): State<AppState>) -> Json<Value> {
             { "method": "GET", "path": "/api/memory/sessions", "description": "imported sessions" },
             { "method": "GET", "path": "/api/memory/tree", "description": "browse the memory filesystem (?uri=)" },
             { "method": "GET", "path": "/api/memory/{id}", "description": "one memory item or node" },
+            { "method": "GET", "path": "/api/openapi.json", "description": "OpenAPI 3.1 description of this API" },
+            { "method": "GET/POST", "path": "/api/stream/explain/{symbol}", "description": "SSE: stream an LLM call-flow explanation for a symbol" },
+            { "method": "POST", "path": "/api/stream/index", "description": "SSE: stream indexing progress for a repository path" },
         ],
     }))
+}
+
+/// `GET /api/openapi.json` — machine-readable API description.
+///
+/// Serves the checked-in OpenAPI 3.1 document (embedded at compile time) with a
+/// JSON content type so native-app clients can generate typed bindings.
+async fn openapi() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        OPENAPI_JSON,
+    )
 }
 
 /// Run the management HTTP API server until ctrl-c.

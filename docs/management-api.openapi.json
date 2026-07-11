@@ -1,0 +1,313 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "CodeSearch Management API",
+    "version": "0.1.0",
+    "description": "HTTP management API for the `codesearch serve` command. Exposes codesearch operations over REST/JSON and Server-Sent Events (SSE), separate from the MCP protocol server.\n\nThis document is checked in at `docs/management-api.openapi.json` and served verbatim at `GET /api/openapi.json`.\n\n## Streaming (SSE) endpoints\n\nPaths under `/api/stream/` respond with `text/event-stream`. Each frame is a named SSE event (`event:`) with a JSON `data:` payload. A terminal `done` or `error` event is always the last frame; clients treat either as end-of-stream. If the client disconnects, the server drops the in-flight work. The precise `event` names and payloads are documented per-path below and, because OpenAPI cannot express SSE frame shapes natively, mirrored in the `SseEvent*` component schemas.\n\n## REST endpoints (stacked PR #2)\n\nThe non-streaming `/api/...` REST endpoints (search, repositories, stats, etc.) are added by the sibling PR and are described generically here under `See `x-note``. Their exact request/response schemas should be reconciled into this document once that PR merges."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:{port}",
+      "description": "Local management server (default bind). Use 0.0.0.0 when started with --public.",
+      "variables": {
+        "port": {
+          "default": "0",
+          "description": "Port passed to `codesearch serve`."
+        }
+      }
+    }
+  ],
+  "tags": [
+    { "name": "meta", "description": "Server metadata and health." },
+    { "name": "stream", "description": "Long-running / token-streaming operations over SSE." },
+    { "name": "rest", "description": "Non-streaming command endpoints (owned by stacked PR #2)." }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "Liveness/readiness probe",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "Server is up.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Health" },
+                "example": { "status": "ok", "version": "0.1.0" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "API index",
+        "description": "Self-describing document listing the currently available endpoints. Also served at `/`.",
+        "operationId": "apiIndex",
+        "responses": {
+          "200": {
+            "description": "API index document.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiIndex" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/openapi.json": {
+      "get": {
+        "tags": ["meta"],
+        "summary": "OpenAPI description of this API",
+        "operationId": "openapi",
+        "responses": {
+          "200": {
+            "description": "This OpenAPI 3.1 document.",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    },
+    "/api/stream/explain/{symbol}": {
+      "parameters": [
+        {
+          "name": "symbol",
+          "in": "path",
+          "required": true,
+          "description": "The symbol whose call flow to explain. Interpreted as a regex when the request body sets `regex: true`.",
+          "schema": { "type": "string" }
+        }
+      ],
+      "get": {
+        "tags": ["stream"],
+        "summary": "Stream an LLM call-flow explanation (SSE)",
+        "description": "Streams the LLM's explanation of a symbol's bidirectional call flow token by token.\n\n**Response is `text/event-stream`.** Events, in order:\n- `token` — one chunk of the explanation; payload `{ \"text\": string }`. Zero or more.\n- `done` — terminal summary; payload `SseExplainDone`. Exactly one on success.\n- `error` — terminal failure; payload `{ \"message\": string }`. Replaces `done` on failure.\n\nIf the symbol is ambiguous (matches several fully-qualified names), no `token` events are emitted and the `done` event carries `status: \"ambiguous\"` with a `candidates` list instead of an explanation.\n\nNo request body is required for `GET`; use `POST` to pass options.",
+        "operationId": "explainStreamGet",
+        "responses": {
+          "200": {
+            "description": "SSE stream of `token` events followed by a terminal `done` or `error` event.",
+            "content": {
+              "text/event-stream": {
+                "schema": { "$ref": "#/components/schemas/SseExplainEvent" }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": ["stream"],
+        "summary": "Stream an LLM call-flow explanation (SSE)",
+        "description": "Same as the `GET` form, but accepts an optional JSON body of options.",
+        "operationId": "explainStreamPost",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ExplainStreamRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "SSE stream of `token` events followed by a terminal `done` or `error` event.",
+            "content": {
+              "text/event-stream": {
+                "schema": { "$ref": "#/components/schemas/SseExplainEvent" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/stream/index": {
+      "post": {
+        "tags": ["stream"],
+        "summary": "Stream repository indexing progress (SSE)",
+        "description": "Indexes a repository path and streams coarse lifecycle progress.\n\n**Response is `text/event-stream`.** Events, in order:\n- `progress` — a lifecycle update; payload `{ \"stage\": string, \"message\": string }`. `stage` is `started` first, then periodic `running` heartbeats.\n- `done` — terminal summary; payload `SseIndexDone`. Exactly one on success.\n- `error` — terminal failure; payload `{ \"message\": string }`. Replaces `done` on failure.\n\nProgress is coarse (start / running heartbeats / done) because the underlying use case does not yet expose a per-file progress channel.",
+        "operationId": "indexStream",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/IndexStreamRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "SSE stream of `progress` events followed by a terminal `done` or `error` event.",
+            "content": {
+              "text/event-stream": {
+                "schema": { "$ref": "#/components/schemas/SseIndexEvent" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Health": {
+        "type": "object",
+        "required": ["status", "version"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ok"] },
+          "version": { "type": "string", "description": "Crate version of the running server." }
+        }
+      },
+      "ApiIndex": {
+        "type": "object",
+        "required": ["name", "version", "endpoints"],
+        "properties": {
+          "name": { "type": "string" },
+          "version": { "type": "string" },
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "method": { "type": "string" },
+                "path": { "type": "string" },
+                "description": { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "ExplainStreamRequest": {
+        "type": "object",
+        "description": "Optional options for the explain stream. All fields optional.",
+        "properties": {
+          "repository": {
+            "type": ["string", "null"],
+            "description": "Restrict the explanation to a single repository (name or UUID)."
+          },
+          "regex": {
+            "type": "boolean",
+            "default": false,
+            "description": "Interpret the `{symbol}` path segment as a regular expression."
+          },
+          "llm": {
+            "type": ["string", "null"],
+            "enum": ["anthropic", "openai", null],
+            "description": "LLM backend to use. Defaults to `anthropic`."
+          }
+        }
+      },
+      "IndexStreamRequest": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": { "type": "string", "description": "Filesystem path of the repository to index." },
+          "name": { "type": ["string", "null"], "description": "Optional human-readable name (defaults to the directory name)." },
+          "force": { "type": "boolean", "default": false, "description": "Force a full re-index, discarding existing data for this path." }
+        }
+      },
+      "SseExplainEvent": {
+        "description": "One SSE frame emitted by `/api/stream/explain/{symbol}`. `event` names the frame; `data` is the JSON payload. Modelled as a union for documentation — the wire format is SSE, not JSON.",
+        "oneOf": [
+          { "$ref": "#/components/schemas/SseTokenEvent" },
+          { "$ref": "#/components/schemas/SseExplainDoneEvent" },
+          { "$ref": "#/components/schemas/SseErrorEvent" }
+        ]
+      },
+      "SseIndexEvent": {
+        "description": "One SSE frame emitted by `/api/stream/index`.",
+        "oneOf": [
+          { "$ref": "#/components/schemas/SseProgressEvent" },
+          { "$ref": "#/components/schemas/SseIndexDoneEvent" },
+          { "$ref": "#/components/schemas/SseErrorEvent" }
+        ]
+      },
+      "SseTokenEvent": {
+        "type": "object",
+        "description": "`event: token` — one chunk of streamed explanation text.",
+        "required": ["text"],
+        "properties": { "text": { "type": "string" } }
+      },
+      "SseProgressEvent": {
+        "type": "object",
+        "description": "`event: progress` — a coarse lifecycle update.",
+        "required": ["stage", "message"],
+        "properties": {
+          "stage": { "type": "string", "enum": ["started", "running"] },
+          "message": { "type": "string" }
+        }
+      },
+      "SseErrorEvent": {
+        "type": "object",
+        "description": "`event: error` — terminal failure. Last frame of the stream.",
+        "required": ["message"],
+        "properties": { "message": { "type": "string" } }
+      },
+      "SseExplainDoneEvent": {
+        "type": "object",
+        "description": "`event: done` — terminal success for the explain stream.",
+        "oneOf": [
+          { "$ref": "#/components/schemas/SseExplainDoneOk" },
+          { "$ref": "#/components/schemas/SseExplainDoneAmbiguous" }
+        ]
+      },
+      "SseExplainDoneOk": {
+        "type": "object",
+        "required": ["status", "root_symbol", "explanation", "total_affected", "max_depth_reached", "referenced"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ok"] },
+          "root_symbol": { "type": "string" },
+          "explanation": { "type": "string", "description": "Full post-processed Markdown explanation (also delivered incrementally as `token` events)." },
+          "total_affected": { "type": "integer" },
+          "max_depth_reached": { "type": "integer" },
+          "referenced": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "symbol": { "type": "string" },
+                "repository": { "type": "string" },
+                "file": { "type": "string" },
+                "line": { "type": "integer" }
+              }
+            }
+          }
+        }
+      },
+      "SseExplainDoneAmbiguous": {
+        "type": "object",
+        "required": ["status", "root_symbol", "candidates", "is_regex"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ambiguous"] },
+          "root_symbol": { "type": "string" },
+          "candidates": { "type": "array", "items": { "type": "string" } },
+          "is_regex": { "type": "boolean" }
+        }
+      },
+      "SseIndexDoneEvent": {
+        "type": "object",
+        "description": "`event: done` — terminal success for the index stream.",
+        "required": ["status", "name", "file_count", "chunk_count", "languages"],
+        "properties": {
+          "status": { "type": "string", "enum": ["ok"] },
+          "name": { "type": "string" },
+          "file_count": { "type": "integer" },
+          "chunk_count": { "type": "integer" },
+          "languages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "language": { "type": "string" },
+                "files": { "type": "integer" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "x-note": "The non-streaming REST endpoints under `/api/...` (e.g. search, repositories, stats) are owned by stacked PR #2 and are intentionally not enumerated here to avoid churn. Once PR #2 merges, add their paths, request bodies, and response schemas to this document. The streaming endpoints and the skeleton endpoints (/health, /api, /api/openapi.json) above are precise and stable."
+}
