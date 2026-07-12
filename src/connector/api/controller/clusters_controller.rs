@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 
-use crate::cli::{OutputFormat, OutputFormatTextJson};
+use crate::cli::{LlmTarget, OutputFormat, OutputFormatTextJson};
+use crate::domain::community_label;
 
 use super::super::Container;
+use super::build_chat_client;
 
 pub struct ClustersController<'a> {
     container: &'a Container,
@@ -18,16 +20,30 @@ impl<'a> ClustersController<'a> {
         &self,
         repository: Option<String>,
         format: OutputFormatTextJson,
+        llm: LlmTarget,
+        no_llm: bool,
     ) -> Result<String> {
         let repository_id = self
             .container
             .resolve_repository_id(repository.as_deref())
             .await;
         let use_case = self.container.cluster_detection_use_case();
-        let cg = use_case
+        let mut cg = use_case
             .create_clusters(&repository_id)
             .await
             .context("detecting clusters for repository")?;
+
+        // LLM naming runs by default (best-effort, cached by cluster id). It
+        // probes the endpoint with one call and skips to id fallback if that
+        // fails, so an unreachable endpoint costs one quick error, not a timeout
+        // per cluster. `--no-llm` skips it outright.
+        if !no_llm {
+            let chat = build_chat_client(llm)?;
+            self.container
+                .community_naming_use_case()
+                .name_clusters(&mut cg.clusters, chat.as_ref())
+                .await;
+        }
 
         let format: OutputFormat = format.into();
         Ok(match format {
@@ -57,7 +73,7 @@ impl<'a> ClustersController<'a> {
                     out.push_str(&format!(
                         "{:>3}. {} ({} files, {}, cohesion {:.2})\n",
                         i + 1,
-                        c.name,
+                        community_label(&c.display_name, &c.id),
                         c.size,
                         c.dominant_language,
                         c.cohesion,
@@ -116,7 +132,11 @@ impl<'a> ClustersController<'a> {
             (Some(c), OutputFormat::Text) => format!(
                 "File `{}` belongs to cluster `{}` \
                  ({} files, {}, cohesion {:.2})\n",
-                file_path, c.name, c.size, c.dominant_language, c.cohesion
+                file_path,
+                community_label(&c.display_name, &c.id),
+                c.size,
+                c.dominant_language,
+                c.cohesion
             ),
         })
     }

@@ -18,15 +18,15 @@ use crate::connector::adapter::{
     MEMORY_DB_FILE, NO_EMBEDDINGS_MODEL,
 };
 use crate::{
-    AnthropicClient, AnthropicReranking, ClusterDetectionUseCase, DeleteRepositoryUseCase,
-    DuckdbCallGraphRepository, DuckdbChannelEndpointRepository, DuckdbFileHashRepository,
-    DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService, ExecutionFeaturesUseCase,
-    ExplainUseCase, FileRelationshipUseCase, GraphExpansionUseCase, ImpactAnalysisUseCase,
-    InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander,
-    MockEmbedding, MockReranking, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding,
-    OrtReranking, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
-    SymbolClusterDetectionUseCase, SymbolContextUseCase, TreeSitterChannelExtractor,
-    TreeSitterParser, VectorRepository,
+    AnthropicClient, AnthropicReranking, ClusterDetectionUseCase, CommunityNamingUseCase,
+    DeleteRepositoryUseCase, DuckdbCallGraphRepository, DuckdbChannelEndpointRepository,
+    DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
+    ExecutionFeaturesUseCase, ExplainUseCase, FileRelationshipUseCase, GraphExpansionUseCase,
+    ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
+    ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding, MockReranking, OpenAiChatClient,
+    OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, RerankingService, Scip,
+    SearchCodeUseCase, SnippetLookupUseCase, SymbolClusterDetectionUseCase, SymbolContextUseCase,
+    TreeSitterChannelExtractor, TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -756,6 +756,11 @@ impl Container {
     pub fn symbol_cluster_detection_use_case(&self) -> SymbolClusterDetectionUseCase {
         SymbolClusterDetectionUseCase::new(self.call_graph_use_case.clone())
             .with_storage(self.analysis_repo.clone())
+    }
+
+    /// LLM naming for detected communities, backed by the analysis cache.
+    pub fn community_naming_use_case(&self) -> CommunityNamingUseCase {
+        CommunityNamingUseCase::new(self.analysis_repo.clone())
     }
 
     /// Open the memory store — a dedicated DuckDB file (`memory.duckdb`)

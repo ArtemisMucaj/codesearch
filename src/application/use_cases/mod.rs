@@ -1,6 +1,7 @@
 mod call_graph;
 mod channel_link;
 mod cluster_detection;
+mod community_naming;
 mod delete_repository;
 mod execution_features;
 mod execution_features_naming;
@@ -28,6 +29,7 @@ mod visualize_graph;
 pub use call_graph::*;
 pub use channel_link::*;
 pub use cluster_detection::*;
+pub use community_naming::*;
 pub use delete_repository::*;
 pub use execution_features::*;
 pub use explain::*;

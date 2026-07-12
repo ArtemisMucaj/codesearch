@@ -9,26 +9,20 @@
 //! and even directory boundaries, which the file-level view cannot show.
 //!
 //! The graph primitives and the algorithm are reused verbatim from
-//! `cluster_detection` (`Graph`, `leiden`, `kind_weight`, naming helpers) so the
-//! two levels stay behaviourally identical and benefit from the same fixes.
+//! `cluster_detection` (`Graph`, `leiden`, `kind_weight`) so the two levels stay
+//! behaviourally identical and benefit from the same fixes.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use tracing::{debug, warn};
-use uuid::Uuid;
 
-use super::cluster_detection::{kind_weight, leiden, slugify, split_identifier, Graph, STOP_WORDS};
+use super::cluster_detection::{kind_weight, leiden, Graph};
 use crate::application::{AnalysisRepository, CallGraphUseCase};
 use crate::domain::{
-    CommunityMeta, DomainError, GraphEdge, GraphLevel, GraphNode, GraphView, SymbolCommunity,
-    SymbolCommunityGraph,
+    community_label, stable_community_id, CommunityMeta, DomainError, GraphEdge, GraphLevel,
+    GraphNode, GraphView, SymbolCommunity, SymbolCommunityGraph,
 };
-
-/// Maximum length of a generated community-name slug.
-const NAME_MAX_LENGTH: usize = 30;
-/// Minimum keyword length considered meaningful for naming.
-const MIN_KEYWORD_LEN: usize = 3;
 
 /// Use case: detect communities of tightly-coupled symbols in a repository's
 /// call graph and answer membership queries against them.
@@ -75,13 +69,35 @@ impl SymbolClusterDetectionUseCase {
         &self,
         repository_id: &str,
     ) -> Result<SymbolCommunityGraph, DomainError> {
-        if let Some(stored) = self.load_stored(repository_id).await {
-            return Ok(stored);
-        }
-        let sg = self.build_symbol_graph(repository_id).await?;
-        let scg = self.compute_communities(repository_id, &sg);
-        self.store(&scg).await;
+        let mut scg = match self.load_stored(repository_id).await {
+            Some(stored) => stored,
+            None => {
+                let sg = self.build_symbol_graph(repository_id).await?;
+                let scg = self.compute_communities(repository_id, &sg);
+                self.store(&scg).await;
+                scg
+            }
+        };
+        self.apply_cached_names(&mut scg.communities).await;
         Ok(scg)
+    }
+
+    /// Fill each community's `display_name` from the persistent LLM-name cache
+    /// (keyed on the stable id). Pure cache read — no LLM call — so every render
+    /// path shows any name already generated. Misses stay `None`.
+    async fn apply_cached_names(&self, communities: &mut [SymbolCommunity]) {
+        let Some(storage) = &self.storage else {
+            return;
+        };
+        let ids: Vec<String> = communities.iter().map(|c| c.id.clone()).collect();
+        let Ok(names) = storage.get_community_names(&ids).await else {
+            return;
+        };
+        for community in communities {
+            if let Some(name) = names.get(&community.id) {
+                community.display_name = Some(name.clone());
+            }
+        }
     }
 
     /// Load the stored community graph, if storage is attached and has one.
@@ -162,8 +178,8 @@ impl SymbolClusterDetectionUseCase {
                     }
                 };
                 SymbolCommunity {
-                    id: Uuid::new_v4().to_string(),
-                    name: name_symbol_community(members),
+                    id: stable_community_id("s", members),
+                    display_name: None,
                     repository_id: repository_id.to_string(),
                     dominant_language: dominant_language(members, &sg.language_of),
                     size: members.len(),
@@ -173,8 +189,8 @@ impl SymbolClusterDetectionUseCase {
             })
             .collect();
 
-        // Largest first, then name for a stable order.
-        communities.sort_by(|a, b| b.size.cmp(&a.size).then(a.name.cmp(&b.name)));
+        // Largest first, then stable id for a deterministic order.
+        communities.sort_by(|a, b| b.size.cmp(&a.size).then(a.id.cmp(&b.id)));
 
         SymbolCommunityGraph {
             communities,
@@ -211,7 +227,7 @@ impl SymbolClusterDetectionUseCase {
         // the same call-graph snapshot (stored analyses are invalidated on
         // re-index), so a stored partition stays consistent with a fresh graph.
         let sg = self.build_symbol_graph(repository_id).await?;
-        let scg = match self.load_stored(repository_id).await {
+        let mut scg = match self.load_stored(repository_id).await {
             Some(stored) => stored,
             None => {
                 let scg = self.compute_communities(repository_id, &sg);
@@ -219,6 +235,7 @@ impl SymbolClusterDetectionUseCase {
                 scg
             }
         };
+        self.apply_cached_names(&mut scg.communities).await;
 
         // Symbol FQN → community index (position in the size-sorted list).
         let mut symbol_community: HashMap<&str, usize> = HashMap::new();
@@ -229,7 +246,7 @@ impl SymbolClusterDetectionUseCase {
             }
             communities.push(CommunityMeta {
                 index: idx,
-                name: c.name.clone(),
+                name: community_label(&c.display_name, &c.id).to_string(),
                 size: c.size,
                 cohesion: c.cohesion,
             });
@@ -371,69 +388,6 @@ fn short_symbol_name(symbol: &str) -> &str {
         .unwrap_or(symbol)
 }
 
-/// The `Class#method` identifier portion of a symbol — everything after the last
-/// path separator, with trailing call decoration removed. This drops directory
-/// and package-path prefixes (e.g. `svc/`) so keyword-based naming keys on the
-/// type and member names that actually describe a community, not on the shared
-/// path every member happens to live under.
-fn symbol_identifier_part(symbol: &str) -> &str {
-    let trimmed = symbol.trim_end_matches(|c: char| matches!(c, '.' | '(' | ')'));
-    match trimmed.rsplit_once(|c: char| matches!(c, '/' | '\\')) {
-        Some((_, tail)) => tail,
-        None => trimmed,
-    }
-}
-
-/// Derive a human-readable community name from its members' symbol names: the
-/// dominant short name if one is shared by >40% of members, otherwise the most
-/// frequent meaningful keyword across all member names.
-fn name_symbol_community(members: &[String]) -> String {
-    if members.is_empty() {
-        return "unknown".to_string();
-    }
-
-    // Dominant short name (>40% of members share it).
-    let mut name_freq: BTreeMap<&str, usize> = BTreeMap::new();
-    for m in members {
-        *name_freq.entry(short_symbol_name(m)).or_insert(0) += 1;
-    }
-    if let Some((&name, &count)) = name_freq
-        .iter()
-        .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
-    {
-        // Integer-safe count/len > 0.4  ≡  count * 5 > len * 2.
-        if count * 5 > members.len() * 2 {
-            return slugify(name, NAME_MAX_LENGTH);
-        }
-    }
-
-    // Otherwise the most frequent meaningful keyword across the type and member
-    // names of each symbol (e.g. `Payment` from `PaymentService#charge`), so a
-    // shared concept beats any single method name.
-    let mut kw_freq: BTreeMap<String, usize> = BTreeMap::new();
-    for m in members {
-        for segment in symbol_identifier_part(m).split(|c: char| matches!(c, ':' | '#' | '.')) {
-            for word in split_identifier(segment) {
-                let lower = word.to_lowercase();
-                if lower.len() >= MIN_KEYWORD_LEN && !STOP_WORDS.contains(&lower.as_str()) {
-                    *kw_freq.entry(lower).or_insert(0) += 1;
-                }
-            }
-        }
-    }
-    let top_kw = kw_freq
-        .iter()
-        .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
-        .map(|(k, _)| k.clone())
-        .unwrap_or_default();
-
-    if top_kw.is_empty() {
-        slugify(short_symbol_name(&members[0]), NAME_MAX_LENGTH)
-    } else {
-        slugify(&top_kw, NAME_MAX_LENGTH)
-    }
-}
-
 /// Find the community containing `symbol`, preferring an exact FQN match, then a
 /// boundary suffix match, then a substring match. Case-sensitive throughout.
 fn find_symbol_community(
@@ -476,32 +430,11 @@ mod tests {
     }
 
     #[test]
-    fn test_name_symbol_community_dominant_name() {
-        let members = vec![
-            "a/X#handle().".to_string(),
-            "b/Y#handle().".to_string(),
-            "c/Z#handle().".to_string(),
-        ];
-        assert_eq!(name_symbol_community(&members), "handle");
-    }
-
-    #[test]
-    fn test_name_symbol_community_keyword() {
-        let members = vec![
-            "svc/PaymentService#charge().".to_string(),
-            "svc/PaymentGateway#refund().".to_string(),
-            "svc/PaymentRepo#save().".to_string(),
-        ];
-        // No single short name dominates, but "payment" is the shared keyword.
-        assert_eq!(name_symbol_community(&members), "payment");
-    }
-
-    #[test]
     fn test_find_symbol_community_prefers_exact() {
         let communities = vec![
             SymbolCommunity {
                 id: "1".into(),
-                name: "a".into(),
+                display_name: None,
                 repository_id: "r".into(),
                 dominant_language: "rust".into(),
                 size: 1,
@@ -510,7 +443,7 @@ mod tests {
             },
             SymbolCommunity {
                 id: "2".into(),
-                name: "b".into(),
+                display_name: None,
                 repository_id: "r".into(),
                 dominant_language: "rust".into(),
                 size: 1,
@@ -526,7 +459,7 @@ mod tests {
     fn test_find_symbol_community_suffix() {
         let communities = vec![SymbolCommunity {
             id: "1".into(),
-            name: "a".into(),
+            display_name: None,
             repository_id: "r".into(),
             dominant_language: "rust".into(),
             size: 1,

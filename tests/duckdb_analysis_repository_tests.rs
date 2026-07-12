@@ -30,7 +30,7 @@ fn sample_cluster_graph(repository_id: &str) -> ClusterGraph {
         clusters: vec![
             Cluster {
                 id: format!("{repository_id}-c1"),
-                name: "auth".to_string(),
+                display_name: None,
                 repository_id: repository_id.to_string(),
                 dominant_language: "rust".to_string(),
                 size: 2,
@@ -42,7 +42,7 @@ fn sample_cluster_graph(repository_id: &str) -> ClusterGraph {
             },
             Cluster {
                 id: format!("{repository_id}-c2"),
-                name: "search".to_string(),
+                display_name: None,
                 repository_id: repository_id.to_string(),
                 dominant_language: "rust".to_string(),
                 size: 1,
@@ -60,7 +60,7 @@ fn sample_symbol_community_graph(repository_id: &str) -> SymbolCommunityGraph {
     SymbolCommunityGraph {
         communities: vec![SymbolCommunity {
             id: "s1".to_string(),
-            name: "payment".to_string(),
+            display_name: None,
             repository_id: repository_id.to_string(),
             dominant_language: "php".to_string(),
             size: 2,
@@ -145,7 +145,6 @@ async fn cluster_graph_roundtrip() {
     assert_eq!(loaded.clusters.len(), 2);
     // Largest cluster first, members alphabetical.
     assert_eq!(loaded.clusters[0].id, "repo-1-c1");
-    assert_eq!(loaded.clusters[0].name, "auth");
     assert_eq!(loaded.clusters[0].size, 2);
     assert!((loaded.clusters[0].cohesion - 0.75).abs() < 1e-6);
     assert_eq!(
@@ -224,7 +223,6 @@ async fn symbol_community_graph_roundtrip() {
     assert_eq!(loaded.total_symbols, 2);
     assert_eq!(loaded.total_edges, 1);
     assert_eq!(loaded.communities.len(), 1);
-    assert_eq!(loaded.communities[0].name, "payment");
     assert_eq!(loaded.communities[0].dominant_language, "php");
     assert_eq!(
         loaded.communities[0].members,
@@ -250,7 +248,6 @@ async fn save_replaces_previous_symbol_community_graph() {
     // wholesale — proving full-to-full replacement, not just empty overwrite.
     let mut updated = sample_symbol_community_graph("repo-1");
     updated.communities[0].id = "s9".to_string();
-    updated.communities[0].name = "billing".to_string();
     updated.communities[0].members = vec!["svc/BillingService#invoice().".to_string()];
     updated.communities[0].size = 1;
     updated.total_symbols = 1;
@@ -264,7 +261,6 @@ async fn save_replaces_previous_symbol_community_graph() {
     assert_eq!(loaded.total_symbols, 1);
     assert_eq!(loaded.communities.len(), 1);
     assert_eq!(loaded.communities[0].id, "s9");
-    assert_eq!(loaded.communities[0].name, "billing");
     assert_eq!(
         loaded.communities[0].members,
         vec!["svc/BillingService#invoice()."]
@@ -561,7 +557,6 @@ async fn write_back_persists_symbol_community_graph_for_a_later_reader() {
         .expect("symbol communities persisted to disk");
     assert_eq!(loaded.total_symbols, 2);
     assert_eq!(loaded.communities.len(), 1);
-    assert_eq!(loaded.communities[0].name, "payment");
     assert_eq!(
         loaded.communities[0].members,
         vec![

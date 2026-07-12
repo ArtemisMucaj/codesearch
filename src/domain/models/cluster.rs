@@ -1,13 +1,48 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Derive a stable, content-addressed community id from its members.
+///
+/// The id is a short hex digest of the (already sorted) member list, so the
+/// *same* set of files/symbols always yields the *same* id across re-index and
+/// recompute runs — unlike a random UUID, which changes every time. This is what
+/// lets an expensive, cached artefact (an LLM-generated display name) be keyed on
+/// a community and survive recomputation as long as its membership is unchanged.
+///
+/// `prefix` distinguishes the two levels (`c` for file clusters, `s` for symbol
+/// communities) so ids never collide between them.
+pub fn stable_community_id(prefix: &str, members: &[String]) -> String {
+    let mut hasher = Sha256::new();
+    for member in members {
+        hasher.update(member.as_bytes());
+        hasher.update([0u8]); // delimiter so ["ab","c"] ≠ ["a","bc"]
+    }
+    let digest = hasher.finalize();
+    // 12 hex chars (48 bits) is ample to avoid collisions within one repo's
+    // few-hundred communities while staying short enough to show in a listing.
+    let hex: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+    format!("{prefix}-{hex}")
+}
+
+/// The user-facing label for a community: its LLM display name when one has been
+/// generated, otherwise its stable id. Every render path uses this so the same
+/// community reads identically in `list`, `get`, `overview`, MCP, and the
+/// management API (a bare id until it is named, never a blank).
+pub fn community_label<'a>(display_name: &'a Option<String>, id: &'a str) -> &'a str {
+    display_name.as_deref().unwrap_or(id)
+}
 
 /// A named group of files that are tightly coupled to each other and loosely
 /// coupled to the rest of the codebase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cluster {
-    /// UUID identifying this cluster.
+    /// Stable, content-addressed id (see [`stable_community_id`]).
     pub id: String,
-    /// Human-readable name derived from common directory/symbol patterns.
-    pub name: String,
+    /// LLM-generated human-readable name, cached by [`Self::id`]. `None` until a
+    /// name has been generated (or when no LLM is configured); callers then show
+    /// the id via [`community_label`].
+    #[serde(default)]
+    pub display_name: Option<String>,
     /// Repository this cluster belongs to.
     pub repository_id: String,
     /// Most common programming language among member files.
@@ -43,10 +78,13 @@ pub struct ClusterGraph {
 /// a subsystem, a collaborating set of functions) that can cut across files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolCommunity {
-    /// UUID identifying this community.
+    /// Stable, content-addressed id (see [`stable_community_id`]).
     pub id: String,
-    /// Human-readable name derived from common tokens in member symbol names.
-    pub name: String,
+    /// LLM-generated human-readable name, cached by [`Self::id`]. `None` until a
+    /// name has been generated (or when no LLM is configured); callers then show
+    /// the id via [`community_label`].
+    #[serde(default)]
+    pub display_name: Option<String>,
     /// Repository this community belongs to.
     pub repository_id: String,
     /// Most common programming language among member symbols.

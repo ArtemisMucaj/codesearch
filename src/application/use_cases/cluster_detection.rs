@@ -38,12 +38,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tracing::{debug, warn};
-use uuid::Uuid;
 
 use crate::application::{AnalysisRepository, FileRelationshipUseCase};
 use crate::domain::{
-    Cluster, ClusterGraph, CommunityMeta, DomainError, FileEdge, GraphEdge, GraphLevel, GraphNode,
-    GraphView, Language,
+    community_label, stable_community_id, Cluster, ClusterGraph, CommunityMeta, DomainError,
+    FileEdge, GraphEdge, GraphLevel, GraphNode, GraphView, Language,
 };
 
 // ── Edge-weight constants by reference kind ───────────────────────────────
@@ -60,9 +59,6 @@ const TYPEREFERENCE_WEIGHT: f64 = 0.6;
 const IMPORT_WEIGHT: f64 = 0.5;
 /// Default weight for unrecognised reference kinds.
 const DEFAULT_KIND_WEIGHT: f64 = 0.3;
-
-/// Maximum character length for a generated cluster-name slug.
-const SLUG_MAX_LENGTH: usize = 30;
 
 pub(crate) fn kind_weight(kind: &str) -> f64 {
     match kind.to_lowercase().as_str() {
@@ -216,27 +212,163 @@ const MAX_COMMUNITY_FRACTION: f64 = 0.25;
 /// this many nodes — below it the size dominance is not meaningful.
 const MIN_SPLIT_SIZE: usize = 10;
 
-/// Run Leiden cluster detection on `graph` and return a partition: a
-/// `Vec<usize>` where `partition[node_index]` is the cluster id.
+/// Target ceiling on the largest community's share of the graph used by the
+/// dynamic resolution search ([`select_resolution`]). Resolution is increased
+/// until the biggest community fits under this fraction, which is what breaks
+/// the modularity resolution-limit mega-blobs (a single "community" holding
+/// 10–25 % of every symbol in the repo, mixing unrelated subsystems) into
+/// coherent units. A large service has dozens of real modules, so no single one
+/// should own more than a small slice; 6 % keeps the biggest honest without
+/// forcing over-fragmentation (the `< 0.95` progress guard in
+/// [`select_resolution`] stops climbing once splitting stops helping).
+const TARGET_MAX_FRACTION: f64 = 0.06;
+/// Candidate resolutions swept by [`select_resolution`], ascending. `1.0` is
+/// classic modularity; higher values pull the null-model penalty up, favouring
+/// more, smaller communities. Capped so the search cannot shatter a genuinely
+/// cohesive graph into dust.
+const RESOLUTION_LADDER: &[f64] = &[1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0];
+
+/// Minimum node count before the dynamic resolution search runs. The modularity
+/// resolution limit only produces mega-blobs on large graphs; on small graphs
+/// classic modularity (γ = 1) already recovers the right structure, and raising
+/// the resolution there would over-split genuinely tight groups (e.g. splitting
+/// a connected pair). Below this size we keep γ = 1.
+const MIN_NODES_FOR_RESOLUTION_SEARCH: usize = 60;
+
+/// If a resolution puts more than this fraction of nodes into tiny (≤ 2 node)
+/// communities, it has shattered the graph rather than de-blobbed it, and the
+/// resolution search backs off to the last coherent resolution
+/// (see [`select_resolution`]).
+const MAX_FRAGMENT_RATIO: f64 = 0.5;
+
+/// Run Leiden cluster detection on `graph` at automatically-selected resolution
+/// and return a partition: a `Vec<usize>` where `partition[node_index]` is the
+/// cluster id.
 ///
-/// This is the Leiden core ([`leiden_core`]) followed by the two
-/// guarantee-enforcing post-passes ([`split_oversized`] then
-/// [`enforce_connectivity`]); labels are renumbered contiguously at the end.
+/// The resolution is chosen by [`select_resolution`]; the partition is then the
+/// Leiden core ([`leiden_core`]) followed by the two guarantee-enforcing
+/// post-passes ([`split_oversized`] then [`enforce_connectivity`]), with labels
+/// renumbered contiguously at the end.
 pub(crate) fn leiden(graph: &Graph) -> Vec<usize> {
     if graph.n == 0 {
         return Vec::new();
     }
+    // `select_resolution` already ran `leiden_core` at the chosen γ while
+    // searching; reuse that partition instead of recomputing it.
+    let (gamma, mut result) = select_resolution(graph);
 
-    let mut result = leiden_core(graph);
     // Split any community that dominates the graph (uses the bare core on the
     // induced subgraph, so this does not recurse through the post-passes).
-    split_oversized(graph, &mut result);
+    split_oversized(graph, &mut result, gamma);
     // Belt-and-braces: true Leiden refinement already yields connected
     // communities, but the oversized split and any future change could not, so
     // re-assert the guarantee as the final step.
     enforce_connectivity(graph, &mut result);
     renumber(&mut result);
     result
+}
+
+/// Choose a resolution for `graph` dynamically.
+///
+/// Modularity has a well-known resolution limit: on a large, densely
+/// interconnected graph its optimum merges many small, genuinely distinct
+/// modules into a handful of giant blobs (here, symbol communities holding
+/// 15–25 % of the whole repo that mix unrelated subsystems). Rather than hard-
+/// code one resolution, we sweep [`RESOLUTION_LADDER`] and pick the *smallest*
+/// (coarsest) resolution whose largest community fits under
+/// [`TARGET_MAX_FRACTION`]. Coarsest-that-fits keeps communities as large as
+/// they can be without a blob dominating, so we neither under- nor over-split.
+///
+/// If no resolution on the ladder gets under the target (an unusually monolithic
+/// graph, or one whose natural modules are larger than the target), the search
+/// stops before it starts *shattering* the graph: once raising γ produces mostly
+/// tiny fragments (a fragmentation ratio past [`MAX_FRAGMENT_RATIO`]) rather than
+/// splitting blobs into real modules, it falls back to the last resolution that
+/// still yielded coherent communities. Graphs below
+/// [`MIN_NODES_FOR_RESOLUTION_SEARCH`] keep γ = 1.
+/// Returns the chosen resolution *and* the `leiden_core` partition computed at
+/// it, so the caller need not re-run the core a final time.
+fn select_resolution(graph: &Graph) -> (f64, Vec<usize>) {
+    if graph.n < MIN_NODES_FOR_RESOLUTION_SEARCH {
+        return (1.0, leiden_core(graph, 1.0));
+    }
+    let target = (graph.n as f64 * TARGET_MAX_FRACTION).ceil() as usize;
+
+    // Among non-shattering resolutions, remember the one whose largest community
+    // is smallest — the best de-blobbing that still leaves real modules intact.
+    // Seeded from the first (coarsest) rung so a `best` partition always exists,
+    // even if every rung shatters or overshoots the target.
+    let mut best: Option<(f64, Vec<usize>)> = None;
+    let mut best_largest = usize::MAX;
+    for &gamma in RESOLUTION_LADDER {
+        let partition = leiden_core(graph, gamma);
+        let (largest, tiny_fraction) = partition_shape(&partition);
+
+        // Stop as soon as a resolution shatters the graph into mostly-tiny
+        // fragments: higher γ from here only makes it worse, and the previously
+        // recorded best is the coherent choice.
+        if tiny_fraction > MAX_FRAGMENT_RATIO {
+            // `best` is set unless the very first rung shatters; in that pathological
+            // case fall back to this rung's partition rather than none.
+            let chosen = best.unwrap_or((gamma, partition));
+            debug!(
+                "select_resolution: gamma={gamma} shatters (fragments={tiny_fraction:.2}); \
+                 stopping at best_gamma={} (best_largest={best_largest}, n={})",
+                chosen.0, graph.n
+            );
+            return chosen;
+        }
+
+        if largest < best_largest {
+            best = Some((gamma, partition.clone()));
+            best_largest = largest;
+        }
+
+        if largest <= target {
+            debug!(
+                "select_resolution: gamma={gamma} largest={largest} target={target} (n={})",
+                graph.n
+            );
+            return (gamma, partition);
+        }
+    }
+    let chosen = best.expect("RESOLUTION_LADDER is non-empty so best is always set");
+    debug!(
+        "select_resolution: no gamma met target={target}; using best_gamma={} \
+         (best_largest={best_largest}, n={})",
+        chosen.0, graph.n
+    );
+    chosen
+}
+
+/// The largest community's size and the fraction of nodes in "tiny" (≤ 2 node)
+/// communities, computed in one pass. A high tiny-fraction means the resolution
+/// has shattered the graph into singletons/pairs rather than into real modules.
+fn partition_shape(partition: &[usize]) -> (usize, f64) {
+    if partition.is_empty() {
+        return (0, 0.0);
+    }
+    let mut counts: HashMap<usize, usize> = HashMap::new();
+    for &label in partition {
+        *counts.entry(label).or_insert(0) += 1;
+    }
+    let largest = counts.values().copied().max().unwrap_or(0);
+    let tiny: usize = counts.values().filter(|&&c| c <= 2).sum();
+    (largest, tiny as f64 / partition.len() as f64)
+}
+
+/// Size of the largest community in a partition. Used only by tests now that
+/// [`select_resolution`] gets both metrics it needs from [`partition_shape`].
+#[cfg(test)]
+fn largest_community_size(partition: &[usize]) -> usize {
+    let mut counts: HashMap<usize, usize> = HashMap::new();
+    let mut max = 0;
+    for &label in partition {
+        let c = counts.entry(label).or_insert(0);
+        *c += 1;
+        max = max.max(*c);
+    }
+    max
 }
 
 /// The Leiden core (Traag et al. 2019): repeatedly (1) move nodes to the
@@ -251,7 +383,11 @@ pub(crate) fn leiden(graph: &Graph) -> Vec<usize> {
 /// Returns a partition mapped back to the original nodes (not renumbered, no
 /// post-passes — that is [`leiden`]'s job, kept separate so [`split_oversized`]
 /// can re-cluster a subgraph without recursing through the post-passes).
-fn leiden_core(graph: &Graph) -> Vec<usize> {
+///
+/// `gamma` is the resolution: it scales the null-model (expected-edge) term in
+/// every gain and in [`modularity`], so `gamma > 1` favours more, smaller
+/// communities. `gamma == 1` is classic modularity.
+fn leiden_core(graph: &Graph, gamma: f64) -> Vec<usize> {
     if graph.n == 0 {
         return Vec::new();
     }
@@ -265,11 +401,11 @@ fn leiden_core(graph: &Graph) -> Vec<usize> {
     let mut prev_modularity = f64::NEG_INFINITY;
 
     for _ in 0..MAX_ITERATIONS {
-        local_moving_phase(&current, &mut partition);
+        local_moving_phase(&current, &mut partition, gamma);
         renumber(&mut partition);
 
         let num_communities = partition.iter().copied().max().map(|m| m + 1).unwrap_or(0);
-        let q = modularity(&current, &partition);
+        let q = modularity(&current, &partition, gamma);
 
         // Nothing left to aggregate (every node already its own community) or no
         // meaningful modularity improvement: stop with the current partition.
@@ -279,7 +415,7 @@ fn leiden_core(graph: &Graph) -> Vec<usize> {
         prev_modularity = q;
 
         // Refine each community into well-connected sub-communities.
-        let mut refined = refine_partition(&current, &partition, &mut rng);
+        let mut refined = refine_partition(&current, &partition, &mut rng, gamma);
         renumber(&mut refined);
 
         // Aggregate by the refined partition. The renumbered `refined` vector is
@@ -378,10 +514,11 @@ fn enforce_connectivity(graph: &Graph, partition: &mut [usize]) {
 
 /// Subdivide any community whose size exceeds [`MAX_COMMUNITY_FRACTION`] of the
 /// graph (and is at least [`MIN_SPLIT_SIZE`] nodes) by re-running [`leiden_core`]
-/// on its induced subgraph. The first resulting sub-community keeps the original
-/// label; the rest receive fresh labels. Single-level only: if the subgraph is
-/// indivisible the community is left as-is.
-fn split_oversized(graph: &Graph, partition: &mut [usize]) {
+/// on its induced subgraph at resolution `gamma`. The first resulting
+/// sub-community keeps the original label; the rest receive fresh labels.
+/// Single-level only: if the subgraph is indivisible the community is left
+/// as-is.
+fn split_oversized(graph: &Graph, partition: &mut [usize], gamma: f64) {
     if graph.n == 0 {
         return;
     }
@@ -410,7 +547,7 @@ fn split_oversized(graph: &Graph, partition: &mut [usize]) {
             }
         }
 
-        let mut sub_partition = leiden_core(&sub);
+        let mut sub_partition = leiden_core(&sub, gamma);
         renumber(&mut sub_partition);
         let sub_clusters = sub_partition
             .iter()
@@ -434,8 +571,12 @@ fn split_oversized(graph: &Graph, partition: &mut [usize]) {
     }
 }
 
-/// Modularity Q = (1/2m) Σ_ij [ A_ij - k_i k_j / 2m ] δ(c_i, c_j)
-fn modularity(graph: &Graph, partition: &[usize]) -> f64 {
+/// Modularity Q = (1/2m) Σ_ij [ A_ij - γ·k_i k_j / 2m ] δ(c_i, c_j)
+///
+/// `gamma` (γ) is the resolution: γ > 1 inflates the expected-edge penalty, so
+/// keeping two nodes together must overcome a larger null-model term, which
+/// yields more, smaller communities.
+fn modularity(graph: &Graph, partition: &[usize], gamma: f64) -> f64 {
     let m2 = 2.0 * graph.total_weight;
     if m2 == 0.0 {
         return 0.0;
@@ -460,13 +601,14 @@ fn modularity(graph: &Graph, partition: &[usize]) -> f64 {
     for u in 0..graph.n {
         *cluster_degree.entry(partition[u]).or_insert(0.0) += graph.degree[u];
     }
-    let penalty: f64 = cluster_degree.values().map(|&d| d * d).sum::<f64>() / (m2 * m2);
+    let penalty: f64 = gamma * cluster_degree.values().map(|&d| d * d).sum::<f64>() / (m2 * m2);
     q - penalty
 }
 
 /// Local moving phase: repeatedly scan all nodes and move each to the
-/// neighbouring cluster that maximises the modularity gain.
-fn local_moving_phase(graph: &Graph, partition: &mut Vec<usize>) {
+/// neighbouring cluster that maximises the modularity gain at resolution
+/// `gamma` (which scales the null-model term of every gain).
+fn local_moving_phase(graph: &Graph, partition: &mut Vec<usize>, gamma: f64) {
     let mut cluster_total: HashMap<usize, f64> = HashMap::new();
     for u in 0..graph.n {
         *cluster_total.entry(partition[u]).or_insert(0.0) += graph.degree[u];
@@ -500,9 +642,9 @@ fn local_moving_phase(graph: &Graph, partition: &mut Vec<usize>) {
                 .map(|&(_, w)| w)
                 .sum::<f64>();
 
-            // Modularity gain of removing u from cu.
+            // Modularity gain of removing u from cu (null-model term scaled by γ).
             let sigma_cu = *cluster_total.get(&cu).unwrap_or(&0.0);
-            let remove_gain = ku_in - ku * (sigma_cu - ku) / m2;
+            let remove_gain = ku_in - gamma * ku * (sigma_cu - ku) / m2;
 
             // Find best target cluster. Iterate candidates in ascending cluster
             // id (not HashMap order) so that ties — equal modularity gain — are
@@ -518,7 +660,7 @@ fn local_moving_phase(graph: &Graph, partition: &mut Vec<usize>) {
 
             for (ct, w_to_ct) in candidates {
                 let sigma_ct = *cluster_total.get(&ct).unwrap_or(&0.0);
-                let gain = w_to_ct - ku * sigma_ct / m2 + remove_gain;
+                let gain = w_to_ct - gamma * ku * sigma_ct / m2 + remove_gain;
                 if gain > best_gain {
                     best_gain = gain;
                     best_cluster = ct;
@@ -551,7 +693,15 @@ fn local_moving_phase(graph: &Graph, partition: &mut Vec<usize>) {
 ///   change is about.
 ///
 /// Returns the refined sub-community label per node (not yet renumbered).
-fn refine_partition(graph: &Graph, community: &[usize], rng: &mut SplitMix64) -> Vec<usize> {
+///
+/// `gamma` scales the null-model term of the merge gain, matching the resolution
+/// used in the local-moving phase so refinement splits at the same granularity.
+fn refine_partition(
+    graph: &Graph,
+    community: &[usize],
+    rng: &mut SplitMix64,
+    gamma: f64,
+) -> Vec<usize> {
     let n = graph.n;
     // Every node starts in its own singleton sub-community (id == node index).
     let mut refined: Vec<usize> = (0..n).collect();
@@ -592,9 +742,9 @@ fn refine_partition(graph: &Graph, community: &[usize], rng: &mut SplitMix64) ->
         candidates.sort_unstable_by_key(|&(c, _)| c);
         let mut gains: Vec<(usize, f64)> = Vec::new();
         for (c, w_to_c) in candidates {
-            // Merging a singleton into c: gain = w_to_c - k_v * Σ_c / 2m
+            // Merging a singleton into c: gain = w_to_c - γ · k_v · Σ_c / 2m
             // (the singleton has no internal mass, so its removal cost is 0).
-            let gain = w_to_c - kv * sub_degree[c] / m2;
+            let gain = w_to_c - gamma * kv * sub_degree[c] / m2;
             if gain >= 0.0 {
                 gains.push((c, gain));
             }
@@ -690,91 +840,34 @@ fn aggregate_by(graph: &Graph, membership: &[usize]) -> Graph {
     new_graph
 }
 
-// ── Cluster naming ────────────────────────────────────────────────────────
+// ── Directory analysis (LLM naming hint) ──────────────────────────────────
 
-/// Common words excluded when extracting meaningful keywords from symbol names.
-pub(crate) const STOP_WORDS: &[&str] = &[
-    "get", "set", "test", "new", "is", "has", "to", "from", "with", "the", "and", "or", "of", "in",
-    "at", "by", "for",
-];
-
-/// Derive a human-readable name for a cluster given its member file paths and
-/// a map from file path to dominant symbol name.
+/// Count how many members live under each ancestor directory.
 ///
-/// Four-step heuristic (code-review-graph approach):
-/// 1. Most common short directory name among members.
-/// 2. If one symbol accounts for >40 % of members, use it.
-/// 3. Otherwise, most frequent meaningful keyword from symbol names.
-/// 4. Combine as `"{dir}-{keyword}"`, slug-cased, max 30 chars.
-fn name_cluster(members: &[String], symbol_map: &HashMap<String, String>) -> String {
-    if members.is_empty() {
-        return "unknown".to_string();
-    }
-
-    // Step 1: most common short directory component.
-    let mut dir_freq: HashMap<&str, usize> = HashMap::new();
+/// For every member path, this walks the directory components of its parent and
+/// increments the count for each ancestor prefix (`a`, `a/b`, `a/b/c`), so the
+/// returned map answers "how many members share directory X" for every X. Feeds
+/// the LLM naming prompt's location hints (see `community_naming`).
+pub(crate) fn ancestor_dir_frequencies(members: &[String]) -> HashMap<String, usize> {
+    let mut freq: HashMap<String, usize> = HashMap::new();
     for path in members {
-        if let Some(parent) = Path::new(path).parent() {
-            // Take the last meaningful directory component.
-            let component = parent
-                .file_name()
-                .and_then(|s| s.to_str())
-                .filter(|s| !s.is_empty() && *s != "." && *s != "/")
-                .unwrap_or("");
-            if !component.is_empty() {
-                *dir_freq.entry(component).or_insert(0) += 1;
+        let parent = match Path::new(path).parent().and_then(|p| p.to_str()) {
+            Some(p) if !p.is_empty() && p != "." => p,
+            _ => continue,
+        };
+        let mut acc = String::new();
+        for component in parent
+            .split(['/', '\\'])
+            .filter(|c| !c.is_empty() && *c != ".")
+        {
+            if !acc.is_empty() {
+                acc.push('/');
             }
+            acc.push_str(component);
+            *freq.entry(acc.clone()).or_insert(0) += 1;
         }
     }
-    let top_dir = dir_freq
-        .iter()
-        .max_by_key(|&(_, c)| c)
-        .map(|(&d, _)| d)
-        .unwrap_or("src");
-
-    // Step 2: dominant symbol (> 40 % of members).
-    let mut sym_freq: HashMap<&str, usize> = HashMap::new();
-    for path in members {
-        if let Some(sym) = symbol_map.get(path) {
-            let short = sym
-                .split(|c: char| c == ':' || c == '/' || c == '#' || c == '.')
-                .filter(|s| !s.is_empty())
-                .last()
-                .unwrap_or(sym.as_str());
-            *sym_freq.entry(short).or_insert(0) += 1;
-        }
-    }
-    // Pick the highest-frequency symbol; use it if it strictly exceeds the threshold.
-    // Integer-safe: count * 5 > len * 2  ≡  count / len > 0.4 (DOMINANT_SYMBOL_THRESHOLD).
-    if let Some((&dominant_sym, &count)) = sym_freq.iter().max_by_key(|(_, &c)| c) {
-        if count * 5 > members.len() * 2 {
-            return slugify(dominant_sym, SLUG_MAX_LENGTH);
-        }
-    }
-
-    // Step 3: most frequent meaningful keyword from symbol names.
-    let mut kw_freq: HashMap<String, usize> = HashMap::new();
-    for sym in sym_freq.keys() {
-        for word in split_identifier(sym) {
-            let lower = word.to_lowercase();
-            if lower.len() >= 3 && !STOP_WORDS.contains(&lower.as_str()) {
-                *kw_freq.entry(lower).or_insert(0) += 1;
-            }
-        }
-    }
-    let top_kw = kw_freq
-        .iter()
-        .max_by_key(|&(_, c)| c)
-        .map(|(k, _)| k.as_str())
-        .unwrap_or("");
-
-    // Step 4: combine.
-    let combined = if top_kw.is_empty() {
-        top_dir.to_string()
-    } else {
-        format!("{}-{}", top_dir, top_kw)
-    };
-    slugify(&combined, SLUG_MAX_LENGTH)
+    freq
 }
 
 /// The trailing path component of a file path, used as a node's short display
@@ -785,60 +878,6 @@ fn basename(path: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or(path)
         .to_string()
-}
-
-/// Split a camelCase or snake_case identifier into words.
-pub(crate) fn split_identifier(s: &str) -> Vec<&str> {
-    // Try snake_case first.
-    if s.contains('_') {
-        return s.split('_').filter(|w| !w.is_empty()).collect();
-    }
-    // camelCase: split before every uppercase letter.
-    let mut parts: Vec<&str> = Vec::new();
-    let mut start = 0;
-    let bytes = s.as_bytes();
-    for i in 1..bytes.len() {
-        if bytes[i].is_ascii_uppercase() && bytes[i - 1].is_ascii_lowercase() {
-            parts.push(&s[start..i]);
-            start = i;
-        }
-    }
-    parts.push(&s[start..]);
-    parts
-}
-
-/// Convert a string to a lowercase slug, truncated to `max_len` characters.
-pub(crate) fn slugify(s: &str, max_len: usize) -> String {
-    let slug: String = s
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    // Collapse consecutive dashes.
-    let mut result = String::new();
-    let mut last_dash = false;
-    for c in slug.chars() {
-        if c == '-' {
-            if !last_dash {
-                result.push(c);
-            }
-            last_dash = true;
-        } else {
-            result.push(c);
-            last_dash = false;
-        }
-    }
-    let trimmed = result.trim_matches('-').to_string();
-    if trimmed.chars().count() > max_len {
-        trimmed.chars().take(max_len).collect()
-    } else {
-        trimmed
-    }
 }
 
 // ── Cohesion computation (O(edges) batch approach) ────────────────────────
@@ -940,7 +979,7 @@ impl ClusterDetectionUseCase {
             .file_graph
             .build_graph(Some(&[repository_id.to_string()]), 1, false)
             .await?;
-        let cg = match self.load_stored(repository_id).await {
+        let mut cg = match self.load_stored(repository_id).await {
             Some(stored) => stored,
             None => {
                 let cg = self.compute_clusters(repository_id, &graph);
@@ -948,6 +987,7 @@ impl ClusterDetectionUseCase {
                 cg
             }
         };
+        self.apply_cached_names(&mut cg.clusters).await;
         Ok((cg, graph))
     }
 
@@ -1000,14 +1040,15 @@ impl ClusterDetectionUseCase {
                     } else {
                         int_e as f32 / (int_e + ext_e) as f32
                     };
+                    let members = vec![path.clone()];
                     Cluster {
-                        id: Uuid::new_v4().to_string(),
-                        name: name_cluster(&[path.clone()], &HashMap::new()),
+                        id: stable_community_id("c", &members),
+                        display_name: None,
                         repository_id: repository_id.to_string(),
                         dominant_language: lang,
                         size: 1,
                         cohesion,
-                        members: vec![path.clone()],
+                        members,
                     }
                 })
                 .collect();
@@ -1072,22 +1113,15 @@ impl ClusterDetectionUseCase {
             .map(|(file_idx, &label)| (files[file_idx].clone(), label))
             .collect();
 
-        // Assign UUIDs up-front so cohesion map can key on them.
-        let cluster_ids: Vec<String> = (0..num_clusters)
-            .map(|_| Uuid::new_v4().to_string())
+        // Assign stable, content-addressed ids up-front so the cohesion map can
+        // key on them and a cached LLM name survives recomputation (members are
+        // already sorted, so the id is deterministic).
+        let cluster_ids: Vec<String> = members_by_cluster
+            .iter()
+            .map(|members| stable_community_id("c", members))
             .collect();
 
         let cohesion_stats = batch_cohesion(&file_to_cluster, &graph.edges, &cluster_ids);
-
-        // Build a simple file→first_symbol map from edge symbols for naming.
-        let mut file_symbol_map: HashMap<String, String> = HashMap::new();
-        for edge in &graph.edges {
-            if let Some(sym) = edge.symbols.first() {
-                file_symbol_map
-                    .entry(edge.to_file.clone())
-                    .or_insert_with(|| sym.clone());
-            }
-        }
 
         let mut clusters: Vec<Cluster> = members_by_cluster
             .iter()
@@ -1117,12 +1151,9 @@ impl ClusterDetectionUseCase {
                     int_e as f32 / (int_e + ext_e) as f32
                 };
 
-                // Name.
-                let name = name_cluster(members, &file_symbol_map);
-
                 Cluster {
                     id: cid,
-                    name,
+                    display_name: None,
                     repository_id: repository_id.to_string(),
                     dominant_language,
                     size: members.len(),
@@ -1132,8 +1163,8 @@ impl ClusterDetectionUseCase {
             })
             .collect();
 
-        // Sort by descending size, then name for stability.
-        clusters.sort_by(|a, b| b.size.cmp(&a.size).then(a.name.cmp(&b.name)));
+        // Sort by descending size, then stable id for a deterministic order.
+        clusters.sort_by(|a, b| b.size.cmp(&a.size).then(a.id.cmp(&b.id)));
 
         ClusterGraph {
             clusters,
@@ -1146,16 +1177,39 @@ impl ClusterDetectionUseCase {
     /// Detect clusters in the dependency graph of `repository_id`, serving
     /// stored results when available and persisting freshly computed ones.
     pub async fn create_clusters(&self, repository_id: &str) -> Result<ClusterGraph, DomainError> {
-        if let Some(stored) = self.load_stored(repository_id).await {
-            return Ok(stored);
-        }
-        let graph = self
-            .file_graph
-            .build_graph(Some(&[repository_id.to_string()]), 1, false)
-            .await?;
-        let cg = self.compute_clusters(repository_id, &graph);
-        self.store(&cg).await;
+        let mut cg = match self.load_stored(repository_id).await {
+            Some(stored) => stored,
+            None => {
+                let graph = self
+                    .file_graph
+                    .build_graph(Some(&[repository_id.to_string()]), 1, false)
+                    .await?;
+                let cg = self.compute_clusters(repository_id, &graph);
+                self.store(&cg).await;
+                cg
+            }
+        };
+        self.apply_cached_names(&mut cg.clusters).await;
         Ok(cg)
+    }
+
+    /// Fill each cluster's `display_name` from the persistent LLM-name cache
+    /// (keyed on the stable id). Pure cache read — no LLM call — so every render
+    /// path can call it cheaply and show any name already generated. Misses stay
+    /// `None`; the LLM fills them via [`super::CommunityNamingUseCase`].
+    async fn apply_cached_names(&self, clusters: &mut [Cluster]) {
+        let Some(storage) = &self.storage else {
+            return;
+        };
+        let ids: Vec<String> = clusters.iter().map(|c| c.id.clone()).collect();
+        let Ok(names) = storage.get_community_names(&ids).await else {
+            return;
+        };
+        for cluster in clusters {
+            if let Some(name) = names.get(&cluster.id) {
+                cluster.display_name = Some(name.clone());
+            }
+        }
     }
 
     /// Build a render-ready [`GraphView`] of the file-dependency graph, with each
@@ -1176,7 +1230,7 @@ impl ClusterDetectionUseCase {
         for (idx, cluster) in cg.clusters.iter().enumerate() {
             communities.push(CommunityMeta {
                 index: idx,
-                name: cluster.name.clone(),
+                name: community_label(&cluster.display_name, &cluster.id).to_string(),
                 size: cluster.size,
                 cohesion: cluster.cohesion,
             });
@@ -1274,11 +1328,11 @@ impl ClusterDetectionUseCase {
             .flat_map(|c| c.members.iter().map(move |m| (m.as_str(), c.id.as_str())))
             .collect();
 
-        // Build cluster_id→name lookup for display.
+        // Build cluster_id→label lookup for display (LLM name, else id).
         let cluster_id_to_name: HashMap<&str, &str> = cg
             .clusters
             .iter()
-            .map(|c| (c.id.as_str(), c.name.as_str()))
+            .map(|c| (c.id.as_str(), community_label(&c.display_name, &c.id)))
             .collect();
 
         // Aggregate: (from_cluster_id, to_cluster_id) → total_weight
@@ -1329,7 +1383,10 @@ impl ClusterDetectionUseCase {
 
             out.push_str(&format!(
                 "| {} | {} | {} | {} |\n",
-                cluster.name, cluster.size, cluster.dominant_language, deps_str
+                community_label(&cluster.display_name, &cluster.id),
+                cluster.size,
+                cluster.dominant_language,
+                deps_str
             ));
         }
 
@@ -1348,25 +1405,6 @@ mod tests {
         assert_eq!(kind_weight("call"), 1.0);
         assert_eq!(kind_weight("import"), 0.5);
         assert_eq!(kind_weight("unknown_kind"), 0.3);
-    }
-
-    #[test]
-    fn test_slugify() {
-        assert_eq!(slugify("MyModule", 30), "mymodule");
-        assert_eq!(slugify("my-module", 30), "my-module");
-        assert_eq!(slugify("  foo  bar  ", 30), "foo-bar");
-        let long = slugify("a-very-long-name-that-exceeds-the-limit", 10);
-        assert!(long.len() <= 10);
-    }
-
-    #[test]
-    fn test_split_identifier_snake() {
-        assert_eq!(split_identifier("my_func_name"), vec!["my", "func", "name"]);
-    }
-
-    #[test]
-    fn test_split_identifier_camel() {
-        assert_eq!(split_identifier("myFuncName"), vec!["my", "Func", "Name"]);
     }
 
     #[test]
@@ -1435,7 +1473,7 @@ mod tests {
         g.add_edge(0, 5, 0.1); // weak bridge
 
         let mut partition = vec![0; 10];
-        split_oversized(&g, &mut partition);
+        split_oversized(&g, &mut partition, 1.0);
 
         assert!(
             partition[0..5].iter().all(|&l| l == partition[0]),
@@ -1462,7 +1500,7 @@ mod tests {
         g.add_edge(1, 2, 1.0);
         g.add_edge(2, 3, 1.0);
         let mut partition = vec![0, 0, 0, 0];
-        split_oversized(&g, &mut partition);
+        split_oversized(&g, &mut partition, 1.0);
         assert!(partition.iter().all(|&l| l == 0));
     }
 
@@ -1546,16 +1584,6 @@ mod tests {
     }
 
     #[test]
-    fn test_name_cluster_uses_dir() {
-        let members = vec![
-            "src/auth/login.rs".to_string(),
-            "src/auth/logout.rs".to_string(),
-        ];
-        let name = name_cluster(&members, &HashMap::new());
-        assert!(name.contains("auth"), "expected 'auth' in '{}'", name);
-    }
-
-    #[test]
     fn test_renumber() {
         let mut p = vec![5, 5, 10, 10, 5];
         renumber(&mut p);
@@ -1563,5 +1591,43 @@ mod tests {
         assert_eq!(p[1], p[4]);
         assert_ne!(p[0], p[2]);
         assert_eq!(p[2], p[3]);
+    }
+
+    #[test]
+    fn test_select_resolution_breaks_up_blob() {
+        // Ten tightly-connected 8-cliques, chained by weak bridges into one big
+        // graph (80 nodes). Classic modularity (γ=1) merges neighbouring cliques
+        // into blobs; the dynamic resolution search must raise γ until no single
+        // community dominates, recovering finer structure.
+        const CLIQUES: usize = 10;
+        const SIZE: usize = 8;
+        let mut g = Graph::new(CLIQUES * SIZE);
+        for c in 0..CLIQUES {
+            let base = c * SIZE;
+            for i in base..base + SIZE {
+                for j in (i + 1)..base + SIZE {
+                    g.add_edge(i, j, 1.0);
+                }
+            }
+            if c > 0 {
+                g.add_edge(base, base - SIZE, 0.05); // weak bridge to previous clique
+            }
+        }
+
+        let partition = leiden(&g);
+        let largest = largest_community_size(&partition);
+        let target = (g.n as f64 * TARGET_MAX_FRACTION).ceil() as usize;
+        assert!(
+            largest <= target.max(SIZE),
+            "largest community {largest} should fit the resolution target {target} \
+             (n={})",
+            g.n
+        );
+        // Sanity: we did not shatter the cliques into dust.
+        let num = partition.iter().copied().max().unwrap() + 1;
+        assert!(
+            (CLIQUES..=CLIQUES * 2).contains(&num),
+            "expected ~{CLIQUES} communities, got {num}"
+        );
     }
 }

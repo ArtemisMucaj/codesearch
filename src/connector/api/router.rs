@@ -160,8 +160,15 @@ impl<'a> Router<'a> {
             }
             Commands::Uses { from, to } => self.uses_controller.uses(from, to).await,
             Commands::Clusters { subcommand } => match subcommand {
-                ClustersSubcommand::List { repository, format } => {
-                    self.clusters_controller.list(repository, format).await
+                ClustersSubcommand::List {
+                    repository,
+                    format,
+                    llm,
+                    no_llm,
+                } => {
+                    self.clusters_controller
+                        .list(repository, format, llm, no_llm)
+                        .await
                 }
                 ClustersSubcommand::Get {
                     file,
@@ -173,9 +180,14 @@ impl<'a> Router<'a> {
                 }
             },
             Commands::SymbolClusters { subcommand } => match subcommand {
-                SymbolClustersSubcommand::List { repository, format } => {
+                SymbolClustersSubcommand::List {
+                    repository,
+                    format,
+                    llm,
+                    no_llm,
+                } => {
                     self.symbol_clusters_controller
-                        .list(repository, format)
+                        .list(repository, format, llm, no_llm)
                         .await
                 }
                 SymbolClustersSubcommand::Get {

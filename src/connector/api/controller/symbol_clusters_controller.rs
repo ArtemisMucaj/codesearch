@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 
-use crate::cli::{OutputFormat, OutputFormatTextJson};
+use crate::cli::{LlmTarget, OutputFormat, OutputFormatTextJson};
 
 use super::super::Container;
+use super::build_chat_client;
+use crate::domain::community_label;
 
 /// CLI controller for symbol-level communities (Leiden over the call graph).
 pub struct SymbolClustersController<'a> {
@@ -19,16 +21,29 @@ impl<'a> SymbolClustersController<'a> {
         &self,
         repository: Option<String>,
         format: OutputFormatTextJson,
+        llm: LlmTarget,
+        no_llm: bool,
     ) -> Result<String> {
         let repository_id = self
             .container
             .resolve_repository_id(repository.as_deref())
             .await;
         let use_case = self.container.symbol_cluster_detection_use_case();
-        let graph = use_case
+        let mut graph = use_case
             .detect_communities(&repository_id)
             .await
             .context("detecting symbol communities for repository")?;
+
+        // LLM naming runs by default (best-effort, cached by community id); it
+        // probes once and falls back to ids if the endpoint is down. `--no-llm`
+        // skips it.
+        if !no_llm {
+            let chat = build_chat_client(llm)?;
+            self.container
+                .community_naming_use_case()
+                .name_symbol_communities(&mut graph.communities, chat.as_ref())
+                .await;
+        }
 
         let format: OutputFormat = format.into();
         Ok(match format {
@@ -58,7 +73,7 @@ impl<'a> SymbolClustersController<'a> {
                     out.push_str(&format!(
                         "{:>3}. {} ({} symbols, {}, cohesion {:.2})\n",
                         i + 1,
-                        c.name,
+                        community_label(&c.display_name, &c.id),
                         c.size,
                         c.dominant_language,
                         c.cohesion,
@@ -115,7 +130,11 @@ impl<'a> SymbolClustersController<'a> {
                     let mut out = format!(
                         "Symbol `{}` belongs to community `{}` \
                          ({} symbols, {}, cohesion {:.2})\n",
-                        symbol, c.name, c.size, c.dominant_language, c.cohesion
+                        symbol,
+                        community_label(&c.display_name, &c.id),
+                        c.size,
+                        c.dominant_language,
+                        c.cohesion
                     );
                     for m in c.members.iter().take(20) {
                         out.push_str(&format!("    {}\n", m));
