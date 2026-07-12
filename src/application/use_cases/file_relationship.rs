@@ -96,20 +96,33 @@ impl FileRelationshipUseCase {
 
             for sr in refs {
                 let callee = sr.callee_symbol();
-                let Some((to_file, to_repo)) = symbol_map.get(callee) else {
-                    continue;
-                };
-
                 let from_file = sr.caller_file_path().to_string();
                 let from_repo = sr.repository_id().to_string();
 
+                // Resolve the callee's definition file. The SCIP importer records
+                // it directly in `reference_file_path` (the callee's definition
+                // site, resolved across the whole index); prefer that. Fall back
+                // to the chunk-derived symbol map only when the importer left the
+                // reference on its own file (i.e. the callee had no definition
+                // occurrence in this repo) — which lets tree-sitter-only indexes,
+                // where `reference_file_path` mirrors the caller file, still
+                // resolve cross-file edges the way they did before.
+                let ref_file = sr.reference_file_path();
+                let (to_file, to_repo): (String, String) = if ref_file != from_file {
+                    (ref_file.to_string(), from_repo.clone())
+                } else if let Some((f, r)) = symbol_map.get(callee) {
+                    (f.clone(), r.clone())
+                } else {
+                    continue;
+                };
+
                 // Skip self-loops (same file on both ends).
-                if from_file == *to_file {
+                if from_file == to_file {
                     continue;
                 }
 
                 // Optionally skip cross-repo edges.
-                if !include_cross_repo && from_repo != *to_repo {
+                if !include_cross_repo && from_repo != to_repo {
                     continue;
                 }
 
