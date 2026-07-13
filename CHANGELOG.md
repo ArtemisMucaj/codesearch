@@ -22,6 +22,21 @@
 * unit tests for `InMemoryVectorRepository` hybrid paths: cosine vs RRF score ranges, dual-leg ranking, post-fusion `min_score` filtering, no early pruning, empty-term fallback, and limit enforcement
 * integration tests for end-to-end hybrid search: results returned with positive scores, keyword-matched chunk surfaces, special SQL characters (`%`, `_`, `!`) do not cause errors, and semantic-only baseline confirms the flag gates the BM25 leg
 
+## [1.4.0](https://github.com/ArtemisMucaj/codesearch/compare/v1.3.0...v1.4.0) (2026-07-13)
+
+
+### Features
+
+* detect coupling elements in Leiden communities ([#183](https://github.com/ArtemisMucaj/codesearch/issues/183)) ([2b0ea18](https://github.com/ArtemisMucaj/codesearch/commit/2b0ea18cbc40d988a51a5dd88c1d8adb9a0b26a7))
+* LLM-generated community names + clustering fixes ([#181](https://github.com/ArtemisMucaj/codesearch/issues/181)) ([93e4931](https://github.com/ArtemisMucaj/codesearch/commit/93e4931216823dfc424b2e75585719bdcc656139))
+* **serve:** expose couplings over MCP and the management API ([#184](https://github.com/ArtemisMucaj/codesearch/issues/184)) ([5170e27](https://github.com/ArtemisMucaj/codesearch/commit/5170e2755e0cc6959634a39e0578f2ee6278d73d))
+* **serve:** serve command with MCP + REST/streaming management API ([#177](https://github.com/ArtemisMucaj/codesearch/issues/177)) ([e094472](https://github.com/ArtemisMucaj/codesearch/commit/e09447284515b9c735bab4648238e29e65b03150))
+
+
+### Bug Fixes
+
+* **uses:** resolve qualified Class#member callees to their defining file ([#182](https://github.com/ArtemisMucaj/codesearch/issues/182)) ([6c0ece5](https://github.com/ArtemisMucaj/codesearch/commit/6c0ece5320f6c01294e134abe351960ab3ac1cb9))
+
 ## [1.3.0](https://github.com/ArtemisMucaj/codesearch/compare/v1.2.0...v1.3.0) (2026-07-11)
 
 
