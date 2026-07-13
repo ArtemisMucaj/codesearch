@@ -321,6 +321,10 @@ Tests use in-memory DuckDB storage and mock embeddings so they run without a liv
 
 Define named constants for any numeric value that isn't immediately obvious (e.g. default result counts, score thresholds, search depths).
 
+### No References to Codebases Used for Development
+
+Codesearch is often improved by running it against real, private codebases and studying the output. **Never** include exact references to those codebases — in code, comments, tests, commit messages, PR descriptions, or docs. That means no real repository names, namespaces, class/file paths, or symbol names copied from a codebase used during development. Use generic, illustrative placeholders instead (e.g. `App\Models\Order`, repos `lib`/`svc-a`/`svc-b`, files like `src/Utils.php`).
+
 ---
 
 ## Commit Style
