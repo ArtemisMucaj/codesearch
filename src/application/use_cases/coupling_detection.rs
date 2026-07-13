@@ -666,13 +666,14 @@ impl FlowNetwork {
     fn levels(&self, s: usize) -> Vec<Option<usize>> {
         let mut level = vec![None; self.adj.len()];
         level[s] = Some(0);
-        let mut queue = VecDeque::from([s]);
-        while let Some(u) = queue.pop_front() {
+        // Carry each node's level in the queue so no `Option` unwrap is needed.
+        let mut queue = VecDeque::from([(s, 0usize)]);
+        while let Some((u, lu)) = queue.pop_front() {
             for &a in &self.adj[u] {
                 let v = self.to[a];
                 if self.cap[a] > FLOW_EPS && level[v].is_none() {
-                    level[v] = Some(level[u].unwrap() + 1);
-                    queue.push_back(v);
+                    level[v] = Some(lu + 1);
+                    queue.push_back((v, lu + 1));
                 }
             }
         }
