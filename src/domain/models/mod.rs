@@ -1,6 +1,7 @@
 mod channel_endpoint;
 mod cluster;
 mod code_chunk;
+mod coupling;
 mod discovered_session;
 mod embedding;
 mod execution_feature;
@@ -16,6 +17,7 @@ mod symbol_reference;
 pub use channel_endpoint::*;
 pub use cluster::*;
 pub use code_chunk::*;
+pub use coupling::*;
 pub use discovered_session::*;
 pub use embedding::*;
 pub use execution_feature::*;

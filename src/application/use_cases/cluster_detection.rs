@@ -128,6 +128,17 @@ impl Graph {
         }
     }
 
+    /// Number of nodes.
+    pub(crate) fn node_count(&self) -> usize {
+        self.n
+    }
+
+    /// Adjacency of `u`: `(neighbour, weight)` pairs (undirected, so every edge
+    /// appears in both endpoints' lists).
+    pub(crate) fn neighbors(&self, u: usize) -> &[(usize, f64)] {
+        &self.adj[u]
+    }
+
     pub(crate) fn add_edge(&mut self, u: usize, v: usize, w: f64) {
         self.adj[u].push((v, w));
         self.adj[v].push((u, w));
@@ -388,11 +399,22 @@ fn largest_community_size(partition: &[usize]) -> usize {
 /// every gain and in [`modularity`], so `gamma > 1` favours more, smaller
 /// communities. `gamma == 1` is classic modularity.
 fn leiden_core(graph: &Graph, gamma: f64) -> Vec<usize> {
+    leiden_core_seeded(graph, gamma, LEIDEN_SEED)
+}
+
+/// [`leiden_core`] with an explicit refinement seed.
+///
+/// The default entry points pin the seed to [`LEIDEN_SEED`] so partitions are
+/// reproducible; coupling detection ([`super::coupling_detection`]) instead
+/// *needs* the seed-to-seed variation — it re-clusters a community's subgraph
+/// under many seeds to estimate how probable a split is, rather than trusting a
+/// single stochastic outcome. Same algorithm, same guarantees, different seed.
+pub(crate) fn leiden_core_seeded(graph: &Graph, gamma: f64, seed: u64) -> Vec<usize> {
     if graph.n == 0 {
         return Vec::new();
     }
 
-    let mut rng = SplitMix64::new(LEIDEN_SEED);
+    let mut rng = SplitMix64::new(seed);
     let mut current = graph.clone();
     // Partition `p` over the current (aggregated) graph's nodes.
     let mut partition: Vec<usize> = (0..current.n).collect();
@@ -448,7 +470,7 @@ fn leiden_core(graph: &Graph, gamma: f64) -> Vec<usize> {
 /// Group node indices by their partition label, in ascending (label, node)
 /// order. The deterministic ordering is what lets the post-passes split
 /// communities the same way on every run.
-fn group_by_label(partition: &[usize]) -> BTreeMap<usize, Vec<usize>> {
+pub(crate) fn group_by_label(partition: &[usize]) -> BTreeMap<usize, Vec<usize>> {
     let mut by_label: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (node, &label) in partition.iter().enumerate() {
         by_label.entry(label).or_default().push(node);
@@ -785,7 +807,7 @@ fn refine_partition(
 }
 
 /// Renumber partition labels to be contiguous starting from 0.
-fn renumber(partition: &mut Vec<usize>) {
+pub(crate) fn renumber(partition: &mut Vec<usize>) {
     let mut remap: HashMap<usize, usize> = HashMap::new();
     for label in partition.iter_mut() {
         let next = remap.len();
@@ -911,6 +933,54 @@ fn batch_cohesion(
         }
     }
     stats
+}
+
+// ── File-graph construction ───────────────────────────────────────────────
+
+/// Build the undirected, weighted Leiden [`Graph`] from a file-dependency
+/// graph, returning the sorted node (file path) list alongside it.
+///
+/// Node `i` of the returned graph is `files[i]`; parallel/directional edges are
+/// combined into one undirected edge whose weight sums the composite weights.
+/// Shared by cluster detection and coupling detection so both always analyse
+/// the identical graph.
+pub(crate) fn build_file_leiden_graph(graph: &crate::domain::FileGraph) -> (Vec<String>, Graph) {
+    let files: Vec<String> = {
+        let mut v: Vec<String> = graph.files.iter().cloned().collect();
+        v.sort();
+        v
+    };
+    let file_index: HashMap<String, usize> = files
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.clone(), i))
+        .collect();
+
+    let mut g = Graph::new(files.len());
+    // Track which (u,v) pairs have already been added.
+    let mut added: HashMap<(usize, usize), f64> = HashMap::new();
+    for edge in &graph.edges {
+        let Some(&u) = file_index.get(&edge.from_file) else {
+            continue;
+        };
+        let Some(&v) = file_index.get(&edge.to_file) else {
+            continue;
+        };
+        if u == v {
+            continue;
+        }
+        let (lo, hi) = if u < v { (u, v) } else { (v, u) };
+        let w = composite_weight(edge);
+        *added.entry((lo, hi)).or_insert(0.0) += w;
+    }
+    // Insert edges in a deterministic order: adjacency-list ordering feeds
+    // into the clustering phases, so HashMap iteration order must not leak in.
+    let mut added_edges: Vec<((usize, usize), f64)> = added.into_iter().collect();
+    added_edges.sort_unstable_by_key(|&((u, v), _)| (u, v));
+    for ((u, v), w) in added_edges {
+        g.add_edge(u, v, w);
+    }
+    (files, g)
 }
 
 // ── ClusterDetectionUseCase ───────────────────────────────────────────────
@@ -1060,38 +1130,8 @@ impl ClusterDetectionUseCase {
             };
         }
 
-        // Build index: file path → node index.
-        let file_index: HashMap<String, usize> = files
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.clone(), i))
-            .collect();
-
-        // Build undirected weighted graph, combining parallel edges.
-        let mut g = Graph::new(n);
-        // Track which (u,v) pairs have already been added.
-        let mut added: HashMap<(usize, usize), f64> = HashMap::new();
-        for edge in &graph.edges {
-            let Some(&u) = file_index.get(&edge.from_file) else {
-                continue;
-            };
-            let Some(&v) = file_index.get(&edge.to_file) else {
-                continue;
-            };
-            if u == v {
-                continue;
-            }
-            let (lo, hi) = if u < v { (u, v) } else { (v, u) };
-            let w = composite_weight(edge);
-            *added.entry((lo, hi)).or_insert(0.0) += w;
-        }
-        // Insert edges in a deterministic order: adjacency-list ordering feeds
-        // into the clustering phases, so HashMap iteration order must not leak in.
-        let mut added_edges: Vec<((usize, usize), f64)> = added.into_iter().collect();
-        added_edges.sort_unstable_by_key(|&((u, v), _)| (u, v));
-        for ((u, v), w) in added_edges {
-            g.add_edge(u, v, w);
-        }
+        // Build the undirected weighted graph (shared with coupling detection).
+        let (files, g) = build_file_leiden_graph(graph);
 
         // Run Leiden.
         let partition = leiden(&g);

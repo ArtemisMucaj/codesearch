@@ -35,12 +35,13 @@ pub struct SymbolClusterDetectionUseCase {
 }
 
 /// The intermediate symbol graph plus the bookkeeping needed to turn a Leiden
-/// partition into named, scored communities.
-struct SymbolGraph {
+/// partition into named, scored communities. `pub(crate)` so coupling
+/// detection can analyse the identical graph.
+pub(crate) struct SymbolGraph {
     /// Symbol FQN per node index (ascending, deduplicated).
-    symbols: Vec<String>,
+    pub(crate) symbols: Vec<String>,
     /// The weighted undirected graph handed to Leiden.
-    graph: Graph,
+    pub(crate) graph: Graph,
     /// Dominant language per symbol (first seen wins).
     language_of: HashMap<String, String>,
     /// Distinct undirected (lo, hi, weight) edges — used as the edge count, to
@@ -297,7 +298,10 @@ impl SymbolClusterDetectionUseCase {
     /// graph. Only symbols that participate in at least one caller→callee edge
     /// become nodes; isolated and anonymous-only symbols are dropped so the
     /// communities stay meaningful.
-    async fn build_symbol_graph(&self, repository_id: &str) -> Result<SymbolGraph, DomainError> {
+    pub(crate) async fn build_symbol_graph(
+        &self,
+        repository_id: &str,
+    ) -> Result<SymbolGraph, DomainError> {
         let references = self.call_graph.find_by_repository(repository_id).await?;
 
         // Aggregate parallel edges; collect the node set from edge endpoints.

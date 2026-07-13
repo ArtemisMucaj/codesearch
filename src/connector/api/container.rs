@@ -19,14 +19,15 @@ use crate::connector::adapter::{
 };
 use crate::{
     AnthropicClient, AnthropicReranking, ClusterDetectionUseCase, CommunityNamingUseCase,
-    DeleteRepositoryUseCase, DuckdbCallGraphRepository, DuckdbChannelEndpointRepository,
-    DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService,
-    ExecutionFeaturesUseCase, ExplainUseCase, FileRelationshipUseCase, GraphExpansionUseCase,
-    ImpactAnalysisUseCase, InMemoryVectorRepository, IndexRepositoryUseCase,
-    ListRepositoriesUseCase, LlmQueryExpander, MockEmbedding, MockReranking, OpenAiChatClient,
-    OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, RerankingService, Scip,
-    SearchCodeUseCase, SnippetLookupUseCase, SymbolClusterDetectionUseCase, SymbolContextUseCase,
-    TreeSitterChannelExtractor, TreeSitterParser, VectorRepository,
+    CouplingDetectionUseCase, DeleteRepositoryUseCase, DuckdbCallGraphRepository,
+    DuckdbChannelEndpointRepository, DuckdbFileHashRepository, DuckdbMetadataRepository,
+    DuckdbVectorRepository, EmbeddingService, ExecutionFeaturesUseCase, ExplainUseCase,
+    FileRelationshipUseCase, GraphExpansionUseCase, ImpactAnalysisUseCase,
+    InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander,
+    MockEmbedding, MockReranking, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding,
+    OrtReranking, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
+    SymbolClusterDetectionUseCase, SymbolContextUseCase, TreeSitterChannelExtractor,
+    TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -756,6 +757,13 @@ impl Container {
     pub fn symbol_cluster_detection_use_case(&self) -> SymbolClusterDetectionUseCase {
         SymbolClusterDetectionUseCase::new(self.call_graph_use_case.clone())
             .with_storage(self.analysis_repo.clone())
+    }
+
+    pub fn coupling_detection_use_case(&self) -> CouplingDetectionUseCase {
+        CouplingDetectionUseCase::new(
+            Arc::new(self.file_graph_use_case()),
+            Arc::new(self.symbol_cluster_detection_use_case()),
+        )
     }
 
     /// LLM naming for detected communities, backed by the analysis cache.

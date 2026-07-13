@@ -208,6 +208,82 @@ Symbol `authenticate` belongs to community `authenticate` (18 symbols, rust, coh
     …
 ```
 
+## Coupling Elements (`codesearch couplings`)
+
+`couplings` answers a question the cluster listings cannot: **which single file,
+symbol, or dependency is holding a detected community together?** A *coupling
+element* is defined counterfactually — a node or edge whose removal would make
+one Leiden community fall apart into two sub-blocks that were latent inside it
+all along. That is the classic *hub-like dependency* / *modularity violation*
+smell: two modules that only read as one because a single element glues them.
+
+Rather than ablating every element and re-clustering the whole graph (which
+would take hours), the command runs a **filter-then-verify** pipeline, local to
+one community at a time:
+
+1. **Localize** — each community's induced subgraph is re-clustered across a
+   resolution (γ) ladder. A community that never separates has no internal
+   2-block structure and is skipped; one that holds at low γ but separates at a
+   higher rung is *fragile*, and the split names its latent sub-blocks A and B.
+2. **Score candidates cheaply** — the minimum cut between A and B is literally
+   the glue edge set; cut shares aggregated onto incident nodes plus the
+   Guimerà–Amaral participation coefficient rank node candidates.
+3. **Verify by ablation** — each top candidate is removed and the subgraph is
+   re-clustered under several refinement seeds. Leiden is stochastic, so the
+   reported `split_probability` is the *fraction* of runs in which A separates
+   from B, compared against the same fraction with the element still present
+   (`baseline_split_probability`). The difference is the element's
+   **coupling strength**.
+4. **Sweep resolution** — verified couplers are re-tested down the γ ladder, so
+   the report shows the range of resolutions over which the element controls
+   the merge instead of a yes/no at one arbitrary setting.
+
+```bash
+# Coupling elements in the file-dependency graph (default level)
+codesearch couplings -r my-repo
+
+# Same analysis over the symbol call graph
+codesearch couplings -r my-repo --level symbol
+
+# JSON for tooling
+codesearch couplings -r my-repo --format json
+```
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-l, --level` | `file` | Which graph: `file` (modules) or `symbol` (behavioural communities) |
+| `-F, --format` | `text` | Output format: `text` or `json` |
+
+The baseline partition is computed with the same code path as `clusters` /
+`symbol-clusters`, so the community ids in the report match those commands'
+output.
+
+### Example
+
+```text
+Coupling analysis for `my-repo` (file level)
+12 communities — 3 internally fragile, 1 with verified couplers
+────────────────────────────────────────────────────
+  1. c-4be91ca03d21 (14 files) — holds to γ≤0.2, splits at γ=0.4 into 8 + 6
+     block A (8): src/orders/create.rs, src/orders/mod.rs, … 4 more
+     block B (6): src/billing/invoice.rs, src/billing/mod.rs, … 2 more
+     couplers:
+     • node src/orders/billing_glue.rs — strength 0.88 (split probability 1.00 vs baseline 0.12), cut share 0.81, participation 0.47, active γ 0.05–0.2
+     • edge src/orders/mod.rs ↔ src/billing/invoice.rs — strength 0.50 (split probability 0.62 vs baseline 0.12), cut share 0.19, active γ 0.2–0.2
+```
+
+Reading the report: the community is really an *orders* block and a *billing*
+block; `billing_glue.rs` carries most of the min-cut between them and removing
+it makes the community split in every seeded re-clustering. High-strength
+couplers with a wide active-γ range are refactoring targets — splitting or
+inverting that dependency separates the two modules cleanly.
+
+Unlike `clusters` and `symbol-clusters`, this analysis is not cached — it is
+recomputed on each invocation (the command is read-only and safe to run
+concurrently with searches).
+
 ## Visualizing the Graph (`codesearch visualize`)
 
 `visualize` renders the Leiden communities — at either level — into a shareable

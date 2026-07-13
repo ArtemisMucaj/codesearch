@@ -282,6 +282,7 @@ async fn main() -> Result<()> {
                 | Commands::Features { .. }
                 | Commands::Channels { .. }
                 | Commands::Uses { .. }
+                | Commands::Couplings { .. }
                 | Commands::Visualize { .. }
                 | Commands::Tui { .. }
                 // Memory commands only touch memory.duckdb, never the code
