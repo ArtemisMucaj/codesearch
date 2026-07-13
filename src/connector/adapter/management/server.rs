@@ -88,6 +88,8 @@ pub fn routes(state: AppState) -> Router {
             "/api/symbol-clusters",
             get(handlers::clusters::symbol_clusters),
         )
+        // Coupling elements (the glue holding fragile communities together).
+        .route("/api/couplings", get(handlers::couplings::couplings))
         // Cross-service channels.
         .route("/api/channels", get(handlers::channels::channels))
         // Read-only memory queries.
@@ -141,6 +143,7 @@ async fn index(State(_state): State<AppState>) -> Json<Value> {
             { "method": "GET", "path": "/api/features", "description": "entry-point features by criticality" },
             { "method": "GET", "path": "/api/clusters", "description": "file-dependency Leiden clusters" },
             { "method": "GET", "path": "/api/symbol-clusters", "description": "symbol call-graph communities" },
+            { "method": "GET", "path": "/api/couplings", "description": "coupling elements holding fragile communities together (?level=file|symbol)" },
             { "method": "GET", "path": "/api/channels", "description": "cross-service channel links" },
             { "method": "GET", "path": "/api/memory", "description": "list stored memory items (?kind=)" },
             { "method": "GET", "path": "/api/memory/search", "description": "search stored memories (?query=)" },

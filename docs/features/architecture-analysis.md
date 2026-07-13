@@ -284,6 +284,17 @@ Unlike `clusters` and `symbol-clusters`, this analysis is not cached — it is
 recomputed on each invocation (the command is read-only and safe to run
 concurrently with searches).
 
+### From AI tools and the management API
+
+The same analysis is exposed by the servers started with `codesearch serve`
+(and `codesearch mcp`):
+
+- **MCP tool** `couplings` — arguments `repository_id` (required) and `level`
+  (`file` or `symbol`, default `file`); returns the `CouplingReport` as JSON.
+- **REST** `GET /api/couplings?repository=<name-or-id>&level=file|symbol` —
+  returns the same `CouplingReport`. `level` defaults to `file`; an unknown
+  value is a `400`.
+
 ## Visualizing the Graph (`codesearch visualize`)
 
 `visualize` renders the Leiden communities — at either level — into a shareable

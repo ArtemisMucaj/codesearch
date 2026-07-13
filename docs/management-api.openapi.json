@@ -448,6 +448,43 @@
         }
       }
     },
+    "/api/couplings": {
+      "get": {
+        "tags": ["clusters"],
+        "summary": "Coupling elements holding fragile communities together",
+        "description": "Files/symbols or dependencies whose removal would split a Leiden community into two latent sub-blocks (the hub-like dependency / modularity-violation smell). Returns the serialized `CouplingReport` domain value.",
+        "operationId": "couplings",
+        "parameters": [
+          {
+            "name": "repository",
+            "in": "query",
+            "required": false,
+            "description": "Repository to analyse (name or UUID). Omit to auto-detect.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "level",
+            "in": "query",
+            "required": false,
+            "description": "Which graph to analyse: the file-dependency graph or the symbol call graph.",
+            "schema": { "type": "string", "enum": ["file", "symbol"], "default": "file" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The coupling report.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CouplingReport" }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid level parameter."
+          }
+        }
+      }
+    },
     "/api/channels": {
       "get": {
         "tags": ["channels"],
@@ -961,6 +998,11 @@
       "SymbolCommunityGraph": {
         "type": "object",
         "description": "Serialized `SymbolCommunityGraph` domain value: Leiden communities over the symbol call graph.",
+        "additionalProperties": true
+      },
+      "CouplingReport": {
+        "type": "object",
+        "description": "Serialized `CouplingReport` domain value: per internally-fragile Leiden community, its two latent sub-blocks and the ablation-verified coupling elements (nodes/edges) holding them together, with split probabilities and the resolution range each controls.",
         "additionalProperties": true
       },
       "ChannelLinkReport": {

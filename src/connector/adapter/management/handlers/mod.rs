@@ -11,6 +11,7 @@
 
 pub mod channels;
 pub mod clusters;
+pub mod couplings;
 pub mod graph;
 pub mod memory;
 pub mod repositories;
