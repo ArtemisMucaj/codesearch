@@ -115,6 +115,16 @@ pub enum ClustersSubcommand {
         /// Output format: text or json.
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormatTextJson,
+
+        /// LLM provider for display names (default: open-ai, i.e. a local
+        /// OpenAI-compatible endpoint). Names are generated automatically and
+        /// cached by cluster id; if the endpoint is unreachable the id is shown.
+        #[arg(long, value_enum, default_value = "open-ai")]
+        llm: LlmTarget,
+
+        /// Skip LLM naming entirely and show cluster ids.
+        #[arg(long)]
+        no_llm: bool,
     },
 
     /// Show the cluster that a specific file belongs to.
@@ -152,6 +162,16 @@ pub enum SymbolClustersSubcommand {
         /// Output format: text or json.
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormatTextJson,
+
+        /// LLM provider for display names (default: open-ai, i.e. a local
+        /// OpenAI-compatible endpoint). Names are generated automatically and
+        /// cached by community id; if the endpoint is unreachable the id is shown.
+        #[arg(long, value_enum, default_value = "open-ai")]
+        llm: LlmTarget,
+
+        /// Skip LLM naming entirely and show community ids.
+        #[arg(long)]
+        no_llm: bool,
     },
 
     /// Show the community that a specific symbol belongs to.

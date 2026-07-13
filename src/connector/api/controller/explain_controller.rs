@@ -7,9 +7,9 @@ use anyhow::{Context, Result};
 
 use crate::application::ChatClient;
 use crate::cli::LlmTarget;
-use crate::connector::adapter::{AnthropicClient, OpenAiChatClient};
 
 use super::super::Container;
+use super::build_chat_client;
 
 pub struct ExplainController<'a> {
     container: &'a Container,
@@ -28,13 +28,7 @@ impl<'a> ExplainController<'a> {
         dump_symbols: bool,
         is_regex: bool,
     ) -> Result<String> {
-        let chat_client: Arc<dyn ChatClient> = match llm {
-            LlmTarget::Anthropic => Arc::new(AnthropicClient::from_env()),
-            LlmTarget::OpenAi => Arc::new(
-                OpenAiChatClient::from_env()
-                    .context("Failed to initialise OpenAI chat client for explain command")?,
-            ),
-        };
+        let chat_client: Arc<dyn ChatClient> = build_chat_client(llm)?;
 
         let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 

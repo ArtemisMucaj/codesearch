@@ -31,7 +31,6 @@ const LEVEL_SYMBOL: &str = "symbol";
 /// on the load path, where the data must outlive the connection borrow.
 struct CommunityRow {
     id: String,
-    name: String,
     dominant_language: String,
     size: usize,
     cohesion: f32,
@@ -43,7 +42,6 @@ struct CommunityRow {
 /// cloning them.
 struct CommunityRowRef<'a> {
     id: &'a str,
-    name: &'a str,
     dominant_language: &'a str,
     size: usize,
     cohesion: f32,
@@ -210,7 +208,6 @@ impl DuckdbAnalysisRepository {
                 id TEXT PRIMARY KEY,
                 repository_id TEXT NOT NULL,
                 level TEXT NOT NULL,
-                name TEXT NOT NULL,
                 dominant_language TEXT NOT NULL,
                 size BIGINT NOT NULL,
                 cohesion FLOAT NOT NULL
@@ -257,6 +254,18 @@ impl DuckdbAnalysisRepository {
 
             CREATE INDEX IF NOT EXISTS idx_execution_feature_nodes_repo
             ON execution_feature_nodes(repository_id);
+
+            -- Cache of LLM-generated display names, keyed on the stable,
+            -- content-addressed community id. Intentionally NOT scoped to a
+            -- repository and NOT wiped by delete_by_repository: the id is a pure
+            -- function of a community's membership, so an unchanged community
+            -- keeps its name across re-index for free, while a changed one gets a
+            -- new id (a cache miss) rather than a stale name.
+            CREATE TABLE IF NOT EXISTS community_names (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                generated_at TIMESTAMP NOT NULL DEFAULT current_timestamp
+            );
             "#,
         )
         .map_err(|e| {
@@ -347,8 +356,8 @@ impl DuckdbAnalysisRepository {
             let mut cluster_stmt = tx
                 .prepare(
                     "INSERT INTO clusters \
-                     (id, repository_id, level, name, dominant_language, size, cohesion) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (id, repository_id, level, dominant_language, size, cohesion) \
+                     VALUES (?, ?, ?, ?, ?, ?)",
                 )
                 .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
             let mut member_stmt = tx
@@ -364,7 +373,6 @@ impl DuckdbAnalysisRepository {
                         row.id,
                         repository_id,
                         level,
-                        row.name,
                         row.dominant_language,
                         row.size as i64,
                         row.cohesion,
@@ -564,8 +572,8 @@ impl DuckdbAnalysisRepository {
         // Largest first, then name — the order the detection use cases emit.
         let mut cluster_stmt = conn
             .prepare(
-                "SELECT id, name, dominant_language, size, cohesion FROM clusters \
-                 WHERE repository_id = ? AND level = ? ORDER BY size DESC, name, id",
+                "SELECT id, dominant_language, size, cohesion FROM clusters \
+                 WHERE repository_id = ? AND level = ? ORDER BY size DESC, id",
             )
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
         let cluster_rows = cluster_stmt
@@ -573,21 +581,19 @@ impl DuckdbAnalysisRepository {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, f32>(4)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, f32>(3)?,
                 ))
             })
             .map_err(|e| DomainError::storage(format!("Failed to query clusters: {}", e)))?;
 
         let mut rows = Vec::new();
         for row in cluster_rows {
-            let (id, name, dominant_language, size, cohesion) =
+            let (id, dominant_language, size, cohesion) =
                 row.map_err(|e| DomainError::storage(format!("Failed to read row: {}", e)))?;
             let members = members_by_cluster.remove(&id).unwrap_or_default();
             rows.push(CommunityRow {
                 id,
-                name,
                 dominant_language,
                 size: size as usize,
                 cohesion,
@@ -607,7 +613,6 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
             .iter()
             .map(|c| CommunityRowRef {
                 id: &c.id,
-                name: &c.name,
                 dominant_language: &c.dominant_language,
                 size: c.size,
                 cohesion: c.cohesion,
@@ -640,7 +645,10 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
             .into_iter()
             .map(|row| Cluster {
                 id: row.id,
-                name: row.name,
+                // Filled from the persistent name cache at render time; the
+                // cluster graph itself is rewritten on every recompute, so the
+                // LLM name is kept in a separate table keyed on the stable id.
+                display_name: None,
                 repository_id: repository_id.to_string(),
                 dominant_language: row.dominant_language,
                 size: row.size,
@@ -666,7 +674,6 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
             .iter()
             .map(|c| CommunityRowRef {
                 id: &c.id,
-                name: &c.name,
                 dominant_language: &c.dominant_language,
                 size: c.size,
                 cohesion: c.cohesion,
@@ -699,7 +706,9 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
             .into_iter()
             .map(|row| SymbolCommunity {
                 id: row.id,
-                name: row.name,
+                // Filled from the persistent name cache at render time (see the
+                // file-cluster loader for why it is kept out of this table).
+                display_name: None,
                 repository_id: repository_id.to_string(),
                 dominant_language: row.dominant_language,
                 size: row.size,
@@ -845,6 +854,72 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
             tx.commit()
                 .map_err(|e| DomainError::storage(format!("Failed to commit: {}", e)))?;
             debug!("Deleted stored analyses for repository {}", repository_id);
+            Ok(())
+        })
+        .await
+    }
+
+    async fn get_community_names(
+        &self,
+        ids: &[String],
+    ) -> Result<HashMap<String, String>, DomainError> {
+        let mut out = HashMap::new();
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let conn = self.conn.lock().await;
+        if !Self::schema_exists(&conn)? {
+            return Ok(out);
+        }
+
+        // One IN (...) query with a placeholder per id keeps this a single round
+        // trip regardless of community count.
+        let placeholders = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!("SELECT id, name FROM community_names WHERE id IN ({placeholders})");
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
+        let params = duckdb::params_from_iter(ids.iter());
+        let rows = stmt
+            .query_map(params, |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| DomainError::storage(format!("Failed to query community names: {}", e)))?;
+        for row in rows {
+            let (id, name) =
+                row.map_err(|e| DomainError::storage(format!("Failed to read row: {}", e)))?;
+            out.insert(id, name);
+        }
+        Ok(out)
+    }
+
+    async fn save_community_names(&self, names: &[(String, String)]) -> Result<(), DomainError> {
+        if names.is_empty() {
+            return Ok(());
+        }
+        let names = names.to_vec();
+        self.with_write_conn(move |conn| {
+            let tx = conn
+                .transaction()
+                .map_err(|e| DomainError::storage(format!("Failed to begin transaction: {}", e)))?;
+            for (id, name) in &names {
+                // `generated_at` is left to its column DEFAULT (current_timestamp)
+                // on insert and untouched on conflict: DuckDB parses a bare
+                // `current_timestamp` in a DO UPDATE SET as a column reference and
+                // errors, and the timestamp is only informational anyway.
+                tx.execute(
+                    "INSERT INTO community_names (id, name) VALUES (?, ?) \
+                     ON CONFLICT (id) DO UPDATE SET name = excluded.name",
+                    params![id, name],
+                )
+                .map_err(|e| {
+                    DomainError::storage(format!("Failed to save community name: {}", e))
+                })?;
+            }
+            tx.commit()
+                .map_err(|e| DomainError::storage(format!("Failed to commit: {}", e)))?;
             Ok(())
         })
         .await

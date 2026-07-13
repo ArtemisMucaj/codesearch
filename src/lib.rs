@@ -7,16 +7,17 @@ pub mod tui;
 pub use application::{
     AnalysisRepository, CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase,
     ChannelEndpointRepository, ChannelExtractor, ChannelLinkOptions, ChannelLinkReport,
-    ChannelLinkUseCase, ChannelResolver, ChatClient, ClusterDetectionUseCase, ContextNode,
-    DeleteRepositoryUseCase, EmbeddingService, ExecutionFeaturesUseCase, ExplainResult,
-    ExplainUseCase, ExtractionReport, FileHashRepository, FileRelationshipUseCase,
-    GraphExpansionUseCase, ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode, ImportOutcome,
-    ImportSessionUseCase, IndexRepositoryUseCase, ListRepositoriesUseCase, MemoryBrowseUseCase,
-    MemoryExtractionUseCase, MemoryLevel, MemoryRepository, MemoryRow, MemorySearchUseCase,
-    MetadataRepository, ParserService, QueryExpander, RerankingService, ResolveChannelsUseCase,
-    ResolvedConfigValue, RowTarget, Scip, SearchCodeUseCase, SnippetLookupUseCase,
-    SummarizeMemoryUseCase, SymbolClusterDetectionUseCase, SymbolContext, SymbolContextUseCase,
-    VectorRepository, MEMORY_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
+    ChannelLinkUseCase, ChannelResolver, ChatClient, ClusterDetectionUseCase,
+    CommunityNamingUseCase, ContextNode, DeleteRepositoryUseCase, EmbeddingService,
+    ExecutionFeaturesUseCase, ExplainResult, ExplainUseCase, ExtractionReport, FileHashRepository,
+    FileRelationshipUseCase, GraphExpansionUseCase, ImpactAnalysis, ImpactAnalysisUseCase,
+    ImpactNode, ImportOutcome, ImportSessionUseCase, IndexRepositoryUseCase,
+    ListRepositoriesUseCase, MemoryBrowseUseCase, MemoryExtractionUseCase, MemoryLevel,
+    MemoryRepository, MemoryRow, MemorySearchUseCase, MetadataRepository, ParserService,
+    QueryExpander, RerankingService, ResolveChannelsUseCase, ResolvedConfigValue, RowTarget, Scip,
+    SearchCodeUseCase, SnippetLookupUseCase, SummarizeMemoryUseCase, SymbolClusterDetectionUseCase,
+    SymbolContext, SymbolContextUseCase, VectorRepository, MEMORY_ROOT_URI, RESOURCES_ROOT_URI,
+    SESSIONS_ROOT_URI,
 };
 
 pub use application::resource_slug;
@@ -47,12 +48,13 @@ pub use connector::{
 };
 
 pub use domain::{
-    compute_file_hash, ChannelEdge, ChannelEndpoint, ChannelRole, Cluster, ClusterGraph, CodeChunk,
-    DiscoveredSession, DomainError, Embedding, EmbeddingConfig, EndpointSource, ExecutionFeature,
-    FeatureNode, FileHash, ImportedSession, IndexingStatus, Language, MemoryItem, MemoryKind,
-    MemoryNode, MemoryOperation, NodeKind, NodeType, Protocol, ReferenceKind, Repository,
-    SearchQuery, SearchResult, SessionLocator, SessionMessage, SessionSource, SessionTranscript,
-    SymbolCommunity, SymbolCommunityGraph, SymbolReference, VectorStore,
+    compute_file_hash, stable_community_id, ChannelEdge, ChannelEndpoint, ChannelRole, Cluster,
+    ClusterGraph, CodeChunk, DiscoveredSession, DomainError, Embedding, EmbeddingConfig,
+    EndpointSource, ExecutionFeature, FeatureNode, FileHash, ImportedSession, IndexingStatus,
+    Language, MemoryItem, MemoryKind, MemoryNode, MemoryOperation, NodeKind, NodeType, Protocol,
+    ReferenceKind, Repository, SearchQuery, SearchResult, SessionLocator, SessionMessage,
+    SessionSource, SessionTranscript, SymbolCommunity, SymbolCommunityGraph, SymbolReference,
+    VectorStore,
 };
 
 pub use domain::{CommunityMeta, GraphEdge, GraphLevel, GraphNode, GraphView};

@@ -56,4 +56,22 @@ pub trait AnalysisRepository: Send + Sync {
     /// Delete every stored analysis for a repository. Called when the
     /// repository is deleted or its call graph is re-indexed.
     async fn delete_by_repository(&self, repository_id: &str) -> Result<(), DomainError>;
+
+    /// Look up cached LLM-generated display names for the given community ids.
+    ///
+    /// Names are keyed on the *stable, content-addressed* community id
+    /// ([`crate::domain::stable_community_id`]), which is a pure function of the
+    /// community's membership. This cache therefore deliberately outlives the
+    /// per-repository analysis cache wiped by [`Self::delete_by_repository`]: a
+    /// re-index that leaves a community's membership unchanged reuses its name
+    /// for free, and a changed membership simply produces a new id (a cache
+    /// miss) rather than a stale name. Missing ids are absent from the result.
+    async fn get_community_names(
+        &self,
+        ids: &[String],
+    ) -> Result<std::collections::HashMap<String, String>, DomainError>;
+
+    /// Persist LLM-generated display names, keyed on the stable community id.
+    /// Re-inserting an existing id overwrites its name.
+    async fn save_community_names(&self, names: &[(String, String)]) -> Result<(), DomainError>;
 }

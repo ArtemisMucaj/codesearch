@@ -39,8 +39,21 @@ impl ScipImporter {
             let index = scip::types::Index::parse_from_bytes(&bytes)
                 .context("failed to parse SCIP protobuf")?;
 
+            // Pass 1: build a global map from every raw SCIP symbol to
+            // the file it is *defined* in. SCIP records a symbol's definition as
+            // an occurrence with the Definition role, and each document's
+            // `relative_path` is that definition's file. Without this map the
+            // per-document pass has no way to know which file a callee lives in
+            // (a reference occurrence only carries the callee's symbol, not its
+            // definition site), so every reference would be attributed to the
+            // referencing file and the file-dependency graph would collapse to
+            // self-loops.
+            let def_file_of = build_definition_file_map(&index);
+
             let mut by_file: HashMap<String, Vec<SymbolReference>> = HashMap::new();
 
+            // Pass 2: emit references, resolving each callee to its definition
+            // file via the global map.
             for doc in &index.documents {
                 let language = scip_language_to_domain(&doc.language, &doc.relative_path);
                 if !matches!(
@@ -50,7 +63,7 @@ impl ScipImporter {
                     continue;
                 }
 
-                let refs = process_document(doc, &repo_id, language);
+                let refs = process_document(doc, &repo_id, language, &def_file_of);
                 if !refs.is_empty() {
                     debug!("SCIP: {} references from {}", refs.len(), doc.relative_path);
                     by_file
@@ -68,14 +81,72 @@ impl ScipImporter {
 }
 
 // ---------------------------------------------------------------------------
+// Global definition-file resolution
+// ---------------------------------------------------------------------------
+
+/// Build a map from every raw SCIP symbol to the file it is *defined* in,
+/// scanning Definition occurrences across all documents in the index.
+///
+/// The key is the raw SCIP symbol string (not the normalised name, which would
+/// collide across files that share a short symbol name); [`process_document`]
+/// looks a reference up by its own raw `occ.symbol`. When a symbol is (unusually)
+/// defined in more than one file, the first document wins — documents are
+/// visited in index order, which SCIP emits deterministically, so the choice is
+/// stable across runs.
+///
+/// Symbols with no definition occurrence in this index (third-party library
+/// symbols, dynamic PHP magic, etc.) are simply absent; the caller then falls
+/// back to leaving `reference_file_path` as the referencing file.
+fn build_definition_file_map(index: &scip::types::Index) -> HashMap<String, String> {
+    let mut def_file_of: HashMap<String, String> = HashMap::new();
+
+    for doc in &index.documents {
+        let language = scip_language_to_domain(&doc.language, &doc.relative_path);
+        if !matches!(
+            language,
+            Language::JavaScript | Language::TypeScript | Language::Php
+        ) {
+            continue;
+        }
+
+        for occ in &doc.occurrences {
+            if (occ.symbol_roles & ROLE_DEFINITION) == 0 || occ.range.is_empty() {
+                continue;
+            }
+            if occ.symbol.starts_with("local ") {
+                continue;
+            }
+            // Key by the RAW SCIP symbol, not the normalised name: normalisation
+            // strips scip-typescript's file-path prefix, so `foo.ts/foo` and
+            // `bar.ts/foo` would collide and one definition file would wrongly
+            // win for both. References look this map up by their raw symbol too.
+            if normalize_symbol(&occ.symbol, language).is_empty() {
+                continue;
+            }
+            def_file_of
+                .entry(occ.symbol.clone())
+                .or_insert_with(|| doc.relative_path.clone());
+        }
+    }
+
+    def_file_of
+}
+
+// ---------------------------------------------------------------------------
 // Per-document processing
 // ---------------------------------------------------------------------------
 
 /// Convert one SCIP [`Document`] into a flat list of [`SymbolReference`]s.
+///
+/// `def_file_of` maps a raw SCIP symbol to the file it is defined in (built by
+/// [`build_definition_file_map`] across the whole index); it is used to set each
+/// reference's `reference_file_path` to the callee's definition site rather than
+/// the referencing file.
 fn process_document(
     doc: &scip::types::Document,
     repo_id: &str,
     language: Language,
+    def_file_of: &HashMap<String, String>,
 ) -> Vec<SymbolReference> {
     // Build symbol-kind lookup: symbol_str → SymbolKind
     let kind_map: HashMap<&str, SymbolKind> = doc
@@ -139,11 +210,22 @@ fn process_document(
 
         let callee_package = extract_package(&occ.symbol);
 
+        // Resolve the callee to its definition file, keyed by the RAW SCIP
+        // symbol (matching how `build_definition_file_map` keys defs). If the
+        // symbol is defined in this repo's index, `reference_file_path` becomes
+        // that definition site (which is what makes the file-dependency graph a
+        // graph of real cross-file edges); otherwise it falls back to the
+        // referencing file.
+        let reference_file_path = def_file_of
+            .get(&occ.symbol)
+            .cloned()
+            .unwrap_or_else(|| doc.relative_path.clone());
+
         let mut sym_ref = SymbolReference::new(
             enclosing.as_ref().map(|s| s.symbol.clone()),
             callee_symbol,
             doc.relative_path.clone(),
-            doc.relative_path.clone(),
+            reference_file_path,
             occ_line + 1, // SCIP is 0-indexed; our model is 1-indexed
             occ_col + 1,
             reference_kind,

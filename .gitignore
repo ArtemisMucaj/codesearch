@@ -33,3 +33,4 @@ Thumbs.db
 *.profraw
 *.profdata
 coverage/
+.claude/worktrees/

@@ -1,3 +1,23 @@
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+
+use crate::application::ChatClient;
+use crate::cli::LlmTarget;
+use crate::connector::adapter::{AnthropicClient, OpenAiChatClient};
+
+/// Build a chat client for the requested provider from its env config
+/// (`ANTHROPIC_*` or `OPENAI_*`). Shared by every controller that needs an LLM
+/// (explain, memory, community naming) so provider dispatch lives in one place.
+pub(crate) fn build_chat_client(llm: LlmTarget) -> Result<Arc<dyn ChatClient>> {
+    Ok(match llm {
+        LlmTarget::Anthropic => Arc::new(AnthropicClient::from_env()),
+        LlmTarget::OpenAi => Arc::new(
+            OpenAiChatClient::from_env().context("Failed to initialise OpenAI chat client")?,
+        ),
+    })
+}
+
 pub mod channels_controller;
 pub mod clusters_controller;
 pub mod delete_controller;

@@ -10,7 +10,6 @@ use crate::application::{
 use crate::cli::{LlmTarget, MemoryKindArg, OutputFormatTextJson};
 use crate::connector::adapter::{
     fetch_resource, load_transcript as load_discovered_transcript, parse_transcript_file,
-    AnthropicClient, OpenAiChatClient,
 };
 use crate::domain::{DiscoveredSession, MemoryItem, MemoryKind, MemoryNode, MemoryOperation};
 use crate::tui::import_picker::{ImportEvent, ImportRequest};
@@ -29,15 +28,9 @@ impl<'a> MemoryController<'a> {
         Self { container }
     }
 
-    /// Build the chat client for the requested LLM provider.
+    /// Build the chat client for the requested LLM provider (shared dispatch).
     fn chat_client(llm: LlmTarget) -> Result<Arc<dyn ChatClient>> {
-        Ok(match llm {
-            LlmTarget::Anthropic => Arc::new(AnthropicClient::from_env()),
-            LlmTarget::OpenAi => Arc::new(
-                OpenAiChatClient::from_env()
-                    .context("Failed to initialise OpenAI chat client for memory")?,
-            ),
-        })
+        super::build_chat_client(llm)
     }
 
     /// Import a single transcript file directly (the `memory import <path>`
