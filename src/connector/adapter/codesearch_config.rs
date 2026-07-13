@@ -89,6 +89,13 @@ impl CodesearchConfig {
     pub fn copilot_mut(&mut self) -> &mut CopilotConfig {
         self.copilot.get_or_insert_with(CopilotConfig::default)
     }
+
+    /// Load the config from `data_dir` and take its Copilot section (or the
+    /// default when absent) in one step — the common read path for callers that
+    /// only care about the Copilot settings.
+    pub fn load_copilot(data_dir: &str) -> Result<CopilotConfig, DomainError> {
+        Ok(Self::load(data_dir)?.copilot.unwrap_or_default())
+    }
 }
 
 #[cfg(test)]

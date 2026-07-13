@@ -38,10 +38,8 @@ use tokio::sync::mpsc;
 
 use crate::application::ChatClient;
 use crate::cli::LlmTarget;
-use crate::connector::adapter::{
-    AnthropicClient, CodesearchConfig, CopilotChatClient, OpenAiChatClient,
-};
-use crate::domain::{DomainError, VectorStore};
+use crate::connector::adapter::{AnthropicClient, CopilotChatClient, OpenAiChatClient};
+use crate::domain::VectorStore;
 
 use super::server::AppState;
 
@@ -97,20 +95,6 @@ impl From<StreamLlmTarget> for LlmTarget {
             StreamLlmTarget::Copilot => LlmTarget::Copilot,
         }
     }
-}
-
-/// Build a [`CopilotChatClient`] from `<data_dir>/config.json`, applying an
-/// optional per-request `model` override on top of the stored selection. This
-/// is what lets a serve-mode caller pick a model on the fly (from the list
-/// returned by `GET /api/llm/models`) without editing the config file.
-fn build_copilot_client(
-    data_dir: &str,
-    model_override: Option<String>,
-) -> Result<CopilotChatClient, DomainError> {
-    let cfg = CodesearchConfig::load(data_dir)?;
-    let copilot = cfg.copilot.unwrap_or_default();
-    let model = model_override.or(copilot.model);
-    Ok(CopilotChatClient::new(copilot.github_token, model))
 }
 
 // ---------------------------------------------------------------------------
@@ -201,16 +185,18 @@ async fn run_explain_stream(
                 return;
             }
         },
-        LlmTarget::Copilot => match build_copilot_client(&data_dir, req.model.clone()) {
-            Ok(client) => Arc::new(client),
-            Err(err) => {
-                let _ = event_tx.send(sse_event(
-                    "error",
-                    json!({ "message": format!("failed to initialise Copilot client: {err}") }),
-                ));
-                return;
+        LlmTarget::Copilot => {
+            match CopilotChatClient::from_data_dir_with_model(&data_dir, req.model) {
+                Ok(client) => Arc::new(client),
+                Err(err) => {
+                    let _ = event_tx.send(sse_event(
+                        "error",
+                        json!({ "message": format!("failed to initialise Copilot client: {err}") }),
+                    ));
+                    return;
+                }
             }
-        },
+        }
     };
 
     // Per-token channel from the use case; we relay each token as an SSE frame.

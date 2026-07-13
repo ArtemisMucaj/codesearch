@@ -56,7 +56,7 @@ pub async fn models(
 ) -> ApiResult<Json<LlmModelsResponse>> {
     let target = match params.target.as_deref() {
         None => state.container.llm_target(),
-        Some(t) => parse_target(t)?,
+        Some(t) => t.parse::<LlmTarget>().map_err(ApiError::bad_request)?,
     };
 
     let models = match target {
@@ -99,28 +99,7 @@ pub async fn models(
     };
 
     Ok(Json(LlmModelsResponse {
-        target: target_name(target).to_string(),
+        target: target.as_str().to_string(),
         models,
     }))
-}
-
-/// Parse a `?target=` value into an [`LlmTarget`].
-fn parse_target(raw: &str) -> Result<LlmTarget, ApiError> {
-    match raw.to_ascii_lowercase().as_str() {
-        "openai" | "open-ai" => Ok(LlmTarget::OpenAi),
-        "anthropic" => Ok(LlmTarget::Anthropic),
-        "copilot" => Ok(LlmTarget::Copilot),
-        other => Err(ApiError::bad_request(format!(
-            "unknown target '{other}' (expected openai, anthropic, or copilot)"
-        ))),
-    }
-}
-
-/// Stable lowercase name for an [`LlmTarget`], used in the response body.
-fn target_name(target: LlmTarget) -> &'static str {
-    match target {
-        LlmTarget::OpenAi => "openai",
-        LlmTarget::Anthropic => "anthropic",
-        LlmTarget::Copilot => "copilot",
-    }
 }

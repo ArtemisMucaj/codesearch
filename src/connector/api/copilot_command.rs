@@ -88,16 +88,17 @@ async fn login(data_dir: &str, no_pick: bool) -> Result<String> {
         .unwrap_or(0);
 
     // The picker owns the terminal; run it on a blocking thread so it never
-    // contends with the async runtime's reactor.
-    let models_for_ui = models.clone();
-    let choice = tokio::task::spawn_blocking(move || picker::run(&models_for_ui, preselected))
-        .await
-        .map_err(|e| anyhow::anyhow!("model picker task panicked: {e}"))??;
+    // contends with the async runtime's reactor. `models` is moved in and the
+    // chosen entry is returned back out, so nothing is cloned.
+    let chosen = tokio::task::spawn_blocking(move || {
+        picker::run(&models, preselected).map(|choice| choice.map(|index| models[index].clone()))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("model picker task panicked: {e}"))??;
 
-    let Some(index) = choice else {
+    let Some(chosen) = chosen else {
         return Ok("Login unchanged — no model selected.".to_string());
     };
-    let chosen = &models[index];
 
     cfg.copilot_mut().model = Some(chosen.id.clone());
     cfg.save(data_dir)?;
@@ -124,11 +125,8 @@ async fn models(data_dir: &str, json: bool) -> Result<String> {
 
 /// `copilot status`: report auth state and the selected model.
 async fn status(data_dir: &str) -> Result<String> {
-    let cfg = CodesearchConfig::load(data_dir)?;
-    let selected = cfg
-        .copilot
-        .as_ref()
-        .and_then(|c| c.model.clone())
+    let selected = CodesearchConfig::load_copilot(data_dir)?
+        .model
         .unwrap_or_else(|| "(none — CLI default)".to_string());
 
     let auth = client(data_dir)?.auth_status().await.ok();

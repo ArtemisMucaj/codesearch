@@ -99,9 +99,19 @@ impl CopilotChatClient {
     /// A missing file / missing Copilot section yields a client with no stored
     /// token (CLI uses its own credentials) and the default model.
     pub fn from_data_dir(data_dir: &str) -> Result<Self, DomainError> {
-        let cfg = super::CodesearchConfig::load(data_dir)?;
-        let copilot = cfg.copilot.unwrap_or_default();
-        Ok(Self::new(copilot.github_token, copilot.model)
+        Self::from_data_dir_with_model(data_dir, None)
+    }
+
+    /// Like [`Self::from_data_dir`] but applies a per-call model override on top
+    /// of the stored selection when `model_override` is `Some` — the path used
+    /// by serve-mode requests that pick a model on the fly.
+    pub fn from_data_dir_with_model(
+        data_dir: &str,
+        model_override: Option<String>,
+    ) -> Result<Self, DomainError> {
+        let copilot = super::CodesearchConfig::load_copilot(data_dir)?;
+        let model = model_override.or(copilot.model);
+        Ok(Self::new(copilot.github_token, model)
             .with_copilot_home(std::path::Path::new(data_dir).join(COPILOT_HOME_SUBDIR)))
     }
 

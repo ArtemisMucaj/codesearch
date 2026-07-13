@@ -384,6 +384,34 @@ pub enum LlmTarget {
     Copilot,
 }
 
+impl LlmTarget {
+    /// Stable lowercase identifier, used in API responses and request params.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LlmTarget::OpenAi => "openai",
+            LlmTarget::Anthropic => "anthropic",
+            LlmTarget::Copilot => "copilot",
+        }
+    }
+}
+
+impl std::str::FromStr for LlmTarget {
+    type Err = String;
+
+    /// Parse a target name. Accepts both `openai` and `open-ai` (the clap
+    /// value name) so CLI and API spellings both work.
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.to_ascii_lowercase().as_str() {
+            "openai" | "open-ai" => Ok(LlmTarget::OpenAi),
+            "anthropic" => Ok(LlmTarget::Anthropic),
+            "copilot" => Ok(LlmTarget::Copilot),
+            other => Err(format!(
+                "unknown target '{other}' (expected openai, anthropic, or copilot)"
+            )),
+        }
+    }
+}
+
 /// Reranking backend to use after retrieval.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum RerankingTarget {
