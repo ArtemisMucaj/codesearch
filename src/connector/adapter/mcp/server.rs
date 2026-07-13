@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::application::{CallGraphQuery, ChannelLinkOptions};
 use crate::connector::api::Container;
-use crate::domain::{FileEdge, MemoryKind, Protocol, SearchQuery};
+use crate::domain::{FileEdge, GraphLevel, MemoryKind, Protocol, SearchQuery};
 
 use super::tools::SearchResultOutput;
 
@@ -245,6 +245,23 @@ pub struct GetFileClusterInput {
 pub struct ArchitectureOverviewInput {
     /// Repository ID to summarise as a Markdown architecture table.
     pub repository_id: String,
+}
+
+/// Which graph the couplings analysis runs over.
+fn default_coupling_level() -> String {
+    "file".to_string()
+}
+
+/// Input parameters for the couplings tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CouplingsInput {
+    /// Repository ID to analyse for coupling elements.
+    pub repository_id: String,
+
+    /// Which graph to analyse: "file" (file-dependency graph, the default) or
+    /// "symbol" (symbol call graph).
+    #[serde(default = "default_coupling_level")]
+    pub level: String,
 }
 
 /// Input parameters for the channels tool
@@ -987,6 +1004,40 @@ impl CodesearchMcpServer {
             })?;
 
         Ok(CallToolResult::success(vec![Content::text(overview)]))
+    }
+
+    /// Find coupling elements: files/symbols or dependencies whose removal would
+    /// split a Leiden community into two latent sub-blocks — the hub-like
+    /// dependency / modularity-violation smell. Runs the filter-then-verify
+    /// pipeline per community and reports, for each internally-fragile
+    /// community, its two sub-blocks and the ablation-verified couplers holding
+    /// them together (with split probabilities and the resolution range each
+    /// controls). Set level to "file" or "symbol".
+    /// Requires the repository to have been indexed with call-graph support.
+    #[tool(name = "couplings")]
+    async fn couplings(
+        &self,
+        params: Parameters<CouplingsInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = params.0;
+
+        let level = GraphLevel::parse(&input.level).map_err(|msg| {
+            McpError::invalid_params(format!("invalid level '{}': {msg}", input.level), None)
+        })?;
+
+        let use_case = self.container.coupling_detection_use_case();
+        let report = use_case
+            .detect(&input.repository_id, level)
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Coupling detection failed: {}", e), None)
+            })?;
+
+        let json = serde_json::to_string_pretty(&report).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize coupling report: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
     /// Show cross-service channel links between indexed repositories:

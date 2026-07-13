@@ -165,6 +165,7 @@ async fn index_endpoint_describes_the_api() {
         "/api/search",
         "/api/impact",
         "/api/clusters",
+        "/api/couplings",
         "/api/channels",
         "/api/memory",
     ] {
@@ -173,6 +174,45 @@ async fn index_endpoint_describes_the_api() {
             "index should advertise {expected}, got {paths:?}"
         );
     }
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn couplings_endpoint_returns_a_report() {
+    let (container, _dir) = test_container().await;
+    index_fixture(&container).await;
+    let (base_url, server) = spawn_management_server_with_container(container).await;
+
+    // Default level (file) — well-formed CouplingReport even for a tiny repo
+    // with no fragile communities.
+    let resp = reqwest::get(format!("{base_url}/api/couplings?repository=fixture-repo"))
+        .await
+        .expect("request to /api/couplings failed");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("response body was not JSON");
+    assert_eq!(body["level"], "file");
+    assert!(body["total_communities"].is_number());
+    assert!(body["fragile_communities"].is_number());
+    assert!(body["communities"].is_array());
+
+    // Explicit symbol level is accepted and reflected in the report.
+    let resp = reqwest::get(format!(
+        "{base_url}/api/couplings?repository=fixture-repo&level=symbol"
+    ))
+    .await
+    .expect("symbol-level request failed");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("symbol body was not JSON");
+    assert_eq!(body["level"], "symbol");
+
+    // An unknown level is a 400.
+    let resp = reqwest::get(format!(
+        "{base_url}/api/couplings?repository=fixture-repo&level=bogus"
+    ))
+    .await
+    .expect("bad-level request failed");
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
 
     server.abort();
 }

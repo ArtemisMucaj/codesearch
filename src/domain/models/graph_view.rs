@@ -28,6 +28,19 @@ impl GraphLevel {
             GraphLevel::Symbol => "symbol",
         }
     }
+
+    /// Parse the wire representation accepted by the CLI, MCP, and REST
+    /// surfaces. Keeping the accepted values and the error message in one place
+    /// prevents the adapters from drifting apart. On an unknown value returns
+    /// the canonical error message (without the offending value, so callers can
+    /// prepend it in whatever style their surface uses).
+    pub fn parse(s: &str) -> Result<Self, &'static str> {
+        match s {
+            "file" => Ok(GraphLevel::File),
+            "symbol" => Ok(GraphLevel::Symbol),
+            _ => Err("expected 'file' or 'symbol'"),
+        }
+    }
 }
 
 /// A single node: a file path or a fully-qualified symbol name.
@@ -92,5 +105,31 @@ impl GraphView {
     /// Total edge count.
     pub fn edge_count(&self) -> usize {
         self.edges.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GraphLevel;
+
+    #[test]
+    fn graph_level_parse_accepts_known_values() {
+        assert_eq!(GraphLevel::parse("file"), Ok(GraphLevel::File));
+        assert_eq!(GraphLevel::parse("symbol"), Ok(GraphLevel::Symbol));
+    }
+
+    #[test]
+    fn graph_level_parse_rejects_unknown_values() {
+        assert!(GraphLevel::parse("bogus").is_err());
+        // Case-sensitive: the wire form is lowercase (matches serde).
+        assert!(GraphLevel::parse("File").is_err());
+        assert!(GraphLevel::parse("").is_err());
+    }
+
+    #[test]
+    fn graph_level_parse_round_trips_node_noun() {
+        for level in [GraphLevel::File, GraphLevel::Symbol] {
+            assert_eq!(GraphLevel::parse(level.node_noun()), Ok(level));
+        }
     }
 }
