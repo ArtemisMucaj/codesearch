@@ -55,11 +55,12 @@ impl FileRelationshipUseCase {
         let target_repos: Vec<_> = if let Some(ids) = repository_ids {
             let id_set: HashSet<&str> = ids.iter().map(String::as_str).collect();
             all_repos
-                .into_iter()
+                .iter()
                 .filter(|r| id_set.contains(r.id()))
+                .cloned()
                 .collect()
         } else {
-            all_repos
+            all_repos.clone()
         };
 
         if target_repos.is_empty() {
@@ -73,15 +74,41 @@ impl FileRelationshipUseCase {
         // ── 2. Build symbol_name → (file_path, repo_id) lookup ────────────
         // Prefer the first entry when the same symbol name appears in multiple
         // files (e.g. a trait defined in a module and re-exported).
+        //
+        // Chunk symbol names are *bare* (a class `Order`, a free function, or a
+        // member `getTotal`), but reference callees are frequently
+        // qualified as `Fully\Qualified\Class#member` — 55%+ of PHP method and
+        // property accesses take this form. Looking a qualified callee up by its
+        // full string never matches a bare chunk key, so those references were
+        // silently dropped and cross-file dependencies through methods vanished.
+        //
+        // To bridge the two, we resolve a `Class#member` callee by the *base
+        // name* of its class part (the segment after the last `\`), which is
+        // exactly what a class chunk is named. We deliberately do NOT fall back
+        // to the bare member name: members like `delete`/`save`/`get` are far
+        // too generic and would fabricate edges to whichever unrelated class
+        // happened to define a same-named method. A basename that resolves to
+        // more than one file is likewise ambiguous, so we drop it rather than
+        // guess — `ambiguous` records those names.
+        //
+        // The map is built over EVERY repo in the namespace, not just the
+        // `target_repos` for this query. A `uses A B` call passes only {A, B},
+        // but a class name unique within {A, B} can still be ambiguous
+        // namespace-wide (e.g. `App\Models\Billing\Invoice` exists in both B and
+        // a third repo C). Restricting the map to the query targets would hide
+        // that clash and mis-bind A's reference to B's same-named class, so we
+        // index all repos and let the global ambiguity check drop such names.
         let mut symbol_map: HashMap<String, (String, String)> = HashMap::new();
-        for repo in &target_repos {
+        let mut ambiguous: HashSet<String> = HashSet::new();
+        for repo in &all_repos {
+            let repo_id = repo.id().to_string();
             let entries = self.vector_repo.get_symbol_to_file_map(repo.id()).await?;
             for (sym, file) in entries {
-                symbol_map
-                    .entry(sym)
-                    .or_insert((file, repo.id().to_string()));
+                index_symbol(&mut symbol_map, &mut ambiguous, sym, file, &repo_id);
             }
         }
+
+        let resolve_callee = |callee: &str| resolve_callee(callee, &symbol_map, &ambiguous);
 
         // ── 3. Aggregate symbol references into file-level edges ──────────
         // Key: (from_file, from_repo_id, to_file, to_repo_id)
@@ -110,8 +137,8 @@ impl FileRelationshipUseCase {
                 let ref_file = sr.reference_file_path();
                 let (to_file, to_repo): (String, String) = if ref_file != from_file {
                     (ref_file.to_string(), from_repo.clone())
-                } else if let Some((f, r)) = symbol_map.get(callee) {
-                    (f.clone(), r.clone())
+                } else if let Some((f, r)) = resolve_callee(callee) {
+                    (f, r)
                 } else {
                     continue;
                 };
@@ -197,5 +224,196 @@ impl FileRelationshipUseCase {
             files,
             edges,
         })
+    }
+}
+
+/// Record one chunk symbol's definition site into the resolution maps.
+///
+/// The first repo to define a bare name wins the `symbol_map` slot. If a later
+/// entry claims the same name from a *different* definition site, the name is
+/// marked `ambiguous` and will never be resolved by base name — resolving it
+/// would be a guess. The identity that distinguishes sites is `(file, repo)`,
+/// not `file` alone: services routinely share a relative path (e.g. every
+/// service has its own `test/Framework/Client.php`), so comparing paths only
+/// would wrongly treat two repos' `Client` as one definition and leak a caller's
+/// own symbol onto a foreign repo's file.
+fn index_symbol(
+    symbol_map: &mut HashMap<String, (String, String)>,
+    ambiguous: &mut HashSet<String>,
+    sym: String,
+    file: String,
+    repo_id: &str,
+) {
+    match symbol_map.get(&sym) {
+        Some((f, r)) if (f.as_str(), r.as_str()) != (file.as_str(), repo_id) => {
+            ambiguous.insert(sym);
+        }
+        Some(_) => {}
+        None => {
+            symbol_map.insert(sym, (file, repo_id.to_string()));
+        }
+    }
+}
+
+/// Split a `Class#member` callee's class part into its namespace segments and
+/// its base name: `App\Models\Orders\Order#get` → (`["App","Models","Orders"]`,
+/// `"Order"`). Returns `None` for a callee with no `#` or an empty class part
+/// (a bare symbol, which resolves by exact match instead).
+fn class_path(callee: &str) -> Option<(Vec<&str>, &str)> {
+    let class = callee.split_once('#')?.0;
+    let mut segs: Vec<&str> = class
+        .split(['\\', '/', ':'])
+        .filter(|s| !s.is_empty())
+        .collect();
+    let base = segs.pop()?;
+    Some((segs, base))
+}
+
+/// Resolve a reference callee to the `(file, repo)` that defines it, using, in
+/// order:
+///   1. an exact chunk-symbol match (a bare class or free function), then
+///   2. the base name of a `Class#member` callee's class — but only when the
+///      base name is unambiguous (defined in a single file across the target
+///      repos) AND the callee's immediate parent namespace segment appears in
+///      the resolved file's path.
+///
+/// The namespace check is what stops a shared base name from producing a false
+/// edge: `App\Reports\DeleteRequest#create` and a shared library's
+/// `App\Consents\DeleteRequest` share the base `DeleteRequest`, but the parent
+/// segment `Reports` is absent from `src/Consents/DeleteRequest.php`, so the
+/// basename match is rejected rather than guessed. Bare member fallback is
+/// deliberately omitted: members like `get`/`save`/`delete` are too generic to
+/// resolve by name.
+fn resolve_callee(
+    callee: &str,
+    symbol_map: &HashMap<String, (String, String)>,
+    ambiguous: &HashSet<String>,
+) -> Option<(String, String)> {
+    if let Some(hit) = symbol_map.get(callee) {
+        return Some(hit.clone());
+    }
+    let (namespace, base) = class_path(callee)?;
+    if ambiguous.contains(base) {
+        return None;
+    }
+    let (file, repo) = symbol_map.get(base)?;
+    // Vendor/framework roots (the top-level namespace) are too broad to
+    // discriminate, so only the immediate parent segment must be reflected in
+    // the target path.
+    if let Some(parent) = namespace.last() {
+        if !file.contains(parent) {
+            return None;
+        }
+    }
+    Some((file.clone(), repo.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn loc_in(file: &str, repo: &str) -> (String, String) {
+        (file.to_string(), repo.to_string())
+    }
+
+    // All `fixture()` definitions live in the `lib` repo.
+    fn loc(file: &str) -> (String, String) {
+        loc_in(file, "lib")
+    }
+
+    /// Build the resolution maps through the real [`index_symbol`] logic from a
+    /// list of `(symbol, file, repo)` definition sites.
+    fn build(defs: &[(&str, &str, &str)]) -> (HashMap<String, (String, String)>, HashSet<String>) {
+        let mut m = HashMap::new();
+        let mut amb = HashSet::new();
+        for (sym, file, repo) in defs {
+            index_symbol(&mut m, &mut amb, sym.to_string(), file.to_string(), repo);
+        }
+        (m, amb)
+    }
+
+    fn fixture() -> (HashMap<String, (String, String)>, HashSet<String>) {
+        build(&[
+            ("Order", "src/Models/Orders/Order.php", "lib"),
+            ("GenericUtils", "GenericUtils.php", "lib"),
+            // Defined once → resolvable, but the namespace check must still
+            // reject a foreign caller (see the DeleteRequest tests below).
+            ("DeleteRequest", "src/Consents/DeleteRequest.php", "lib"),
+            // Same base name in several files → ambiguous, must never resolve.
+            ("Invoice", "src/Models/Billing/Invoice.php", "lib"),
+            ("Invoice", "src/Models/Archive/Invoice.php", "lib"),
+        ])
+    }
+
+    #[test]
+    fn same_relative_path_in_two_repos_is_ambiguous() {
+        // `test/Framework/Client.php` exists in both svc-a and svc-b. The bare
+        // name `Client` must be flagged ambiguous, not silently bound to
+        // whichever repo was indexed first.
+        let (_m, amb) = build(&[
+            ("Client", "test/Framework/Client.php", "svc-a"),
+            ("Client", "test/Framework/Client.php", "svc-b"),
+        ]);
+        assert!(amb.contains("Client"));
+    }
+
+    #[test]
+    fn same_site_indexed_twice_is_not_ambiguous() {
+        let (m, amb) = build(&[("Utils", "Utils.php", "lib"), ("Utils", "Utils.php", "lib")]);
+        assert!(!amb.contains("Utils"));
+        assert_eq!(m.get("Utils"), Some(&loc_in("Utils.php", "lib")));
+    }
+
+    #[test]
+    fn exact_bare_symbol_resolves() {
+        let (m, amb) = fixture();
+        assert_eq!(
+            resolve_callee("GenericUtils", &m, &amb),
+            Some(loc("GenericUtils.php"))
+        );
+    }
+
+    #[test]
+    fn qualified_member_resolves_by_class_base_name() {
+        let (m, amb) = fixture();
+        assert_eq!(
+            resolve_callee("App\\Models\\Orders\\Order#getTotal", &m, &amb),
+            Some(loc("src/Models/Orders/Order.php"))
+        );
+    }
+
+    #[test]
+    fn foreign_namespace_with_shared_base_name_is_rejected() {
+        let (m, amb) = fixture();
+        // Caller's `Reports\DeleteRequest` must NOT resolve to the library's
+        // `Consents/DeleteRequest.php` — parent segment `Reports` is absent.
+        assert_eq!(
+            resolve_callee("App\\Reports\\DeleteRequest#create", &m, &amb),
+            None
+        );
+    }
+
+    #[test]
+    fn matching_namespace_with_shared_base_name_resolves() {
+        let (m, amb) = fixture();
+        assert_eq!(
+            resolve_callee("App\\Consents\\DeleteRequest#create", &m, &amb),
+            Some(loc("src/Consents/DeleteRequest.php"))
+        );
+    }
+
+    #[test]
+    fn ambiguous_base_name_never_resolves() {
+        let (m, amb) = fixture();
+        assert_eq!(
+            resolve_callee("App\\Models\\Billing\\Invoice#get", &m, &amb),
+            None
+        );
+    }
+
+    #[test]
+    fn unknown_callee_returns_none() {
+        let (m, amb) = fixture();
+        assert_eq!(resolve_callee("Nonexistent\\Thing#foo", &m, &amb), None);
     }
 }
