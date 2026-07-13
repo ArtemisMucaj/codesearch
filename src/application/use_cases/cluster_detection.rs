@@ -88,6 +88,225 @@ fn composite_weight(edge: &FileEdge) -> f64 {
     base * mean_kind
 }
 
+// ── Weighted-degree helpers (used by the façade split's god-object gate) ───
+
+/// Weighted degree per node from an undirected edge list over `n` nodes.
+fn weighted_degrees(n: usize, edges: &[(usize, usize, f64)]) -> Vec<f64> {
+    let mut deg = vec![0.0f64; n];
+    for &(u, v, w) in edges {
+        deg[u] += w;
+        deg[v] += w;
+    }
+    deg
+}
+
+/// The weighted-degree threshold at the given percentile (nearest-rank on the
+/// sorted non-zero degrees). Returns `f64::INFINITY` when there is nothing to
+/// threshold, so no node is ever flagged.
+fn degree_threshold_at(degrees: &[f64], percentile: f64) -> f64 {
+    let mut sorted: Vec<f64> = degrees.iter().copied().filter(|d| *d > 0.0).collect();
+    if sorted.is_empty() {
+        return f64::INFINITY;
+    }
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // Nearest-rank: rank = ceil(p/100 * N), clamped into [1, N].
+    let rank = ((percentile / 100.0) * sorted.len() as f64).ceil() as usize;
+    let idx = rank.clamp(1, sorted.len()) - 1;
+    sorted[idx]
+}
+
+// ── Coupling-informed façade split (experimental) ─────────────────────────
+//
+// A god-object (a shared constants class, a base exception, a utility
+// grab-bag) is a single node wired to hundreds of otherwise-unrelated nodes.
+// The hub pre-filter above blunts it by scaling or dropping its edges, but that
+// is a blunt instrument: down-weighting keeps the node as the *only* bridge
+// between two blocks (so it stays a coupler), and dropping shatters the graph.
+//
+// The façade split is surgical. It first asks the coupling pipeline which nodes
+// are *verified* couplers, then replaces each such god-object `H` with one
+// **façade per neighbouring community**: every edge `H—v` is re-attached to the
+// façade `H@community(v)`. No edge weight is lost, but `H` is no longer a single
+// vertex two communities can route a path through — the false glue is gone
+// while every real dependency survives. After Leiden runs on the façaded graph,
+// the façades are collapsed back to `H`, which is assigned to whichever
+// community its façades carry the most weight into.
+//
+// Enabled by `CS_FACADE_SPLIT=1`; the god-object degree gate is
+// `CS_FACADE_MIN_DEGREE_PCT` (percentile, default 99). OFF by default.
+
+/// Env var (any non-empty value enables): turn on the coupling-informed façade
+/// split in place of plain Leiden for cluster / symbol-community detection.
+const FACADE_SPLIT_ENV: &str = "CS_FACADE_SPLIT";
+/// Env var: weighted-degree percentile a verified coupler must clear to be
+/// treated as a god-object worth splitting (default [`DEFAULT_FACADE_PCT`]).
+const FACADE_MIN_DEGREE_PCT_ENV: &str = "CS_FACADE_MIN_DEGREE_PCT";
+/// Default degree percentile gate for god-object selection.
+const DEFAULT_FACADE_PCT: f64 = 99.0;
+
+/// Whether the façade split is enabled, and with what degree gate.
+pub(crate) fn facade_split_config() -> Option<f64> {
+    let enabled = std::env::var(FACADE_SPLIT_ENV)
+        .map(|v| !v.trim().is_empty() && v.trim() != "0")
+        .unwrap_or(false);
+    if !enabled {
+        return None;
+    }
+    let pct = std::env::var(FACADE_MIN_DEGREE_PCT_ENV)
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|p| (0.0..=100.0).contains(p))
+        .unwrap_or(DEFAULT_FACADE_PCT);
+    Some(pct)
+}
+
+/// Partition `n` nodes (named by `names`, connected by `edges`) using the
+/// coupling-informed façade split, returning a label per original node.
+///
+/// Steps: (1) build the raw graph, (2) [`super::coupling_detection::detect_god_objects`]
+/// selects verified couplers above the degree gate, (3) explode each into
+/// per-neighbour-community façades, (4) run [`leiden`] on the expanded graph,
+/// (5) collapse façades back so every original node gets exactly one label.
+///
+/// Deterministic: the god-object list, façade order, and edge insertion are all
+/// sorted, and the collapse tie-breaks on the smallest label.
+pub(crate) fn partition_with_facade_split(
+    names: &[String],
+    edges: &[(usize, usize, f64)],
+    degree_percentile: f64,
+) -> Vec<usize> {
+    let n = names.len();
+    let mut raw = Graph::new(n);
+    for &(u, v, w) in edges {
+        raw.add_edge(u, v, w);
+    }
+
+    // Degree gate: the percentile over the raw weighted-degree distribution.
+    let degrees = weighted_degrees(n, edges);
+    let min_degree = degree_threshold_at(&degrees, degree_percentile);
+
+    let gods = super::coupling_detection::detect_god_objects(&raw, names, min_degree);
+    if gods.is_empty() {
+        // Nothing to split — behave exactly like plain detection.
+        let mut p = leiden(&raw);
+        renumber(&mut p);
+        return p;
+    }
+    let god_set: HashSet<usize> = gods.iter().map(|g| g.node).collect();
+
+    // Baseline partition drives which community each neighbour belongs to.
+    let baseline = leiden(&raw);
+
+    // Build the façaded graph. Original non-god nodes keep indices `0..n`;
+    // façades are appended. `origin[i]` maps every façaded node back to its
+    // original node index so the partition can be collapsed afterwards.
+    let mut origin: Vec<usize> = (0..n).collect();
+    // (god node, neighbour-community) → façade node index.
+    let mut facade_of: HashMap<(usize, usize), usize> = HashMap::new();
+
+    // Resolve the façade index for god `g`'s edge toward a neighbour in
+    // community `comm`, creating it on first use.
+    let facade_index = |g: usize,
+                        comm: usize,
+                        origin: &mut Vec<usize>,
+                        facade_of: &mut HashMap<(usize, usize), usize>|
+     -> usize {
+        *facade_of.entry((g, comm)).or_insert_with(|| {
+            let idx = origin.len();
+            origin.push(g);
+            idx
+        })
+    };
+
+    // Deterministic edge list of the façaded graph.
+    let mut new_edges: Vec<(usize, usize, f64)> = Vec::with_capacity(edges.len());
+    for &(u, v, w) in edges {
+        let u_god = god_set.contains(&u);
+        let v_god = god_set.contains(&v);
+        // Endpoint that is a god-object is redirected to its façade for the
+        // *other* endpoint's community; a non-god endpoint stays itself.
+        let su = if u_god {
+            facade_index(u, baseline[v], &mut origin, &mut facade_of)
+        } else {
+            u
+        };
+        let sv = if v_god {
+            facade_index(v, baseline[u], &mut origin, &mut facade_of)
+        } else {
+            v
+        };
+        if su == sv {
+            continue; // god↔god edge within the same façade bucket: skip self-loop
+        }
+        new_edges.push((su, sv, w));
+    }
+
+    let expanded_n = origin.len();
+    let mut expanded = Graph::new(expanded_n);
+    // Deduplicate + deterministic order (façade routing can produce parallels).
+    let mut merged: HashMap<(usize, usize), f64> = HashMap::new();
+    for (u, v, w) in new_edges {
+        let (lo, hi) = if u < v { (u, v) } else { (v, u) };
+        *merged.entry((lo, hi)).or_insert(0.0) += w;
+    }
+    let mut merged_edges: Vec<((usize, usize), f64)> = merged.into_iter().collect();
+    merged_edges.sort_unstable_by_key(|&((u, v), _)| (u, v));
+    for ((u, v), w) in &merged_edges {
+        expanded.add_edge(*u, *v, *w);
+    }
+
+    let expanded_partition = leiden(&expanded);
+
+    // Collapse façades back onto their origin node. A god-object lands in the
+    // community its façades carry the most edge weight into; ties break toward
+    // the smallest label. Non-god nodes inherit their own label directly.
+    let mut weight_into: Vec<HashMap<usize, f64>> = vec![HashMap::new(); n];
+    for &((u, v), w) in &merged_edges {
+        let (ou, ov) = (origin[u], origin[v]);
+        if god_set.contains(&ou) {
+            *weight_into[ou].entry(expanded_partition[u]).or_insert(0.0) += w;
+        }
+        if god_set.contains(&ov) {
+            *weight_into[ov].entry(expanded_partition[v]).or_insert(0.0) += w;
+        }
+    }
+
+    let mut labels: Vec<usize> = vec![usize::MAX; n];
+    for orig in 0..n {
+        if god_set.contains(&orig) {
+            // Heaviest façade community; deterministic tie-break on label.
+            let best = weight_into[orig]
+                .iter()
+                .max_by(|a, b| {
+                    a.1.partial_cmp(b.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(b.0.cmp(a.0))
+                })
+                .map(|(&label, _)| label);
+            // A god with no surviving façade edge (all were god↔god self-loops)
+            // falls back to its own expanded label.
+            labels[orig] = best.unwrap_or(expanded_partition[orig]);
+        } else {
+            labels[orig] = expanded_partition[orig];
+        }
+    }
+    renumber(&mut labels);
+    if let Some(top) = gods.first() {
+        debug!(
+            "facade split: {} god-objects exploded into {} façades ({} → {} nodes); \
+             strongest: {} (degree {:.1}, coupling strength {:.2})",
+            gods.len(),
+            expanded_n - n,
+            n,
+            expanded_n,
+            names[top.node],
+            top.degree,
+            top.coupling_strength,
+        );
+    }
+    labels
+}
+
 // ── Graph representation ──────────────────────────────────────────────────
 
 /// A compact undirected weighted graph stored as adjacency lists.
@@ -161,6 +380,23 @@ impl Graph {
     /// Total self-loop (intra-community) mass across all nodes.
     fn self_loop_total(&self) -> f64 {
         self.self_loops.iter().sum()
+    }
+
+    /// The deduplicated undirected edge list `(lo, hi, weight)`, sorted for
+    /// determinism. Each undirected edge appears once (`lo < hi`); self-loops
+    /// are excluded. Used by the façade split, which needs to rebuild the graph
+    /// with god-object nodes exploded.
+    pub(crate) fn edge_list(&self) -> Vec<(usize, usize, f64)> {
+        let mut edges: Vec<(usize, usize, f64)> = Vec::new();
+        for u in 0..self.n {
+            for &(v, w) in &self.adj[u] {
+                if u < v {
+                    edges.push((u, v, w));
+                }
+            }
+        }
+        edges.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        edges
     }
 }
 
@@ -1133,8 +1369,13 @@ impl ClusterDetectionUseCase {
         // Build the undirected weighted graph (shared with coupling detection).
         let (files, g) = build_file_leiden_graph(graph);
 
-        // Run Leiden.
-        let partition = leiden(&g);
+        // Run Leiden — or, when the coupling-informed façade split is enabled,
+        // explode verified god-object couplers into per-community façades first
+        // so they can no longer glue unrelated modules into one cluster.
+        let partition = match facade_split_config() {
+            Some(pct) => partition_with_facade_split(&files, &g.edge_list(), pct),
+            None => leiden(&g),
+        };
 
         // Group files by cluster label.
         let num_clusters = partition.iter().copied().max().map(|m| m + 1).unwrap_or(0);
@@ -1673,5 +1914,78 @@ mod tests {
             (CLIQUES..=CLIQUES * 2).contains(&num),
             "expected ~{CLIQUES} communities, got {num}"
         );
+    }
+
+    // ── Façade split ──────────────────────────────────────────────────────
+
+    /// Two 6-cliques whose *only* connection is a single hub node (node 12)
+    /// wired to every node of both cliques — the canonical god-object: it
+    /// couples the two blocks and its degree dwarfs every other node's.
+    fn hub_joined_cliques() -> (Vec<String>, Vec<(usize, usize, f64)>) {
+        let mut g = Graph::new(13);
+        for base in [0usize, 6] {
+            for i in base..base + 6 {
+                for j in (i + 1)..base + 6 {
+                    g.add_edge(i, j, 1.0);
+                }
+            }
+        }
+        for i in 0..12 {
+            g.add_edge(12, i, 1.0); // hub touches both cliques
+        }
+        let names: Vec<String> = (0..13).map(|i| format!("src/n{i}.rs")).collect();
+        (names, g.edge_list())
+    }
+
+    #[test]
+    fn test_facade_split_separates_hub_joined_cliques() {
+        let (names, edges) = hub_joined_cliques();
+
+        // Degree gate at the 90th percentile admits only the hub (node 12),
+        // whose degree (12) is far above the clique nodes' (5 intra + 1 hub).
+        let labels = partition_with_facade_split(&names, &edges, 90.0);
+
+        // The two cliques must now land in different clusters: with the hub
+        // exploded into a per-clique façade, nothing bridges them.
+        let clique_a = labels[0];
+        let clique_b = labels[6];
+        assert!(
+            (0..6).all(|i| labels[i] == clique_a),
+            "clique A not whole: {labels:?}"
+        );
+        assert!(
+            (6..12).all(|i| labels[i] == clique_b),
+            "clique B not whole: {labels:?}"
+        );
+        assert_ne!(
+            clique_a, clique_b,
+            "façade split failed to separate the cliques: {labels:?}"
+        );
+
+        // Every original node gets exactly one label (façades collapsed away).
+        assert_eq!(labels.len(), names.len());
+    }
+
+    #[test]
+    fn test_facade_split_deterministic() {
+        let (names, edges) = hub_joined_cliques();
+        assert_eq!(
+            partition_with_facade_split(&names, &edges, 90.0),
+            partition_with_facade_split(&names, &edges, 90.0)
+        );
+    }
+
+    #[test]
+    fn test_facade_split_no_god_objects_matches_plain_leiden() {
+        // Two clean cliques with no hub: nothing is a coupler, so the façade
+        // path must fall back to plain Leiden's partition exactly.
+        let g = two_cliques(6, 0.05);
+        let names: Vec<String> = (0..g.node_count())
+            .map(|i| format!("src/n{i}.rs"))
+            .collect();
+        let mut plain = leiden(&g);
+        renumber(&mut plain);
+        let facade = partition_with_facade_split(&names, &g.edge_list(), 99.0);
+        assert_eq!(plain, facade);
     }
 }

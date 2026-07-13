@@ -17,7 +17,9 @@ use std::sync::Arc;
 
 use tracing::{debug, warn};
 
-use super::cluster_detection::{kind_weight, leiden, Graph};
+use super::cluster_detection::{
+    facade_split_config, kind_weight, leiden, partition_with_facade_split, Graph,
+};
 use crate::application::{AnalysisRepository, CallGraphUseCase};
 use crate::domain::{
     community_label, stable_community_id, CommunityMeta, DomainError, GraphEdge, GraphLevel,
@@ -144,7 +146,13 @@ impl SymbolClusterDetectionUseCase {
             };
         }
 
-        let partition = leiden(&sg.graph);
+        // Run Leiden — or the coupling-informed façade split (god-objects like a
+        // shared constants class or base exception exploded into per-community
+        // façades) when it is enabled.
+        let partition = match facade_split_config() {
+            Some(pct) => partition_with_facade_split(&sg.symbols, &sg.edges, pct),
+            None => leiden(&sg.graph),
+        };
         let num_communities = partition.iter().copied().max().map(|m| m + 1).unwrap_or(0);
 
         // Group member symbols by community label.

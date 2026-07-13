@@ -244,6 +244,91 @@ fn analyze_graph(graph: &Graph, names: &[String], id_prefix: &str) -> GraphAnaly
     }
 }
 
+// ── God-object detection (drives the façade split) ────────────────────────
+
+/// A verified node coupler proposed for façade-splitting, resolved to its graph
+/// node index with the strength that earned it a place.
+pub(crate) struct GodObject {
+    /// Graph node index of the coupling node.
+    pub node: usize,
+    /// `split_probability − baseline` from the ablation verification — how
+    /// decisively removing this node splits the community it couples.
+    pub coupling_strength: f64,
+    /// Weighted degree of the node in the full graph — the "god-object" gate: a
+    /// coupler is only worth splitting into façades if it is globally hub-like.
+    pub degree: f64,
+}
+
+/// Identify the god-object coupling nodes in `graph`: run the full coupling
+/// pipeline, take every *verified node coupler*, and keep the ones whose global
+/// weighted degree clears `min_degree`. Returned in a deterministic order
+/// (descending degree, then ascending node index).
+///
+/// This is the selection stage of the coupling-informed façade split: unlike a
+/// raw degree-percentile filter, a node qualifies only if the ablation
+/// verification already proved it holds a community together — degree is just
+/// the gate that separates a true god-object (glues many communities by
+/// ubiquity) from a small local hub (legitimately central to one module).
+pub(crate) fn detect_god_objects(
+    graph: &Graph,
+    names: &[String],
+    min_degree: f64,
+) -> Vec<GodObject> {
+    let analysis = analyze_graph(graph, names, "c");
+
+    // Map node name → graph index once. Names are unique per graph.
+    let index_of: HashMap<&str, usize> = names
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), i))
+        .collect();
+
+    let degree = weighted_degree(graph);
+
+    // Collect the strongest strength seen per node across every community it
+    // couples (a god-object couples many, so it appears repeatedly).
+    let mut best_strength: HashMap<usize, f64> = HashMap::new();
+    for community in &analysis.communities {
+        for coupler in &community.couplers {
+            if coupler.kind != CouplingElementKind::Node {
+                continue; // edges are not god-objects
+            }
+            let Some(name) = coupler.elements.first() else {
+                continue;
+            };
+            let Some(&node) = index_of.get(name.as_str()) else {
+                continue;
+            };
+            let entry = best_strength.entry(node).or_insert(0.0);
+            *entry = entry.max(coupler.coupling_strength);
+        }
+    }
+
+    let mut gods: Vec<GodObject> = best_strength
+        .into_iter()
+        .filter(|&(node, _)| degree[node] >= min_degree)
+        .map(|(node, coupling_strength)| GodObject {
+            node,
+            coupling_strength,
+            degree: degree[node],
+        })
+        .collect();
+    gods.sort_by(|a, b| {
+        b.degree
+            .partial_cmp(&a.degree)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.node.cmp(&b.node))
+    });
+    gods
+}
+
+/// Weighted degree of every node (sum of incident edge weights).
+fn weighted_degree(graph: &Graph) -> Vec<f64> {
+    (0..graph.node_count())
+        .map(|u| graph.neighbors(u).iter().map(|&(_, w)| w).sum())
+        .collect()
+}
+
 // ── Community subgraph ────────────────────────────────────────────────────
 
 /// The induced subgraph of one community, kept as an explicit edge list so
