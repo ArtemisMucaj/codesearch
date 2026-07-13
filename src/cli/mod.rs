@@ -600,6 +600,22 @@ pub enum Commands {
         subcommand: SymbolClustersSubcommand,
     },
 
+    /// Find coupling elements: files/symbols or dependencies whose removal
+    /// would split a Leiden community into two latent sub-blocks
+    Couplings {
+        /// Repository ID or name. Omit to auto-detect from the current directory.
+        #[arg(short, long)]
+        repository: Option<String>,
+
+        /// Which graph to analyse: the file-dependency graph or the symbol call graph.
+        #[arg(short, long, value_enum, default_value = "file")]
+        level: VizLevel,
+
+        /// Output format: text or json.
+        #[arg(short = 'F', long, value_enum, default_value = "text")]
+        format: OutputFormatTextJson,
+    },
+
     /// Render a repository's Leiden communities as an HTML graph, SVG, or Obsidian canvas
     Visualize {
         /// Repository ID or name. Omit to auto-detect from the current directory.

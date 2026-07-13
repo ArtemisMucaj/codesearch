@@ -17,7 +17,9 @@ use std::sync::Arc;
 
 use tracing::{debug, warn};
 
-use super::cluster_detection::{kind_weight, leiden, Graph};
+use super::cluster_detection::{
+    facade_split_config, kind_weight, leiden, partition_with_facade_split, Graph,
+};
 use crate::application::{AnalysisRepository, CallGraphUseCase};
 use crate::domain::{
     community_label, stable_community_id, CommunityMeta, DomainError, GraphEdge, GraphLevel,
@@ -35,12 +37,13 @@ pub struct SymbolClusterDetectionUseCase {
 }
 
 /// The intermediate symbol graph plus the bookkeeping needed to turn a Leiden
-/// partition into named, scored communities.
-struct SymbolGraph {
+/// partition into named, scored communities. `pub(crate)` so coupling
+/// detection can analyse the identical graph.
+pub(crate) struct SymbolGraph {
     /// Symbol FQN per node index (ascending, deduplicated).
-    symbols: Vec<String>,
+    pub(crate) symbols: Vec<String>,
     /// The weighted undirected graph handed to Leiden.
-    graph: Graph,
+    pub(crate) graph: Graph,
     /// Dominant language per symbol (first seen wins).
     language_of: HashMap<String, String>,
     /// Distinct undirected (lo, hi, weight) edges — used as the edge count, to
@@ -143,7 +146,13 @@ impl SymbolClusterDetectionUseCase {
             };
         }
 
-        let partition = leiden(&sg.graph);
+        // Run Leiden — or the coupling-informed façade split (god-objects like a
+        // shared constants class or base exception exploded into per-community
+        // façades) when it is enabled.
+        let partition = match facade_split_config() {
+            Some(pct) => partition_with_facade_split(&sg.symbols, &sg.edges, pct),
+            None => leiden(&sg.graph),
+        };
         let num_communities = partition.iter().copied().max().map(|m| m + 1).unwrap_or(0);
 
         // Group member symbols by community label.
@@ -297,7 +306,10 @@ impl SymbolClusterDetectionUseCase {
     /// graph. Only symbols that participate in at least one caller→callee edge
     /// become nodes; isolated and anonymous-only symbols are dropped so the
     /// communities stay meaningful.
-    async fn build_symbol_graph(&self, repository_id: &str) -> Result<SymbolGraph, DomainError> {
+    pub(crate) async fn build_symbol_graph(
+        &self,
+        repository_id: &str,
+    ) -> Result<SymbolGraph, DomainError> {
         let references = self.call_graph.find_by_repository(repository_id).await?;
 
         // Aggregate parallel edges; collect the node set from edge endpoints.
