@@ -197,10 +197,23 @@ pub(crate) fn partition_with_facade_split(
     // Baseline partition drives which community each neighbour belongs to.
     let baseline = leiden(&raw);
 
-    // Build the façaded graph. Original non-god nodes keep indices `0..n`;
-    // façades are appended. `origin[i]` maps every façaded node back to its
-    // original node index so the partition can be collapsed afterwards.
-    let mut origin: Vec<usize> = (0..n).collect();
+    // Build the façaded graph over a *compact* index space that excludes the
+    // god originals entirely: a split god-object has all its edges re-routed to
+    // façades, so keeping its original index would leave an isolated singleton
+    // that inflates `expanded.n` and the tiny-community fraction
+    // `select_resolution` reads — biasing the resolution search on many-god
+    // graphs. `origin[i]` maps every expanded node back to an original node so
+    // the partition can be collapsed afterwards: a non-god original keeps its
+    // identity; a façade points at its god.
+    let mut origin: Vec<usize> = Vec::with_capacity(n);
+    // Original (non-god) node index → its compact index in the expanded graph.
+    let mut compact_of: Vec<Option<usize>> = vec![None; n];
+    for (u, slot) in compact_of.iter_mut().enumerate() {
+        if !god_set.contains(&u) {
+            *slot = Some(origin.len());
+            origin.push(u);
+        }
+    }
     // (god node, neighbour-community) → façade node index.
     let mut facade_of: HashMap<(usize, usize), usize> = HashMap::new();
 
@@ -218,23 +231,26 @@ pub(crate) fn partition_with_facade_split(
         })
     };
 
-    // Deterministic edge list of the façaded graph.
+    // Map one edge endpoint to its expanded index: a non-god node has a compact
+    // index in `compact_of`; a god node (compact index `None`) is redirected to
+    // its façade for the *other* endpoint's community. `compact_of` thus doubles
+    // as the god test, so no separate membership lookup or unwrap is needed.
+    let endpoint_index = |node: usize,
+                          other_community: usize,
+                          origin: &mut Vec<usize>,
+                          facade_of: &mut HashMap<(usize, usize), usize>|
+     -> usize {
+        match compact_of[node] {
+            Some(idx) => idx,
+            None => facade_index(node, other_community, origin, facade_of),
+        }
+    };
+
+    // Deterministic edge list of the façaded graph, in compact indices.
     let mut new_edges: Vec<(usize, usize, f64)> = Vec::with_capacity(edges.len());
     for &(u, v, w) in edges {
-        let u_god = god_set.contains(&u);
-        let v_god = god_set.contains(&v);
-        // Endpoint that is a god-object is redirected to its façade for the
-        // *other* endpoint's community; a non-god endpoint stays itself.
-        let su = if u_god {
-            facade_index(u, baseline[v], &mut origin, &mut facade_of)
-        } else {
-            u
-        };
-        let sv = if v_god {
-            facade_index(v, baseline[u], &mut origin, &mut facade_of)
-        } else {
-            v
-        };
+        let su = endpoint_index(u, baseline[v], &mut origin, &mut facade_of);
+        let sv = endpoint_index(v, baseline[u], &mut origin, &mut facade_of);
         if su == sv {
             continue; // god↔god edge within the same façade bucket: skip self-loop
         }
@@ -257,9 +273,11 @@ pub(crate) fn partition_with_facade_split(
 
     let expanded_partition = leiden(&expanded);
 
-    // Collapse façades back onto their origin node. A god-object lands in the
-    // community its façades carry the most edge weight into; ties break toward
-    // the smallest label. Non-god nodes inherit their own label directly.
+    // Collapse the expanded partition back to one label per original node.
+    // A non-god original reads its compact node's label directly; a god-object
+    // lands in the community its façades carry the most edge weight into (ties
+    // break toward the smaller label). Weight is summed over the façades only,
+    // keyed by the *original* god node via `origin`.
     let mut weight_into: Vec<HashMap<usize, f64>> = vec![HashMap::new(); n];
     for &((u, v), w) in &merged_edges {
         let (ou, ov) = (origin[u], origin[v]);
@@ -271,32 +289,43 @@ pub(crate) fn partition_with_facade_split(
         }
     }
 
+    // A community label that no façade or non-god node occupies — the fallback
+    // home for a god-object whose every edge was a dropped god↔god self-loop.
+    // Giving it a fresh isolated label keeps it out of an arbitrary community.
+    let mut next_label = expanded_partition
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |m| m + 1);
+
     let mut labels: Vec<usize> = vec![usize::MAX; n];
-    for orig in 0..n {
-        if god_set.contains(&orig) {
-            // Heaviest façade community; deterministic tie-break on label.
-            let best = weight_into[orig]
+    for (orig, slot) in labels.iter_mut().enumerate() {
+        *slot = match compact_of[orig] {
+            // Non-god node: inherit its compact node's label.
+            Some(idx) => expanded_partition[idx],
+            // God node: heaviest façade community, else a fresh isolated label.
+            None => weight_into[orig]
                 .iter()
                 .max_by(|a, b| {
                     a.1.partial_cmp(b.1)
                         .unwrap_or(std::cmp::Ordering::Equal)
                         .then(b.0.cmp(a.0))
                 })
-                .map(|(&label, _)| label);
-            // A god with no surviving façade edge (all were god↔god self-loops)
-            // falls back to its own expanded label.
-            labels[orig] = best.unwrap_or(expanded_partition[orig]);
-        } else {
-            labels[orig] = expanded_partition[orig];
-        }
+                .map(|(&label, _)| label)
+                .unwrap_or_else(|| {
+                    let l = next_label;
+                    next_label += 1;
+                    l
+                }),
+        };
     }
     renumber(&mut labels);
     if let Some(top) = gods.first() {
         debug!(
-            "facade split: {} god-objects exploded into {} façades ({} → {} nodes); \
+            "facade split: {} god-objects exploded into {} façades ({} originals → {} expanded nodes); \
              strongest: {} (degree {:.1}, coupling strength {:.2})",
             gods.len(),
-            expanded_n - n,
+            expanded_n - (n - gods.len()),
             n,
             expanded_n,
             names[top.node],
