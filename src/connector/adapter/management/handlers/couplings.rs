@@ -33,13 +33,9 @@ pub async fn couplings(
     Query(params): Query<CouplingParams>,
 ) -> ApiResult<Json<CouplingReport>> {
     let level = match params.level.as_deref() {
-        None | Some("file") => GraphLevel::File,
-        Some("symbol") => GraphLevel::Symbol,
-        Some(other) => {
-            return Err(ApiError::bad_request(format!(
-                "invalid level '{other}': expected 'file' or 'symbol'"
-            )));
-        }
+        None => GraphLevel::File,
+        Some(s) => GraphLevel::parse(s)
+            .map_err(|msg| ApiError::bad_request(format!("invalid level '{s}': {msg}")))?,
     };
 
     let repository_id = state

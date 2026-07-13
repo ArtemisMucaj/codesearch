@@ -480,7 +480,8 @@
             }
           },
           "400": {
-            "description": "Invalid level parameter."
+            "description": "Invalid level parameter.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
           }
         }
       }

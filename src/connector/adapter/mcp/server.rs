@@ -1021,16 +1021,9 @@ impl CodesearchMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let input = params.0;
 
-        let level = match input.level.as_str() {
-            "file" => GraphLevel::File,
-            "symbol" => GraphLevel::Symbol,
-            other => {
-                return Err(McpError::invalid_params(
-                    format!("invalid level '{other}': expected 'file' or 'symbol'"),
-                    None,
-                ));
-            }
-        };
+        let level = GraphLevel::parse(&input.level).map_err(|msg| {
+            McpError::invalid_params(format!("invalid level '{}': {msg}", input.level), None)
+        })?;
 
         let use_case = self.container.coupling_detection_use_case();
         let report = use_case
