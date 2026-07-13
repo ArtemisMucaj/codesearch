@@ -1202,8 +1202,12 @@ impl ClusterDetectionUseCase {
             return;
         };
         let ids: Vec<String> = clusters.iter().map(|c| c.id.clone()).collect();
-        let Ok(names) = storage.get_community_names(&ids).await else {
-            return;
+        let names = match storage.get_community_names(&ids).await {
+            Ok(names) => names,
+            Err(e) => {
+                warn!("failed to load cached community names, showing ids: {e}");
+                return;
+            }
         };
         for cluster in clusters {
             if let Some(name) = names.get(&cluster.id) {

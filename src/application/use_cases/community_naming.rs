@@ -1,15 +1,14 @@
 //! LLM-generated display names for Leiden communities, cached by stable id.
 //!
-//! Cluster/community *detection* produces a heuristic `name` (a directory- or
-//! keyword-derived slug) and a stable, content-addressed `id`. This use case
-//! turns those into nice human-readable **display names** via an LLM, lazily and
-//! with a persistent cache:
+//! Cluster/community *detection* produces only a stable, content-addressed `id`.
+//! This use case turns each community into a nice human-readable **display name**
+//! via an LLM, lazily and with a persistent cache:
 //!
 //! 1. For a batch of communities, look up cached names by id
 //!    ([`AnalysisRepository::get_community_names`]).
 //! 2. For every cache miss, ask the [`ChatClient`] for a short label, feeding it
-//!    the community's heuristic name plus a sample of member symbols/files and
-//!    its dominant directories — no source reads, so the prompt stays cheap.
+//!    a sample of member symbols/files and their dominant directories — no
+//!    source reads, so the prompt stays cheap.
 //! 3. Persist the freshly generated names ([`AnalysisRepository::save_community_names`])
 //!    so subsequent renders — and future runs whose membership is unchanged —
 //!    are free.
@@ -187,7 +186,9 @@ impl CommunityNamingUseCase {
 
         if !fresh.is_empty() {
             if let Err(e) = self.storage.save_community_names(&fresh).await {
-                debug!("skipping community-name cache write: {e}");
+                // Louder than a read miss: a dropped write means these names are
+                // regenerated (and re-billed to the LLM) on every future run.
+                warn!("failed to persist community names, they will be regenerated: {e}");
             }
         }
     }

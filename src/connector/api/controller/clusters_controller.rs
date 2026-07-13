@@ -36,13 +36,19 @@ impl<'a> ClustersController<'a> {
         // LLM naming runs by default (best-effort, cached by cluster id). It
         // probes the endpoint with one call and skips to id fallback if that
         // fails, so an unreachable endpoint costs one quick error, not a timeout
-        // per cluster. `--no-llm` skips it outright.
+        // per cluster. `--no-llm` skips it outright. A chat-client build failure
+        // (e.g. TLS init) is non-fatal here — degrade to ids rather than aborting
+        // the listing.
         if !no_llm {
-            let chat = build_chat_client(llm)?;
-            self.container
-                .community_naming_use_case()
-                .name_clusters(&mut cg.clusters, chat.as_ref())
-                .await;
+            match build_chat_client(llm) {
+                Ok(chat) => {
+                    self.container
+                        .community_naming_use_case()
+                        .name_clusters(&mut cg.clusters, chat.as_ref())
+                        .await;
+                }
+                Err(e) => tracing::warn!("LLM naming disabled, showing ids: {e}"),
+            }
         }
 
         let format: OutputFormat = format.into();

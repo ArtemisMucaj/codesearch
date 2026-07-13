@@ -39,7 +39,7 @@ impl ScipImporter {
             let index = scip::types::Index::parse_from_bytes(&bytes)
                 .context("failed to parse SCIP protobuf")?;
 
-            // Pass 1: build a global map from every symbol's normalised name to
+            // Pass 1: build a global map from every raw SCIP symbol to
             // the file it is *defined* in. SCIP records a symbol's definition as
             // an occurrence with the Definition role, and each document's
             // `relative_path` is that definition's file. Without this map the
@@ -84,14 +84,15 @@ impl ScipImporter {
 // Global definition-file resolution
 // ---------------------------------------------------------------------------
 
-/// Build a map from every symbol's normalised name to the file it is *defined*
-/// in, scanning Definition occurrences across all documents in the index.
+/// Build a map from every raw SCIP symbol to the file it is *defined* in,
+/// scanning Definition occurrences across all documents in the index.
 ///
-/// The key is the same [`normalize_symbol`] output used for callee symbols in
-/// [`process_document`], so a reference's callee can be looked up directly to
-/// find its definition file. When a symbol is (unusually) defined in more than
-/// one file, the first document wins — documents are visited in index order,
-/// which SCIP emits deterministically, so the choice is stable across runs.
+/// The key is the raw SCIP symbol string (not the normalised name, which would
+/// collide across files that share a short symbol name); [`process_document`]
+/// looks a reference up by its own raw `occ.symbol`. When a symbol is (unusually)
+/// defined in more than one file, the first document wins — documents are
+/// visited in index order, which SCIP emits deterministically, so the choice is
+/// stable across runs.
 ///
 /// Symbols with no definition occurrence in this index (third-party library
 /// symbols, dynamic PHP magic, etc.) are simply absent; the caller then falls
@@ -115,12 +116,15 @@ fn build_definition_file_map(index: &scip::types::Index) -> HashMap<String, Stri
             if occ.symbol.starts_with("local ") {
                 continue;
             }
-            let symbol = normalize_symbol(&occ.symbol, language);
-            if symbol.is_empty() {
+            // Key by the RAW SCIP symbol, not the normalised name: normalisation
+            // strips scip-typescript's file-path prefix, so `foo.ts/foo` and
+            // `bar.ts/foo` would collide and one definition file would wrongly
+            // win for both. References look this map up by their raw symbol too.
+            if normalize_symbol(&occ.symbol, language).is_empty() {
                 continue;
             }
             def_file_of
-                .entry(symbol)
+                .entry(occ.symbol.clone())
                 .or_insert_with(|| doc.relative_path.clone());
         }
     }
@@ -134,7 +138,7 @@ fn build_definition_file_map(index: &scip::types::Index) -> HashMap<String, Stri
 
 /// Convert one SCIP [`Document`] into a flat list of [`SymbolReference`]s.
 ///
-/// `def_file_of` maps a normalised symbol to the file it is defined in (built by
+/// `def_file_of` maps a raw SCIP symbol to the file it is defined in (built by
 /// [`build_definition_file_map`] across the whole index); it is used to set each
 /// reference's `reference_file_path` to the callee's definition site rather than
 /// the referencing file.
@@ -206,12 +210,14 @@ fn process_document(
 
         let callee_package = extract_package(&occ.symbol);
 
-        // Resolve the callee to its definition file. If the symbol is defined in
-        // this repo's index, `reference_file_path` becomes that definition site
-        // (which is what makes the file-dependency graph a graph of real
-        // cross-file edges); otherwise it falls back to the referencing file.
+        // Resolve the callee to its definition file, keyed by the RAW SCIP
+        // symbol (matching how `build_definition_file_map` keys defs). If the
+        // symbol is defined in this repo's index, `reference_file_path` becomes
+        // that definition site (which is what makes the file-dependency graph a
+        // graph of real cross-file edges); otherwise it falls back to the
+        // referencing file.
         let reference_file_path = def_file_of
-            .get(&callee_symbol)
+            .get(&occ.symbol)
             .cloned()
             .unwrap_or_else(|| doc.relative_path.clone());
 

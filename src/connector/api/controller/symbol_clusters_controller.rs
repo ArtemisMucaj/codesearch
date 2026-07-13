@@ -36,13 +36,17 @@ impl<'a> SymbolClustersController<'a> {
 
         // LLM naming runs by default (best-effort, cached by community id); it
         // probes once and falls back to ids if the endpoint is down. `--no-llm`
-        // skips it.
+        // skips it. A chat-client build failure is non-fatal — degrade to ids.
         if !no_llm {
-            let chat = build_chat_client(llm)?;
-            self.container
-                .community_naming_use_case()
-                .name_symbol_communities(&mut graph.communities, chat.as_ref())
-                .await;
+            match build_chat_client(llm) {
+                Ok(chat) => {
+                    self.container
+                        .community_naming_use_case()
+                        .name_symbol_communities(&mut graph.communities, chat.as_ref())
+                        .await;
+                }
+                Err(e) => tracing::warn!("LLM naming disabled, showing ids: {e}"),
+            }
         }
 
         let format: OutputFormat = format.into();
