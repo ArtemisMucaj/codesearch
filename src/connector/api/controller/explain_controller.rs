@@ -28,7 +28,7 @@ impl<'a> ExplainController<'a> {
         dump_symbols: bool,
         is_regex: bool,
     ) -> Result<String> {
-        let chat_client: Arc<dyn ChatClient> = build_chat_client(llm)?;
+        let chat_client: Arc<dyn ChatClient> = build_chat_client(llm, self.container.data_dir())?;
 
         let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 

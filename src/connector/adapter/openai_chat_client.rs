@@ -11,6 +11,9 @@ use crate::domain::DomainError;
 
 const DEFAULT_BASE_URL: &str = "http://localhost:1234";
 const CHAT_PATH: &str = "/v1/chat/completions";
+/// OpenAI-compatible model-discovery endpoint (`GET`). Derived from the base
+/// URL, so it works against LM Studio, OpenAI, and any compatible server.
+const MODELS_PATH: &str = "/v1/models";
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
 #[derive(Serialize)]
@@ -76,6 +79,19 @@ impl ChatResponseMessage {
         let content = self.content.filter(|c| !c.trim().is_empty());
         content.or_else(|| self.reasoning_content.filter(|c| !c.trim().is_empty()))
     }
+}
+
+/// Response of `GET /v1/models` on an OpenAI-compatible server.
+#[derive(Deserialize)]
+struct ModelsResponse {
+    data: Vec<ModelEntry>,
+}
+
+/// One entry in the `/v1/models` list. Only `id` is required by the spec; the
+/// rest is server-specific and ignored here.
+#[derive(Deserialize)]
+struct ModelEntry {
+    id: String,
 }
 
 /// A single chunk from an OpenAI-compatible streaming response.
@@ -154,6 +170,36 @@ impl OpenAiChatClient {
     /// The base URL this client is configured to use — useful for log messages.
     pub fn configured_base_url(&self) -> String {
         self.url.trim_end_matches(CHAT_PATH).to_string()
+    }
+
+    /// The model id this client sends in chat requests.
+    pub fn configured_model(&self) -> &str {
+        &self.model
+    }
+
+    /// Discover the models the server offers via `GET /v1/models`.
+    ///
+    /// Returns their ids (e.g. `"google/gemma-4-e2b"`). Works against any
+    /// OpenAI-compatible server (LM Studio, OpenAI, vLLM, …). Errors if the
+    /// endpoint is unreachable or returns a non-success status.
+    pub async fn list_models(&self) -> Result<Vec<String>, DomainError> {
+        let url = format!("{}{}", self.configured_base_url(), MODELS_PATH);
+        let resp = self.client.get(&url).send().await.map_err(|e| {
+            DomainError::internal(format!("OpenAI models request to {url} failed: {e}"))
+        })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(DomainError::internal(format!(
+                "OpenAI models API returned {status}: {body}"
+            )));
+        }
+
+        let parsed: ModelsResponse = resp.json().await.map_err(|e| {
+            DomainError::internal(format!("failed to parse OpenAI models response: {e}"))
+        })?;
+        Ok(parsed.data.into_iter().map(|m| m.id).collect())
     }
 }
 

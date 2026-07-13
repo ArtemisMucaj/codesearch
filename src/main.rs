@@ -106,8 +106,8 @@ struct Cli {
     #[arg(long, global = true, default_value = "4")]
     embedding_requests: usize,
 
-    /// LLM provider for query expansion: 'anthropic' (default) or 'open-ai'
-    #[arg(long, global = true, value_enum, default_value = "anthropic")]
+    /// LLM provider for query expansion: 'open-ai' (default), 'anthropic', or 'copilot'
+    #[arg(long, global = true, value_enum, default_value = "open-ai")]
     llm_target: LlmTarget,
 
     #[command(subcommand)]
@@ -136,6 +136,11 @@ async fn main() -> Result<()> {
         _ => (false, 0, 0, false),
     };
     let is_tui = matches!(&cli.command, Commands::Tui { .. });
+    // `copilot login` opens a full-screen model picker (ratatui), so it needs
+    // the same "logs to a file, not the corrupted terminal" treatment as the
+    // TUI. `models`/`status` are plain stdout and don't, but treating the whole
+    // `copilot` command uniformly keeps the branch simple and harmless.
+    let is_copilot = matches!(&cli.command, Commands::Copilot { .. });
     // `memory import` with no PATH opens an interactive picker (a full-screen
     // TUI) before any container is built. It owns the terminal like the TUI, so
     // it needs the same file-based logging and the same "open first, build the
@@ -156,7 +161,7 @@ async fn main() -> Result<()> {
         EnvFilter::new("warn,codesearch=info")
     };
 
-    if is_tui || is_import_picker {
+    if is_tui || is_import_picker || is_copilot {
         // Ratatui owns the terminal; any write to stderr corrupts the display.
         // Redirect logs to ~/.codesearch/tui.log so they are still accessible.
         let log_dir = expand_tilde(&cli.data_dir);
@@ -215,6 +220,18 @@ async fn main() -> Result<()> {
             *embedding_dimensions,
             *no_embeddings,
         )?;
+        println!("{output}");
+        return Ok(());
+    }
+
+    // `copilot` (login / models / status) only needs the data directory and the
+    // `copilot` CLI — no index database, embeddings, or container. Handle it
+    // before the container is built so it starts instantly and never loads ONNX.
+    if is_copilot {
+        let Commands::Copilot { subcommand } = cli.command else {
+            unreachable!("is_copilot is only set for Commands::Copilot")
+        };
+        let output = codesearch::run_copilot_command(subcommand, &data_dir).await?;
         println!("{output}");
         return Ok(());
     }

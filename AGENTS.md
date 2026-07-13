@@ -177,6 +177,46 @@ embeddings and never touch ONNX). Point `ORT_DYLIB_PATH` at a `libonnxruntime.so
 if you actually need inference. Revert the feature before committing — it changes
 how release binaries locate ONNX Runtime and must not ship by default.
 
+The `github-copilot-sdk` dependency (the Copilot chat backend) has a `build.rs`
+that, by default, downloads the `copilot` CLI archive. We depend on it with
+`default-features = false` so the CLI is **not** bundled — but the download can
+still be attempted at build time. Set `COPILOT_SKIP_CLI_DOWNLOAD=1` in the build
+environment to skip it entirely; the CLI is resolved at runtime from `PATH` (or
+`COPILOT_CLI_PATH`):
+
+```bash
+COPILOT_SKIP_CLI_DOWNLOAD=1 cargo build
+```
+
+### LLM backends
+
+Three interchangeable [`ChatClient`](src/application/interfaces/chat_client.rs)
+backends power LLM features (query expansion, `explain`, community naming, memory
+extraction). Select one with the global `--llm-target`:
+
+| `--llm-target` | Backend | Config |
+|---|---|---|
+| `open-ai` (**default**) | OpenAI-compatible `/v1/chat/completions` | `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY` |
+| `anthropic` | Anthropic-compatible `/v1/messages` | `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `ANTHROPIC_API_KEY` |
+| `copilot` | A **GitHub Copilot subscription**, via the official `copilot` CLI | `~/.codesearch/config.json` (see `codesearch copilot login`) |
+
+The Copilot backend drives the `copilot` CLI over JSON-RPC (`github-copilot-sdk`);
+the CLI owns the OAuth device-flow login and token refresh. `codesearch copilot
+login` opens a model picker and saves the choice; `copilot models` / `copilot
+status` inspect the account. In `serve` mode, `GET /api/llm/models` lists the
+active backend's models (`?target=openai|copilot`) and the streaming endpoints
+accept a `model` override so a client can switch models on the fly.
+
+Model discovery is uniform for OpenAI (`GET /v1/models`) and Copilot; the
+Anthropic Messages API has no portable discovery endpoint and is intentionally
+excluded from `/api/llm/models`.
+
+> **Follow-up (not yet built):** a `GenericAcpChatClient` behind the same
+> `ChatClient` trait could drive any [ACP](https://agentclientprotocol.com)-
+> compatible agent for a provider-agnostic backend. The Copilot CLI speaks its
+> own JSON-RPC (not ACP), so wiring Copilot through ACP would need a bridge; the
+> trait boundary keeps this cheap to add later.
+
 ### Run
 
 ```bash
@@ -194,6 +234,12 @@ cargo run --release -- mcp
 
 # Start an MCP server over HTTP
 cargo run --release -- mcp --http 3000
+
+# Log in to GitHub Copilot and pick a model (opens a TUI picker)
+cargo run --release -- copilot login
+
+# Then use the Copilot subscription for any LLM feature
+cargo run --release -- explain some_function --llm-target copilot
 ```
 
 Or after copying the release binary to your `$PATH`:

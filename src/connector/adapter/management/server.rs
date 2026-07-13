@@ -99,6 +99,8 @@ pub fn routes(state: AppState) -> Router {
         .route("/api/memory/sessions", get(handlers::memory::sessions))
         .route("/api/memory/tree", get(handlers::memory::tree))
         .route("/api/memory/{id}", get(handlers::memory::get))
+        // LLM backend introspection (models available for on-the-fly selection).
+        .route("/api/llm/models", get(handlers::llm::models))
         // ── Streaming (SSE) endpoints ────────────────────────────────────────
         // Live under the `/api/stream/...` prefix so they never clash with the
         // `/api/...` REST routes above.

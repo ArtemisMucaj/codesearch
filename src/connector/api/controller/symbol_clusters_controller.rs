@@ -38,7 +38,7 @@ impl<'a> SymbolClustersController<'a> {
         // probes once and falls back to ids if the endpoint is down. `--no-llm`
         // skips it. A chat-client build failure is non-fatal — degrade to ids.
         if !no_llm {
-            match build_chat_client(llm) {
+            match build_chat_client(llm, self.container.data_dir()) {
                 Ok(chat) => {
                     self.container
                         .community_naming_use_case()

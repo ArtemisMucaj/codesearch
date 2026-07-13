@@ -267,7 +267,7 @@ pub enum MemorySubcommand {
         path: Option<String>,
 
         /// LLM provider for extraction: 'anthropic' (default) or 'open-ai'
-        #[arg(long, value_enum, default_value = "anthropic")]
+        #[arg(long, value_enum, default_value = "open-ai")]
         llm: LlmTarget,
 
         /// Re-import even if this session was already imported.
@@ -339,7 +339,7 @@ pub enum MemorySubcommand {
         name: Option<String>,
 
         /// LLM provider for the summary: 'anthropic' (default) or 'open-ai'.
-        #[arg(long, value_enum, default_value = "anthropic")]
+        #[arg(long, value_enum, default_value = "open-ai")]
         llm: LlmTarget,
     },
 
@@ -372,11 +372,16 @@ pub enum EmbeddingTarget {
 /// Provider to use for LLM calls (query expansion, explain, etc.).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum LlmTarget {
-    /// Anthropic-compatible /v1/messages (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL)
+    /// OpenAI-compatible /v1/chat/completions (OPENAI_BASE_URL, OPENAI_MODEL).
+    /// The default: it targets LM Studio locally out of the box and supports
+    /// `/v1/models` discovery.
     #[default]
-    Anthropic,
-    /// OpenAI-compatible /v1/chat/completions (OPENAI_BASE_URL, OPENAI_MODEL)
     OpenAi,
+    /// Anthropic-compatible /v1/messages (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL)
+    Anthropic,
+    /// GitHub Copilot subscription via the `copilot` CLI. Token + model come
+    /// from `~/.codesearch/config.json` (run `codesearch copilot login`).
+    Copilot,
 }
 
 /// Reranking backend to use after retrieval.
@@ -531,7 +536,7 @@ pub enum Commands {
         repository: Option<String>,
 
         /// LLM provider: 'anthropic' (default) or 'open-ai'
-        #[arg(long, value_enum, default_value = "anthropic")]
+        #[arg(long, value_enum, default_value = "open-ai")]
         llm: LlmTarget,
 
         /// Print each analyzed symbol and the source chunk sent to the LLM
@@ -690,4 +695,41 @@ pub enum Commands {
         #[arg(long, value_enum, default_value = "search")]
         mode: TuiMode,
     },
+
+    /// Configure the GitHub Copilot chat backend (login + model selection).
+    ///
+    /// Stores its state in `<data-dir>/config.json` (default
+    /// `~/.codesearch/config.json`); use it with `--llm-target copilot`.
+    Copilot {
+        #[command(subcommand)]
+        subcommand: CopilotSubcommand,
+    },
+}
+
+/// Subcommands for `codesearch copilot`.
+#[derive(Subcommand)]
+pub enum CopilotSubcommand {
+    /// Log in to GitHub Copilot and pick a model, saving both to config.json.
+    ///
+    /// Opens an interactive TUI: it runs the OAuth device-flow login (unless a
+    /// token is already stored), fetches the models your subscription can use,
+    /// and lets you select one. The chosen token + model are written to
+    /// `<data-dir>/config.json`.
+    Login {
+        /// Skip the interactive picker and just (re)run login, keeping the
+        /// currently-selected model. Useful for refreshing an expired token in
+        /// a non-interactive shell.
+        #[arg(long)]
+        no_pick: bool,
+    },
+
+    /// List the models available to the logged-in Copilot account.
+    Models {
+        /// Emit JSON instead of a formatted table.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Print the current Copilot configuration (token presence + model).
+    Status,
 }

@@ -19,10 +19,10 @@ use crate::connector::adapter::{
 };
 use crate::{
     AnthropicClient, AnthropicReranking, ClusterDetectionUseCase, CommunityNamingUseCase,
-    CouplingDetectionUseCase, DeleteRepositoryUseCase, DuckdbCallGraphRepository,
-    DuckdbChannelEndpointRepository, DuckdbFileHashRepository, DuckdbMetadataRepository,
-    DuckdbVectorRepository, EmbeddingService, ExecutionFeaturesUseCase, ExplainUseCase,
-    FileRelationshipUseCase, GraphExpansionUseCase, ImpactAnalysisUseCase,
+    CopilotChatClient, CouplingDetectionUseCase, DeleteRepositoryUseCase,
+    DuckdbCallGraphRepository, DuckdbChannelEndpointRepository, DuckdbFileHashRepository,
+    DuckdbMetadataRepository, DuckdbVectorRepository, EmbeddingService, ExecutionFeaturesUseCase,
+    ExplainUseCase, FileRelationshipUseCase, GraphExpansionUseCase, ImpactAnalysisUseCase,
     InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander,
     MockEmbedding, MockReranking, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding,
     OrtReranking, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
@@ -564,6 +564,14 @@ impl Container {
                     );
                     Arc::new(c)
                 }
+                LlmTarget::Copilot => {
+                    let c = CopilotChatClient::from_data_dir(&config.data_dir)?;
+                    debug!(
+                        "Using Copilot query expander (model={:?})",
+                        c.configured_model()
+                    );
+                    Arc::new(c)
+                }
             };
             Some(Arc::new(LlmQueryExpander::new(client)))
         } else {
@@ -847,6 +855,12 @@ impl Container {
 
     pub fn data_dir(&self) -> &str {
         &self.config.data_dir
+    }
+
+    /// The LLM backend this container was configured with (`--llm-target`).
+    /// Serve-mode handlers use it as the default when a request omits its own.
+    pub fn llm_target(&self) -> LlmTarget {
+        self.config.llm_target
     }
 
     pub fn namespace(&self) -> &str {

@@ -29,8 +29,8 @@ impl<'a> MemoryController<'a> {
     }
 
     /// Build the chat client for the requested LLM provider (shared dispatch).
-    fn chat_client(llm: LlmTarget) -> Result<Arc<dyn ChatClient>> {
-        super::build_chat_client(llm)
+    fn chat_client(&self, llm: LlmTarget) -> Result<Arc<dyn ChatClient>> {
+        super::build_chat_client(llm, self.container.data_dir())
     }
 
     /// Import a single transcript file directly (the `memory import <path>`
@@ -69,7 +69,7 @@ impl<'a> MemoryController<'a> {
             return Ok(());
         }
 
-        let chat_client = Self::chat_client(llm)?;
+        let chat_client = self.chat_client(llm)?;
         let use_case = self.container.memory_import_use_case(chat_client)?;
 
         // The picker sends requests one at a time (import-highlighted), so a
@@ -140,7 +140,7 @@ impl<'a> MemoryController<'a> {
         if transcripts.is_empty() {
             return Ok("Nothing to import.".to_string());
         }
-        let chat_client = Self::chat_client(llm)?;
+        let chat_client = self.chat_client(llm)?;
         let use_case = self.container.memory_import_use_case(chat_client)?;
 
         let multiple = transcripts.len() > 1;
@@ -177,7 +177,7 @@ impl<'a> MemoryController<'a> {
         // Name the node: an explicit --name wins, else derive from the title.
         let slug = resource_slug(name.as_deref().unwrap_or(&fetched.title));
 
-        let chat_client = Self::chat_client(llm)?;
+        let chat_client = self.chat_client(llm)?;
         let summary = self.container.memory_summary_use_case(chat_client)?;
 
         let node = summary
