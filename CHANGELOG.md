@@ -22,6 +22,13 @@
 * unit tests for `InMemoryVectorRepository` hybrid paths: cosine vs RRF score ranges, dual-leg ranking, post-fusion `min_score` filtering, no early pruning, empty-term fallback, and limit enforcement
 * integration tests for end-to-end hybrid search: results returned with positive scores, keyword-matched chunk surfaces, special SQL characters (`%`, `_`, `!`) do not cause errors, and semantic-only baseline confirms the flag gates the BM25 leg
 
+## [1.5.0](https://github.com/ArtemisMucaj/codesearch/compare/v1.4.0...v1.5.0) (2026-07-14)
+
+
+### Features
+
+* **llm:** add GitHub Copilot chat backend + model discovery ([#185](https://github.com/ArtemisMucaj/codesearch/issues/185)) ([568e3ad](https://github.com/ArtemisMucaj/codesearch/commit/568e3ad1d04bbcddf54190cf11687fe878c6d36f))
+
 ## [1.4.0](https://github.com/ArtemisMucaj/codesearch/compare/v1.3.0...v1.4.0) (2026-07-13)
 
 
