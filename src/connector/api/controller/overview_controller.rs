@@ -237,7 +237,9 @@ fn render_modules(out: &mut String, modules: &crate::application::ModuleOverview
     ));
     out.push_str("| Module | Files | Language | Cohesion | Top Dependencies |\n");
     out.push_str("|--------|-------|----------|----------|------------------|\n");
-    for cluster in cg.clusters.iter().take(top) {
+    // Load-bearing modules first (size × external coupling), so the top rows
+    // are the ones a reader must know about, not merely the largest.
+    for cluster in modules.clusters_by_importance().into_iter().take(top) {
         let deps: Vec<String> = modules
             .dependencies
             .iter()

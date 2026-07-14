@@ -1271,6 +1271,35 @@ pub struct ModuleOverview {
     pub dependencies: Vec<ModuleDependency>,
 }
 
+impl ModuleOverview {
+    /// Clusters ranked by an "importance" composite: `size × (1 + external
+    /// dependency weight)`, where the external weight counts inter-cluster
+    /// edges in both directions (what the cluster pulls in and what depends on
+    /// it). This puts the load-bearing modules — large *and* heavily coupled
+    /// to the rest of the codebase — first, rather than merely the largest;
+    /// the `1 +` keeps fully self-contained clusters ordered by size among
+    /// themselves instead of collapsing them to a shared zero score.
+    pub fn clusters_by_importance(&self) -> Vec<&Cluster> {
+        let mut external: HashMap<&str, f64> = HashMap::new();
+        for dep in &self.dependencies {
+            *external.entry(dep.from_cluster_id.as_str()).or_insert(0.0) += dep.weight;
+            *external.entry(dep.to_cluster_id.as_str()).or_insert(0.0) += dep.weight;
+        }
+        let importance = |c: &Cluster| {
+            c.size as f64 * (1.0 + external.get(c.id.as_str()).copied().unwrap_or(0.0))
+        };
+        let mut ranked: Vec<&Cluster> = self.graph.clusters.iter().collect();
+        // Secondary key keeps the order stable when scores tie.
+        ranked.sort_by(|a, b| {
+            importance(b)
+                .partial_cmp(&importance(a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        ranked
+    }
+}
+
 pub struct ClusterDetectionUseCase {
     file_graph: Arc<FileRelationshipUseCase>,
     /// Optional persistence for detected clusters. When present, detection
@@ -1729,7 +1758,9 @@ impl ClusterDetectionUseCase {
         out.push_str("| Cluster | Files | Language | Top Dependencies |\n");
         out.push_str("|---------|-------|----------|------------------|\n");
 
-        for cluster in &cg.clusters {
+        // Load-bearing modules first (size × external coupling), matching the
+        // ordering of the repository-wide `overview` command.
+        for cluster in overview.clusters_by_importance() {
             // Top 3 outgoing inter-cluster edges (dependencies are pre-sorted
             // by descending weight).
             let deps: Vec<(&str, f64)> = overview
@@ -1775,6 +1806,48 @@ mod tests {
         assert_eq!(kind_weight("call"), 1.0);
         assert_eq!(kind_weight("import"), 0.5);
         assert_eq!(kind_weight("unknown_kind"), 0.3);
+    }
+
+    #[test]
+    fn test_clusters_by_importance_ranks_coupled_clusters_first() {
+        let mk = |id: &str, size: usize| Cluster {
+            id: id.to_string(),
+            display_name: None,
+            repository_id: "repo".to_string(),
+            dominant_language: "Rust".to_string(),
+            size,
+            cohesion: 1.0,
+            members: Vec::new(),
+        };
+        // "big" is the largest but fully self-contained; "hub" and "leaf" are
+        // smaller but coupled to each other.
+        let overview = ModuleOverview {
+            graph: ClusterGraph {
+                clusters: vec![mk("big", 40), mk("hub", 10), mk("leaf", 5)],
+                repository_id: "repo".to_string(),
+                total_files: 55,
+                total_edges: 30,
+            },
+            dependencies: vec![
+                ModuleDependency {
+                    from_cluster_id: "leaf".to_string(),
+                    to_cluster_id: "hub".to_string(),
+                    weight: 20.0,
+                },
+                ModuleDependency {
+                    from_cluster_id: "hub".to_string(),
+                    to_cluster_id: "leaf".to_string(),
+                    weight: 10.0,
+                },
+            ],
+        };
+        let ranked: Vec<&str> = overview
+            .clusters_by_importance()
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        // hub: 10 × (1 + 30) = 310; leaf: 5 × 31 = 155; big: 40 × 1 = 40.
+        assert_eq!(ranked, vec!["hub", "leaf", "big"]);
     }
 
     #[test]
