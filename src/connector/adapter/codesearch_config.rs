@@ -27,6 +27,45 @@ pub struct CodesearchConfig {
     /// GitHub Copilot chat backend configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copilot: Option<CopilotConfig>,
+
+    /// Named OpenAI-compatible endpoints (LM Studio, vLLM, hosted OpenAI, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai: Option<OpenAiConfig>,
+}
+
+/// A set of named OpenAI-compatible endpoints plus which one is active.
+///
+/// Lets a user (or a native app via the management API) register several
+/// servers and switch between them at runtime, instead of the single
+/// env-var-configured endpoint.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OpenAiConfig {
+    /// Name of the endpoint used when `--llm-target open-ai` is selected with no
+    /// explicit `--openai-endpoint`. When unset (or naming a missing endpoint),
+    /// callers fall back to the `OPENAI_*` environment variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<String>,
+
+    /// Registered endpoints, keyed by a user-chosen name (e.g. `"lmstudio"`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub endpoints: std::collections::BTreeMap<String, OpenAiEndpoint>,
+}
+
+/// One OpenAI-compatible server.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OpenAiEndpoint {
+    /// Base URL, e.g. `http://localhost:1234` (no `/v1` suffix).
+    pub base_url: String,
+
+    /// Model id sent in chat requests. When absent, the server's default (or a
+    /// built-in default) is used; run the picker to select one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// Bearer API key for hosted servers. Absent/empty for local servers like
+    /// LM Studio. Never returned over the management API (masked on read).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 }
 
 /// Persisted GitHub Copilot settings.
@@ -113,6 +152,21 @@ impl CodesearchConfig {
     pub fn load_copilot(data_dir: &str) -> Result<CopilotConfig, DomainError> {
         Ok(Self::load(data_dir)?.copilot.unwrap_or_default())
     }
+
+    /// Mutable access to the OpenAI section, creating it if absent.
+    pub fn openai_mut(&mut self) -> &mut OpenAiConfig {
+        self.openai.get_or_insert_with(OpenAiConfig::default)
+    }
+
+    /// Resolve which named OpenAI endpoint to use, honoring an explicit
+    /// `name_override` first, then the configured `active` endpoint. Returns
+    /// `None` when neither is set (or names a missing endpoint) so the caller
+    /// falls back to the `OPENAI_*` environment variables.
+    pub fn resolve_openai_endpoint(&self, name_override: Option<&str>) -> Option<OpenAiEndpoint> {
+        let openai = self.openai.as_ref()?;
+        let name = name_override.or(openai.active.as_deref())?;
+        openai.endpoints.get(name).cloned()
+    }
 }
 
 #[cfg(test)]
@@ -158,5 +212,71 @@ mod tests {
         CodesearchConfig::default().save(data_dir).unwrap();
         let written = std::fs::read_to_string(CodesearchConfig::path_in(data_dir)).unwrap();
         assert!(!written.contains("copilot"), "got: {written}");
+    }
+
+    #[test]
+    fn openai_endpoints_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let data_dir = dir.path().to_str().unwrap();
+
+        let mut cfg = CodesearchConfig::default();
+        let openai = cfg.openai_mut();
+        openai.endpoints.insert(
+            "lmstudio".to_string(),
+            OpenAiEndpoint {
+                base_url: "http://localhost:1234".to_string(),
+                model: Some("gemma".to_string()),
+                api_key: None,
+            },
+        );
+        openai.active = Some("lmstudio".to_string());
+        cfg.save(data_dir).unwrap();
+
+        let loaded = CodesearchConfig::load(data_dir).unwrap();
+        let openai = loaded.openai.expect("openai section present");
+        assert_eq!(openai.active.as_deref(), Some("lmstudio"));
+        let ep = openai.endpoints.get("lmstudio").expect("endpoint present");
+        assert_eq!(ep.base_url, "http://localhost:1234");
+        assert_eq!(ep.model.as_deref(), Some("gemma"));
+    }
+
+    #[test]
+    fn resolve_openai_endpoint_precedence() {
+        let mut cfg = CodesearchConfig::default();
+        let openai = cfg.openai_mut();
+        openai.endpoints.insert(
+            "a".to_string(),
+            OpenAiEndpoint {
+                base_url: "http://a".to_string(),
+                ..Default::default()
+            },
+        );
+        openai.endpoints.insert(
+            "b".to_string(),
+            OpenAiEndpoint {
+                base_url: "http://b".to_string(),
+                ..Default::default()
+            },
+        );
+        openai.active = Some("a".to_string());
+
+        // Explicit override wins over active.
+        assert_eq!(
+            cfg.resolve_openai_endpoint(Some("b")).unwrap().base_url,
+            "http://b"
+        );
+        // Falls back to active when no override.
+        assert_eq!(
+            cfg.resolve_openai_endpoint(None).unwrap().base_url,
+            "http://a"
+        );
+        // A missing name resolves to None (caller falls back to env).
+        assert!(cfg.resolve_openai_endpoint(Some("missing")).is_none());
+    }
+
+    #[test]
+    fn resolve_openai_endpoint_none_without_config() {
+        let cfg = CodesearchConfig::default();
+        assert!(cfg.resolve_openai_endpoint(None).is_none());
     }
 }

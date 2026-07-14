@@ -141,6 +141,10 @@ async fn main() -> Result<()> {
     // TUI. `models`/`status` are plain stdout and don't, but treating the whole
     // `copilot` command uniformly keeps the branch simple and harmless.
     let is_copilot = matches!(&cli.command, Commands::Copilot { .. });
+    // `openai select` opens a ratatui picker, so like `copilot` it needs
+    // file-based logging; the other openai subcommands are plain stdout but the
+    // uniform branch is harmless.
+    let is_openai = matches!(&cli.command, Commands::Openai { .. });
     // `memory import` with no PATH opens an interactive picker (a full-screen
     // TUI) before any container is built. It owns the terminal like the TUI, so
     // it needs the same file-based logging and the same "open first, build the
@@ -161,7 +165,7 @@ async fn main() -> Result<()> {
         EnvFilter::new("warn,codesearch=info")
     };
 
-    if is_tui || is_import_picker || is_copilot {
+    if is_tui || is_import_picker || is_copilot || is_openai {
         // Ratatui owns the terminal; any write to stderr corrupts the display.
         // Redirect logs to ~/.codesearch/tui.log so they are still accessible.
         let log_dir = expand_tilde(&cli.data_dir);
@@ -232,6 +236,17 @@ async fn main() -> Result<()> {
             unreachable!("is_copilot is only set for Commands::Copilot")
         };
         let output = codesearch::run_copilot_command(subcommand, &data_dir).await?;
+        println!("{output}");
+        return Ok(());
+    }
+
+    // `openai` (endpoints / add / use / models / select) only needs the data
+    // directory and the target server — no container. Handle it early too.
+    if is_openai {
+        let Commands::Openai { subcommand } = cli.command else {
+            unreachable!("is_openai is only set for Commands::Openai")
+        };
+        let output = codesearch::run_openai_command(subcommand, &data_dir).await?;
         println!("{output}");
         return Ok(());
     }

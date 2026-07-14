@@ -15,6 +15,8 @@ const CHAT_PATH: &str = "/v1/chat/completions";
 /// URL, so it works against LM Studio, OpenAI, and any compatible server.
 const MODELS_PATH: &str = "/v1/models";
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
+/// Default model when neither the endpoint config nor `OPENAI_MODEL` sets one.
+const DEFAULT_MODEL: &str = "google/gemma-4-e2b";
 
 #[derive(Serialize)]
 struct ChatRequest {
@@ -127,44 +129,85 @@ pub struct OpenAiChatClient {
 }
 
 impl OpenAiChatClient {
+    /// Build from the `OPENAI_*` environment variables (the default endpoint
+    /// when no named endpoint from config is selected).
     pub fn from_env() -> Result<Self, reqwest::Error> {
         let base =
             std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        let url = format!("{}{}", base.trim_end_matches('/'), CHAT_PATH);
-        let model =
-            std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "google/gemma-4-e2b".to_string());
-
-        debug!("OpenAiChatClient: endpoint={}, model={}", url, model);
-
-        let mut headers = reqwest::header::HeaderMap::new();
-        if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-            if !key.is_empty() {
-                match reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")) {
-                    Ok(val) => {
-                        headers.insert(reqwest::header::AUTHORIZATION, val);
-                    }
-                    Err(e) => {
-                        let masked = mask_key(&key);
-                        warn!(
-                            "OpenAiChatClient: failed to build Authorization header \
-                             (key={masked}): {e}; skipping"
-                        );
-                    }
-                }
-            }
-        }
-
+        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let api_key = std::env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty());
         let timeout_secs = std::env::var("OPENAI_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
+        Self::from_endpoint(&base, &model, api_key.as_deref(), timeout_secs)
+    }
+
+    /// Build the OpenAI-compatible client for a run: resolve a named endpoint
+    /// from `<data_dir>/config.json` (honoring `endpoint_override`, then the
+    /// configured `active` endpoint), falling back to the `OPENAI_*`
+    /// environment variables when no endpoint is configured.
+    pub fn from_config(
+        data_dir: &str,
+        endpoint_override: Option<&str>,
+    ) -> Result<Self, DomainError> {
+        let cfg = super::CodesearchConfig::load(data_dir)?;
+        match cfg.resolve_openai_endpoint(endpoint_override) {
+            Some(ep) => {
+                let model = ep.model.as_deref().unwrap_or(DEFAULT_MODEL);
+                Self::from_endpoint(
+                    &ep.base_url,
+                    model,
+                    ep.api_key.as_deref(),
+                    DEFAULT_TIMEOUT_SECS,
+                )
+                .map_err(|e| DomainError::internal(format!("failed to build OpenAI client: {e}")))
+            }
+            None => Self::from_env()
+                .map_err(|e| DomainError::internal(format!("failed to build OpenAI client: {e}"))),
+        }
+    }
+
+    /// Build from an explicit endpoint (a named endpoint from config): `base`
+    /// URL, `model`, and optional bearer `api_key`. Shares the header/client
+    /// construction with [`Self::from_env`].
+    pub fn from_endpoint(
+        base: &str,
+        model: &str,
+        api_key: Option<&str>,
+        timeout_secs: u64,
+    ) -> Result<Self, reqwest::Error> {
+        let url = format!("{}{}", base.trim_end_matches('/'), CHAT_PATH);
+        debug!("OpenAiChatClient: endpoint={}, model={}", url, model);
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+            match reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")) {
+                Ok(val) => {
+                    headers.insert(reqwest::header::AUTHORIZATION, val);
+                }
+                Err(e) => {
+                    let masked = mask_key(key);
+                    warn!(
+                        "OpenAiChatClient: failed to build Authorization header \
+                         (key={masked}): {e}; skipping"
+                    );
+                }
+            }
+        }
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .default_headers(headers)
             .build()?;
 
-        Ok(Self { client, url, model })
+        Ok(Self {
+            client,
+            url,
+            model: model.to_string(),
+        })
     }
 
     /// Construct from pre-built parts: a `reqwest::Client` (whose default

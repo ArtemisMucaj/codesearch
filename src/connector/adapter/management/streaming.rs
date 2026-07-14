@@ -57,11 +57,15 @@ pub struct ExplainStreamRequest {
     /// Which LLM backend to use. Defaults to the OpenAI-compatible backend.
     #[serde(default)]
     pub llm: Option<StreamLlmTarget>,
-    /// Override the model for this request (currently honored by the Copilot
-    /// backend). When omitted, the backend's configured/default model is used.
-    /// Pick a valid id from `GET /api/llm/models`.
+    /// Override the model for this request (Copilot backend, and the OpenAI
+    /// backend's chosen endpoint). When omitted, the backend's configured/default
+    /// model is used. Pick a valid id from `GET /api/llm/models`.
     #[serde(default)]
     pub model: Option<String>,
+    /// For the OpenAI backend: which named endpoint from config to use. When
+    /// omitted, the configured `active` endpoint (then `OPENAI_*`) is used.
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 /// JSON body for the index stream.
@@ -175,16 +179,18 @@ async fn run_explain_stream(
     let llm: LlmTarget = req.llm.map(Into::into).unwrap_or_default();
     let chat_client: Arc<dyn ChatClient> = match llm {
         LlmTarget::Anthropic => Arc::new(AnthropicClient::from_env()),
-        LlmTarget::OpenAi => match OpenAiChatClient::from_env() {
-            Ok(client) => Arc::new(client),
-            Err(err) => {
-                let _ = event_tx.send(sse_event(
-                    "error",
-                    json!({ "message": format!("failed to initialise OpenAI client: {err}") }),
-                ));
-                return;
+        LlmTarget::OpenAi => {
+            match OpenAiChatClient::from_config(&data_dir, req.endpoint.as_deref()) {
+                Ok(client) => Arc::new(client),
+                Err(err) => {
+                    let _ = event_tx.send(sse_event(
+                        "error",
+                        json!({ "message": format!("failed to initialise OpenAI client: {err}") }),
+                    ));
+                    return;
+                }
             }
-        },
+        }
         LlmTarget::Copilot => {
             match CopilotChatClient::from_data_dir_with_model(&data_dir, req.model) {
                 Ok(client) => Arc::new(client),

@@ -1,20 +1,29 @@
-//! LLM backend introspection for serve mode.
+//! LLM backend introspection and configuration for serve mode.
 //!
 //! - `GET /api/llm/models` — the chat models available to the active LLM
 //!   backend, so a native-app / web client can populate a model picker and then
 //!   pass a chosen `model` back to the streaming endpoints on the fly.
+//! - `GET /api/llm/endpoints` — list the configured OpenAI-compatible endpoints
+//!   and which is active (keys masked).
+//! - `PUT /api/llm/endpoints/{name}` — add or update an endpoint.
+//! - `POST /api/llm/active` — set the active endpoint.
 //!
-//! The backend defaults to the one the server was started with
+//! Together these let a running server (and a native app talking to it)
+//! configure LLM backends at runtime, not just via the CLI. Endpoint changes
+//! persist to `<data_dir>/config.json` (mode `0600`).
+//!
+//! The backend for `models` defaults to the one the server was started with
 //! (`--llm-target`), and can be overridden per request with `?target=`
 //! (`openai` | `anthropic` | `copilot`).
 
-use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::LlmTarget;
-use crate::connector::adapter::{CopilotChatClient, OpenAiChatClient};
+use crate::connector::adapter::{
+    CodesearchConfig, CopilotChatClient, OpenAiChatClient, OpenAiEndpoint,
+};
 
 use super::super::error::{ApiError, ApiResult};
 use super::super::server::AppState;
@@ -26,6 +35,10 @@ pub struct LlmModelsParams {
     /// Omit to use the server's configured `--llm-target`.
     #[serde(default)]
     pub target: Option<String>,
+    /// For the OpenAI backend: which named endpoint from config to query. Omit
+    /// to use the configured `active` endpoint (then `OPENAI_*`).
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 /// A single model in the response.
@@ -61,12 +74,10 @@ pub async fn models(
 
     let models = match target {
         LlmTarget::OpenAi => {
-            let client = OpenAiChatClient::from_env().map_err(|e| {
-                ApiError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("failed to initialise OpenAI client: {e}"),
-                )
-            })?;
+            let client = OpenAiChatClient::from_config(
+                state.container.data_dir(),
+                params.endpoint.as_deref(),
+            )?;
             client
                 .list_models()
                 .await?
@@ -102,4 +113,119 @@ pub async fn models(
         target: target.as_str().to_string(),
         models,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI-compatible endpoint management
+// ---------------------------------------------------------------------------
+
+/// One endpoint in the `GET /api/llm/endpoints` response. The API key is never
+/// returned; only whether one is set (`has_key`).
+#[derive(Debug, Serialize)]
+pub struct EndpointInfo {
+    pub name: String,
+    pub base_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub has_key: bool,
+    /// Whether this is the configured `active` endpoint.
+    pub active: bool,
+}
+
+/// Response body for `GET /api/llm/endpoints`.
+#[derive(Debug, Serialize)]
+pub struct EndpointsResponse {
+    pub active: Option<String>,
+    pub endpoints: Vec<EndpointInfo>,
+}
+
+/// `GET /api/llm/endpoints` — list configured OpenAI-compatible endpoints. API
+/// keys are masked (`has_key`), so this is safe to expose over the management
+/// API.
+pub async fn list_endpoints(State(state): State<AppState>) -> ApiResult<Json<EndpointsResponse>> {
+    let cfg = CodesearchConfig::load(state.container.data_dir())?;
+    let openai = cfg.openai.unwrap_or_default();
+    let active = openai.active.clone();
+
+    let endpoints = openai
+        .endpoints
+        .into_iter()
+        .map(|(name, ep)| EndpointInfo {
+            active: active.as_deref() == Some(name.as_str()),
+            has_key: ep.api_key.as_deref().is_some_and(|k| !k.is_empty()),
+            name,
+            base_url: ep.base_url,
+            model: ep.model,
+        })
+        .collect();
+
+    Ok(Json(EndpointsResponse { active, endpoints }))
+}
+
+/// Request body for `PUT /api/llm/endpoints/{name}`.
+#[derive(Debug, Deserialize)]
+pub struct UpsertEndpointRequest {
+    pub base_url: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Bearer API key. Write-only: it is stored but never returned by any GET.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Make this the active endpoint after saving.
+    #[serde(default)]
+    pub set_active: bool,
+}
+
+/// `PUT /api/llm/endpoints/{name}` — add or update an endpoint.
+pub async fn upsert_endpoint(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(body): Json<UpsertEndpointRequest>,
+) -> ApiResult<Json<EndpointsResponse>> {
+    if name.trim().is_empty() {
+        return Err(ApiError::bad_request("endpoint name must not be empty"));
+    }
+    let data_dir = state.container.data_dir();
+    let mut cfg = CodesearchConfig::load(data_dir)?;
+    let openai = cfg.openai_mut();
+    openai.endpoints.insert(
+        name.clone(),
+        OpenAiEndpoint {
+            base_url: body.base_url,
+            model: body.model,
+            api_key: body.api_key.filter(|k| !k.is_empty()),
+        },
+    );
+    if body.set_active {
+        openai.active = Some(name);
+    }
+    cfg.save(data_dir)?;
+
+    list_endpoints(State(state)).await
+}
+
+/// Request body for `POST /api/llm/active`.
+#[derive(Debug, Deserialize)]
+pub struct SetActiveRequest {
+    pub name: String,
+}
+
+/// `POST /api/llm/active` — set the active OpenAI endpoint.
+pub async fn set_active_endpoint(
+    State(state): State<AppState>,
+    Json(body): Json<SetActiveRequest>,
+) -> ApiResult<Json<EndpointsResponse>> {
+    let data_dir = state.container.data_dir();
+    let mut cfg = CodesearchConfig::load(data_dir)?;
+    let openai = cfg.openai_mut();
+    if !openai.endpoints.contains_key(&body.name) {
+        return Err(ApiError::not_found(format!(
+            "no endpoint named '{}'",
+            body.name
+        )));
+    }
+    openai.active = Some(body.name);
+    cfg.save(data_dir)?;
+
+    list_endpoints(State(state)).await
 }

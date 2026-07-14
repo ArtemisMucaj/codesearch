@@ -732,6 +732,67 @@ pub enum Commands {
         #[command(subcommand)]
         subcommand: CopilotSubcommand,
     },
+
+    /// Manage OpenAI-compatible endpoints (LM Studio, vLLM, hosted OpenAI, …).
+    ///
+    /// Register named endpoints, pick the active one, and select models —
+    /// stored in `<data-dir>/config.json` and used with `--llm-target open-ai`.
+    Openai {
+        #[command(subcommand)]
+        subcommand: OpenaiSubcommand,
+    },
+}
+
+/// Subcommands for `codesearch openai`.
+#[derive(Subcommand)]
+pub enum OpenaiSubcommand {
+    /// List configured endpoints and which is active (API keys masked).
+    Endpoints {
+        /// Emit JSON instead of a formatted table.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Add or update a named endpoint.
+    Add {
+        /// Endpoint name (e.g. `lmstudio`).
+        name: String,
+        /// Base URL, e.g. `http://localhost:1234` (no `/v1` suffix).
+        #[arg(long)]
+        base_url: String,
+        /// Default model id for this endpoint (optional; run `select` later).
+        #[arg(long)]
+        model: Option<String>,
+        /// Bearer API key for hosted servers (optional).
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Make this the active endpoint.
+        #[arg(long)]
+        set_active: bool,
+    },
+
+    /// Set the active endpoint by name.
+    Use {
+        /// Name of a previously-added endpoint.
+        name: String,
+    },
+
+    /// List the models an endpoint offers (via its `/v1/models`).
+    Models {
+        /// Endpoint to query. Omit to use the active endpoint (then `OPENAI_*`).
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Emit JSON instead of a formatted table.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Pick a model for an endpoint interactively and save it.
+    Select {
+        /// Endpoint to configure. Omit to use the active endpoint.
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
 }
 
 /// Subcommands for `codesearch copilot`.

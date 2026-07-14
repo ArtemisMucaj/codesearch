@@ -39,6 +39,11 @@ const SCOPE: &str = "read:user";
 /// so we never poll slightly too early and trip `slow_down`.
 const POLL_SAFETY_MARGIN: Duration = Duration::from_secs(1);
 
+/// Per-request timeout so a stalled connection to `github.com` can't hang the
+/// login command indefinitely. Bounds each individual HTTP call; the overall
+/// poll loop still runs until the user authorizes or the code expires.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The device-code grant, ready to display to the user and poll on.
 pub struct DeviceCode {
     /// Code the user types into the verification page.
@@ -82,6 +87,7 @@ pub async fn request_device_code(client: &reqwest::Client) -> Result<DeviceCode,
         .post(DEVICE_CODE_URL)
         .header(reqwest::header::ACCEPT, "application/json")
         .json(&serde_json::json!({ "client_id": CLIENT_ID, "scope": SCOPE }))
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(|e| DomainError::internal(format!("device-code request failed: {e}")))?;
@@ -128,6 +134,7 @@ pub async fn poll_for_token(
                 "device_code": device.device_code,
                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
             }))
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(|e| DomainError::internal(format!("token poll request failed: {e}")))?;

@@ -185,9 +185,43 @@ extraction). Select one with the global `--llm-target`:
 
 | `--llm-target` | Backend | Config |
 |---|---|---|
-| `open-ai` (**default**) | OpenAI-compatible `/v1/chat/completions` | `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY` |
+| `open-ai` (**default**) | OpenAI-compatible `/v1/chat/completions` | named endpoints in `config.json` (see below), or `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY` |
 | `anthropic` | Anthropic-compatible `/v1/messages` | `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `ANTHROPIC_API_KEY` |
 | `copilot` | A **GitHub Copilot subscription** | `~/.codesearch/config.json` (see `codesearch copilot login`) |
+
+#### OpenAI-compatible endpoints
+
+The OpenAI backend supports **multiple named endpoints** (LM Studio, vLLM, hosted
+OpenAI, …) in `config.json` under an `openai` section, so you can register
+several servers and switch between them without editing env vars:
+
+```jsonc
+{
+  "openai": {
+    "active": "lmstudio",
+    "endpoints": {
+      "lmstudio": { "base_url": "http://localhost:1234", "model": "…" },
+      "vllm-box": { "base_url": "http://10.0.0.5:8000", "model": "…", "api_key": "…" }
+    }
+  }
+}
+```
+
+Resolution when `--llm-target open-ai` runs: the configured **`active`** endpoint,
+else the `OPENAI_*` env vars. Manage endpoints from the CLI —
+
+```bash
+codesearch openai add lmstudio --base-url http://localhost:1234
+codesearch openai use lmstudio          # set active
+codesearch openai models                # list the active endpoint's models
+codesearch openai select                # pick a model interactively (TUI)
+codesearch openai endpoints             # list all (API keys masked)
+```
+
+— or **at runtime through the serve management API**, so a native app can
+configure backends against a running server: `GET /api/llm/endpoints` (keys
+masked), `PUT /api/llm/endpoints/{name}` (write-only `api_key`), `POST
+/api/llm/active`, and `GET /api/llm/models?target=openai&endpoint=<name>`.
 
 The Copilot backend talks to the Copilot API (`https://api.githubcopilot.com`,
 OpenAI-compatible) **directly over HTTP** — no external CLI. `codesearch copilot

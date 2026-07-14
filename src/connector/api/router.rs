@@ -272,6 +272,9 @@ impl<'a> Router<'a> {
             Commands::Copilot { .. } => Err(anyhow::anyhow!(
                 "copilot command is handled separately in main"
             )),
+            Commands::Openai { .. } => Err(anyhow::anyhow!(
+                "openai command is handled separately in main"
+            )),
         }
     }
 }

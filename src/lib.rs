@@ -26,7 +26,8 @@ pub use application::{aggregate, render, VizFormat, DEFAULT_NODE_LIMIT};
 
 pub use cli::{
     ClustersSubcommand, Commands, CopilotSubcommand, EmbeddingTarget, FeaturesSubcommand,
-    LlmTarget, MemorySubcommand, OutputFormat, RerankingTarget, SymbolClustersSubcommand, TuiMode,
+    LlmTarget, MemorySubcommand, OpenaiSubcommand, OutputFormat, RerankingTarget,
+    SymbolClustersSubcommand, TuiMode,
 };
 
 pub use connector::adapter::{
@@ -61,5 +62,5 @@ pub use domain::{CommunityMeta, GraphEdge, GraphLevel, GraphNode, GraphView};
 
 pub use connector::api::{
     namespace_embedding_config, resolve_repo_context, run_copilot_command, run_import_picker_ui,
-    Container, ContainerConfig, MemoryController, ResolvedContext, Router,
+    run_openai_command, Container, ContainerConfig, MemoryController, ResolvedContext, Router,
 };

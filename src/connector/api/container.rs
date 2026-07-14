@@ -557,7 +557,7 @@ impl Container {
                     Arc::new(c)
                 }
                 LlmTarget::OpenAi => {
-                    let c = OpenAiChatClient::from_env()?;
+                    let c = OpenAiChatClient::from_config(&config.data_dir, None)?;
                     debug!(
                         "Using OpenAI query expander (url={})",
                         c.configured_base_url()
