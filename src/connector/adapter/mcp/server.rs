@@ -240,13 +240,6 @@ pub struct GetFileClusterInput {
     pub repository_id: String,
 }
 
-/// Input parameters for the architecture_overview tool
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ArchitectureOverviewInput {
-    /// Repository ID to summarise as a Markdown architecture table.
-    pub repository_id: String,
-}
-
 /// Which graph the couplings analysis runs over.
 fn default_coupling_level() -> String {
     "file".to_string()
@@ -984,28 +977,6 @@ impl CodesearchMcpServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    /// Produce a high-level architecture overview of a repository as a Markdown
-    /// table: one row per cluster with its file count, dominant language, and top
-    /// inter-cluster dependencies.
-    /// Requires the repository to have been indexed with call-graph support.
-    #[tool(name = "architecture_overview")]
-    async fn architecture_overview(
-        &self,
-        params: Parameters<ArchitectureOverviewInput>,
-    ) -> Result<CallToolResult, McpError> {
-        let input = params.0;
-
-        let use_case = self.container.cluster_detection_use_case();
-        let overview = use_case
-            .architecture_overview(&input.repository_id)
-            .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Architecture overview failed: {}", e), None)
-            })?;
-
-        Ok(CallToolResult::success(vec![Content::text(overview)]))
-    }
-
     /// Find coupling elements: files/symbols or dependencies whose removal would
     /// split a Leiden community into two latent sub-blocks — the hub-like
     /// dependency / modularity-violation smell. Runs the filter-then-verify
@@ -1304,7 +1275,6 @@ impl ServerHandler for CodesearchMcpServer {
                  • channels — cross-service producer→consumer links over Kafka/HTTP/MQTT channels\n\
                  • list_clusters — architectural (file-level) clusters via Leiden community detection\n\
                  • get_file_cluster — the cluster a given file belongs to\n\
-                 • architecture_overview — Markdown table summarising clusters and dependencies\n\
                  • list_symbol_clusters — symbol-level communities via Leiden over the call graph\n\
                  • get_symbol_cluster — the symbol community a given symbol belongs to\n\
                  • search_memory — recall long-term memories (preferences, experiences, skills, \

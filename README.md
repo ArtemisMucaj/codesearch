@@ -500,7 +500,6 @@ The HTTP server exposes the MCP endpoint at `/mcp`.
 | `file_uses` | Files in one repository that depend on files in another. Accepts `from` and `to` (repository name or ID). |
 | `list_clusters` | Architectural clusters via Leiden community detection. Accepts `repository_id`. |
 | `get_file_cluster` | The cluster a given file belongs to. Accepts `file_path` and `repository_id`. |
-| `architecture_overview` | Markdown table summarising clusters and inter-cluster dependencies. Accepts `repository_id`. |
 | `list_symbol_clusters` | Symbol-level communities via Leiden over the call graph. Accepts `repository_id`. |
 | `get_symbol_cluster` | The symbol community a given symbol belongs to. Accepts `symbol` and `repository_id`. |
 | `search_memory` | Recall long-term memories (preferences, experiences, skills, facts) extracted from imported sessions. Accepts `query`, `kind`, and `limit`. |
