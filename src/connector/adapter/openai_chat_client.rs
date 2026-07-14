@@ -167,6 +167,17 @@ impl OpenAiChatClient {
         Ok(Self { client, url, model })
     }
 
+    /// Construct from pre-built parts: a `reqwest::Client` (whose default
+    /// headers already carry any auth), the full chat-completions `url`, and the
+    /// `model` to send. Used by [`CopilotChatClient`](super::CopilotChatClient),
+    /// which speaks the same OpenAI-compatible protocol against
+    /// `https://api.githubcopilot.com/chat/completions` with Copilot auth
+    /// headers — so it reuses all of this client's request/stream logic instead
+    /// of duplicating it.
+    pub fn with_parts(client: reqwest::Client, url: String, model: String) -> Self {
+        Self { client, url, model }
+    }
+
     /// The base URL this client is configured to use — useful for log messages.
     pub fn configured_base_url(&self) -> String {
         self.url.trim_end_matches(CHAT_PATH).to_string()

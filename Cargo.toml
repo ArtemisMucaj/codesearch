@@ -91,16 +91,9 @@ schemars = "1.0"
 axum = "0.8"
 tokio-util = "0.7"
 
-# HTTP client (used by LlmQueryExpander to call Claude / Anthropic API)
+# HTTP client. Used by the LLM chat clients (Anthropic, OpenAI-compatible, and
+# the GitHub Copilot backend, which talks to api.githubcopilot.com directly).
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
-
-# GitHub Copilot chat backend (CopilotChatClient). Drives the `copilot` CLI over
-# JSON-RPC; the CLI performs its own OAuth device-flow login and token refresh.
-# `default-features = false` disables the `bundled-cli` feature so we do NOT
-# download/embed the CLI at build time — the user's installed `copilot` binary
-# (or `COPILOT_CLI_PATH`) is resolved at runtime. Set `COPILOT_SKIP_CLI_DOWNLOAD=1`
-# when building so build.rs never reaches for the network (see CLAUDE.md).
-github-copilot-sdk = { git = "https://github.com/github/copilot-sdk", rev = "5adb51b9e2ac50ad4876e756fa8c05549c1490fd", default-features = false }
 
 # TUI
 ratatui = { version = "0.29", features = ["crossterm"] }

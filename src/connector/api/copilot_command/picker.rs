@@ -10,12 +10,13 @@
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use github_copilot_sdk::Model;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
+
+use crate::connector::adapter::CopilotModel as Model;
 
 /// Run the picker over `models`, starting the cursor at `preselected`.
 ///
@@ -112,10 +113,10 @@ fn detail_panel(model: Option<&Model>) -> Paragraph<'static> {
     };
 
     let mut lines: Vec<Line<'static>> = vec![field("Name", &m.name), field("ID", &m.id)];
-    if let Some(category) = &m.model_picker_category {
-        lines.push(field("Category", &format!("{category:?}").to_lowercase()));
+    if let Some(vendor) = &m.vendor {
+        lines.push(field("Vendor", vendor));
     }
-    if let Some(limits) = &m.capabilities.limits {
+    if let Some(limits) = m.capabilities.as_ref().and_then(|c| c.limits.as_ref()) {
         if let Some(ctx) = limits.max_context_window_tokens {
             lines.push(field("Context window", &format!("{ctx} tokens")));
         }
@@ -123,19 +124,11 @@ fn detail_panel(model: Option<&Model>) -> Paragraph<'static> {
             lines.push(field("Max output", &format!("{out} tokens")));
         }
     }
-    if !m
-        .supported_reasoning_efforts
-        .as_deref()
-        .unwrap_or(&[])
-        .is_empty()
-    {
-        lines.push(field(
-            "Reasoning",
-            &m.supported_reasoning_efforts
-                .as_deref()
-                .unwrap_or(&[])
-                .join(", "),
-        ));
+    if m.preview {
+        lines.push(Line::from(Span::styled(
+            "preview",
+            Style::default().fg(Color::Yellow),
+        )));
     }
 
     Paragraph::new(lines).block(block).wrap(Wrap { trim: true })

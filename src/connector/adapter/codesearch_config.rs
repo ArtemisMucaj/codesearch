@@ -32,14 +32,14 @@ pub struct CodesearchConfig {
 /// Persisted GitHub Copilot settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CopilotConfig {
-    /// GitHub OAuth token (`ghu_…`) captured during `copilot login`. When
-    /// present it is handed to the Copilot CLI so it skips its own interactive
-    /// login; when absent the CLI performs the device-flow login itself.
+    /// GitHub OAuth token (`ghu_…`) captured during `copilot login`. Sent as a
+    /// `Bearer` credential on every Copilot API request. When absent, requests
+    /// are unauthenticated and fail — run `copilot login` first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_token: Option<String>,
 
     /// Model id selected in the picker (e.g. `"claude-sonnet-4.5"`). When
-    /// absent the CLI's default model is used.
+    /// absent the Copilot API's default model is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 }

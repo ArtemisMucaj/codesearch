@@ -15,6 +15,7 @@ mod anthropic_reranking;
 mod chat_client;
 mod claude_transcript;
 mod codesearch_config;
+pub mod copilot_auth;
 mod copilot_chat_client;
 mod duckdb_analysis_repository;
 mod duckdb_call_graph_repository;
