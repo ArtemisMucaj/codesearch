@@ -244,7 +244,13 @@ impl OpenAiChatClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = match resp.text().await {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("OpenAiChatClient: failed to read models error-response body: {e}");
+                    format!("<failed to read body: {e}>")
+                }
+            };
             return Err(DomainError::internal(format!(
                 "OpenAI models API returned {status}: {body}"
             )));

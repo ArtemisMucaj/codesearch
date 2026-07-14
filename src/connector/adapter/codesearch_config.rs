@@ -167,6 +167,24 @@ impl CodesearchConfig {
         let name = name_override.or(openai.active.as_deref())?;
         openai.endpoints.get(name).cloned()
     }
+
+    /// Async wrapper around [`Self::load`] that runs the (blocking) file read on
+    /// a blocking thread — for use from async request handlers that must not
+    /// stall the executor.
+    pub async fn load_async(data_dir: &str) -> Result<Self, DomainError> {
+        let data_dir = data_dir.to_string();
+        tokio::task::spawn_blocking(move || Self::load(&data_dir))
+            .await
+            .map_err(|e| DomainError::internal(format!("config load task panicked: {e}")))?
+    }
+
+    /// Async wrapper around [`Self::save`] (see [`Self::load_async`]).
+    pub async fn save_async(self, data_dir: &str) -> Result<(), DomainError> {
+        let data_dir = data_dir.to_string();
+        tokio::task::spawn_blocking(move || self.save(&data_dir))
+            .await
+            .map_err(|e| DomainError::internal(format!("config save task panicked: {e}")))?
+    }
 }
 
 #[cfg(test)]

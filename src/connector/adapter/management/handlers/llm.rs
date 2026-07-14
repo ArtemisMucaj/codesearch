@@ -143,7 +143,7 @@ pub struct EndpointsResponse {
 /// keys are masked (`has_key`), so this is safe to expose over the management
 /// API.
 pub async fn list_endpoints(State(state): State<AppState>) -> ApiResult<Json<EndpointsResponse>> {
-    let cfg = CodesearchConfig::load(state.container.data_dir())?;
+    let cfg = CodesearchConfig::load_async(state.container.data_dir()).await?;
     let openai = cfg.openai.unwrap_or_default();
     let active = openai.active.clone();
 
@@ -185,8 +185,8 @@ pub async fn upsert_endpoint(
     if name.trim().is_empty() {
         return Err(ApiError::bad_request("endpoint name must not be empty"));
     }
-    let data_dir = state.container.data_dir();
-    let mut cfg = CodesearchConfig::load(data_dir)?;
+    let data_dir = state.container.data_dir().to_string();
+    let mut cfg = CodesearchConfig::load_async(&data_dir).await?;
     let openai = cfg.openai_mut();
     openai.endpoints.insert(
         name.clone(),
@@ -196,10 +196,12 @@ pub async fn upsert_endpoint(
             api_key: body.api_key.filter(|k| !k.is_empty()),
         },
     );
-    if body.set_active {
+    // Activate on explicit request, or when this is the first endpoint — matching
+    // the `codesearch openai add` CLI so both paths behave the same.
+    if body.set_active || openai.active.is_none() {
         openai.active = Some(name);
     }
-    cfg.save(data_dir)?;
+    cfg.save_async(&data_dir).await?;
 
     list_endpoints(State(state)).await
 }
@@ -215,8 +217,8 @@ pub async fn set_active_endpoint(
     State(state): State<AppState>,
     Json(body): Json<SetActiveRequest>,
 ) -> ApiResult<Json<EndpointsResponse>> {
-    let data_dir = state.container.data_dir();
-    let mut cfg = CodesearchConfig::load(data_dir)?;
+    let data_dir = state.container.data_dir().to_string();
+    let mut cfg = CodesearchConfig::load_async(&data_dir).await?;
     let openai = cfg.openai_mut();
     if !openai.endpoints.contains_key(&body.name) {
         return Err(ApiError::not_found(format!(
@@ -225,7 +227,7 @@ pub async fn set_active_endpoint(
         )));
     }
     openai.active = Some(body.name);
-    cfg.save(data_dir)?;
+    cfg.save_async(&data_dir).await?;
 
     list_endpoints(State(state)).await
 }
