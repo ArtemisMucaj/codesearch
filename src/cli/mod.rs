@@ -266,8 +266,8 @@ pub enum MemorySubcommand {
         /// Path to a transcript file (JSONL). Omit to open the session picker.
         path: Option<String>,
 
-        /// LLM provider for extraction: 'anthropic' (default) or 'open-ai'
-        #[arg(long, value_enum, default_value = "anthropic")]
+        /// LLM provider for extraction: 'open-ai' (default), 'anthropic', or 'copilot'
+        #[arg(long, value_enum, default_value = "open-ai")]
         llm: LlmTarget,
 
         /// Re-import even if this session was already imported.
@@ -338,8 +338,8 @@ pub enum MemorySubcommand {
         #[arg(long)]
         name: Option<String>,
 
-        /// LLM provider for the summary: 'anthropic' (default) or 'open-ai'.
-        #[arg(long, value_enum, default_value = "anthropic")]
+        /// LLM provider for the summary: 'open-ai' (default), 'anthropic', or 'copilot'.
+        #[arg(long, value_enum, default_value = "open-ai")]
         llm: LlmTarget,
     },
 
@@ -372,11 +372,44 @@ pub enum EmbeddingTarget {
 /// Provider to use for LLM calls (query expansion, explain, etc.).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum LlmTarget {
-    /// Anthropic-compatible /v1/messages (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL)
+    /// OpenAI-compatible /v1/chat/completions (OPENAI_BASE_URL, OPENAI_MODEL).
+    /// The default: it targets LM Studio locally out of the box and supports
+    /// `/v1/models` discovery.
     #[default]
-    Anthropic,
-    /// OpenAI-compatible /v1/chat/completions (OPENAI_BASE_URL, OPENAI_MODEL)
     OpenAi,
+    /// Anthropic-compatible /v1/messages (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL)
+    Anthropic,
+    /// GitHub Copilot subscription via the `copilot` CLI. Token + model come
+    /// from `~/.codesearch/config.json` (run `codesearch copilot login`).
+    Copilot,
+}
+
+impl LlmTarget {
+    /// Stable lowercase identifier, used in API responses and request params.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LlmTarget::OpenAi => "openai",
+            LlmTarget::Anthropic => "anthropic",
+            LlmTarget::Copilot => "copilot",
+        }
+    }
+}
+
+impl std::str::FromStr for LlmTarget {
+    type Err = String;
+
+    /// Parse a target name. Accepts both `openai` and `open-ai` (the clap
+    /// value name) so CLI and API spellings both work.
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.to_ascii_lowercase().as_str() {
+            "openai" | "open-ai" => Ok(LlmTarget::OpenAi),
+            "anthropic" => Ok(LlmTarget::Anthropic),
+            "copilot" => Ok(LlmTarget::Copilot),
+            other => Err(format!(
+                "unknown target '{other}' (expected openai, anthropic, or copilot)"
+            )),
+        }
+    }
 }
 
 /// Reranking backend to use after retrieval.
@@ -530,8 +563,8 @@ pub enum Commands {
         #[arg(short, long)]
         repository: Option<String>,
 
-        /// LLM provider: 'anthropic' (default) or 'open-ai'
-        #[arg(long, value_enum, default_value = "anthropic")]
+        /// LLM provider: 'open-ai' (default), 'anthropic', or 'copilot'
+        #[arg(long, value_enum, default_value = "open-ai")]
         llm: LlmTarget,
 
         /// Print each analyzed symbol and the source chunk sent to the LLM
@@ -690,4 +723,102 @@ pub enum Commands {
         #[arg(long, value_enum, default_value = "search")]
         mode: TuiMode,
     },
+
+    /// Configure the GitHub Copilot chat backend (login + model selection).
+    ///
+    /// Stores its state in `<data-dir>/config.json` (default
+    /// `~/.codesearch/config.json`); use it with `--llm-target copilot`.
+    Copilot {
+        #[command(subcommand)]
+        subcommand: CopilotSubcommand,
+    },
+
+    /// Manage OpenAI-compatible endpoints (LM Studio, vLLM, hosted OpenAI, …).
+    ///
+    /// Register named endpoints, pick the active one, and select models —
+    /// stored in `<data-dir>/config.json` and used with `--llm-target open-ai`.
+    Openai {
+        #[command(subcommand)]
+        subcommand: OpenaiSubcommand,
+    },
+}
+
+/// Subcommands for `codesearch openai`.
+#[derive(Subcommand)]
+pub enum OpenaiSubcommand {
+    /// List configured endpoints and which is active (API keys masked).
+    Endpoints {
+        /// Emit JSON instead of a formatted table.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Add or update a named endpoint.
+    Add {
+        /// Endpoint name (e.g. `lmstudio`).
+        name: String,
+        /// Base URL, e.g. `http://localhost:1234` (no `/v1` suffix).
+        #[arg(long)]
+        base_url: String,
+        /// Default model id for this endpoint (optional; run `select` later).
+        #[arg(long)]
+        model: Option<String>,
+        /// Bearer API key for hosted servers (optional).
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Make this the active endpoint.
+        #[arg(long)]
+        set_active: bool,
+    },
+
+    /// Set the active endpoint by name.
+    Use {
+        /// Name of a previously-added endpoint.
+        name: String,
+    },
+
+    /// List the models an endpoint offers (via its `/v1/models`).
+    Models {
+        /// Endpoint to query. Omit to use the active endpoint (then `OPENAI_*`).
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Emit JSON instead of a formatted table.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Pick a model for an endpoint interactively and save it.
+    Select {
+        /// Endpoint to configure. Omit to use the active endpoint.
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+}
+
+/// Subcommands for `codesearch copilot`.
+#[derive(Subcommand)]
+pub enum CopilotSubcommand {
+    /// Log in to GitHub Copilot and pick a model, saving both to config.json.
+    ///
+    /// Opens an interactive TUI: it runs the OAuth device-flow login (unless a
+    /// token is already stored), fetches the models your subscription can use,
+    /// and lets you select one. The chosen token + model are written to
+    /// `<data-dir>/config.json`.
+    Login {
+        /// Skip the interactive picker and just (re)run login, keeping the
+        /// currently-selected model. Useful for refreshing an expired token in
+        /// a non-interactive shell.
+        #[arg(long)]
+        no_pick: bool,
+    },
+
+    /// List the models available to the logged-in Copilot account.
+    Models {
+        /// Emit JSON instead of a formatted table.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Print the current Copilot configuration (token presence + model).
+    Status,
 }

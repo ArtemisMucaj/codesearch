@@ -38,7 +38,7 @@ use tokio::sync::mpsc;
 
 use crate::application::ChatClient;
 use crate::cli::LlmTarget;
-use crate::connector::adapter::{AnthropicClient, OpenAiChatClient};
+use crate::connector::adapter::{AnthropicClient, CopilotChatClient, OpenAiChatClient};
 use crate::domain::VectorStore;
 
 use super::server::AppState;
@@ -54,9 +54,18 @@ pub struct ExplainStreamRequest {
     /// Interpret the `:symbol` path segment as a regular expression.
     #[serde(default)]
     pub regex: bool,
-    /// Which LLM backend to use. Defaults to Anthropic-compatible.
+    /// Which LLM backend to use. Defaults to the OpenAI-compatible backend.
     #[serde(default)]
     pub llm: Option<StreamLlmTarget>,
+    /// Override the model for this request (Copilot backend, and the OpenAI
+    /// backend's chosen endpoint). When omitted, the backend's configured/default
+    /// model is used. Pick a valid id from `GET /api/llm/models`.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// For the OpenAI backend: which named endpoint from config to use. When
+    /// omitted, the configured `active` endpoint (then `OPENAI_*`) is used.
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 /// JSON body for the index stream.
@@ -79,6 +88,7 @@ pub struct IndexStreamRequest {
 pub enum StreamLlmTarget {
     Anthropic,
     OpenAi,
+    Copilot,
 }
 
 impl From<StreamLlmTarget> for LlmTarget {
@@ -86,6 +96,7 @@ impl From<StreamLlmTarget> for LlmTarget {
         match value {
             StreamLlmTarget::Anthropic => LlmTarget::Anthropic,
             StreamLlmTarget::OpenAi => LlmTarget::OpenAi,
+            StreamLlmTarget::Copilot => LlmTarget::Copilot,
         }
     }
 }
@@ -143,12 +154,15 @@ pub async fn explain_stream(
     // the `Arc<Container>` can then drop when this handler returns rather than
     // staying alive for the whole (potentially long) SSE stream.
     let use_case = state.container.explain_use_case();
+    // Copilot reads its token/model from `<data_dir>/config.json`; capture the
+    // path now so the spawned task doesn't need to hold the container alive.
+    let data_dir = state.container.data_dir().to_string();
 
     // Channel of ready-to-send SSE events feeding the HTTP response.
     let (event_tx, event_rx) = mpsc::unbounded_channel::<Event>();
 
     tokio::spawn(async move {
-        run_explain_stream(use_case, symbol, req, event_tx).await;
+        run_explain_stream(use_case, symbol, req, data_dir, event_tx).await;
     });
 
     Sse::new(receiver_stream(event_rx)).keep_alive(KeepAlive::default())
@@ -159,21 +173,36 @@ async fn run_explain_stream(
     use_case: crate::application::ExplainUseCase,
     symbol: String,
     req: ExplainStreamRequest,
+    data_dir: String,
     event_tx: mpsc::UnboundedSender<Event>,
 ) {
-    let llm: LlmTarget = req.llm.map(Into::into).unwrap_or(LlmTarget::Anthropic);
+    let llm: LlmTarget = req.llm.map(Into::into).unwrap_or_default();
     let chat_client: Arc<dyn ChatClient> = match llm {
         LlmTarget::Anthropic => Arc::new(AnthropicClient::from_env()),
-        LlmTarget::OpenAi => match OpenAiChatClient::from_env() {
-            Ok(client) => Arc::new(client),
-            Err(err) => {
-                let _ = event_tx.send(sse_event(
-                    "error",
-                    json!({ "message": format!("failed to initialise OpenAI client: {err}") }),
-                ));
-                return;
+        LlmTarget::OpenAi => {
+            match OpenAiChatClient::from_config(&data_dir, req.endpoint.as_deref()) {
+                Ok(client) => Arc::new(client),
+                Err(err) => {
+                    let _ = event_tx.send(sse_event(
+                        "error",
+                        json!({ "message": format!("failed to initialise OpenAI client: {err}") }),
+                    ));
+                    return;
+                }
             }
-        },
+        }
+        LlmTarget::Copilot => {
+            match CopilotChatClient::from_data_dir_with_model(&data_dir, req.model) {
+                Ok(client) => Arc::new(client),
+                Err(err) => {
+                    let _ = event_tx.send(sse_event(
+                        "error",
+                        json!({ "message": format!("failed to initialise Copilot client: {err}") }),
+                    ));
+                    return;
+                }
+            }
+        }
     };
 
     // Per-token channel from the use case; we relay each token as an SSE frame.

@@ -4,16 +4,24 @@ use anyhow::{Context, Result};
 
 use crate::application::ChatClient;
 use crate::cli::LlmTarget;
-use crate::connector::adapter::{AnthropicClient, OpenAiChatClient};
+use crate::connector::adapter::{AnthropicClient, CopilotChatClient, OpenAiChatClient};
 
-/// Build a chat client for the requested provider from its env config
-/// (`ANTHROPIC_*` or `OPENAI_*`). Shared by every controller that needs an LLM
-/// (explain, memory, community naming) so provider dispatch lives in one place.
-pub(crate) fn build_chat_client(llm: LlmTarget) -> Result<Arc<dyn ChatClient>> {
+/// Build a chat client for the requested provider. The Anthropic backend reads
+/// its endpoint from the environment (`ANTHROPIC_*`); the OpenAI backend resolves
+/// a named endpoint from `<data_dir>/config.json` (the configured `active` one)
+/// and falls back to `OPENAI_*`; the Copilot backend reads its token and model
+/// from config. Shared by every controller that needs an LLM (explain, memory,
+/// community naming) so provider dispatch lives in one place.
+pub(crate) fn build_chat_client(llm: LlmTarget, data_dir: &str) -> Result<Arc<dyn ChatClient>> {
     Ok(match llm {
         LlmTarget::Anthropic => Arc::new(AnthropicClient::from_env()),
         LlmTarget::OpenAi => Arc::new(
-            OpenAiChatClient::from_env().context("Failed to initialise OpenAI chat client")?,
+            OpenAiChatClient::from_config(data_dir, None)
+                .context("Failed to initialise OpenAI chat client")?,
+        ),
+        LlmTarget::Copilot => Arc::new(
+            CopilotChatClient::from_data_dir(data_dir)
+                .context("Failed to initialise Copilot chat client")?,
         ),
     })
 }

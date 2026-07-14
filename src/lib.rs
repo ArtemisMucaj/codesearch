@@ -25,8 +25,9 @@ pub use application::resource_slug;
 pub use application::{aggregate, render, VizFormat, DEFAULT_NODE_LIMIT};
 
 pub use cli::{
-    ClustersSubcommand, Commands, EmbeddingTarget, FeaturesSubcommand, LlmTarget, MemorySubcommand,
-    OutputFormat, RerankingTarget, SymbolClustersSubcommand, TuiMode,
+    ClustersSubcommand, Commands, CopilotSubcommand, EmbeddingTarget, FeaturesSubcommand,
+    LlmTarget, MemorySubcommand, OpenaiSubcommand, OutputFormat, RerankingTarget,
+    SymbolClustersSubcommand, TuiMode,
 };
 
 pub use connector::adapter::{
@@ -38,13 +39,13 @@ pub use connector::adapter::management::{
 };
 
 pub use connector::{
-    parse_transcript, parse_transcript_file, AnthropicClient, AnthropicReranking,
-    DuckdbAnalysisRepository, DuckdbCallGraphRepository, DuckdbChannelEndpointRepository,
-    DuckdbFileHashRepository, DuckdbMemoryRepository, DuckdbMetadataRepository,
-    DuckdbVectorRepository, InMemoryVectorRepository, LlmQueryExpander, MockEmbedding,
-    MockReranking, NamespaceEmbeddingConfig, NoEmbedding, OpenAiChatClient, OpenAiEmbedding,
-    OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterChannelExtractor, TreeSitterParser,
-    DEFAULT_ONNX_EMBEDDING_MODEL, MEMORY_DB_FILE, NO_EMBEDDINGS_MODEL,
+    parse_transcript, parse_transcript_file, AnthropicClient, AnthropicReranking, CodesearchConfig,
+    CopilotChatClient, DuckdbAnalysisRepository, DuckdbCallGraphRepository,
+    DuckdbChannelEndpointRepository, DuckdbFileHashRepository, DuckdbMemoryRepository,
+    DuckdbMetadataRepository, DuckdbVectorRepository, InMemoryVectorRepository, LlmQueryExpander,
+    MockEmbedding, MockReranking, NamespaceEmbeddingConfig, NoEmbedding, OpenAiChatClient,
+    OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterChannelExtractor,
+    TreeSitterParser, DEFAULT_ONNX_EMBEDDING_MODEL, MEMORY_DB_FILE, NO_EMBEDDINGS_MODEL,
 };
 
 pub use domain::{
@@ -60,6 +61,6 @@ pub use domain::{
 pub use domain::{CommunityMeta, GraphEdge, GraphLevel, GraphNode, GraphView};
 
 pub use connector::api::{
-    namespace_embedding_config, resolve_repo_context, run_import_picker_ui, Container,
-    ContainerConfig, MemoryController, ResolvedContext, Router,
+    namespace_embedding_config, resolve_repo_context, run_copilot_command, run_import_picker_ui,
+    run_openai_command, Container, ContainerConfig, MemoryController, ResolvedContext, Router,
 };

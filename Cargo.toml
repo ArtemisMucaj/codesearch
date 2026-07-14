@@ -91,7 +91,8 @@ schemars = "1.0"
 axum = "0.8"
 tokio-util = "0.7"
 
-# HTTP client (used by LlmQueryExpander to call Claude / Anthropic API)
+# HTTP client. Used by the LLM chat clients (Anthropic, OpenAI-compatible, and
+# the GitHub Copilot backend, which talks to api.githubcopilot.com directly).
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
 # TUI

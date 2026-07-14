@@ -11,7 +11,12 @@ use crate::domain::DomainError;
 
 const DEFAULT_BASE_URL: &str = "http://localhost:1234";
 const CHAT_PATH: &str = "/v1/chat/completions";
+/// OpenAI-compatible model-discovery endpoint (`GET`). Derived from the base
+/// URL, so it works against LM Studio, OpenAI, and any compatible server.
+const MODELS_PATH: &str = "/v1/models";
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
+/// Default model when neither the endpoint config nor `OPENAI_MODEL` sets one.
+const DEFAULT_MODEL: &str = "google/gemma-4-e2b";
 
 #[derive(Serialize)]
 struct ChatRequest {
@@ -78,6 +83,19 @@ impl ChatResponseMessage {
     }
 }
 
+/// Response of `GET /v1/models` on an OpenAI-compatible server.
+#[derive(Deserialize)]
+struct ModelsResponse {
+    data: Vec<ModelEntry>,
+}
+
+/// One entry in the `/v1/models` list. Only `id` is required by the spec; the
+/// rest is server-specific and ignored here.
+#[derive(Deserialize)]
+struct ModelEntry {
+    id: String,
+}
+
 /// A single chunk from an OpenAI-compatible streaming response.
 #[derive(Deserialize)]
 struct StreamChunk {
@@ -111,49 +129,137 @@ pub struct OpenAiChatClient {
 }
 
 impl OpenAiChatClient {
+    /// Build from the `OPENAI_*` environment variables (the default endpoint
+    /// when no named endpoint from config is selected).
     pub fn from_env() -> Result<Self, reqwest::Error> {
         let base =
             std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        let url = format!("{}{}", base.trim_end_matches('/'), CHAT_PATH);
-        let model =
-            std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "google/gemma-4-e2b".to_string());
-
-        debug!("OpenAiChatClient: endpoint={}, model={}", url, model);
-
-        let mut headers = reqwest::header::HeaderMap::new();
-        if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-            if !key.is_empty() {
-                match reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")) {
-                    Ok(val) => {
-                        headers.insert(reqwest::header::AUTHORIZATION, val);
-                    }
-                    Err(e) => {
-                        let masked = mask_key(&key);
-                        warn!(
-                            "OpenAiChatClient: failed to build Authorization header \
-                             (key={masked}): {e}; skipping"
-                        );
-                    }
-                }
-            }
-        }
-
+        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let api_key = std::env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty());
         let timeout_secs = std::env::var("OPENAI_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
+        Self::from_endpoint(&base, &model, api_key.as_deref(), timeout_secs)
+    }
+
+    /// Build the OpenAI-compatible client for a run: resolve a named endpoint
+    /// from `<data_dir>/config.json` (honoring `endpoint_override`, then the
+    /// configured `active` endpoint), falling back to the `OPENAI_*`
+    /// environment variables when no endpoint is configured.
+    pub fn from_config(
+        data_dir: &str,
+        endpoint_override: Option<&str>,
+    ) -> Result<Self, DomainError> {
+        let cfg = super::CodesearchConfig::load(data_dir)?;
+        match cfg.resolve_openai_endpoint(endpoint_override) {
+            Some(ep) => {
+                let model = ep.model.as_deref().unwrap_or(DEFAULT_MODEL);
+                Self::from_endpoint(
+                    &ep.base_url,
+                    model,
+                    ep.api_key.as_deref(),
+                    DEFAULT_TIMEOUT_SECS,
+                )
+                .map_err(|e| DomainError::internal(format!("failed to build OpenAI client: {e}")))
+            }
+            None => Self::from_env()
+                .map_err(|e| DomainError::internal(format!("failed to build OpenAI client: {e}"))),
+        }
+    }
+
+    /// Build from an explicit endpoint (a named endpoint from config): `base`
+    /// URL, `model`, and optional bearer `api_key`. Shares the header/client
+    /// construction with [`Self::from_env`].
+    pub fn from_endpoint(
+        base: &str,
+        model: &str,
+        api_key: Option<&str>,
+        timeout_secs: u64,
+    ) -> Result<Self, reqwest::Error> {
+        let url = format!("{}{}", base.trim_end_matches('/'), CHAT_PATH);
+        debug!("OpenAiChatClient: endpoint={}, model={}", url, model);
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(key) = api_key.filter(|k| !k.is_empty()) {
+            match reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")) {
+                Ok(val) => {
+                    headers.insert(reqwest::header::AUTHORIZATION, val);
+                }
+                Err(e) => {
+                    let masked = mask_key(key);
+                    warn!(
+                        "OpenAiChatClient: failed to build Authorization header \
+                         (key={masked}): {e}; skipping"
+                    );
+                }
+            }
+        }
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .default_headers(headers)
             .build()?;
 
-        Ok(Self { client, url, model })
+        Ok(Self {
+            client,
+            url,
+            model: model.to_string(),
+        })
+    }
+
+    /// Construct from pre-built parts: a `reqwest::Client` (whose default
+    /// headers already carry any auth), the full chat-completions `url`, and the
+    /// `model` to send. Used by [`CopilotChatClient`](super::CopilotChatClient),
+    /// which speaks the same OpenAI-compatible protocol against
+    /// `https://api.githubcopilot.com/chat/completions` with Copilot auth
+    /// headers — so it reuses all of this client's request/stream logic instead
+    /// of duplicating it.
+    pub fn with_parts(client: reqwest::Client, url: String, model: String) -> Self {
+        Self { client, url, model }
     }
 
     /// The base URL this client is configured to use — useful for log messages.
     pub fn configured_base_url(&self) -> String {
         self.url.trim_end_matches(CHAT_PATH).to_string()
+    }
+
+    /// The model id this client sends in chat requests.
+    pub fn configured_model(&self) -> &str {
+        &self.model
+    }
+
+    /// Discover the models the server offers via `GET /v1/models`.
+    ///
+    /// Returns their ids (e.g. `"google/gemma-4-e2b"`). Works against any
+    /// OpenAI-compatible server (LM Studio, OpenAI, vLLM, …). Errors if the
+    /// endpoint is unreachable or returns a non-success status.
+    pub async fn list_models(&self) -> Result<Vec<String>, DomainError> {
+        let url = format!("{}{}", self.configured_base_url(), MODELS_PATH);
+        let resp = self.client.get(&url).send().await.map_err(|e| {
+            DomainError::internal(format!("OpenAI models request to {url} failed: {e}"))
+        })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = match resp.text().await {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("OpenAiChatClient: failed to read models error-response body: {e}");
+                    format!("<failed to read body: {e}>")
+                }
+            };
+            return Err(DomainError::internal(format!(
+                "OpenAI models API returned {status}: {body}"
+            )));
+        }
+
+        let parsed: ModelsResponse = resp.json().await.map_err(|e| {
+            DomainError::internal(format!("failed to parse OpenAI models response: {e}"))
+        })?;
+        Ok(parsed.data.into_iter().map(|m| m.id).collect())
     }
 }
 
