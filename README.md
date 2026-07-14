@@ -301,6 +301,30 @@ See [Getting Started — Launch the Interactive TUI](docs/features/getting-start
 Beyond per-symbol call graphs, CodeSearch analyses the file- and repository-level
 dependency graph built during indexing.
 
+### Repository Overview (`overview`)
+
+Combines every analysis into a one-page Markdown dossier for a repository:
+index statistics, architectural modules (file clusters), behavioural symbol
+communities, coupling hotspots (god nodes), the most critical execution
+features, and cross-service channels — plus an optional LLM-written executive
+summary. Each section degrades gracefully when its underlying data is missing
+(e.g. no SCIP call graph yet), and community display names are generated and
+cached the same way as in `clusters` / `symbol-clusters`.
+
+```bash
+# Full dossier for the repository in the current directory
+codesearch overview
+
+# For a specific repository, as JSON (for tooling)
+codesearch overview -r my-repo -F json
+
+# Show more rows per section, skip the expensive coupling analysis
+codesearch overview --top 20 --skip couplings
+
+# No LLM: keep cached community names, skip naming + the executive summary
+codesearch overview --no-llm
+```
+
 ### Execution Features (`features`)
 
 Discovers entry-point execution flows (forward call chains rooted at entry-point
@@ -329,10 +353,9 @@ codesearch clusters list my-repo
 
 # Find which cluster a file belongs to
 codesearch clusters get src/api/auth.rs my-repo
-
-# Print a high-level Markdown architecture overview table
-codesearch clusters overview my-repo
 ```
+
+For a Markdown module table (plus every other analysis), use `codesearch overview`.
 
 ### Symbol Clusters (`symbol-clusters`)
 
@@ -477,7 +500,6 @@ The HTTP server exposes the MCP endpoint at `/mcp`.
 | `file_uses` | Files in one repository that depend on files in another. Accepts `from` and `to` (repository name or ID). |
 | `list_clusters` | Architectural clusters via Leiden community detection. Accepts `repository_id`. |
 | `get_file_cluster` | The cluster a given file belongs to. Accepts `file_path` and `repository_id`. |
-| `architecture_overview` | Markdown table summarising clusters and inter-cluster dependencies. Accepts `repository_id`. |
 | `list_symbol_clusters` | Symbol-level communities via Leiden over the call graph. Accepts `repository_id`. |
 | `get_symbol_cluster` | The symbol community a given symbol belongs to. Accepts `symbol` and `repository_id`. |
 | `search_memory` | Recall long-term memories (preferences, experiences, skills, facts) extracted from imported sessions. Accepts `query`, `kind`, and `limit`. |

@@ -83,6 +83,7 @@ The codebase follows **Domain-Driven Design (DDD)** with a strict **Ports & Adap
 | Symbol-level community detection (Leiden over the call graph) | `src/application/use_cases/symbol_cluster_detection.rs` |
 | Coupling-element detection (the glue holding fragile communities together) | `src/application/use_cases/coupling_detection.rs` |
 | File / cross-repo relationship graph (`uses`) | `src/application/use_cases/file_relationship.rs` |
+| Combined repository overview (`overview`) | `src/application/use_cases/repository_overview.rs` |
 | Source snippet lookup | `src/application/use_cases/snippet_lookup.rs` |
 | List / delete repositories | `src/application/use_cases/{list,delete}_repository.rs` |
 

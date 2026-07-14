@@ -112,10 +112,11 @@ codesearch clusters list my-repo --format json
 
 # Show which cluster a specific file belongs to (path as indexed, repo-relative)
 codesearch clusters get src/api/auth.rs my-repo
-
-# Print a high-level Markdown architecture overview table
-codesearch clusters overview my-repo
 ```
+
+For a Markdown module table combined with every other analysis (symbol
+communities, couplings, execution features, channels), use the repository-wide
+`codesearch overview` command.
 
 ### Options
 

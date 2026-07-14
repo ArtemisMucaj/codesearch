@@ -103,6 +103,23 @@ impl From<OutputFormatTextJson> for OutputFormat {
     }
 }
 
+/// Sections of the `overview` report that can be skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OverviewSection {
+    /// Architectural modules (file-level Leiden clusters).
+    Modules,
+    /// Behavioural communities (symbol-level Leiden over the call graph).
+    Communities,
+    /// Coupling hotspots (god nodes / glue edges) — the most expensive section.
+    Couplings,
+    /// Entry-point execution features ranked by criticality.
+    Features,
+    /// Cross-service channel links (Kafka, HTTP, MQTT, …).
+    Channels,
+    /// The LLM-generated executive summary.
+    Summary,
+}
+
 /// Subcommands for the `clusters` command.
 #[derive(Subcommand)]
 pub enum ClustersSubcommand {
@@ -139,13 +156,6 @@ pub enum ClustersSubcommand {
         /// Output format: text or json.
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormatTextJson,
-    },
-
-    /// Print a high-level Markdown architecture overview table.
-    Overview {
-        /// Repository ID or name. Omit to auto-detect from the current directory.
-        #[arg(short, long)]
-        repository: Option<String>,
     },
 }
 
@@ -619,6 +629,36 @@ pub enum Commands {
         from: String,
         /// Repository being used (the dependency side).
         to: String,
+    },
+
+    /// One-page repository dossier: index stats, architectural modules,
+    /// symbol communities, coupling hotspots (god nodes), critical execution
+    /// features, and cross-service channels in a single Markdown report
+    Overview {
+        /// Repository ID or name. Omit to auto-detect from the current directory.
+        #[arg(short, long)]
+        repository: Option<String>,
+
+        /// Output format: text (Markdown) or json.
+        #[arg(short = 'F', long, value_enum, default_value = "text")]
+        format: OutputFormatTextJson,
+
+        /// Rows shown per ranked section (modules, communities, features).
+        #[arg(short, long, default_value = "10")]
+        top: usize,
+
+        /// Sections to skip (comma-separated), e.g. --skip couplings,channels.
+        #[arg(long, value_enum, value_delimiter = ',')]
+        skip: Vec<OverviewSection>,
+
+        /// LLM provider for community naming and the closing summary
+        /// (default: open-ai, i.e. a local OpenAI-compatible endpoint).
+        #[arg(long, value_enum, default_value = "open-ai")]
+        llm: LlmTarget,
+
+        /// Skip all LLM enrichment (community names and the summary).
+        #[arg(long)]
+        no_llm: bool,
     },
 
     /// Detect and explore architectural clusters in a repository's file dependency graph

@@ -1253,6 +1253,53 @@ pub(crate) fn build_file_leiden_graph(graph: &crate::domain::FileGraph) -> (Vec<
 /// Minimum number of file nodes required for clustering to be meaningful.
 const MIN_NODES_FOR_CLUSTERING: usize = 10;
 
+/// One aggregated inter-cluster dependency: the summed composite weight of all
+/// file-level edges going from one cluster's members into another's.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModuleDependency {
+    pub from_cluster_id: String,
+    pub to_cluster_id: String,
+    /// Sum of [`composite_weight`] over the contributing file edges.
+    pub weight: f64,
+}
+
+/// Structured module map of a repository: the Leiden cluster graph plus the
+/// aggregated inter-cluster dependencies, sorted by descending weight.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModuleOverview {
+    pub graph: ClusterGraph,
+    pub dependencies: Vec<ModuleDependency>,
+}
+
+impl ModuleOverview {
+    /// Clusters ranked by an "importance" composite: `size × (1 + external
+    /// dependency weight)`, where the external weight counts inter-cluster
+    /// edges in both directions (what the cluster pulls in and what depends on
+    /// it). This puts the load-bearing modules — large *and* heavily coupled
+    /// to the rest of the codebase — first, rather than merely the largest;
+    /// the `1 +` keeps fully self-contained clusters ordered by size among
+    /// themselves instead of collapsing them to a shared zero score.
+    pub fn clusters_by_importance(&self) -> Vec<&Cluster> {
+        let mut external: HashMap<&str, f64> = HashMap::new();
+        for dep in &self.dependencies {
+            *external.entry(dep.from_cluster_id.as_str()).or_insert(0.0) += dep.weight;
+            *external.entry(dep.to_cluster_id.as_str()).or_insert(0.0) += dep.weight;
+        }
+        let importance = |c: &Cluster| {
+            c.size as f64 * (1.0 + external.get(c.id.as_str()).copied().unwrap_or(0.0))
+        };
+        let mut ranked: Vec<&Cluster> = self.graph.clusters.iter().collect();
+        // Secondary key keeps the order stable when scores tie.
+        ranked.sort_by(|a, b| {
+            importance(b)
+                .partial_cmp(&importance(a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        ranked
+    }
+}
+
 pub struct ClusterDetectionUseCase {
     file_graph: Arc<FileRelationshipUseCase>,
     /// Optional persistence for detected clusters. When present, detection
@@ -1621,19 +1668,15 @@ impl ClusterDetectionUseCase {
         Ok(cluster_idx.map(|i| cg.clusters.swap_remove(i)))
     }
 
-    /// Return a high-level architecture summary as a Markdown table.
-    ///
-    /// One row per cluster: name, file count, dominant language, and the top 3
-    /// outgoing inter-cluster dependencies by summed edge weight.
-    pub async fn architecture_overview(&self, repository_id: &str) -> Result<String, DomainError> {
+    /// Return the cluster graph together with the aggregated inter-cluster
+    /// dependencies — the structured form of [`Self::architecture_overview`],
+    /// for callers (e.g. the repository-wide `overview` command) that render
+    /// or post-process the module map themselves.
+    pub async fn module_overview(
+        &self,
+        repository_id: &str,
+    ) -> Result<ModuleOverview, DomainError> {
         let (cg, graph) = self.clusters_and_graph(repository_id).await?;
-
-        if cg.clusters.is_empty() {
-            return Ok(format!(
-                "No clusters detected for repository `{}`.",
-                repository_id
-            ));
-        }
 
         // Build file→cluster_id lookup.
         let file_to_cluster: HashMap<&str, &str> = cg
@@ -1642,14 +1685,7 @@ impl ClusterDetectionUseCase {
             .flat_map(|c| c.members.iter().map(move |m| (m.as_str(), c.id.as_str())))
             .collect();
 
-        // Build cluster_id→label lookup for display (LLM name, else id).
-        let cluster_id_to_name: HashMap<&str, &str> = cg
-            .clusters
-            .iter()
-            .map(|c| (c.id.as_str(), community_label(&c.display_name, &c.id)))
-            .collect();
-
-        // Aggregate: (from_cluster_id, to_cluster_id) → total_weight
+        // Aggregate: (from_cluster_id, to_cluster_id) → total composite weight.
         let mut inter: HashMap<(&str, &str), f64> = HashMap::new();
         for edge in &graph.edges {
             let from_c = file_to_cluster.get(edge.from_file.as_str());
@@ -1660,6 +1696,54 @@ impl ClusterDetectionUseCase {
                 }
             }
         }
+
+        let mut dependencies: Vec<ModuleDependency> = inter
+            .into_iter()
+            .map(|((from, to), weight)| ModuleDependency {
+                from_cluster_id: from.to_string(),
+                to_cluster_id: to.to_string(),
+                weight,
+            })
+            .collect();
+        // Secondary key keeps the order stable when weights tie (the map
+        // iteration order above is arbitrary).
+        dependencies.sort_by(|a, b| {
+            b.weight
+                .partial_cmp(&a.weight)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    (&a.from_cluster_id, &a.to_cluster_id)
+                        .cmp(&(&b.from_cluster_id, &b.to_cluster_id))
+                })
+        });
+
+        Ok(ModuleOverview {
+            graph: cg,
+            dependencies,
+        })
+    }
+
+    /// Return a high-level architecture summary as a Markdown table.
+    ///
+    /// One row per cluster: name, file count, dominant language, and the top 3
+    /// outgoing inter-cluster dependencies by summed edge weight.
+    pub async fn architecture_overview(&self, repository_id: &str) -> Result<String, DomainError> {
+        let overview = self.module_overview(repository_id).await?;
+        let cg = &overview.graph;
+
+        if cg.clusters.is_empty() {
+            return Ok(format!(
+                "No clusters detected for repository `{}`.",
+                repository_id
+            ));
+        }
+
+        // Build cluster_id→label lookup for display (LLM name, else id).
+        let cluster_id_to_name: HashMap<&str, &str> = cg
+            .clusters
+            .iter()
+            .map(|c| (c.id.as_str(), community_label(&c.display_name, &c.id)))
+            .collect();
 
         // Build table.
         let mut out = String::new();
@@ -1674,15 +1758,18 @@ impl ClusterDetectionUseCase {
         out.push_str("| Cluster | Files | Language | Top Dependencies |\n");
         out.push_str("|---------|-------|----------|------------------|\n");
 
-        for cluster in &cg.clusters {
-            // Top 3 outgoing inter-cluster edges.
-            let mut deps: Vec<(&str, f64)> = inter
+        // Load-bearing modules first (size × external coupling), matching the
+        // ordering of the repository-wide `overview` command.
+        for cluster in overview.clusters_by_importance() {
+            // Top 3 outgoing inter-cluster edges (dependencies are pre-sorted
+            // by descending weight).
+            let deps: Vec<(&str, f64)> = overview
+                .dependencies
                 .iter()
-                .filter(|((fc, _), _)| *fc == cluster.id.as_str())
-                .map(|((_, tc), &w)| (*tc, w))
+                .filter(|d| d.from_cluster_id == cluster.id)
+                .map(|d| (d.to_cluster_id.as_str(), d.weight))
+                .take(3)
                 .collect();
-            deps.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            deps.truncate(3);
             let deps_str = if deps.is_empty() {
                 "—".to_string()
             } else {
@@ -1719,6 +1806,48 @@ mod tests {
         assert_eq!(kind_weight("call"), 1.0);
         assert_eq!(kind_weight("import"), 0.5);
         assert_eq!(kind_weight("unknown_kind"), 0.3);
+    }
+
+    #[test]
+    fn test_clusters_by_importance_ranks_coupled_clusters_first() {
+        let mk = |id: &str, size: usize| Cluster {
+            id: id.to_string(),
+            display_name: None,
+            repository_id: "repo".to_string(),
+            dominant_language: "Rust".to_string(),
+            size,
+            cohesion: 1.0,
+            members: Vec::new(),
+        };
+        // "big" is the largest but fully self-contained; "hub" and "leaf" are
+        // smaller but coupled to each other.
+        let overview = ModuleOverview {
+            graph: ClusterGraph {
+                clusters: vec![mk("big", 40), mk("hub", 10), mk("leaf", 5)],
+                repository_id: "repo".to_string(),
+                total_files: 55,
+                total_edges: 30,
+            },
+            dependencies: vec![
+                ModuleDependency {
+                    from_cluster_id: "leaf".to_string(),
+                    to_cluster_id: "hub".to_string(),
+                    weight: 20.0,
+                },
+                ModuleDependency {
+                    from_cluster_id: "hub".to_string(),
+                    to_cluster_id: "leaf".to_string(),
+                    weight: 10.0,
+                },
+            ],
+        };
+        let ranked: Vec<&str> = overview
+            .clusters_by_importance()
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        // hub: 10 × (1 + 30) = 310; leaf: 5 × 31 = 155; big: 40 × 1 = 40.
+        assert_eq!(ranked, vec!["hub", "leaf", "big"]);
     }
 
     #[test]

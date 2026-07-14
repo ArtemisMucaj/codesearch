@@ -25,9 +25,9 @@ use crate::{
     ExplainUseCase, FileRelationshipUseCase, GraphExpansionUseCase, ImpactAnalysisUseCase,
     InMemoryVectorRepository, IndexRepositoryUseCase, ListRepositoriesUseCase, LlmQueryExpander,
     MockEmbedding, MockReranking, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking, OrtEmbedding,
-    OrtReranking, RerankingService, Scip, SearchCodeUseCase, SnippetLookupUseCase,
-    SymbolClusterDetectionUseCase, SymbolContextUseCase, TreeSitterChannelExtractor,
-    TreeSitterParser, VectorRepository,
+    OrtReranking, RepositoryOverviewUseCase, RerankingService, Scip, SearchCodeUseCase,
+    SnippetLookupUseCase, SymbolClusterDetectionUseCase, SymbolContextUseCase,
+    TreeSitterChannelExtractor, TreeSitterParser, VectorRepository,
 };
 
 pub struct ContainerConfig {
@@ -777,6 +777,20 @@ impl Container {
     /// LLM naming for detected communities, backed by the analysis cache.
     pub fn community_naming_use_case(&self) -> CommunityNamingUseCase {
         CommunityNamingUseCase::new(self.analysis_repo.clone())
+    }
+
+    /// Combined single-repository overview (stats, modules, symbol
+    /// communities, couplings, features, channels).
+    pub fn repository_overview_use_case(&self) -> RepositoryOverviewUseCase {
+        RepositoryOverviewUseCase::new(
+            self.metadata_repository(),
+            self.call_graph_use_case.clone(),
+            Arc::new(self.cluster_detection_use_case()),
+            Arc::new(self.symbol_cluster_detection_use_case()),
+            Arc::new(self.coupling_detection_use_case()),
+            Arc::new(self.execution_features_use_case()),
+            Arc::new(self.channel_link_use_case()),
+        )
     }
 
     /// Open the memory store — a dedicated DuckDB file (`memory.duckdb`)
