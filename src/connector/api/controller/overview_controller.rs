@@ -112,7 +112,15 @@ async fn generate_summary(
     chat: &dyn ChatClient,
 ) -> Option<String> {
     let mut digest = render_markdown(report, top);
-    digest.truncate(MAX_SUMMARY_DIGEST_CHARS);
+    if digest.len() > MAX_SUMMARY_DIGEST_CHARS {
+        // The rendering is full of multibyte characters (→, γ, …), so back the
+        // cut off to a char boundary — String::truncate panics mid-codepoint.
+        let mut cut = MAX_SUMMARY_DIGEST_CHARS;
+        while !digest.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        digest.truncate(cut);
+    }
     let system = "You are a senior software architect. You receive an auto-generated \
                   static-analysis overview of one code repository: index statistics, \
                   architectural modules (file clusters), behavioural symbol communities, \

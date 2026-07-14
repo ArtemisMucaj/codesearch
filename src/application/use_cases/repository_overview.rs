@@ -227,11 +227,13 @@ impl RepositoryOverviewUseCase {
 
         // Call-graph size is best-effort: an empty or missing graph is a
         // normal state (indexed without SCIP), not a stats failure.
-        let cg = self
-            .call_graph
-            .stats(repository_id)
-            .await
-            .unwrap_or_default();
+        let cg = match self.call_graph.stats(repository_id).await {
+            Ok(stats) => stats,
+            Err(e) => {
+                tracing::warn!("failed to compute call-graph stats for '{repository_id}': {e}");
+                Default::default()
+            }
+        };
 
         let mut languages: Vec<LanguageShare> = repo
             .languages()
@@ -348,11 +350,15 @@ impl RepositoryOverviewUseCase {
             .unmatched_consumers
             .retain(|e| e.repository_id() == repository_id);
 
+        // Only name repositories inside the channel scope: the report is
+        // serialized as-is, and an unfiltered map would leak repository names
+        // from other namespaces.
         let repository_names: HashMap<String, String> = self
             .metadata
             .list()
             .await?
             .into_iter()
+            .filter(|r| scope.iter().any(|id| id == r.id()))
             .map(|r| (r.id().to_string(), r.name().to_string()))
             .collect();
 
