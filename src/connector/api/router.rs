@@ -7,8 +7,9 @@ use super::container::Container;
 use super::controller::{
     ChannelsController, ClustersController, CouplingsController, DeleteController,
     ExecutionFeaturesController, ExplainController, ImpactController, IndexController,
-    ListRepositoriesController, MemoryController, SearchController, StatsController,
-    SymbolClustersController, SymbolContextController, UsesController, VisualizeController,
+    ListRepositoriesController, MemoryController, OverviewController, SearchController,
+    StatsController, SymbolClustersController, SymbolContextController, UsesController,
+    VisualizeController,
 };
 
 pub struct Router<'a> {
@@ -28,6 +29,7 @@ pub struct Router<'a> {
     symbol_clusters_controller: SymbolClustersController<'a>,
     couplings_controller: CouplingsController<'a>,
     visualize_controller: VisualizeController<'a>,
+    overview_controller: OverviewController<'a>,
 }
 
 impl<'a> Router<'a> {
@@ -49,6 +51,7 @@ impl<'a> Router<'a> {
             symbol_clusters_controller: SymbolClustersController::new(container),
             couplings_controller: CouplingsController::new(container),
             visualize_controller: VisualizeController::new(container),
+            overview_controller: OverviewController::new(container),
         }
     }
 
@@ -161,6 +164,18 @@ impl<'a> Router<'a> {
                     .await
             }
             Commands::Uses { from, to } => self.uses_controller.uses(from, to).await,
+            Commands::Overview {
+                repository,
+                format,
+                top,
+                skip,
+                llm,
+                no_llm,
+            } => {
+                self.overview_controller
+                    .overview(repository, format, top, skip, llm, no_llm)
+                    .await
+            }
             Commands::Clusters { subcommand } => match subcommand {
                 ClustersSubcommand::List {
                     repository,

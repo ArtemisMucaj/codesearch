@@ -301,6 +301,30 @@ See [Getting Started — Launch the Interactive TUI](docs/features/getting-start
 Beyond per-symbol call graphs, CodeSearch analyses the file- and repository-level
 dependency graph built during indexing.
 
+### Repository Overview (`overview`)
+
+Combines every analysis into a one-page Markdown dossier for a repository:
+index statistics, architectural modules (file clusters), behavioural symbol
+communities, coupling hotspots (god nodes), the most critical execution
+features, and cross-service channels — plus an optional LLM-written executive
+summary. Each section degrades gracefully when its underlying data is missing
+(e.g. no SCIP call graph yet), and community display names are generated and
+cached the same way as in `clusters` / `symbol-clusters`.
+
+```bash
+# Full dossier for the repository in the current directory
+codesearch overview
+
+# For a specific repository, as JSON (for tooling)
+codesearch overview -r my-repo -F json
+
+# Show more rows per section, skip the expensive coupling analysis
+codesearch overview --top 20 --skip couplings
+
+# No LLM: keep cached community names, skip naming + the executive summary
+codesearch overview --no-llm
+```
+
 ### Execution Features (`features`)
 
 Discovers entry-point execution flows (forward call chains rooted at entry-point
