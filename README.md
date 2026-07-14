@@ -353,10 +353,9 @@ codesearch clusters list my-repo
 
 # Find which cluster a file belongs to
 codesearch clusters get src/api/auth.rs my-repo
-
-# Print a high-level Markdown architecture overview table
-codesearch clusters overview my-repo
 ```
+
+For a Markdown module table (plus every other analysis), use `codesearch overview`.
 
 ### Symbol Clusters (`symbol-clusters`)
 

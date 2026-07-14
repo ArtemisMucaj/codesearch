@@ -192,9 +192,6 @@ impl<'a> Router<'a> {
                     repository,
                     format,
                 } => self.clusters_controller.get(file, repository, format).await,
-                ClustersSubcommand::Overview { repository } => {
-                    self.clusters_controller.overview(repository).await
-                }
             },
             Commands::SymbolClusters { subcommand } => match subcommand {
                 SymbolClustersSubcommand::List {

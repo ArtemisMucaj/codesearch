@@ -147,16 +147,4 @@ impl<'a> ClustersController<'a> {
         })
     }
 
-    /// Print a Markdown architecture overview table.
-    pub async fn overview(&self, repository: Option<String>) -> Result<String> {
-        let repository_id = self
-            .container
-            .resolve_repository_id(repository.as_deref())
-            .await;
-        let use_case = self.container.cluster_detection_use_case();
-        Ok(use_case
-            .architecture_overview(&repository_id)
-            .await
-            .context("generating architecture overview")?)
-    }
 }

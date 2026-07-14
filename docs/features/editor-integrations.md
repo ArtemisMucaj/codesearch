@@ -14,7 +14,7 @@ The `--format` (`-F`) flag controls output for `search`, `context`, `impact`,
 | `vimgrep` | `file:line:col:text` for Neovim quickfix list and Telescope | `search`, `context`, `impact`, `features` |
 
 > `clusters list` / `clusters get` support `text` and `json` only; `vimgrep` is not
-> available for them. `clusters overview` always emits a Markdown table.
+> available for them. The repository-wide `overview` command emits Markdown (or JSON).
 
 ## Zed
 

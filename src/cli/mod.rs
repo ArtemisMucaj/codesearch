@@ -157,13 +157,6 @@ pub enum ClustersSubcommand {
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormatTextJson,
     },
-
-    /// Print a high-level Markdown architecture overview table.
-    Overview {
-        /// Repository ID or name. Omit to auto-detect from the current directory.
-        #[arg(short, long)]
-        repository: Option<String>,
-    },
 }
 
 /// Subcommands for the `symbol-clusters` command — Leiden communities detected
