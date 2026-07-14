@@ -266,7 +266,7 @@ pub enum MemorySubcommand {
         /// Path to a transcript file (JSONL). Omit to open the session picker.
         path: Option<String>,
 
-        /// LLM provider for extraction: 'anthropic' (default) or 'open-ai'
+        /// LLM provider for extraction: 'open-ai' (default), 'anthropic', or 'copilot'
         #[arg(long, value_enum, default_value = "open-ai")]
         llm: LlmTarget,
 
@@ -338,7 +338,7 @@ pub enum MemorySubcommand {
         #[arg(long)]
         name: Option<String>,
 
-        /// LLM provider for the summary: 'anthropic' (default) or 'open-ai'.
+        /// LLM provider for the summary: 'open-ai' (default), 'anthropic', or 'copilot'.
         #[arg(long, value_enum, default_value = "open-ai")]
         llm: LlmTarget,
     },
@@ -563,7 +563,7 @@ pub enum Commands {
         #[arg(short, long)]
         repository: Option<String>,
 
-        /// LLM provider: 'anthropic' (default) or 'open-ai'
+        /// LLM provider: 'open-ai' (default), 'anthropic', or 'copilot'
         #[arg(long, value_enum, default_value = "open-ai")]
         llm: LlmTarget,
 

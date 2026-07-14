@@ -81,8 +81,25 @@ impl CodesearchConfig {
         let path = Self::path_in(data_dir);
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| DomainError::internal(format!("failed to serialize config: {e}")))?;
-        std::fs::write(&path, json)
-            .map_err(|e| DomainError::internal(format!("failed to write {}: {e}", path.display())))
+        std::fs::write(&path, json).map_err(|e| {
+            DomainError::internal(format!("failed to write {}: {e}", path.display()))
+        })?;
+
+        // The file can hold a GitHub OAuth token, so keep it owner-only rather
+        // than inheriting the (often world/group-readable) umask default.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |e| {
+                    DomainError::internal(format!(
+                        "failed to restrict permissions on {}: {e}",
+                        path.display()
+                    ))
+                },
+            )?;
+        }
+        Ok(())
     }
 
     /// Mutable access to the Copilot section, creating it if absent.

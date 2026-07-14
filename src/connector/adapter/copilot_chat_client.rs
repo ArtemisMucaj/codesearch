@@ -48,6 +48,10 @@ use crate::domain::DomainError;
 /// timeout the HTTP chat clients use, so slow reasoning models are not cut off.
 const TURN_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Wall-clock budget for listing models (spawns the CLI + one RPC). Short so a
+/// stalled CLI can't hang the `/api/llm/models` request or the login picker.
+const LIST_MODELS_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// SDK event `type` for the final assistant message (carries the full text).
 const EVENT_ASSISTANT_MESSAGE: &str = "assistant.message";
 /// SDK event `type` for an incremental streamed token chunk.
@@ -170,18 +174,35 @@ impl CopilotChatClient {
     /// List the models available to the authenticated Copilot account. Backs
     /// `codesearch copilot models`, the login-TUI picker, and the serve-mode
     /// `GET /api/llm/models` endpoint.
+    ///
+    /// Bounded by [`LIST_MODELS_TIMEOUT`] so a stalled CLI/SDK call can't hang
+    /// the caller (notably the `/api/llm/models` HTTP request) indefinitely.
     pub async fn list_models(&self) -> Result<Vec<Model>, DomainError> {
-        let client = self.client().await?;
-        client
-            .list_models()
+        let fetch = async {
+            let client = self.client().await?;
+            client
+                .list_models()
+                .await
+                .map_err(|e| DomainError::internal(format!("failed to list Copilot models: {e}")))
+        };
+        tokio::time::timeout(LIST_MODELS_TIMEOUT, fetch)
             .await
-            .map_err(|e| DomainError::internal(format!("failed to list Copilot models: {e}")))
+            .map_err(|_| {
+                DomainError::internal(format!(
+                    "listing Copilot models timed out after {}s",
+                    LIST_MODELS_TIMEOUT.as_secs()
+                ))
+            })?
     }
 
     /// Build the per-turn [`SessionConfig`]: system prompt, model, streaming
-    /// flag, and auto-approved permissions.
+    /// flag, and denied tool permissions.
     fn session_config(&self, system: &str, streaming: bool) -> SessionConfig {
-        let mut cfg = SessionConfig::default().approve_all_permissions();
+        // These are one-shot text prompts (query expansion, explain, naming);
+        // they never legitimately invoke tools. Deny every tool request so the
+        // session fails closed — a stray/injected tool call can't take a side
+        // effect — rather than auto-approving everything.
+        let mut cfg = SessionConfig::default().deny_all_permissions();
         cfg.streaming = Some(streaming);
         // Install the caller's system prompt verbatim. `replace` (rather than
         // the default `append`) keeps the CLI's own agent preamble out of these
@@ -221,7 +242,19 @@ impl CopilotChatClient {
             let mut streamed = String::new();
             let mut final_text: Option<String> = None;
             let mut error: Option<String> = None;
-            while let Ok(event) = events.recv().await {
+            loop {
+                let event = match events.recv().await {
+                    Ok(event) => event,
+                    // The stream ended (Closed) or we fell behind (Lagged)
+                    // before a terminal `assistant.message`. Record it as an
+                    // error: returning the partial `streamed` text as a success
+                    // would make a truncated answer indistinguishable from a
+                    // complete one.
+                    Err(e) => {
+                        error = Some(format!("event stream ended before completion: {e}"));
+                        break;
+                    }
+                };
                 match event.event_type.as_str() {
                     EVENT_ASSISTANT_MESSAGE_DELTA => {
                         if let Some(delta) = event.data.get("deltaContent").and_then(|v| v.as_str())
