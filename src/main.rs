@@ -350,12 +350,19 @@ async fn main() -> Result<()> {
             // Stdio mode: the process cwd is the workspace this server was
             // launched for, so memory searches default to its scope.
             tracing::info!("Starting codesearch MCP server (stdio)");
-            let default_scope = std::env::current_dir().ok().and_then(|cwd| {
-                codesearch::resolve_memory_scope(
-                    &container.metadata_db_path(),
-                    &cwd.to_string_lossy(),
-                )
-            });
+            let db_path = container.metadata_db_path();
+            let cwd = std::env::current_dir().ok();
+            let default_scope = if let Some(cwd) = cwd {
+                let cwd_str = cwd.to_string_lossy().to_string();
+                tokio::task::spawn_blocking(move || {
+                    codesearch::resolve_memory_scope(&db_path, &cwd_str)
+                })
+                .await
+                .ok()
+                .flatten()
+            } else {
+                None
+            };
             let server = CodesearchMcpServer::with_default_memory_scope(container, default_scope);
             let service = server.serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;

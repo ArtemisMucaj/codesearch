@@ -313,7 +313,14 @@ fn push_node_with_levels(rows: &mut Vec<MemoryRow>, node: &MemoryNode, depth: u8
     if !node.overview().trim().is_empty() {
         rows.push(level_row(node, MemoryLevel::Overview, child_depth));
     }
-    if !node.content().trim().is_empty() {
+    // Mask internal manifest for Project rollup nodes (index nodes have
+    // empty content by invariant; the manifest is bookkeeping).
+    let has_content = if node.kind() == NodeKind::Project {
+        false
+    } else {
+        !node.content().trim().is_empty()
+    };
+    if has_content {
         rows.push(level_row(node, MemoryLevel::Detail, child_depth));
     }
 }
@@ -344,7 +351,15 @@ fn level_row(node: &MemoryNode, level: MemoryLevel, depth: u8) -> MemoryRow {
     let text = match level {
         MemoryLevel::Abstract => node.abstract_(),
         MemoryLevel::Overview => node.overview(),
-        MemoryLevel::Detail => node.content(),
+        MemoryLevel::Detail => {
+            // Mask internal manifest for Project rollup nodes (index nodes have
+            // empty content by invariant; the manifest is bookkeeping).
+            if node.kind() == NodeKind::Project {
+                ""
+            } else {
+                node.content()
+            }
+        }
     };
     MemoryRow {
         depth,

@@ -147,11 +147,20 @@ impl MemoryExtractionUseCase {
             }
         }
         // No embeddings: surface the most recent items instead so merging
-        // still has a chance to happen.
+        // still has a chance to happen. Filter to the transcript's scope
+        // (global memories plus its project/namespace items) before the limit.
         match self.memory_repo.list_items(None).await {
-            Ok(mut items) => {
-                items.truncate(PREFETCH_LIMIT);
-                items
+            Ok(items) => {
+                let mut filtered: Vec<MemoryItem> = items
+                    .into_iter()
+                    .filter(|item| match (item.scope(), transcript.project.as_deref()) {
+                        (None, _) => true,
+                        (Some(item_scope), Some(project)) => item_scope == project,
+                        (Some(_), None) => false,
+                    })
+                    .collect();
+                filtered.truncate(PREFETCH_LIMIT);
+                filtered
             }
             Err(e) => {
                 warn!("memory prefetch list failed: {e}");

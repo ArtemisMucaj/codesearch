@@ -1189,14 +1189,23 @@ impl CodesearchMcpServer {
             .collect::<Vec<_>>();
 
         let output = match node {
-            Some(node) => MemoryNodeOutput {
-                uri: node.uri().to_string(),
-                kind: node.kind().as_str().to_string(),
-                r#abstract: node.abstract_().to_string(),
-                overview: node.overview().to_string(),
-                content: node.content().to_string(),
-                children,
-            },
+            Some(node) => {
+                // Mask internal manifest for Project rollup nodes (index nodes
+                // have empty content by invariant; the manifest is bookkeeping).
+                let content = if node.kind() == crate::domain::NodeKind::Project {
+                    String::new()
+                } else {
+                    node.content().to_string()
+                };
+                MemoryNodeOutput {
+                    uri: node.uri().to_string(),
+                    kind: node.kind().as_str().to_string(),
+                    r#abstract: node.abstract_().to_string(),
+                    overview: node.overview().to_string(),
+                    content,
+                    children,
+                }
+            }
             // A directory URI (e.g. memory://sessions) may have no node record
             // of its own but still list children.
             None if !children.is_empty() => MemoryNodeOutput {

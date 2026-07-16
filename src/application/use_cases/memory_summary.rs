@@ -250,11 +250,24 @@ impl SummarizeMemoryUseCase {
         let mut regenerated = 0usize;
         for (scope, scoped_items) in by_scope {
             let uri = scope_rollup_uri(scope);
-            let previous = self.memory_repo.find_node(&uri).await.ok().flatten();
-            // Skip scopes whose items are all older than the current rollup.
+            let previous = self.memory_repo.find_node(&uri).await?;
+            // Skip scopes whose items haven't changed. Compare both the newest
+            // updated_at (catches item content edits) and a sorted concatenation
+            // of item IDs + timestamps (catches deletions/moves/additions).
             if let Some(ref prev) = previous {
                 let newest = scoped_items.iter().map(|i| i.updated_at()).max();
-                if newest.is_some_and(|t| t < prev.updated_at()) {
+                let current_manifest: String = {
+                    let mut pairs: Vec<String> = scoped_items
+                        .iter()
+                        .map(|i| format!("{}:{}", i.id(), i.updated_at()))
+                        .collect();
+                    pairs.sort_unstable();
+                    pairs.join(";")
+                };
+                let stored_manifest = prev.content();
+                if newest.is_some_and(|t| t < prev.updated_at())
+                    && stored_manifest == current_manifest
+                {
                     continue;
                 }
             }
@@ -276,13 +289,21 @@ impl SummarizeMemoryUseCase {
 
             let now = unix_now();
             let created_at = previous.map(|p| p.created_at()).unwrap_or(now);
+            let manifest: String = {
+                let mut pairs: Vec<String> = scoped_items
+                    .iter()
+                    .map(|i| format!("{}:{}", i.id(), i.updated_at()))
+                    .collect();
+                pairs.sort_unstable();
+                pairs.join(";")
+            };
             let node = MemoryNode::new(
                 uri,
                 NodeKind::Project,
                 Some(PROJECTS_ROOT_URI.to_string()),
                 clamp(&abstract_, MAX_ABSTRACT_CHARS),
                 clamp(&overview, MAX_OVERVIEW_CHARS),
-                String::new(),
+                manifest,
                 created_at,
                 now,
             );

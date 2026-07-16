@@ -223,7 +223,16 @@ fn detail_body(row: &MemoryRow) -> Vec<Line<'static>> {
             let (tag, text) = match level {
                 MemoryLevel::Abstract => ("L0 · Abstract", node.abstract_()),
                 MemoryLevel::Overview => ("L1 · Overview", node.overview()),
-                MemoryLevel::Detail => ("L2 · Detail", node.content()),
+                MemoryLevel::Detail => {
+                    // Mask internal manifest for Project rollup nodes (index nodes
+                    // have empty content by invariant; the manifest is bookkeeping).
+                    let content = if node.kind() == NodeKind::Project {
+                        ""
+                    } else {
+                        node.content()
+                    };
+                    ("L2 · Detail", content)
+                }
             };
             let mut lines = vec![section_header(tag), Line::from("")];
             lines.extend(markdown::render(text));
@@ -241,7 +250,14 @@ fn detail_body(row: &MemoryRow) -> Vec<Line<'static>> {
                 lines.push(section_header("L1 · Overview"));
                 lines.extend(markdown::render(node.overview()));
             }
-            if !node.content().trim().is_empty() {
+            // Mask internal manifest for Project rollup nodes (index nodes have
+            // empty content by invariant; the manifest is bookkeeping).
+            let has_content = if node.kind() == NodeKind::Project {
+                false
+            } else {
+                !node.content().trim().is_empty()
+            };
+            if has_content {
                 lines.push(Line::from(""));
                 lines.push(meta_line(
                     "(select \"L2 · detail\" to read the full content)",

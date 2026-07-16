@@ -633,16 +633,22 @@ impl MemoryRepository for DuckdbMemoryRepository {
     }
 
     async fn delete_node(&self, uri: &str) -> Result<bool, DomainError> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "DELETE FROM memory_node_vectors WHERE node_uri = ?1",
-            params![uri],
-        )
-        .map_err(|e| DomainError::storage(format!("Failed to delete node vector: {e}")))?;
-        let deleted = conn
-            .execute("DELETE FROM memory_nodes WHERE uri = ?1", params![uri])
-            .map_err(|e| DomainError::storage(format!("Failed to delete node: {e}")))?;
-        Ok(deleted > 0)
+        let conn = self.conn.clone();
+        let uri = uri.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            conn.execute(
+                "DELETE FROM memory_node_vectors WHERE node_uri = ?1",
+                params![&uri],
+            )
+            .map_err(|e| DomainError::storage(format!("Failed to delete node vector: {e}")))?;
+            let deleted = conn
+                .execute("DELETE FROM memory_nodes WHERE uri = ?1", params![&uri])
+                .map_err(|e| DomainError::storage(format!("Failed to delete node: {e}")))?;
+            Ok(deleted > 0)
+        })
+        .await
+        .map_err(|e| DomainError::storage(format!("Blocking task panicked: {e}")))?
     }
 
     async fn list_child_nodes(&self, parent_uri: &str) -> Result<Vec<MemoryNode>, DomainError> {

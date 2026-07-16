@@ -645,8 +645,15 @@ fn render_node(node: &MemoryNode) -> String {
     if !node.overview().trim().is_empty() {
         out.push_str(&format!("## Overview (L1)\n{}\n\n", node.overview()));
     }
-    if !node.content().trim().is_empty() {
-        out.push_str(&format!("## Detail (L2)\n{}\n", node.content()));
+    // Mask internal manifest for Project rollup nodes (index nodes have
+    // empty content by invariant; the manifest is bookkeeping).
+    let content = if node.kind() == crate::domain::NodeKind::Project {
+        ""
+    } else {
+        node.content()
+    };
+    if !content.trim().is_empty() {
+        out.push_str(&format!("## Detail (L2)\n{}\n", content));
     }
     out
 }
