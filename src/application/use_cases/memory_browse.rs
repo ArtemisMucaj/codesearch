@@ -20,7 +20,7 @@ use std::sync::Arc;
 use crate::application::interfaces::{EmbeddingService, MemoryRepository};
 use crate::application::use_cases::memory_search::MemorySearchUseCase;
 use crate::application::use_cases::memory_summary::{
-    MEMORY_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
+    MEMORY_ROOT_URI, PROJECTS_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
 };
 use crate::domain::{DomainError, MemoryItem, MemoryKind, MemoryNode, NodeKind};
 
@@ -31,12 +31,13 @@ const RRF_K: f32 = 60.0;
 const NODE_CANDIDATES_PER_LEG: usize = 20;
 
 /// Sort rank for a node kind in the browse view, so the filesystem reads
-/// top-down: the rollup first, then sessions, then resources.
+/// top-down: the rollup first, then project rollups, sessions, resources.
 fn node_kind_rank(kind: NodeKind) -> u8 {
     match kind {
         NodeKind::Memory => 0,
-        NodeKind::Session => 1,
-        NodeKind::Resource => 2,
+        NodeKind::Project => 1,
+        NodeKind::Session => 2,
+        NodeKind::Resource => 3,
     }
 }
 
@@ -130,7 +131,7 @@ impl MemoryBrowseUseCase {
     /// Hybrid semantic + keyword recall over items *and* nodes, fused per
     /// modality and interleaved by score into a flat list of depth-0 rows.
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryRow>, DomainError> {
-        let items = self.item_search.execute(query, None, limit).await?;
+        let items = self.item_search.execute(query, None, None, limit).await?;
         let nodes = self.search_nodes(query, limit).await?;
 
         let mut scored: Vec<(f32, MemoryRow)> = Vec::new();
@@ -242,8 +243,15 @@ impl MemoryBrowseUseCase {
             push_item_groups(&mut rows, &items, base_depth);
         }
 
-        // Sessions and resources each get a directory header, with their nodes
-        // (and each node's levels) nested underneath.
+        // Project scopes, sessions, and resources each get a directory header,
+        // with their nodes (and each node's levels) nested underneath.
+        push_dir_group(
+            &mut rows,
+            "projects/",
+            PROJECTS_ROOT_URI,
+            NodeKind::Project,
+            &nodes,
+        );
         push_dir_group(
             &mut rows,
             "sessions/",

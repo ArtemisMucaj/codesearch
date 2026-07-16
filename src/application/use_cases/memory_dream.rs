@@ -230,11 +230,17 @@ impl MemoryDreamUseCase {
             }
         }
 
-        // Phase 4 — refresh the rollup and record the run.
+        // Phase 4 — refresh the rollups and record the run.
         if !report.applied.is_empty() {
             if let Err(e) = self.summary.regenerate_rollup().await {
                 warn!("dream: failed to regenerate memory rollup: {e}");
             }
+        }
+        // Per-scope rollups check their own staleness, so this only spends
+        // model calls on scopes the cycle (or anything since the last one)
+        // actually touched.
+        if let Err(e) = self.summary.regenerate_scope_rollups().await {
+            warn!("dream: failed to regenerate scope rollups: {e}");
         }
         self.record_run(&report, started_at).await;
         info!(

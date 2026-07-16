@@ -126,9 +126,17 @@ impl MemoryExtractionUseCase {
             }
             match self.embedding_service.embed_query(&query).await {
                 Ok(vector) => {
+                    // Prefetch within the session's scope (its items + globals)
+                    // so merging happens against memories that are actually
+                    // relevant to this project/namespace.
                     match self
                         .memory_repo
-                        .search_semantic(&vector, None, PREFETCH_LIMIT)
+                        .search_semantic(
+                            &vector,
+                            None,
+                            transcript.project.as_deref(),
+                            PREFETCH_LIMIT,
+                        )
                         .await
                     {
                         Ok(results) => return results.into_iter().map(|(item, _)| item).collect(),

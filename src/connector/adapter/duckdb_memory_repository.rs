@@ -374,12 +374,21 @@ impl MemoryRepository for DuckdbMemoryRepository {
         &self,
         vector: &[f32],
         kind: Option<MemoryKind>,
+        scope: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(MemoryItem, f32)>, DomainError> {
         let literal = self.vector_literal(vector)?;
-        let kind_clause = match kind {
-            Some(k) => format!("WHERE i.kind = '{}'", k.as_str()),
-            None => String::new(),
+        let mut conditions: Vec<String> = Vec::new();
+        if let Some(k) = kind {
+            conditions.push(format!("i.kind = '{}'", k.as_str()));
+        }
+        if let Some(s) = scope {
+            conditions.push(format!("(i.scope IS NULL OR i.scope = '{}')", sql_quote(s)));
+        }
+        let kind_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
         };
         let sql = format!(
             "SELECT {cols}, 1.0 - array_cosine_distance(v.vector, {literal}) AS score \
@@ -414,6 +423,7 @@ impl MemoryRepository for DuckdbMemoryRepository {
         &self,
         query: &str,
         kind: Option<MemoryKind>,
+        scope: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(MemoryItem, f32)>, DomainError> {
         let terms: Vec<String> = query
@@ -444,10 +454,16 @@ impl MemoryRepository for DuckdbMemoryRepository {
             })
             .collect();
         let score_expr = format!("({}) / {}.0", match_cases.join(" + "), terms.len());
-        let kind_clause = match kind {
+        let mut kind_clause = match kind {
             Some(k) => format!("AND kind = '{}'", k.as_str()),
             None => String::new(),
         };
+        if let Some(s) = scope {
+            kind_clause.push_str(&format!(
+                " AND (scope IS NULL OR scope = '{}')",
+                sql_quote(s)
+            ));
+        }
         let sql = format!(
             "SELECT {ITEM_COLUMNS}, {score_expr} AS score \
              FROM memory_items \
@@ -614,6 +630,19 @@ impl MemoryRepository for DuckdbMemoryRepository {
             Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(DomainError::storage(format!("Failed to query node: {e}"))),
         }
+    }
+
+    async fn delete_node(&self, uri: &str) -> Result<bool, DomainError> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "DELETE FROM memory_node_vectors WHERE node_uri = ?1",
+            params![uri],
+        )
+        .map_err(|e| DomainError::storage(format!("Failed to delete node vector: {e}")))?;
+        let deleted = conn
+            .execute("DELETE FROM memory_nodes WHERE uri = ?1", params![uri])
+            .map_err(|e| DomainError::storage(format!("Failed to delete node: {e}")))?;
+        Ok(deleted > 0)
     }
 
     async fn list_child_nodes(&self, parent_uri: &str) -> Result<Vec<MemoryNode>, DomainError> {
@@ -841,6 +870,11 @@ impl MemoryRepository for DuckdbMemoryRepository {
             nodes_by_kind,
         })
     }
+}
+
+/// Escape a string for interpolation into a single-quoted SQL literal.
+fn sql_quote(s: &str) -> String {
+    s.replace('\'', "''")
 }
 
 fn dream_run_from_row(row: &Row<'_>) -> Result<DreamRun, duckdb::Error> {

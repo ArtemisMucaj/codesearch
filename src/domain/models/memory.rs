@@ -223,6 +223,9 @@ pub struct ImportedSession {
 /// - `Memory` — the whole-memory rollup (`memory://memory`): a regenerated
 ///   abstract + overview over every stored [`MemoryItem`], read first before
 ///   drilling into individual memories.
+/// - `Project` — the rollup of one project/namespace scope
+///   (`memory://projects/<scope>`): a regenerated abstract + overview over
+///   the items carrying that scope, read first when working in that project.
 /// - `Session` — one imported session (`memory://sessions/<id>`): its L2 is
 ///   the full normalized transcript, kept so the conversation can be re-read.
 /// - `Resource` — a file or URL added explicitly via `memory add`
@@ -231,17 +234,24 @@ pub struct ImportedSession {
 #[serde(rename_all = "lowercase")]
 pub enum NodeKind {
     Memory,
+    Project,
     Session,
     Resource,
 }
 
 impl NodeKind {
-    pub const ALL: [NodeKind; 3] = [NodeKind::Memory, NodeKind::Session, NodeKind::Resource];
+    pub const ALL: [NodeKind; 4] = [
+        NodeKind::Memory,
+        NodeKind::Project,
+        NodeKind::Session,
+        NodeKind::Resource,
+    ];
 
     /// Stable identifier used in storage.
     pub fn as_str(&self) -> &'static str {
         match self {
             NodeKind::Memory => "memory",
+            NodeKind::Project => "project",
             NodeKind::Session => "session",
             NodeKind::Resource => "resource",
         }
@@ -250,6 +260,7 @@ impl NodeKind {
     pub fn parse(s: &str) -> Option<NodeKind> {
         match s.trim().to_ascii_lowercase().as_str() {
             "memory" => Some(NodeKind::Memory),
+            "project" => Some(NodeKind::Project),
             "session" => Some(NodeKind::Session),
             "resource" => Some(NodeKind::Resource),
             _ => None,

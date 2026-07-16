@@ -85,7 +85,7 @@ struct Cli {
     #[arg(long, global = true)]
     mock_embeddings: bool,
 
-    #[arg(long, global = true, default_value = "search", value_parser = validate_namespace)]
+    #[arg(long, global = true, default_value = codesearch::cli::DEFAULT_NAMESPACE, value_parser = validate_namespace)]
     namespace: String,
 
     #[arg(long, global = true)]
@@ -347,9 +347,16 @@ async fn main() -> Result<()> {
             // HTTP mode
             run_http_server(container, port, public_bind).await?;
         } else {
-            // Stdio mode
+            // Stdio mode: the process cwd is the workspace this server was
+            // launched for, so memory searches default to its scope.
             tracing::info!("Starting codesearch MCP server (stdio)");
-            let server = CodesearchMcpServer::new(container);
+            let default_scope = std::env::current_dir().ok().and_then(|cwd| {
+                codesearch::resolve_memory_scope(
+                    &container.metadata_db_path(),
+                    &cwd.to_string_lossy(),
+                )
+            });
+            let server = CodesearchMcpServer::with_default_memory_scope(container, default_scope);
             let service = server.serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
         }

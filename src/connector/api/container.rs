@@ -871,7 +871,9 @@ impl Container {
             memory_repo,
             chat_client,
             self.embedding_service.clone(),
-            Arc::new(crate::connector::adapter::LocalSessionDiscovery),
+            Arc::new(crate::connector::adapter::LocalSessionDiscovery::new(Some(
+                self.metadata_db_path(),
+            ))),
             import,
             summary,
         ))
@@ -892,6 +894,11 @@ impl Container {
 
     pub fn data_dir(&self) -> &str {
         &self.config.data_dir
+    }
+
+    /// Path of the global metadata database (repositories, namespace config).
+    pub fn metadata_db_path(&self) -> PathBuf {
+        PathBuf::from(&self.config.data_dir).join("codesearch.duckdb")
     }
 
     /// The LLM backend this container was configured with (`--llm-target`).

@@ -310,6 +310,11 @@ pub struct SearchMemoryInput {
     /// "fact". Omit to search across all kinds.
     pub kind: Option<String>,
 
+    /// Restrict to memories relevant in one project/namespace scope (its
+    /// items plus globals). Omit to use the server's default scope (the
+    /// workspace it serves); pass "*" to search across all scopes.
+    pub scope: Option<String>,
+
     /// Maximum number of results to return (default: 10, server cap: 100)
     #[serde(default = "default_limit")]
     pub limit: usize,
@@ -396,6 +401,10 @@ fn parse_kind_filter(kind: &Option<String>) -> Result<Option<MemoryKind>, McpErr
 #[derive(Clone)]
 pub struct CodesearchMcpServer {
     container: Arc<Container>,
+    /// Memory scope applied to `search_memory` when the caller does not pass
+    /// one. Set in stdio mode (where the process cwd is the workspace the
+    /// assistant is working in); `None` for shared HTTP servers.
+    default_memory_scope: Option<String>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -404,6 +413,16 @@ impl CodesearchMcpServer {
     pub fn new(container: Arc<Container>) -> Self {
         Self {
             container,
+            default_memory_scope: None,
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    /// Like [`Self::new`], with a default memory scope for `search_memory`.
+    pub fn with_default_memory_scope(container: Arc<Container>, scope: Option<String>) -> Self {
+        Self {
+            container,
+            default_memory_scope: scope,
             tool_router: Self::tool_router(),
         }
     }
@@ -1072,12 +1091,17 @@ impl CodesearchMcpServer {
         let input = params.0;
         let kind = parse_kind_filter(&input.kind)?;
         let limit = input.limit.min(MAX_LIMIT);
+        let scope = match input.scope.as_deref() {
+            Some("*") => None,
+            Some(s) => Some(s.to_string()),
+            None => self.default_memory_scope.clone(),
+        };
 
         let use_case = self.container.memory_search_use_case().map_err(|e| {
             McpError::internal_error(format!("Failed to open memory store: {}", e), None)
         })?;
         let results = use_case
-            .execute(&input.query, kind, limit)
+            .execute(&input.query, kind, scope.as_deref(), limit)
             .await
             .map_err(|e| McpError::internal_error(format!("Memory search failed: {}", e), None))?;
 

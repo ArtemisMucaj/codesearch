@@ -248,10 +248,12 @@ impl<'a> Router<'a> {
                     query,
                     num,
                     kind,
+                    scope,
+                    all_scopes,
                     format,
                 } => {
                     self.memory_controller
-                        .search(query, num, kind, format)
+                        .search(query, num, kind, scope, all_scopes, format)
                         .await
                 }
                 MemorySubcommand::List { kind, format } => {

@@ -53,6 +53,7 @@ fn is_summary_call(system: &str) -> bool {
     system.contains("summarize a finished coding-assistant session")
         || system.contains("summarize a document or web page")
         || system.contains("top-level index")
+        || system.contains("about ONE project")
 }
 
 #[async_trait]
@@ -346,7 +347,7 @@ async fn hybrid_search_finds_stored_memories() {
         Arc::clone(&harness.memory_repo),
         Arc::clone(&harness.embedding),
     );
-    let results = search.execute("type hints", None, 5).await.unwrap();
+    let results = search.execute("type hints", None, None, 5).await.unwrap();
     assert!(!results.is_empty());
     assert_eq!(results[0].0.name(), "python_typing");
 
@@ -354,7 +355,7 @@ async fn hybrid_search_finds_stored_memories() {
     // fact's own content so the filter is exercised on a non-empty result set
     // (otherwise `all(...)` would pass vacuously on zero rows).
     let facts_only = search
-        .execute("github actions ci", Some(MemoryKind::Fact), 5)
+        .execute("github actions ci", Some(MemoryKind::Fact), None, 5)
         .await
         .unwrap();
     assert!(
@@ -392,7 +393,10 @@ async fn works_without_embeddings_via_keyword_search() {
     use_case.execute(&transcript, false).await.unwrap();
 
     let search = MemorySearchUseCase::new(memory_repo, embedding);
-    let results = search.execute("neovim telescope", None, 5).await.unwrap();
+    let results = search
+        .execute("neovim telescope", None, None, 5)
+        .await
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0.name(), "editor_choice");
 }
@@ -1075,4 +1079,232 @@ async fn dream_run_round_trips_through_repository() {
     assert_eq!(loaded.id, "run-1");
     assert_eq!(loaded.sessions_imported, 3);
     assert_eq!(loaded.operations_applied, 5);
+}
+
+// ---------------------------------------------------------------------------
+// Scoped memory: retrieval filtering + per-scope rollups
+// ---------------------------------------------------------------------------
+
+/// Seed one item (optionally scoped) with the mock embedding of its content.
+async fn seed_scoped(
+    repo: &Arc<dyn MemoryRepository>,
+    embedding: &Arc<dyn EmbeddingService>,
+    name: &str,
+    content: &str,
+    scope: Option<&str>,
+) {
+    let item = MemoryItem::new(
+        format!("id-{name}"),
+        MemoryKind::Fact,
+        name.to_string(),
+        content.to_string(),
+        None,
+        scope.map(str::to_string),
+        100,
+        100,
+        0,
+    );
+    let vector = embedding.embed_query(content).await.unwrap();
+    repo.upsert_item(&item, Some(&vector)).await.unwrap();
+}
+
+#[tokio::test]
+async fn scope_filter_returns_scoped_plus_global_items() {
+    let harness = Harness::new();
+    // Identical content so every item matches the query equally; only the
+    // scope filter separates them.
+    let content = "the service uses postgres for persistence";
+    seed_scoped(
+        &harness.memory_repo,
+        &harness.embedding,
+        "global_fact",
+        content,
+        None,
+    )
+    .await;
+    seed_scoped(
+        &harness.memory_repo,
+        &harness.embedding,
+        "alpha_fact",
+        content,
+        Some("alpha"),
+    )
+    .await;
+    seed_scoped(
+        &harness.memory_repo,
+        &harness.embedding,
+        "beta_fact",
+        content,
+        Some("beta"),
+    )
+    .await;
+
+    let search = MemorySearchUseCase::new(
+        Arc::clone(&harness.memory_repo),
+        Arc::clone(&harness.embedding),
+    );
+
+    // Unfiltered: everything.
+    let all = search.execute("postgres", None, None, 10).await.unwrap();
+    assert_eq!(all.len(), 3);
+
+    // Scoped: that scope's items plus globals, never the other scope's.
+    let alpha = search
+        .execute("postgres", None, Some("alpha"), 10)
+        .await
+        .unwrap();
+    let names: Vec<&str> = alpha.iter().map(|(i, _)| i.name()).collect();
+    assert_eq!(alpha.len(), 2, "expected global + alpha, got {names:?}");
+    assert!(names.contains(&"global_fact"));
+    assert!(names.contains(&"alpha_fact"));
+
+    // Keyword-only search honours the filter too.
+    let repo_kw: Arc<dyn MemoryRepository> = Arc::clone(&harness.memory_repo);
+    let kw = repo_kw
+        .search_keyword("postgres", None, Some("beta"), 10)
+        .await
+        .unwrap();
+    let kw_names: Vec<&str> = kw.iter().map(|(i, _)| i.name()).collect();
+    assert_eq!(kw.len(), 2, "expected global + beta, got {kw_names:?}");
+    assert!(kw_names.contains(&"beta_fact"));
+}
+
+#[tokio::test]
+async fn scope_rollups_track_scopes_and_remove_stale_ones() {
+    let harness = Harness::new();
+    let chat = Arc::new(ScriptedChatClient::new(vec![]));
+    let summary = SummarizeMemoryUseCase::new(
+        chat as Arc<dyn ChatClient>,
+        Arc::clone(&harness.memory_repo),
+        Arc::clone(&harness.embedding),
+    );
+
+    seed_scoped(
+        &harness.memory_repo,
+        &harness.embedding,
+        "alpha_style",
+        "uses tabs",
+        Some("alpha"),
+    )
+    .await;
+    seed_scoped(
+        &harness.memory_repo,
+        &harness.embedding,
+        "alpha_ci",
+        "ci is jenkins",
+        Some("alpha"),
+    )
+    .await;
+    seed_scoped(
+        &harness.memory_repo,
+        &harness.embedding,
+        "beta_db",
+        "uses sqlite",
+        Some("beta"),
+    )
+    .await;
+    seed_scoped(
+        &harness.memory_repo,
+        &harness.embedding,
+        "global_editor",
+        "prefers vim",
+        None,
+    )
+    .await;
+
+    // One rollup per scope; the global item contributes to neither.
+    let regenerated = summary.regenerate_scope_rollups().await.unwrap();
+    assert_eq!(regenerated, 2);
+
+    let alpha = harness
+        .memory_repo
+        .find_node("memory://projects/alpha")
+        .await
+        .unwrap()
+        .expect("alpha rollup should exist");
+    assert_eq!(alpha.kind(), NodeKind::Project);
+    assert!(!alpha.abstract_().is_empty());
+
+    // Beta had a single item: written via the deterministic fallback.
+    let beta = harness
+        .memory_repo
+        .find_node("memory://projects/beta")
+        .await
+        .unwrap()
+        .expect("beta rollup should exist");
+    assert!(beta.overview().contains("beta_db"));
+
+    // Nothing changed since: a second pass regenerates nothing.
+    assert_eq!(summary.regenerate_scope_rollups().await.unwrap(), 0);
+
+    // Remove beta's only item: its rollup disappears, alpha's stays.
+    harness
+        .memory_repo
+        .delete_item(MemoryKind::Fact, "beta_db")
+        .await
+        .unwrap();
+    summary.regenerate_scope_rollups().await.unwrap();
+    assert!(harness
+        .memory_repo
+        .find_node("memory://projects/beta")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(harness
+        .memory_repo
+        .find_node("memory://projects/alpha")
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn memory_scope_prefers_indexed_namespace_over_project_name() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo_root = dir.path().join("myrepo");
+    std::fs::create_dir(&repo_root).unwrap();
+    let canonical = std::fs::canonicalize(&repo_root).unwrap();
+    let db_path = dir.path().join("codesearch.duckdb");
+
+    {
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE repositories (
+                id TEXT, name TEXT, path TEXT, namespace TEXT,
+                git_remote TEXT, updated_at BIGINT
+            )",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO repositories VALUES ('id-1', 'myrepo', ?1, 'teamns', NULL, 1)",
+            duckdb::params![canonical.to_string_lossy()],
+        )
+        .unwrap();
+    }
+
+    let cwd = canonical.to_string_lossy().into_owned();
+    // Indexed under a user-created namespace: sessions share its scope.
+    assert_eq!(
+        codesearch::resolve_memory_scope(&db_path, &cwd),
+        Some("teamns".to_string())
+    );
+
+    // Indexed under the default namespace: falls back to per-project scope.
+    {
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        conn.execute("UPDATE repositories SET namespace = 'search'", [])
+            .unwrap();
+    }
+    assert_eq!(
+        codesearch::resolve_memory_scope(&db_path, &cwd),
+        Some("myrepo".to_string())
+    );
+
+    // Not indexed at all: per-project scope.
+    let other = dir.path().join("otherproj");
+    std::fs::create_dir(&other).unwrap();
+    assert_eq!(
+        codesearch::resolve_memory_scope(&db_path, &other.to_string_lossy()),
+        Some("otherproj".to_string())
+    );
 }

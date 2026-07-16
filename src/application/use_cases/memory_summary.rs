@@ -5,7 +5,7 @@
 //! them: nodes carrying an L0 abstract and an L1 overview so an agent reads a
 //! summary first and drills into detail only when needed.
 //!
-//! Three things get summarized:
+//! Four things get summarized:
 //!
 //! 1. **Each imported session** → `memory://sessions/<id>` with its full
 //!    normalized transcript as L2, plus a generated abstract + overview.
@@ -13,6 +13,9 @@
 //!    fetched file/page text as L2, plus a generated abstract + overview.
 //! 3. **The whole memory store** → the `memory://memory` rollup: a regenerated
 //!    abstract + overview over every stored item, meant to be read first.
+//! 4. **Each project/namespace scope** → `memory://projects/<scope>`: a rollup
+//!    over the items carrying that scope, read first when working in that
+//!    project. Regenerated lazily — only when the scope's items changed.
 //!
 //! Each uses one small LLM call (the same [`ChatClient`] extraction uses), with
 //! a single format-recovery retry and a deterministic fallback so a flaky model
@@ -30,6 +33,8 @@ use crate::domain::{
 
 /// Root URI of the memory rollup node ("read this first").
 pub const MEMORY_ROOT_URI: &str = "memory://memory";
+/// Parent directory URI under which per-project/namespace scope rollups live.
+pub const PROJECTS_ROOT_URI: &str = "memory://projects";
 /// Parent directory URI under which per-session nodes live.
 pub const SESSIONS_ROOT_URI: &str = "memory://sessions";
 /// Parent directory URI under which explicitly-added resources (files/URLs)
@@ -209,6 +214,87 @@ impl SummarizeMemoryUseCase {
         Ok(node)
     }
 
+    /// Regenerate the per-scope rollup nodes (`memory://projects/<scope>`),
+    /// one per distinct project/namespace scope found on stored items: the
+    /// index an agent reads first when working in that project.
+    ///
+    /// Cheap to call repeatedly: a scope's rollup is only regenerated when one
+    /// of its items changed since the node was last written, and rollups whose
+    /// scope no longer exists (all items deleted or promoted to global) are
+    /// removed. Returns how many rollups were (re)generated.
+    #[tracing::instrument(skip_all)]
+    pub async fn regenerate_scope_rollups(&self) -> Result<usize, DomainError> {
+        let items = self.memory_repo.list_items(None).await?;
+        let mut by_scope: std::collections::BTreeMap<&str, Vec<&MemoryItem>> =
+            std::collections::BTreeMap::new();
+        for item in &items {
+            if let Some(scope) = item.scope() {
+                by_scope.entry(scope).or_default().push(item);
+            }
+        }
+
+        // Drop rollups for scopes that vanished from the store.
+        let existing = self.memory_repo.list_nodes(Some(NodeKind::Project)).await?;
+        let live_uris: std::collections::HashSet<String> = by_scope
+            .keys()
+            .map(|scope| scope_rollup_uri(scope))
+            .collect();
+        for node in &existing {
+            if !live_uris.contains(node.uri()) {
+                if let Err(e) = self.memory_repo.delete_node(node.uri()).await {
+                    warn!("failed to delete stale scope rollup '{}': {e}", node.uri());
+                }
+            }
+        }
+
+        let mut regenerated = 0usize;
+        for (scope, scoped_items) in by_scope {
+            let uri = scope_rollup_uri(scope);
+            let previous = self.memory_repo.find_node(&uri).await.ok().flatten();
+            // Skip scopes whose items are all older than the current rollup.
+            if let Some(ref prev) = previous {
+                let newest = scoped_items.iter().map(|i| i.updated_at()).max();
+                if newest.is_some_and(|t| t < prev.updated_at()) {
+                    continue;
+                }
+            }
+
+            let (abstract_, overview) = if scoped_items.len() < 2 {
+                fallback_scope_rollup_summary(scope, &scoped_items)
+            } else {
+                match self
+                    .generate(
+                        &scope_rollup_system_prompt(),
+                        &scope_rollup_user_prompt(scope, &scoped_items),
+                    )
+                    .await
+                {
+                    Some(summary) => summary,
+                    None => fallback_scope_rollup_summary(scope, &scoped_items),
+                }
+            };
+
+            let now = unix_now();
+            let created_at = previous.map(|p| p.created_at()).unwrap_or(now);
+            let node = MemoryNode::new(
+                uri,
+                NodeKind::Project,
+                Some(PROJECTS_ROOT_URI.to_string()),
+                clamp(&abstract_, MAX_ABSTRACT_CHARS),
+                clamp(&overview, MAX_OVERVIEW_CHARS),
+                String::new(),
+                created_at,
+                now,
+            );
+            let vector = self.embed_node(&node).await;
+            self.memory_repo
+                .upsert_node(&node, vector.as_deref())
+                .await?;
+            regenerated += 1;
+        }
+        Ok(regenerated)
+    }
+
     /// Run one summarization call, parsing `{abstract, overview}` JSON with a
     /// single format-recovery retry. Returns `None` on any failure so callers
     /// fall back to a deterministic summary instead of aborting the import.
@@ -347,6 +433,50 @@ fn rollup_user_prompt(items: &[MemoryItem]) -> String {
     }
     prompt.push_str("\n\nSummarize the memory store as the specified JSON object.");
     clamp(&prompt, MAX_SUMMARY_INPUT_CHARS)
+}
+
+/// URI of the rollup node for one project/namespace scope.
+fn scope_rollup_uri(scope: &str) -> String {
+    format!("{PROJECTS_ROOT_URI}/{}", resource_slug(scope))
+}
+
+fn scope_rollup_system_prompt() -> String {
+    r#"You maintain the index of an assistant's long-term memory about ONE project (or one namespace of related projects).
+You are given the memory items scoped to that project (preferences, experiences, skills, facts).
+Produce a summary an agent working in this project reads FIRST, before drilling into individual memories:
+- "abstract": ONE sentence (max ~35 words) capturing what this project is and what the memory covers at a glance.
+- "overview": a markdown outline grouping what is known by theme, naming the notable items so the reader knows what exists and can drill in. Keep it scannable.
+
+Do not invent anything not present in the items. Output ONLY a JSON object: {"abstract": "...", "overview": "..."}"#
+        .to_string()
+}
+
+fn scope_rollup_user_prompt(scope: &str, items: &[&MemoryItem]) -> String {
+    const MAX_ITEM_CHARS: usize = 400;
+    let mut prompt = format!("## Memory items scoped to project '{scope}'\n\n");
+    for item in items {
+        prompt.push_str(&format!(
+            "- [{}] {}: {}\n",
+            item.kind(),
+            item.name(),
+            clamp(&one_line(item.content()), MAX_ITEM_CHARS)
+        ));
+    }
+    prompt.push_str("\n\nSummarize this project's memory as the specified JSON object.");
+    clamp(&prompt, MAX_SUMMARY_INPUT_CHARS)
+}
+
+/// Deterministic fallback for a scope rollup when there is little to summarize
+/// or the model is unavailable.
+fn fallback_scope_rollup_summary(scope: &str, items: &[&MemoryItem]) -> (String, String) {
+    let mut overview = format!("Memories scoped to '{scope}':\n");
+    for item in items {
+        overview.push_str(&format!("- [{}] {}\n", item.kind(), item.name()));
+    }
+    (
+        format!("{} stored memories about project '{scope}'.", items.len()),
+        overview,
+    )
 }
 
 /// Deterministic fallback used when a session cannot be summarized by the model.

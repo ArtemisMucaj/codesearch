@@ -892,6 +892,15 @@
                 "fact"
               ]
             }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "description": "Restrict to memories relevant in this project/namespace scope (its items plus globals). Omit to search every scope.",
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {

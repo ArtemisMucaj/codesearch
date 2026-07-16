@@ -98,6 +98,14 @@ impl ImportSessionUseCase {
                 transcript.id
             );
         }
+        // Per-scope rollups check their own staleness, so this typically
+        // regenerates only the scope this session's items landed in.
+        if let Err(e) = self.summary.regenerate_scope_rollups().await {
+            warn!(
+                "session '{}': failed to regenerate scope rollups: {e}",
+                transcript.id
+            );
+        }
 
         let session = ImportedSession {
             id: transcript.id.clone(),

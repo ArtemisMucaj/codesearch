@@ -41,19 +41,26 @@ pub trait MemoryRepository: Send + Sync {
 
     /// Cosine-similarity search over item embeddings.
     /// Returns `(item, score)` pairs, best first, score in `[0, 1]`.
+    ///
+    /// `scope` filters to items relevant in that project/namespace scope —
+    /// global items plus items carrying exactly that scope. `None` searches
+    /// everything.
     async fn search_semantic(
         &self,
         vector: &[f32],
         kind: Option<MemoryKind>,
+        scope: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(MemoryItem, f32)>, DomainError>;
 
     /// Case-insensitive keyword search over item names and content.
-    /// Returns `(item, score)` pairs, best first.
+    /// Returns `(item, score)` pairs, best first. `scope` filters as in
+    /// [`Self::search_semantic`].
     async fn search_keyword(
         &self,
         query: &str,
         kind: Option<MemoryKind>,
+        scope: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(MemoryItem, f32)>, DomainError>;
 
@@ -85,6 +92,9 @@ pub trait MemoryRepository: Send + Sync {
 
     /// Fetch a single node by its `memory://` URI.
     async fn find_node(&self, uri: &str) -> Result<Option<MemoryNode>, DomainError>;
+
+    /// Delete a node (and its embedding) by URI. Returns whether it existed.
+    async fn delete_node(&self, uri: &str) -> Result<bool, DomainError>;
 
     /// List the direct children of a directory URI (its immediate members in
     /// the virtual filesystem), newest first.

@@ -64,6 +64,10 @@ pub struct MemorySearchParams {
     /// Restrict to one memory kind.
     #[serde(default)]
     pub kind: Option<String>,
+    /// Restrict to memories relevant in this project/namespace scope (its
+    /// items plus globals). Omit to search every scope.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 fn default_memory_limit() -> usize {
@@ -78,7 +82,9 @@ pub async fn search(
 ) -> ApiResult<Json<Value>> {
     let kind = parse_kind(params.kind.as_deref())?;
     let use_case = state.container.memory_search_use_case()?;
-    let results = use_case.execute(&params.query, kind, params.num).await?;
+    let results = use_case
+        .execute(&params.query, kind, params.scope.as_deref(), params.num)
+        .await?;
 
     let items: Vec<Value> = results
         .iter()

@@ -24,6 +24,21 @@ pub struct MemoryController<'a> {
 }
 
 impl<'a> MemoryController<'a> {
+    /// Memory scope of the directory this command runs in: the namespace it
+    /// was indexed under when that namespace is user-created, else the
+    /// directory name. `None` when the cwd is unavailable.
+    async fn current_dir_scope(&self) -> Option<String> {
+        let db_path = self.container.metadata_db_path();
+        let cwd = std::env::current_dir().ok()?.to_string_lossy().into_owned();
+        // Resolution opens DuckDB read-only (blocking I/O).
+        tokio::task::spawn_blocking(move || {
+            crate::connector::api::repo_resolver::resolve_memory_scope(&db_path, &cwd)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
     pub fn new(container: &'a Container) -> Self {
         Self { container }
     }
@@ -107,10 +122,12 @@ impl<'a> MemoryController<'a> {
         // async worker thread.
         let title = session.display_title().to_string();
         let owned = session.clone();
-        let transcript = tokio::task::spawn_blocking(move || load_discovered_transcript(&owned))
-            .await
-            .map_err(|e| anyhow::anyhow!("transcript load task panicked: {e}"))?
-            .with_context(|| format!("could not load '{title}'"))?;
+        let db_path = self.container.metadata_db_path();
+        let transcript =
+            tokio::task::spawn_blocking(move || load_discovered_transcript(&owned, Some(&db_path)))
+                .await
+                .map_err(|e| anyhow::anyhow!("transcript load task panicked: {e}"))?
+                .with_context(|| format!("could not load '{title}'"))?;
         let outcome = use_case.execute(&transcript, true).await?;
         Ok(import_outcome_summary(&outcome))
     }
@@ -203,11 +220,24 @@ impl<'a> MemoryController<'a> {
         query: String,
         num: usize,
         kind: Option<MemoryKindArg>,
+        scope: Option<String>,
+        all_scopes: bool,
         format: OutputFormatTextJson,
     ) -> Result<String> {
         let use_case = self.container.memory_search_use_case()?;
         let kind = kind.map(MemoryKind::from);
-        let results = use_case.execute(&query, kind, num).await?;
+        // Explicit --scope wins; --all-scopes disables filtering; otherwise
+        // resolve the scope from the directory the command runs in.
+        let scope = if all_scopes {
+            None
+        } else if scope.is_some() {
+            scope
+        } else {
+            self.current_dir_scope().await
+        };
+        let results = use_case
+            .execute(&query, kind, scope.as_deref(), num)
+            .await?;
 
         match format {
             OutputFormatTextJson::Json => {
@@ -430,8 +460,10 @@ pub fn run_import_picker_ui(
         crate::connector::adapter::discover_all_sessions_streaming(tx);
     });
 
+    // Preview only needs the messages; scope resolution is skipped here (the
+    // picker runs before the container/database is available).
     let loader = |s: &DiscoveredSession| {
-        load_discovered_transcript(s)
+        load_discovered_transcript(s, None)
             .map(|t| t.messages)
             .map_err(|e| e.to_string())
     };

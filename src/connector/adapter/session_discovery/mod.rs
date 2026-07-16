@@ -24,7 +24,19 @@ use crate::domain::{
 /// stores, used by the dream use case to harvest finished sessions. Discovery
 /// and transcript loading are blocking file/SQLite I/O, so both are pushed off
 /// the async runtime via `spawn_blocking`.
-pub struct LocalSessionDiscovery;
+pub struct LocalSessionDiscovery {
+    /// Metadata database consulted to map a session's working directory to
+    /// the namespace it was indexed under, so its memories can be scoped per
+    /// namespace instead of per project. `None` skips the lookup (memories
+    /// fall back to per-project scoping).
+    db_path: Option<std::path::PathBuf>,
+}
+
+impl LocalSessionDiscovery {
+    pub fn new(db_path: Option<std::path::PathBuf>) -> Self {
+        Self { db_path }
+    }
+}
 
 #[async_trait::async_trait]
 impl crate::application::SessionDiscovery for LocalSessionDiscovery {
@@ -39,7 +51,8 @@ impl crate::application::SessionDiscovery for LocalSessionDiscovery {
         session: &DiscoveredSession,
     ) -> Result<SessionTranscript, DomainError> {
         let owned = session.clone();
-        tokio::task::spawn_blocking(move || load_transcript(&owned))
+        let db_path = self.db_path.clone();
+        tokio::task::spawn_blocking(move || load_transcript(&owned, db_path.as_deref()))
             .await
             .map_err(|e| DomainError::internal(format!("transcript load task panicked: {e}")))?
     }
@@ -101,9 +114,15 @@ pub fn discover_all_sessions_streaming(sink: std::sync::mpsc::Sender<Vec<Discove
 }
 
 /// Materialize the full transcript for a discovered session, so it can be run
-/// through the import pipeline. The session's working directory (when known) is
-/// carried into the transcript as its `project` scope.
-pub fn load_transcript(session: &DiscoveredSession) -> Result<SessionTranscript, DomainError> {
+/// through the import pipeline. The session's working directory (when known)
+/// is carried into the transcript as its memory scope: the namespace the
+/// directory was indexed under when `db_path` resolves one (repositories
+/// deliberately grouped in a namespace share memory), otherwise the project
+/// directory name.
+pub fn load_transcript(
+    session: &DiscoveredSession,
+    db_path: Option<&std::path::Path>,
+) -> Result<SessionTranscript, DomainError> {
     let mut transcript = match (&session.source, &session.locator) {
         (SessionSource::Claude, SessionLocator::File(path)) => {
             crate::connector::adapter::parse_transcript_file(std::path::Path::new(path))
@@ -127,9 +146,13 @@ pub fn load_transcript(session: &DiscoveredSession) -> Result<SessionTranscript,
         ))),
     }?;
 
-    // The discovery layer knows the session's cwd; reduce it to a project name
-    // (the last path component) so extracted memories can be scoped to it.
-    transcript.project = session.cwd.as_deref().and_then(project_from_cwd);
+    // The discovery layer knows the session's cwd; resolve it to a memory
+    // scope (indexed namespace, else the last path component) so extracted
+    // memories can be scoped to it.
+    transcript.project = session.cwd.as_deref().and_then(|cwd| match db_path {
+        Some(db) => crate::connector::api::repo_resolver::resolve_memory_scope(db, cwd),
+        None => project_from_cwd(cwd),
+    });
     Ok(transcript)
 }
 

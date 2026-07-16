@@ -105,11 +105,12 @@ filesystem. Every node bundles three context levels for one location:
 | **L1** | `overview` | a paragraph/outline to orient before reading |
 | **L2** | `content` | the full detail (e.g. a session's transcript) |
 
-The tree has three top-level kinds — `memory` / `session` / `resource`
-context types:
+The tree has four top-level kinds — `memory` / `project` / `session` /
+`resource` context types:
 
 ```text
 memory://memory                 ← the whole-memory rollup ("read this first")
+memory://projects/<scope>       ← rollup of one project/namespace scope
 memory://sessions/<id>          ← one imported session (transcript = L2)
 memory://resources/...          ← files/URLs added explicitly (reserved)
 ```
@@ -125,6 +126,12 @@ deterministic fallback so a flaky model never blocks the import or loses data:
    from the current set of items: an abstract + overview meant to be read
    first, before drilling into individual memories. With fewer than two items
    this is a deterministic placeholder (no LLM call).
+
+Per-scope rollups (`memory://projects/<scope>`, one per distinct project or
+namespace scope found on stored items) are also refreshed on import and during
+dream cycles. Each is only regenerated when one of its scope's items actually
+changed, and a rollup whose scope vanished (all items deleted or generalized
+to global) is removed.
 
 Resources — files and website links — are added explicitly with `memory add`.
 The content is fetched (URLs and HTML are decluttered to Markdown via the
@@ -148,11 +155,36 @@ codesearch memory show memory://memory        # the rollup abstract + overview
 codesearch memory show memory://sessions/<id> # a session's abstract + transcript
 ```
 
+## Project & namespace scoping
+
+Every memory item is either **global** (applies everywhere) or carries a
+**scope** naming the project it belongs to, so one project's conventions never
+surface as advice in another. The scope of a session is resolved from its
+working directory when the transcript is imported:
+
+1. **Indexed under a user-created namespace** → the scope is the *namespace*.
+   Repositories deliberately indexed together in a namespace are correlated —
+   they work together — so their sessions share one memory pool.
+2. **Otherwise** (not indexed, or indexed under the default namespace) → the
+   scope is the project directory name.
+
+Recall applies the same idea in reverse: a scoped search returns that scope's
+items *plus* globals. `codesearch memory search` resolves the scope from the
+directory it runs in automatically; `--scope <name>` overrides it and
+`--all-scopes` disables the filter. The extraction prefetch is scoped the same
+way, so session imports merge new information into the memories that are
+actually about the same project.
+
 ## Recalling memories
 
 ```bash
-# Hybrid search (semantic + keyword, fused with RRF)
+# Hybrid search (semantic + keyword, fused with RRF); results are filtered to
+# the current directory's scope + globals automatically
 codesearch memory search "how do we handle duckdb lock conflicts"
+
+# Search another project's memory, or everything
+codesearch memory search "deploy steps" --scope backend-team
+codesearch memory search "deploy steps" --all-scopes
 
 # Restrict to one kind
 codesearch memory search "code style" --kind preference
@@ -181,7 +213,7 @@ AI tools alongside code search:
 
 | Tool | Description |
 |------|-------------|
-| `search_memory` | Hybrid recall over the memory store. Accepts `query`, optional `kind`, and `limit`. Returns full item content with fused scores. |
+| `search_memory` | Hybrid recall over the memory store. Accepts `query`, optional `kind`, `scope` (defaults to the workspace's scope in stdio mode; `"*"` searches all scopes), and `limit`. Returns full item content with fused scores. |
 | `list_memories` | List stored memories, newest first. Accepts optional `kind` — e.g. `kind="preference"` at session start to load every known user preference. |
 | `read_memory` | Read the virtual filesystem level by level. Call with no args (or `uri="memory://memory"`) first for the whole-memory rollup, then drill into a directory (`memory://sessions`) or a leaf (`memory://sessions/<id>`). Returns the node's L0/L1/L2 plus its children's abstracts. |
 
