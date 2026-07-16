@@ -6,6 +6,8 @@
 //! - `GET /api/memory/stats`      — item / session counts
 //! - `GET /api/memory/sessions`   — imported sessions
 //! - `GET /api/memory/tree`       — browse the memory virtual filesystem (`?uri=`)
+//! - `GET /api/memory/dream`      — dream scheduler status + last recorded run
+//! - `POST /api/memory/dream`     — trigger a dream cycle in the background
 //! - `GET /api/memory/:id`        — one memory item (ID, `kind/name`, or URI node)
 
 use axum::extract::{Path, Query, State};
@@ -145,6 +147,67 @@ pub async fn tree(
         Some(dir) => repo.list_child_nodes(dir).await?,
     };
     Ok(Json(json!({ "count": children.len(), "nodes": children })))
+}
+
+/// Optional JSON body for `POST /api/memory/dream`.
+#[derive(Debug, Default, Deserialize)]
+pub struct DreamTriggerParams {
+    /// Plan and log operations without applying anything.
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Dream even when nothing changed since the last cycle.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `GET /api/memory/dream` — scheduler configuration, whether a cycle is in
+/// flight, and the last recorded run.
+pub async fn dream_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let Some(dream) = state.dream.as_ref() else {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "dreaming is not available on this server (no LLM backend configured at startup)",
+        ));
+    };
+    let config = dream.config();
+    Ok(Json(json!({
+        "enabled": config.dream_enabled(),
+        "interval_hours": config.dream_interval_hours(),
+        "session_idle_minutes": config.session_idle_minutes(),
+        "auto_import": config.auto_import(),
+        "running": dream.is_running(),
+        "last_run": dream.last_run().await,
+    })))
+}
+
+/// `POST /api/memory/dream` — start a dream cycle in the background. Returns
+/// `202` immediately; progress lands in the server log and the run record is
+/// readable via `GET /api/memory/dream` once finished.
+pub async fn dream_trigger(
+    State(state): State<AppState>,
+    body: Option<Json<DreamTriggerParams>>,
+) -> ApiResult<(axum::http::StatusCode, Json<Value>)> {
+    let Some(dream) = state.dream.as_ref() else {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "dreaming is not available on this server (no LLM backend configured at startup)",
+        ));
+    };
+    let params = body.map(|Json(p)| p).unwrap_or_default();
+    if !dream.trigger(params.dry_run, params.force) {
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "a dream cycle is already running",
+        ));
+    }
+    Ok((
+        axum::http::StatusCode::ACCEPTED,
+        Json(json!({
+            "started": true,
+            "dry_run": params.dry_run,
+            "force": params.force,
+        })),
+    ))
 }
 
 /// `GET /api/memory/:id` — resolve one memory item or virtual-filesystem node.

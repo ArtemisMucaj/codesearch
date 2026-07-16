@@ -429,3 +429,28 @@ async fn index_stream_emits_well_formed_sse_events() {
 
     server.abort();
 }
+
+/// Dream endpoints answer 503 when the server booted without a dream service
+/// (no LLM backend at startup) instead of panicking or 404ing.
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_dream_endpoints_report_unavailable_without_service() {
+    let (base, server, _dir) = spawn_management_server().await;
+
+    let status = reqwest::get(format!("{base}/api/memory/dream"))
+        .await
+        .expect("GET /api/memory/dream failed")
+        .status();
+    assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+    let client = reqwest::Client::new();
+    let status = client
+        .post(format!("{base}/api/memory/dream"))
+        .json(&serde_json::json!({ "dry_run": true }))
+        .send()
+        .await
+        .expect("POST /api/memory/dream failed")
+        .status();
+    assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+    server.abort();
+}

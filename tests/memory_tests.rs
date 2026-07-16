@@ -690,3 +690,439 @@ async fn summarize_without_embeddings_still_stores_nodes() {
     assert_eq!(rollup.kind(), NodeKind::Memory);
     assert!(!rollup.abstract_().is_empty());
 }
+
+// ─── Dream (offline consolidation) ──────────────────────────────────────────
+
+use codesearch::{
+    DiscoveredSession, DreamOptions, MemoryDreamUseCase, MemoryItem, MemoryOperation,
+    SessionDiscovery, SessionLocator, SessionSource,
+};
+
+/// Scripted [`SessionDiscovery`] source for harvest tests.
+struct StubDiscovery {
+    sessions: Vec<DiscoveredSession>,
+    transcripts: std::collections::HashMap<String, SessionTranscript>,
+}
+
+impl StubDiscovery {
+    fn empty() -> Self {
+        Self {
+            sessions: Vec::new(),
+            transcripts: std::collections::HashMap::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl SessionDiscovery for StubDiscovery {
+    async fn discover(&self) -> Result<Vec<DiscoveredSession>, DomainError> {
+        Ok(self.sessions.clone())
+    }
+
+    async fn load_transcript(
+        &self,
+        session: &DiscoveredSession,
+    ) -> Result<SessionTranscript, DomainError> {
+        self.transcripts
+            .get(&session.id)
+            .cloned()
+            .ok_or_else(|| DomainError::invalid_input("no stubbed transcript"))
+    }
+}
+
+impl Harness {
+    fn dream_use_case(
+        &self,
+        chat: Arc<ScriptedChatClient>,
+        discovery: StubDiscovery,
+    ) -> MemoryDreamUseCase {
+        let import = self.import_use_case(Arc::clone(&chat));
+        let summary = SummarizeMemoryUseCase::new(
+            Arc::clone(&chat) as Arc<dyn ChatClient>,
+            Arc::clone(&self.memory_repo),
+            Arc::clone(&self.embedding),
+        );
+        MemoryDreamUseCase::new(
+            Arc::clone(&self.memory_repo),
+            chat as Arc<dyn ChatClient>,
+            Arc::clone(&self.embedding),
+            Arc::new(discovery),
+            import,
+            summary,
+        )
+    }
+
+    /// Seed one item with a handcrafted embedding so clustering is controllable.
+    async fn seed_item(&self, kind: MemoryKind, name: &str, content: &str, vector: &[f32]) {
+        let item = MemoryItem::new(
+            format!("id-{name}"),
+            kind,
+            name.to_string(),
+            content.to_string(),
+            None,
+            None,
+            100,
+            100,
+            0,
+        );
+        self.memory_repo
+            .upsert_item(&item, Some(vector))
+            .await
+            .unwrap();
+    }
+}
+
+/// A 384-dim unit vector along axis `axis`, tilted by `tilt` toward the next
+/// axis. `tilt = 0.0` gives orthogonal vectors (never clustered); a small tilt
+/// keeps two vectors on the same axis highly similar (always clustered).
+fn test_vector(axis: usize, tilt: f32) -> Vec<f32> {
+    let mut v = vec![0.0f32; 384];
+    v[axis] = 1.0;
+    v[(axis + 1) % 384] = tilt;
+    v
+}
+
+fn discovered(id: &str, updated_at: i64) -> DiscoveredSession {
+    DiscoveredSession {
+        source: SessionSource::Claude,
+        id: id.to_string(),
+        title: id.to_string(),
+        cwd: None,
+        updated_at,
+        message_count: 2,
+        tail_preview: String::new(),
+        approx_tokens: 10,
+        locator: SessionLocator::File(format!("{id}.jsonl")),
+    }
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[tokio::test]
+async fn dream_consolidates_duplicate_cluster() {
+    let harness = Harness::new();
+    // Two takes on the same topic, embedded close together → one cluster.
+    harness
+        .seed_item(
+            MemoryKind::Experience,
+            "db_lock_fix",
+            "Retry with backoff fixes write-lock conflicts",
+            &test_vector(0, 0.05),
+        )
+        .await;
+    harness
+        .seed_item(
+            MemoryKind::Experience,
+            "db_lock_retry",
+            "Lock conflicts vanish when writers retry",
+            &test_vector(0, 0.10),
+        )
+        .await;
+
+    // The consolidation model merges both into one canonical item and deletes
+    // the absorbed one.
+    let chat = Arc::new(ScriptedChatClient::new(vec![
+        r#"{"items": [{"kind": "experience", "name": "db_lock_fix",
+            "content": "Write-lock conflicts: writers must retry with backoff.", "scope": null}],
+            "delete": [{"kind": "experience", "name": "db_lock_retry"}]}"#,
+    ]));
+    let dream = harness.dream_use_case(Arc::clone(&chat), StubDiscovery::empty());
+
+    let report = dream.execute(&DreamOptions::default()).await.unwrap();
+
+    assert_eq!(report.outcome, "completed");
+    assert_eq!(report.clusters_found, 1);
+    assert_eq!(report.applied.len(), 2, "one merge upsert + one delete");
+    let merged = harness
+        .memory_repo
+        .find_item(MemoryKind::Experience, "db_lock_fix")
+        .await
+        .unwrap()
+        .expect("canonical item kept");
+    assert!(merged.content().contains("retry with backoff"));
+    assert!(harness
+        .memory_repo
+        .find_item(MemoryKind::Experience, "db_lock_retry")
+        .await
+        .unwrap()
+        .is_none());
+    // The run is recorded for scheduling and status.
+    let run = harness
+        .memory_repo
+        .last_dream_run()
+        .await
+        .unwrap()
+        .expect("dream run recorded");
+    assert_eq!(run.operations_applied, 2);
+    assert_eq!(run.notes, "completed");
+}
+
+#[tokio::test]
+async fn dream_skips_when_nothing_changed_since_last_run() {
+    let harness = Harness::new();
+    harness
+        .seed_item(
+            MemoryKind::Fact,
+            "stable_fact",
+            "unchanging",
+            &test_vector(0, 0.0),
+        )
+        .await;
+
+    // First cycle completes (nothing to consolidate, but no previous run).
+    let chat = Arc::new(ScriptedChatClient::new(vec![]));
+    let dream = harness.dream_use_case(Arc::clone(&chat), StubDiscovery::empty());
+    let first = dream.execute(&DreamOptions::default()).await.unwrap();
+    assert_eq!(first.outcome, "completed");
+
+    // Second cycle: no imports, no item updates since → skipped, no LLM calls.
+    let second = dream.execute(&DreamOptions::default()).await.unwrap();
+    assert_eq!(second.outcome, "skipped: nothing new to dream about");
+    assert!(chat.recorded_calls().await.is_empty());
+
+    // `force` overrides the skip.
+    let forced = dream
+        .execute(&DreamOptions {
+            force: true,
+            ..DreamOptions::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(forced.outcome, "completed");
+}
+
+#[tokio::test]
+async fn dream_rejects_deletes_outside_the_cluster() {
+    let harness = Harness::new();
+    harness
+        .seed_item(
+            MemoryKind::Fact,
+            "innocent_bystander",
+            "unrelated but precious",
+            &test_vector(5, 0.0),
+        )
+        .await;
+    harness
+        .seed_item(
+            MemoryKind::Experience,
+            "dup_a",
+            "first take",
+            &test_vector(0, 0.05),
+        )
+        .await;
+    harness
+        .seed_item(
+            MemoryKind::Experience,
+            "dup_b",
+            "second take",
+            &test_vector(0, 0.10),
+        )
+        .await;
+
+    // A misbehaving model tries to delete an item it was never shown.
+    let chat = Arc::new(ScriptedChatClient::new(vec![
+        r#"{"items": [{"kind": "experience", "name": "dup_a", "content": "merged take", "scope": null}],
+            "delete": [{"kind": "experience", "name": "dup_b"},
+                       {"kind": "fact", "name": "innocent_bystander"}]}"#,
+    ]));
+    let dream = harness.dream_use_case(chat, StubDiscovery::empty());
+    let report = dream.execute(&DreamOptions::default()).await.unwrap();
+
+    // In-cluster delete applied; out-of-cluster delete refused.
+    assert!(harness
+        .memory_repo
+        .find_item(MemoryKind::Fact, "innocent_bystander")
+        .await
+        .unwrap()
+        .is_some());
+    assert!(report
+        .skipped
+        .iter()
+        .any(|(op, reason)| matches!(op, MemoryOperation::Delete { name, .. } if name == "innocent_bystander")
+            && reason.contains("not part of the examined cluster")));
+}
+
+#[tokio::test]
+async fn dream_dry_run_plans_without_writing() {
+    let harness = Harness::new();
+    harness
+        .seed_item(
+            MemoryKind::Experience,
+            "dup_a",
+            "first take",
+            &test_vector(0, 0.05),
+        )
+        .await;
+    harness
+        .seed_item(
+            MemoryKind::Experience,
+            "dup_b",
+            "second take",
+            &test_vector(0, 0.10),
+        )
+        .await;
+
+    let chat = Arc::new(ScriptedChatClient::new(vec![
+        r#"{"items": [{"kind": "experience", "name": "dup_a", "content": "merged", "scope": null}],
+            "delete": [{"kind": "experience", "name": "dup_b"}]}"#,
+    ]));
+    let dream = harness.dream_use_case(chat, StubDiscovery::empty());
+    let report = dream
+        .execute(&DreamOptions {
+            dry_run: true,
+            ..DreamOptions::default()
+        })
+        .await
+        .unwrap();
+
+    assert!(report.dry_run);
+    assert_eq!(report.applied.len(), 2, "operations planned");
+    // Nothing was actually written or deleted.
+    let dup_b = harness
+        .memory_repo
+        .find_item(MemoryKind::Experience, "dup_b")
+        .await
+        .unwrap()
+        .expect("dry run must not delete");
+    assert_eq!(dup_b.content(), "second take");
+    let dup_a = harness
+        .memory_repo
+        .find_item(MemoryKind::Experience, "dup_a")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(dup_a.content(), "first take");
+    assert!(harness
+        .memory_repo
+        .last_dream_run()
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn dream_harvests_only_idle_unimported_sessions() {
+    let harness = Harness::new();
+    let now = now_secs();
+
+    let mut discovery = StubDiscovery::empty();
+    // One session finished two hours ago, one still active ten minutes ago.
+    discovery.sessions = vec![
+        discovered("old-session", now - 7_200),
+        discovered("fresh-session", now - 600),
+    ];
+    discovery.transcripts.insert(
+        "old-session".to_string(),
+        transcript(
+            "old-session",
+            &[
+                ("user", "please fix the flaky test"),
+                ("assistant", "done, the race was in setup"),
+            ],
+        ),
+    );
+
+    // Script: one extraction call for the harvested session. No consolidation
+    // call follows (a single item cannot form a cluster).
+    let chat = Arc::new(ScriptedChatClient::new(vec![&extraction_json((
+        "flaky_test_fix",
+        "Races in test setup cause flakiness",
+    ))]));
+    let dream = harness.dream_use_case(chat, discovery);
+    let report = dream.execute(&DreamOptions::default()).await.unwrap();
+
+    assert_eq!(report.sessions_eligible, 1, "fresh session is not eligible");
+    assert_eq!(report.sessions_imported, 1);
+    assert!(harness
+        .memory_repo
+        .find_session("old-session")
+        .await
+        .unwrap()
+        .is_some());
+    assert!(harness
+        .memory_repo
+        .find_session("fresh-session")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(harness
+        .memory_repo
+        .find_item(MemoryKind::Preference, "flaky_test_fix")
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn dream_reflection_writes_but_never_deletes() {
+    let harness = Harness::new();
+    // Four items on orthogonal axes: no clusters, but enough for reflection.
+    for (i, name) in ["exp_one", "exp_two", "exp_three", "exp_four"]
+        .iter()
+        .enumerate()
+    {
+        harness
+            .seed_item(
+                MemoryKind::Experience,
+                name,
+                "ran the migration checklist before deploying",
+                &test_vector(i * 3, 0.0),
+            )
+            .await;
+    }
+
+    // Reflection promotes the repeated experiences to a skill, and (illegally)
+    // tries to delete one of them.
+    let chat = Arc::new(ScriptedChatClient::new(vec![
+        r#"{"items": [{"kind": "skill", "name": "migration_checklist",
+            "content": "Before deploying: run the migration checklist.", "scope": null}],
+            "delete": [{"kind": "experience", "name": "exp_one"}]}"#,
+    ]));
+    let dream = harness.dream_use_case(chat, StubDiscovery::empty());
+    let report = dream.execute(&DreamOptions::default()).await.unwrap();
+
+    assert!(harness
+        .memory_repo
+        .find_item(MemoryKind::Skill, "migration_checklist")
+        .await
+        .unwrap()
+        .is_some());
+    assert!(
+        harness
+            .memory_repo
+            .find_item(MemoryKind::Experience, "exp_one")
+            .await
+            .unwrap()
+            .is_some(),
+        "reflection must not delete"
+    );
+    assert!(report
+        .skipped
+        .iter()
+        .any(|(op, _)| matches!(op, MemoryOperation::Delete { name, .. } if name == "exp_one")));
+}
+
+#[tokio::test]
+async fn dream_run_round_trips_through_repository() {
+    let harness = Harness::new();
+    let run = codesearch::DreamRun {
+        id: "run-1".to_string(),
+        started_at: 10,
+        finished_at: 20,
+        sessions_imported: 3,
+        clusters_found: 2,
+        operations_applied: 5,
+        operations_skipped: 1,
+        notes: "completed".to_string(),
+    };
+    harness.memory_repo.record_dream_run(&run).await.unwrap();
+    let loaded = harness.memory_repo.last_dream_run().await.unwrap().unwrap();
+    assert_eq!(loaded.id, "run-1");
+    assert_eq!(loaded.sessions_imported, 3);
+    assert_eq!(loaded.notes, "completed");
+}

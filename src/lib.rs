@@ -9,17 +9,18 @@ pub use application::{
     ChannelEndpointRepository, ChannelExtractor, ChannelLinkOptions, ChannelLinkReport,
     ChannelLinkUseCase, ChannelOverview, ChannelResolver, ChatClient, ClusterDetectionUseCase,
     CommunityNamingUseCase, ContextNode, CouplingDetectionUseCase, DeleteRepositoryUseCase,
-    EmbeddingService, ExecutionFeaturesUseCase, ExplainResult, ExplainUseCase, ExtractionReport,
-    FileHashRepository, FileRelationshipUseCase, GraphExpansionUseCase, ImpactAnalysis,
-    ImpactAnalysisUseCase, ImpactNode, ImportOutcome, ImportSessionUseCase, IndexRepositoryUseCase,
-    LanguageShare, ListRepositoriesUseCase, MemoryBrowseUseCase, MemoryExtractionUseCase,
+    DreamOptions, DreamReport, EmbeddingService, ExecutionFeaturesUseCase, ExplainResult,
+    ExplainUseCase, ExtractionReport, FileHashRepository, FileRelationshipUseCase,
+    GraphExpansionUseCase, HarvestReport, ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode,
+    ImportOutcome, ImportSessionUseCase, IndexRepositoryUseCase, LanguageShare,
+    ListRepositoriesUseCase, MemoryBrowseUseCase, MemoryDreamUseCase, MemoryExtractionUseCase,
     MemoryLevel, MemoryRepository, MemoryRow, MemorySearchUseCase, MetadataRepository,
     ModuleDependency, ModuleOverview, OverviewOptions, OverviewReport, OverviewStats,
     ParserService, QueryExpander, RepositoryOverviewUseCase, RerankingService,
     ResolveChannelsUseCase, ResolvedConfigValue, RowTarget, Scip, SearchCodeUseCase,
-    SkippedSection, SnippetLookupUseCase, SummarizeMemoryUseCase, SymbolClusterDetectionUseCase,
-    SymbolContext, SymbolContextUseCase, VectorRepository, MEMORY_ROOT_URI, RESOURCES_ROOT_URI,
-    SESSIONS_ROOT_URI,
+    SessionDiscovery, SkippedSection, SnippetLookupUseCase, SummarizeMemoryUseCase,
+    SymbolClusterDetectionUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
+    MEMORY_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
 };
 
 pub use application::resource_slug;
@@ -38,6 +39,7 @@ pub use connector::adapter::{
 
 pub use connector::adapter::management::{
     routes as management_routes, run_management_server, AppState as ManagementAppState,
+    DreamService,
 };
 
 pub use connector::{
@@ -53,11 +55,12 @@ pub use connector::{
 pub use domain::{
     compute_file_hash, stable_community_id, ChannelEdge, ChannelEndpoint, ChannelRole, Cluster,
     ClusterGraph, CodeChunk, CommunityCoupling, CouplingElement, CouplingElementKind,
-    CouplingReport, DiscoveredSession, DomainError, Embedding, EmbeddingConfig, EndpointSource,
-    ExecutionFeature, FeatureNode, FileHash, ImportedSession, IndexingStatus, Language, MemoryItem,
-    MemoryKind, MemoryNode, MemoryOperation, NodeKind, NodeType, Protocol, ReferenceKind,
-    Repository, SearchQuery, SearchResult, SessionLocator, SessionMessage, SessionSource,
-    SessionTranscript, SymbolCommunity, SymbolCommunityGraph, SymbolReference, VectorStore,
+    CouplingReport, DiscoveredSession, DomainError, DreamRun, Embedding, EmbeddingConfig,
+    EndpointSource, ExecutionFeature, FeatureNode, FileHash, ImportedSession, IndexingStatus,
+    Language, MemoryItem, MemoryKind, MemoryNode, MemoryOperation, NodeKind, NodeType, Protocol,
+    ReferenceKind, Repository, SearchQuery, SearchResult, SessionLocator, SessionMessage,
+    SessionSource, SessionTranscript, SymbolCommunity, SymbolCommunityGraph, SymbolReference,
+    VectorStore,
 };
 
 pub use domain::{CommunityMeta, GraphEdge, GraphLevel, GraphNode, GraphView};

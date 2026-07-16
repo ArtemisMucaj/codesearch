@@ -367,8 +367,24 @@ async fn main() -> Result<()> {
 
         let container = Arc::new(Container::new(config).await?);
 
+        // Dream scheduler: harvests finished sessions and consolidates memory
+        // on the configured cadence (config.json `memory` section). Built
+        // best-effort — a server without a usable LLM backend still serves,
+        // it just cannot dream.
+        let dream = match codesearch::DreamService::build(&container) {
+            Ok(service) => {
+                tokio::spawn(Arc::clone(&service).run_scheduler());
+                Some(service)
+            }
+            Err(e) => {
+                tracing::warn!("dreaming disabled: {e:#}");
+                None
+            }
+        };
+
         let mcp = run_http_server(container.clone(), serve_mcp_port, serve_public);
-        let mgmt = codesearch::run_management_server(container, serve_mgmt_port, serve_public);
+        let mgmt =
+            codesearch::run_management_server(container, serve_mgmt_port, serve_public, dream);
 
         tracing::info!(
             "codesearch serve: MCP on port {}, management API on port {}",

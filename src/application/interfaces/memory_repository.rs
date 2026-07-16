@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 
-use crate::domain::{DomainError, ImportedSession, MemoryItem, MemoryKind, MemoryNode, NodeKind};
+use crate::domain::{
+    DomainError, DreamRun, ImportedSession, MemoryItem, MemoryKind, MemoryNode, NodeKind,
+};
 
 /// Persistence port for long-term memory items and imported-session records.
 ///
@@ -55,6 +57,11 @@ pub trait MemoryRepository: Send + Sync {
         limit: usize,
     ) -> Result<Vec<(MemoryItem, f32)>, DomainError>;
 
+    /// Stored embedding for every item that has one, as `(item_id, vector)`.
+    /// Items without a vector (embeddings disabled at write time) are omitted.
+    /// Used by dream consolidation to cluster near-duplicate memories.
+    async fn list_item_vectors(&self) -> Result<Vec<(String, Vec<f32>)>, DomainError>;
+
     /// Record that a session has been imported (idempotence marker).
     async fn record_session(&self, session: &ImportedSession) -> Result<(), DomainError>;
 
@@ -103,6 +110,14 @@ pub trait MemoryRepository: Send + Sync {
         kind: Option<NodeKind>,
         limit: usize,
     ) -> Result<Vec<(MemoryNode, f32)>, DomainError>;
+
+    // ── Dream runs ───────────────────────────────────────────────────────
+
+    /// Record a completed dream cycle.
+    async fn record_dream_run(&self, run: &DreamRun) -> Result<(), DomainError>;
+
+    /// The most recently finished dream run, if any.
+    async fn last_dream_run(&self) -> Result<Option<DreamRun>, DomainError>;
 
     /// Aggregate memory-store statistics: item counts by kind, session count,
     /// and node counts by kind.

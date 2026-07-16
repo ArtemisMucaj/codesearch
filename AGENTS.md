@@ -85,6 +85,7 @@ The codebase follows **Domain-Driven Design (DDD)** with a strict **Ports & Adap
 | File / cross-repo relationship graph (`uses`) | `src/application/use_cases/file_relationship.rs` |
 | Combined repository overview (`overview`) | `src/application/use_cases/repository_overview.rs` |
 | Source snippet lookup | `src/application/use_cases/snippet_lookup.rs` |
+| Memory dream (harvest finished sessions + consolidate the memory store) | `src/application/use_cases/memory_dream.rs` |
 | List / delete repositories | `src/application/use_cases/{list,delete}_repository.rs` |
 
 ### Dependency Injection
@@ -182,7 +183,7 @@ how release binaries locate ONNX Runtime and must not ship by default.
 
 Three interchangeable [`ChatClient`](src/application/interfaces/chat_client.rs)
 backends power LLM features (query expansion, `explain`, community naming, memory
-extraction). Select one with the global `--llm-target`:
+extraction, memory dreaming). Select one with the global `--llm-target`:
 
 | `--llm-target` | Backend | Config |
 |---|---|---|

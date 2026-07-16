@@ -41,12 +41,25 @@ const OPENAPI_JSON: &str = include_str!("../../../../docs/management-api.openapi
 pub struct AppState {
     /// The dependency-injection container wiring adapters to use cases.
     pub container: Arc<Container>,
+    /// Dream scheduler state, present when `serve` runs with dreaming
+    /// available (an LLM backend could be built). `None` disables the
+    /// `/api/memory/dream` endpoints.
+    pub dream: Option<Arc<super::DreamService>>,
 }
 
 impl AppState {
     /// Build the shared state from an already-constructed container.
     pub fn new(container: Arc<Container>) -> Self {
-        Self { container }
+        Self {
+            container,
+            dream: None,
+        }
+    }
+
+    /// Attach the dream scheduler state (serve mode).
+    pub fn with_dream(mut self, dream: Option<Arc<super::DreamService>>) -> Self {
+        self.dream = dream;
+        self
     }
 }
 
@@ -98,6 +111,11 @@ pub fn routes(state: AppState) -> Router {
         .route("/api/memory/stats", get(handlers::memory::stats))
         .route("/api/memory/sessions", get(handlers::memory::sessions))
         .route("/api/memory/tree", get(handlers::memory::tree))
+        // Dream (offline memory consolidation) status + manual trigger.
+        .route(
+            "/api/memory/dream",
+            get(handlers::memory::dream_status).post(handlers::memory::dream_trigger),
+        )
         .route("/api/memory/{id}", get(handlers::memory::get))
         // LLM backend introspection + runtime configuration.
         .route("/api/llm/models", get(handlers::llm::models))
@@ -158,6 +176,8 @@ async fn index(State(_state): State<AppState>) -> Json<Value> {
             { "method": "GET", "path": "/api/memory/stats", "description": "memory item/session counts" },
             { "method": "GET", "path": "/api/memory/sessions", "description": "imported sessions" },
             { "method": "GET", "path": "/api/memory/tree", "description": "browse the memory filesystem (?uri=)" },
+            { "method": "GET", "path": "/api/memory/dream", "description": "dream scheduler status + last run" },
+            { "method": "POST", "path": "/api/memory/dream", "description": "trigger a dream cycle ({dry_run?, force?})" },
             { "method": "GET", "path": "/api/memory/{id}", "description": "one memory item or node" },
             { "method": "GET", "path": "/api/openapi.json", "description": "OpenAPI 3.1 description of this API" },
             { "method": "GET/POST", "path": "/api/stream/explain/{symbol}", "description": "SSE: stream an LLM call-flow explanation for a symbol" },
@@ -185,18 +205,19 @@ async fn openapi() -> impl IntoResponse {
 ///
 /// This intentionally mirrors the MCP HTTP server's lifecycle so both can be
 /// driven concurrently from `main` (e.g. via `tokio::select!`).
-#[tracing::instrument(skip(container), fields(port, public))]
+#[tracing::instrument(skip(container, dream), fields(port, public))]
 pub async fn run_management_server(
     container: Arc<Container>,
     port: u16,
     public: bool,
+    dream: Option<Arc<super::DreamService>>,
 ) -> Result<()> {
     let bind_addr: [u8; 4] = if public { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
     let addr = SocketAddr::from((bind_addr, port));
 
     tracing::info!("Starting codesearch management API on {}", addr);
 
-    let state = AppState::new(container);
+    let state = AppState::new(container).with_dream(dream);
     let app = routes(state);
 
     let listener = tokio::net::TcpListener::bind(addr)

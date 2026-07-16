@@ -394,7 +394,7 @@ fn parse_operations(
 /// context and, inside strings, passes valid JSON escapes through untouched
 /// while escaping anything else so the result parses. Text outside strings is
 /// left exactly as-is.
-fn repair_json_string_escapes(json: &str) -> String {
+pub(crate) fn repair_json_string_escapes(json: &str) -> String {
     let mut out = String::with_capacity(json.len() + json.len() / 16);
     let mut in_string = false;
     let mut chars = json.chars().peekable();
@@ -435,7 +435,7 @@ fn repair_json_string_escapes(json: &str) -> String {
 }
 
 /// Extract the first balanced `{ ... }` object from mixed model output.
-fn extract_json_object(text: &str) -> Option<&str> {
+pub(crate) fn extract_json_object(text: &str) -> Option<&str> {
     let start = text.find('{')?;
     let mut depth = 0usize;
     let mut in_string = false;
@@ -467,7 +467,7 @@ fn extract_json_object(text: &str) -> Option<&str> {
 }
 
 /// Normalize an item name to lowercase snake_case; `None` when empty.
-fn normalize_name(raw: &str) -> Option<String> {
+pub(crate) fn normalize_name(raw: &str) -> Option<String> {
     let name: String = raw
         .trim()
         .to_lowercase()

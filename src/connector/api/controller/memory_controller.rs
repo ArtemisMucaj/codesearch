@@ -4,8 +4,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use crate::application::{
-    resource_slug, ChatClient, ImportOutcome, ImportSessionUseCase, MEMORY_ROOT_URI,
-    RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
+    resource_slug, ChatClient, DreamOptions, DreamReport, ImportOutcome, ImportSessionUseCase,
+    MEMORY_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
 };
 use crate::cli::{LlmTarget, MemoryKindArg, OutputFormatTextJson};
 use crate::connector::adapter::{
@@ -374,6 +374,25 @@ impl<'a> MemoryController<'a> {
         }
     }
 
+    /// Run one dream cycle and render its report.
+    pub async fn dream(
+        &self,
+        llm: LlmTarget,
+        dry_run: bool,
+        force: bool,
+        idle_minutes: u64,
+    ) -> Result<String> {
+        let chat_client = self.chat_client(llm)?;
+        let use_case = self.container.memory_dream_use_case(chat_client)?;
+        let options = DreamOptions {
+            session_idle_secs: (idle_minutes * 60) as i64,
+            dry_run,
+            force,
+        };
+        let report = use_case.execute(&options).await?;
+        Ok(render_dream_report(&report))
+    }
+
     pub async fn sessions(&self, format: OutputFormatTextJson) -> Result<String> {
         let repo = self.container.memory_repository()?;
         let sessions = repo.list_sessions().await?;
@@ -542,6 +561,57 @@ fn render_import_outcome(outcome: &ImportOutcome, multiple: bool) -> String {
             output
         }
     }
+}
+
+/// Render a dream report for the CLI: harvest counts, then the operations,
+/// then guardrail skips.
+fn render_dream_report(report: &DreamReport) -> String {
+    let mut out = String::new();
+    if report.dry_run {
+        out.push_str("Dream (dry run — nothing was applied)\n");
+    } else {
+        out.push_str("Dream cycle finished\n");
+    }
+    out.push_str(&format!(
+        "  sessions: {} finished and not yet imported, {} imported\n",
+        report.sessions_eligible, report.sessions_imported
+    ));
+    out.push_str(&format!(
+        "  consolidation clusters examined: {}\n",
+        report.clusters_found
+    ));
+    if report.outcome.starts_with("skipped") {
+        out.push_str(&format!("  {}\n", report.outcome));
+        return out;
+    }
+    if report.applied.is_empty() {
+        out.push_str("  memory already consolidated — no operations\n");
+    } else {
+        let verb = if report.dry_run { "planned" } else { "applied" };
+        out.push_str(&format!(
+            "  {} operation(s) {verb}:\n",
+            report.applied.len()
+        ));
+        for op in &report.applied {
+            match op {
+                MemoryOperation::Upsert { kind, name, .. } => {
+                    out.push_str(&format!("    + [{kind}] {name}\n"));
+                }
+                MemoryOperation::Delete { kind, name } => {
+                    out.push_str(&format!("    - [{kind}] {name}\n"));
+                }
+            }
+        }
+    }
+    for (op, reason) in &report.skipped {
+        let (kind, name) = match op {
+            MemoryOperation::Upsert { kind, name, .. } | MemoryOperation::Delete { kind, name } => {
+                (kind, name)
+            }
+        };
+        out.push_str(&format!("    ~ [{kind}] {name} skipped: {reason}\n"));
+    }
+    out
 }
 
 fn render_item(item: &MemoryItem) -> String {

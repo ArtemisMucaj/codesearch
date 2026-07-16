@@ -8,8 +8,8 @@ use tracing::{debug, warn};
 use crate::application::{
     AnalysisRepository, CallGraphRepository, CallGraphUseCase, ChannelEndpointRepository,
     ChannelLinkUseCase, ChatClient, FileHashRepository, ImportSessionUseCase, MemoryBrowseUseCase,
-    MemoryExtractionUseCase, MemoryRepository, MemorySearchUseCase, MetadataRepository,
-    QueryExpander, SummarizeMemoryUseCase,
+    MemoryDreamUseCase, MemoryExtractionUseCase, MemoryRepository, MemorySearchUseCase,
+    MetadataRepository, QueryExpander, SummarizeMemoryUseCase,
 };
 use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::scip::ScipRunner;
@@ -851,6 +851,29 @@ impl Container {
         Ok(MemoryBrowseUseCase::new(
             self.memory_repository()?,
             self.embedding_service.clone(),
+        ))
+    }
+
+    /// The dream cycle (harvest finished sessions + consolidate the memory
+    /// store), driven by the given chat model.
+    pub fn memory_dream_use_case(
+        &self,
+        chat_client: Arc<dyn ChatClient>,
+    ) -> Result<MemoryDreamUseCase> {
+        let memory_repo = self.memory_repository()?;
+        let import = self.memory_import_use_case(Arc::clone(&chat_client))?;
+        let summary = SummarizeMemoryUseCase::new(
+            Arc::clone(&chat_client),
+            Arc::clone(&memory_repo),
+            self.embedding_service.clone(),
+        );
+        Ok(MemoryDreamUseCase::new(
+            memory_repo,
+            chat_client,
+            self.embedding_service.clone(),
+            Arc::new(crate::connector::adapter::LocalSessionDiscovery),
+            import,
+            summary,
         ))
     }
 

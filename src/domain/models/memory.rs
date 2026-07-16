@@ -354,6 +354,29 @@ impl MemoryNode {
     }
 }
 
+/// Record of one completed dream cycle — the offline consolidation pass that
+/// harvests finished sessions and reorganizes the memory store.
+///
+/// Stored so the next cycle can tell whether anything changed since the last
+/// one (and skip itself when nothing did), and so users can inspect what
+/// dreaming has been doing (`memory dream --status`, `GET /api/memory/dream`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DreamRun {
+    pub id: String,
+    pub started_at: i64,
+    pub finished_at: i64,
+    /// Finished sessions discovered and imported by the harvest phase.
+    pub sessions_imported: usize,
+    /// Near-duplicate/contradiction clusters examined by consolidation.
+    pub clusters_found: usize,
+    /// Memory operations applied across all phases.
+    pub operations_applied: usize,
+    /// Operations proposed by the model but rejected by a guardrail.
+    pub operations_skipped: usize,
+    /// Free-form outcome note (e.g. `"completed"`, `"skipped: nothing new"`).
+    pub notes: String,
+}
+
 /// A single write/delete decided by the extraction model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemoryOperation {

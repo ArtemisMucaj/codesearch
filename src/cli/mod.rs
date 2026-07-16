@@ -353,6 +353,35 @@ pub enum MemorySubcommand {
         llm: LlmTarget,
     },
 
+    /// Run one dream cycle: harvest finished sessions, then consolidate the
+    /// memory store.
+    ///
+    /// Harvest imports sessions that have been inactive for at least the idle
+    /// window and were never imported. Consolidation clusters near-duplicate
+    /// memories by embedding similarity and asks the configured LLM to merge
+    /// them — resolving contradictions into boundary insights ("X holds in
+    /// context A, Y in context B") rather than dropping a side — then a
+    /// reflection pass promotes cross-session patterns (repeated experiences
+    /// into a skill, per-project facts into globals). `codesearch serve` runs
+    /// this automatically on a schedule; this command runs one cycle now.
+    Dream {
+        /// LLM provider: 'open-ai' (default), 'anthropic', or 'copilot'.
+        #[arg(long, value_enum, default_value = "open-ai")]
+        llm: LlmTarget,
+
+        /// Plan and print the operations without applying anything.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Dream even when nothing changed since the last cycle.
+        #[arg(short, long)]
+        force: bool,
+
+        /// Minutes a session must be inactive to count as finished.
+        #[arg(long, default_value = "60")]
+        idle_minutes: u64,
+    },
+
     /// Browse the memory virtual filesystem (L0/L1 abstracts).
     ///
     /// With no URI, lists the top-level roots (the whole-memory rollup and the

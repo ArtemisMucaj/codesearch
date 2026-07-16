@@ -192,6 +192,65 @@ to pull the specific preferences, experiences, and facts a task needs. The MCP
 server holds a single shared connection to `memory.duckdb`, so concurrent
 tool calls do not contend for DuckDB's single-writer lock.
 
+## Dreaming (offline consolidation)
+
+Per-session extraction only merges new information into the handful of
+memories it prefetches, so duplicates, contradictions, and cross-session
+patterns accumulate between items that were never in the same extraction
+context. A **dream cycle** is the global pass that cleans this up, in four
+phases:
+
+1. **Harvest** — discover finished sessions (Claude Code / OpenCode / Zed,
+   inactive for at least the idle window, never imported) and run them through
+   the regular import pipeline.
+2. **Consolidate** — cluster near-duplicate items by embedding similarity and
+   ask the model to merge each cluster. Contradictions are treated as the most
+   valuable signal: conflicting memories become one item carrying the boundary
+   insight ("retry works on the connection pool, not under an open
+   transaction") instead of silently dropping a side.
+3. **Reflect** — one pass over the whole store proposing a few higher-level
+   items: repeated experiences promoted to a `skill`, the same fact recorded
+   under several project scopes generalized to one global item.
+4. **Refresh** — regenerate the `memory://memory` rollup and record the run in
+   `memory_dream_runs`.
+
+Guardrails bound the blast radius of a misbehaving model: operations are
+capped per cycle, consolidation may only delete items in the cluster it was
+shown, reflection may not delete at all, total deletions are limited to a
+fraction of the store, and a cycle is skipped entirely when nothing changed
+since the last one.
+
+```bash
+# Run one cycle now
+codesearch memory dream
+
+# See what it would do without writing anything
+codesearch memory dream --dry-run
+
+# Dream even if nothing changed since the last cycle
+codesearch memory dream --force
+```
+
+`codesearch serve` schedules dreaming automatically: a sweep every 15 minutes
+imports freshly finished sessions, and a full cycle runs every 4 hours
+(persisted across restarts via the last-run record). Configure it in the
+`memory` section of `~/.codesearch/config.json`:
+
+```jsonc
+{
+  "memory": {
+    "dream_enabled": true,        // scheduled dreaming in serve mode
+    "dream_interval_hours": 4,
+    "session_idle_minutes": 60,   // when a session counts as finished
+    "auto_import": true           // the 15-minute harvest sweep
+  }
+}
+```
+
+The management API exposes the same controls: `GET /api/memory/dream` returns
+scheduler status plus the last run, and `POST /api/memory/dream` (optional
+body `{"dry_run": bool, "force": bool}`) triggers a cycle in the background.
+
 ## Update semantics
 
 Updates use a rewrite-merge suited to a single-model pass: the extraction
@@ -216,6 +275,11 @@ Following the ports & adapters layering:
 - `src/application/use_cases/import_session.rs` — idempotence + session
   recording around extraction + summarization.
 - `src/application/use_cases/memory_search.rs` — hybrid recall with RRF.
+- `src/application/use_cases/memory_dream.rs` (+ `_prompt.rs`) — the dream
+  cycle: harvest → similarity clustering → consolidation/reflection → rollup
+  refresh, with per-phase guardrails.
+- `src/connector/adapter/management/dream.rs` — the serve-mode scheduler and
+  the shared state behind `GET/POST /api/memory/dream`.
 - `src/connector/adapter/claude_transcript.rs` — transcript parser.
 - `src/connector/adapter/duckdb_memory_repository.rs` — the
   `memory.duckdb` adapter.

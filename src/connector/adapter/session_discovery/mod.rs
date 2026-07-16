@@ -20,6 +20,31 @@ use crate::domain::{
     DiscoveredSession, DomainError, SessionLocator, SessionSource, SessionTranscript,
 };
 
+/// [`crate::application::SessionDiscovery`] adapter over the local session
+/// stores, used by the dream use case to harvest finished sessions. Discovery
+/// and transcript loading are blocking file/SQLite I/O, so both are pushed off
+/// the async runtime via `spawn_blocking`.
+pub struct LocalSessionDiscovery;
+
+#[async_trait::async_trait]
+impl crate::application::SessionDiscovery for LocalSessionDiscovery {
+    async fn discover(&self) -> Result<Vec<DiscoveredSession>, DomainError> {
+        tokio::task::spawn_blocking(discover_all_sessions)
+            .await
+            .map_err(|e| DomainError::internal(format!("session discovery task panicked: {e}")))
+    }
+
+    async fn load_transcript(
+        &self,
+        session: &DiscoveredSession,
+    ) -> Result<SessionTranscript, DomainError> {
+        let owned = session.clone();
+        tokio::task::spawn_blocking(move || load_transcript(&owned))
+            .await
+            .map_err(|e| DomainError::internal(format!("transcript load task panicked: {e}")))?
+    }
+}
+
 /// Characters of end-of-session preview surfaced in the picker.
 pub(crate) const PREVIEW_CHARS: usize = 240;
 

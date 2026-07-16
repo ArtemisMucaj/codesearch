@@ -18,19 +18,45 @@
     }
   ],
   "tags": [
-    { "name": "meta", "description": "Server metadata and health." },
-    { "name": "repositories", "description": "Indexed repositories and index-wide statistics." },
-    { "name": "search", "description": "Hybrid semantic + keyword code search." },
-    { "name": "graph", "description": "Call-graph queries: impact, context, cross-repo uses, execution features." },
-    { "name": "clusters", "description": "Architectural (file-level) and symbol-level community detection." },
-    { "name": "channels", "description": "Cross-service channel links." },
-    { "name": "memory", "description": "Read-only queries over long-term memory." },
-    { "name": "stream", "description": "Long-running / token-streaming operations over SSE." }
+    {
+      "name": "meta",
+      "description": "Server metadata and health."
+    },
+    {
+      "name": "repositories",
+      "description": "Indexed repositories and index-wide statistics."
+    },
+    {
+      "name": "search",
+      "description": "Hybrid semantic + keyword code search."
+    },
+    {
+      "name": "graph",
+      "description": "Call-graph queries: impact, context, cross-repo uses, execution features."
+    },
+    {
+      "name": "clusters",
+      "description": "Architectural (file-level) and symbol-level community detection."
+    },
+    {
+      "name": "channels",
+      "description": "Cross-service channel links."
+    },
+    {
+      "name": "memory",
+      "description": "Read-only queries over long-term memory."
+    },
+    {
+      "name": "stream",
+      "description": "Long-running / token-streaming operations over SSE."
+    }
   ],
   "paths": {
     "/health": {
       "get": {
-        "tags": ["meta"],
+        "tags": [
+          "meta"
+        ],
         "summary": "Liveness/readiness probe",
         "operationId": "health",
         "responses": {
@@ -38,8 +64,13 @@
             "description": "Server is up.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Health" },
-                "example": { "status": "ok", "version": "0.1.0" }
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                },
+                "example": {
+                  "status": "ok",
+                  "version": "0.1.0"
+                }
               }
             }
           }
@@ -48,7 +79,9 @@
     },
     "/api": {
       "get": {
-        "tags": ["meta"],
+        "tags": [
+          "meta"
+        ],
         "summary": "API index",
         "description": "Self-describing document listing the currently available endpoints. Also served at `/`.",
         "operationId": "apiIndex",
@@ -57,7 +90,9 @@
             "description": "API index document.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ApiIndex" }
+                "schema": {
+                  "$ref": "#/components/schemas/ApiIndex"
+                }
               }
             }
           }
@@ -66,20 +101,30 @@
     },
     "/api/openapi.json": {
       "get": {
-        "tags": ["meta"],
+        "tags": [
+          "meta"
+        ],
         "summary": "OpenAPI description of this API",
         "operationId": "openapi",
         "responses": {
           "200": {
             "description": "This OpenAPI 3.1 document.",
-            "content": { "application/json": { "schema": { "type": "object" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
           }
         }
       }
     },
     "/api/repositories": {
       "get": {
-        "tags": ["repositories"],
+        "tags": [
+          "repositories"
+        ],
         "summary": "List indexed repositories",
         "operationId": "listRepositories",
         "responses": {
@@ -89,11 +134,15 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": ["repositories"],
+                  "required": [
+                    "repositories"
+                  ],
                   "properties": {
                     "repositories": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/Repository" }
+                      "items": {
+                        "$ref": "#/components/schemas/Repository"
+                      }
                     }
                   }
                 }
@@ -110,11 +159,15 @@
           "in": "path",
           "required": true,
           "description": "Repository name or UUID.",
-          "schema": { "type": "string" }
+          "schema": {
+            "type": "string"
+          }
         }
       ],
       "get": {
-        "tags": ["repositories"],
+        "tags": [
+          "repositories"
+        ],
         "summary": "Get one repository plus its architecture overview",
         "description": "Returns the repository fields plus `architecture_overview`, a best-effort Markdown cluster summary (empty string when the repository has no call graph).",
         "operationId": "getRepository",
@@ -125,7 +178,9 @@
               "application/json": {
                 "schema": {
                   "allOf": [
-                    { "$ref": "#/components/schemas/Repository" },
+                    {
+                      "$ref": "#/components/schemas/Repository"
+                    },
                     {
                       "type": "object",
                       "properties": {
@@ -142,12 +197,20 @@
           },
           "404": {
             "description": "No repository matches the id/name.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       },
       "delete": {
-        "tags": ["repositories"],
+        "tags": [
+          "repositories"
+        ],
         "summary": "Delete a repository",
         "description": "Deletes by ID, falling back to deletion by path when the ID is not found.",
         "operationId": "deleteRepository",
@@ -158,10 +221,20 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": ["deleted", "id"],
+                  "required": [
+                    "deleted",
+                    "id"
+                  ],
                   "properties": {
-                    "deleted": { "type": "boolean", "enum": [true] },
-                    "id": { "type": "string" }
+                    "deleted": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "id": {
+                      "type": "string"
+                    }
                   }
                 }
               }
@@ -169,14 +242,22 @@
           },
           "404": {
             "description": "No repository matches the id or path.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
     },
     "/api/stats": {
       "get": {
-        "tags": ["repositories"],
+        "tags": [
+          "repositories"
+        ],
         "summary": "Index-wide statistics",
         "operationId": "stats",
         "responses": {
@@ -184,7 +265,9 @@
             "description": "Aggregate counts across all repositories in the namespace.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Stats" }
+                "schema": {
+                  "$ref": "#/components/schemas/Stats"
+                }
               }
             }
           }
@@ -193,14 +276,18 @@
     },
     "/api/search": {
       "post": {
-        "tags": ["search"],
+        "tags": [
+          "search"
+        ],
         "summary": "Hybrid semantic + keyword code search",
         "operationId": "search",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/SearchRequest" }
+              "schema": {
+                "$ref": "#/components/schemas/SearchRequest"
+              }
             }
           }
         },
@@ -211,12 +298,19 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": ["count", "results"],
+                  "required": [
+                    "count",
+                    "results"
+                  ],
                   "properties": {
-                    "count": { "type": "integer" },
+                    "count": {
+                      "type": "integer"
+                    },
                     "results": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/SearchHit" }
+                      "items": {
+                        "$ref": "#/components/schemas/SearchHit"
+                      }
                     }
                   }
                 }
@@ -228,7 +322,9 @@
     },
     "/api/impact": {
       "post": {
-        "tags": ["graph"],
+        "tags": [
+          "graph"
+        ],
         "summary": "Blast radius of changing a symbol",
         "description": "BFS up the call graph from the given symbol. Returns the serialized `ImpactAnalysis` domain value.",
         "operationId": "impact",
@@ -236,7 +332,9 @@
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/ImpactRequest" }
+              "schema": {
+                "$ref": "#/components/schemas/ImpactRequest"
+              }
             }
           }
         },
@@ -245,13 +343,21 @@
             "description": "Impact analysis for the symbol.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ImpactAnalysis" }
+                "schema": {
+                  "$ref": "#/components/schemas/ImpactAnalysis"
+                }
               }
             }
           },
           "404": {
             "description": "The symbol was not found in the call graph.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -263,25 +369,34 @@
           "in": "path",
           "required": true,
           "description": "Symbol name, or regex when `regex=true`.",
-          "schema": { "type": "string" }
+          "schema": {
+            "type": "string"
+          }
         },
         {
           "name": "repository",
           "in": "query",
           "required": false,
           "description": "Restrict to a repository (name or UUID).",
-          "schema": { "type": "string" }
+          "schema": {
+            "type": "string"
+          }
         },
         {
           "name": "regex",
           "in": "query",
           "required": false,
           "description": "Interpret `{symbol}` as a regular expression.",
-          "schema": { "type": "boolean", "default": false }
+          "schema": {
+            "type": "boolean",
+            "default": false
+          }
         }
       ],
       "get": {
-        "tags": ["graph"],
+        "tags": [
+          "graph"
+        ],
         "summary": "Callers and callees of a symbol",
         "description": "Returns the serialized `SymbolContext` domain value (callers up to entry points, callees down to leaves).",
         "operationId": "context",
@@ -290,20 +405,30 @@
             "description": "Symbol context.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/SymbolContext" }
+                "schema": {
+                  "$ref": "#/components/schemas/SymbolContext"
+                }
               }
             }
           },
           "404": {
             "description": "The symbol was not found.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
     },
     "/api/uses": {
       "get": {
-        "tags": ["graph"],
+        "tags": [
+          "graph"
+        ],
         "summary": "Cross-repo file dependencies",
         "description": "Files in `from` that reference symbols defined in `to`.",
         "operationId": "uses",
@@ -313,14 +438,18 @@
             "in": "query",
             "required": true,
             "description": "Repository doing the using (name or UUID).",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "to",
             "in": "query",
             "required": true,
             "description": "Repository being used (name or UUID).",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -330,13 +459,23 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": ["from", "to", "edges"],
+                  "required": [
+                    "from",
+                    "to",
+                    "edges"
+                  ],
                   "properties": {
-                    "from": { "$ref": "#/components/schemas/RepoRef" },
-                    "to": { "$ref": "#/components/schemas/RepoRef" },
+                    "from": {
+                      "$ref": "#/components/schemas/RepoRef"
+                    },
+                    "to": {
+                      "$ref": "#/components/schemas/RepoRef"
+                    },
                     "edges": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/FileEdge" }
+                      "items": {
+                        "$ref": "#/components/schemas/FileEdge"
+                      }
                     }
                   }
                 }
@@ -345,14 +484,22 @@
           },
           "404": {
             "description": "Either repository was not found.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
     },
     "/api/features": {
       "get": {
-        "tags": ["graph"],
+        "tags": [
+          "graph"
+        ],
         "summary": "Entry-point execution features by criticality",
         "operationId": "features",
         "parameters": [
@@ -361,14 +508,19 @@
             "in": "query",
             "required": false,
             "description": "Repository to analyse (name or UUID). Omit to auto-detect.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "limit",
             "in": "query",
             "required": false,
             "description": "Maximum number of features to return.",
-            "schema": { "type": "integer", "default": 20 }
+            "schema": {
+              "type": "integer",
+              "default": 20
+            }
           }
         ],
         "responses": {
@@ -378,13 +530,23 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": ["repository_id", "count", "features"],
+                  "required": [
+                    "repository_id",
+                    "count",
+                    "features"
+                  ],
                   "properties": {
-                    "repository_id": { "type": "string" },
-                    "count": { "type": "integer" },
+                    "repository_id": {
+                      "type": "string"
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
                     "features": {
                       "type": "array",
-                      "items": { "$ref": "#/components/schemas/ExecutionFeature" }
+                      "items": {
+                        "$ref": "#/components/schemas/ExecutionFeature"
+                      }
                     }
                   }
                 }
@@ -396,7 +558,9 @@
     },
     "/api/clusters": {
       "get": {
-        "tags": ["clusters"],
+        "tags": [
+          "clusters"
+        ],
         "summary": "File-dependency Leiden clusters",
         "description": "Architectural clusters over the file dependency graph. Returns the serialized `ClusterGraph` domain value.",
         "operationId": "clusters",
@@ -406,7 +570,9 @@
             "in": "query",
             "required": false,
             "description": "Repository to analyse (name or UUID). Omit to auto-detect.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -414,7 +580,9 @@
             "description": "The cluster graph.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ClusterGraph" }
+                "schema": {
+                  "$ref": "#/components/schemas/ClusterGraph"
+                }
               }
             }
           }
@@ -423,7 +591,9 @@
     },
     "/api/symbol-clusters": {
       "get": {
-        "tags": ["clusters"],
+        "tags": [
+          "clusters"
+        ],
         "summary": "Symbol call-graph communities",
         "description": "Leiden communities over the symbol call graph. Returns the serialized `SymbolCommunityGraph` domain value.",
         "operationId": "symbolClusters",
@@ -433,7 +603,9 @@
             "in": "query",
             "required": false,
             "description": "Repository to analyse (name or UUID). Omit to auto-detect.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -441,7 +613,9 @@
             "description": "The symbol community graph.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/SymbolCommunityGraph" }
+                "schema": {
+                  "$ref": "#/components/schemas/SymbolCommunityGraph"
+                }
               }
             }
           }
@@ -450,7 +624,9 @@
     },
     "/api/couplings": {
       "get": {
-        "tags": ["clusters"],
+        "tags": [
+          "clusters"
+        ],
         "summary": "Coupling elements holding fragile communities together",
         "description": "Files/symbols or dependencies whose removal would split a Leiden community into two latent sub-blocks (the hub-like dependency / modularity-violation smell). Returns the serialized `CouplingReport` domain value.",
         "operationId": "couplings",
@@ -460,14 +636,23 @@
             "in": "query",
             "required": false,
             "description": "Repository to analyse (name or UUID). Omit to auto-detect.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "level",
             "in": "query",
             "required": false,
             "description": "Which graph to analyse: the file-dependency graph or the symbol call graph.",
-            "schema": { "type": "string", "enum": ["file", "symbol"], "default": "file" }
+            "schema": {
+              "type": "string",
+              "enum": [
+                "file",
+                "symbol"
+              ],
+              "default": "file"
+            }
           }
         ],
         "responses": {
@@ -475,22 +660,32 @@
             "description": "The coupling report.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/CouplingReport" }
+                "schema": {
+                  "$ref": "#/components/schemas/CouplingReport"
+                }
               }
             }
           },
           "400": {
             "description": "Invalid level parameter.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
     },
     "/api/channels": {
       "get": {
-        "tags": ["channels"],
+        "tags": [
+          "channels"
+        ],
         "summary": "Cross-service channel links",
-        "description": "Matched producer→consumer links (Kafka topics, HTTP routes, MQTT/AMQP topics, gRPC methods). Returns the serialized `ChannelLinkReport` domain value. With no `repository`, scoped to the current namespace's repositories.",
+        "description": "Matched producer\u2192consumer links (Kafka topics, HTTP routes, MQTT/AMQP topics, gRPC methods). Returns the serialized `ChannelLinkReport` domain value. With no `repository`, scoped to the current namespace's repositories.",
         "operationId": "channels",
         "parameters": [
           {
@@ -498,7 +693,12 @@
             "in": "query",
             "required": false,
             "description": "Restrict to specific repositories (name or UUID). Repeatable.",
-            "schema": { "type": "array", "items": { "type": "string" } },
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
             "style": "form",
             "explode": true
           },
@@ -507,21 +707,38 @@
             "in": "query",
             "required": false,
             "description": "Filter by protocol.",
-            "schema": { "type": "string", "enum": ["kafka", "http", "mqtt", "amqp", "grpc"] }
+            "schema": {
+              "type": "string",
+              "enum": [
+                "kafka",
+                "http",
+                "mqtt",
+                "amqp",
+                "grpc"
+              ]
+            }
           },
           {
             "name": "min_confidence",
             "in": "query",
             "required": false,
-            "description": "Drop edges below this confidence (0.0–1.0).",
-            "schema": { "type": "number", "format": "float" }
+            "description": "Drop edges below this confidence (0.0\u20131.0).",
+            "schema": {
+              "type": "number",
+              "format": "float"
+            }
           },
           {
             "name": "exclude_channel",
             "in": "query",
             "required": false,
             "description": "Exclude channels matching these globs. Repeatable.",
-            "schema": { "type": "array", "items": { "type": "string" } },
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
             "style": "form",
             "explode": true
           },
@@ -530,7 +747,10 @@
             "in": "query",
             "required": false,
             "description": "Include endpoints from test files (excluded by default).",
-            "schema": { "type": "boolean", "default": false }
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
           }
         ],
         "responses": {
@@ -538,24 +758,40 @@
             "description": "The channel-link report.",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/ChannelLinkReport" }
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelLinkReport"
+                }
               }
             }
           },
           "400": {
             "description": "Unknown protocol.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "404": {
             "description": "A named repository was not found.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
     },
     "/api/memory": {
       "get": {
-        "tags": ["memory"],
+        "tags": [
+          "memory"
+        ],
         "summary": "List stored memory items",
         "operationId": "memoryList",
         "parameters": [
@@ -564,7 +800,15 @@
             "in": "query",
             "required": false,
             "description": "Restrict to one memory kind.",
-            "schema": { "type": "string", "enum": ["preference", "experience", "skill", "fact"] }
+            "schema": {
+              "type": "string",
+              "enum": [
+                "preference",
+                "experience",
+                "skill",
+                "fact"
+              ]
+            }
           }
         ],
         "responses": {
@@ -574,10 +818,20 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": ["count", "items"],
+                  "required": [
+                    "count",
+                    "items"
+                  ],
                   "properties": {
-                    "count": { "type": "integer" },
-                    "items": { "type": "array", "items": { "$ref": "#/components/schemas/MemoryItem" } }
+                    "count": {
+                      "type": "integer"
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/MemoryItem"
+                      }
+                    }
                   }
                 }
               }
@@ -585,14 +839,22 @@
           },
           "400": {
             "description": "Unknown memory kind.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
     },
     "/api/memory/search": {
       "get": {
-        "tags": ["memory"],
+        "tags": [
+          "memory"
+        ],
         "summary": "Search stored memories",
         "description": "Hybrid semantic + keyword search. Each result carries a `score` alongside the memory-item fields.",
         "operationId": "memorySearch",
@@ -602,21 +864,34 @@
             "in": "query",
             "required": true,
             "description": "Search query.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "num",
             "in": "query",
             "required": false,
             "description": "Maximum number of results.",
-            "schema": { "type": "integer", "default": 10 }
+            "schema": {
+              "type": "integer",
+              "default": 10
+            }
           },
           {
             "name": "kind",
             "in": "query",
             "required": false,
             "description": "Restrict to one memory kind.",
-            "schema": { "type": "string", "enum": ["preference", "experience", "skill", "fact"] }
+            "schema": {
+              "type": "string",
+              "enum": [
+                "preference",
+                "experience",
+                "skill",
+                "fact"
+              ]
+            }
           }
         ],
         "responses": {
@@ -626,17 +901,29 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": ["count", "results"],
+                  "required": [
+                    "count",
+                    "results"
+                  ],
                   "properties": {
-                    "count": { "type": "integer" },
+                    "count": {
+                      "type": "integer"
+                    },
                     "results": {
                       "type": "array",
                       "items": {
                         "allOf": [
-                          { "$ref": "#/components/schemas/MemoryItem" },
+                          {
+                            "$ref": "#/components/schemas/MemoryItem"
+                          },
                           {
                             "type": "object",
-                            "properties": { "score": { "type": "number", "format": "float" } }
+                            "properties": {
+                              "score": {
+                                "type": "number",
+                                "format": "float"
+                              }
+                            }
                           }
                         ]
                       }
@@ -648,14 +935,22 @@
           },
           "400": {
             "description": "Unknown memory kind.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
     },
     "/api/memory/stats": {
       "get": {
-        "tags": ["memory"],
+        "tags": [
+          "memory"
+        ],
         "summary": "Memory item/session counts",
         "operationId": "memoryStats",
         "responses": {
@@ -665,10 +960,17 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": ["total_items", "total_sessions"],
+                  "required": [
+                    "total_items",
+                    "total_sessions"
+                  ],
                   "properties": {
-                    "total_items": { "type": "integer" },
-                    "total_sessions": { "type": "integer" }
+                    "total_items": {
+                      "type": "integer"
+                    },
+                    "total_sessions": {
+                      "type": "integer"
+                    }
                   }
                 }
               }
@@ -679,7 +981,9 @@
     },
     "/api/memory/sessions": {
       "get": {
-        "tags": ["memory"],
+        "tags": [
+          "memory"
+        ],
         "summary": "Imported sessions",
         "operationId": "memorySessions",
         "responses": {
@@ -689,10 +993,20 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": ["count", "sessions"],
+                  "required": [
+                    "count",
+                    "sessions"
+                  ],
                   "properties": {
-                    "count": { "type": "integer" },
-                    "sessions": { "type": "array", "items": { "$ref": "#/components/schemas/ImportedSession" } }
+                    "count": {
+                      "type": "integer"
+                    },
+                    "sessions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ImportedSession"
+                      }
+                    }
                   }
                 }
               }
@@ -703,7 +1017,9 @@
     },
     "/api/memory/tree": {
       "get": {
-        "tags": ["memory"],
+        "tags": [
+          "memory"
+        ],
         "summary": "Browse the memory virtual filesystem",
         "description": "With no `uri`, returns the rollup node plus the sessions and resources directories. With a `uri`, returns that directory's children.",
         "operationId": "memoryTree",
@@ -713,7 +1029,9 @@
             "in": "query",
             "required": false,
             "description": "Directory URI to list (e.g. `memory://sessions`).",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -723,14 +1041,145 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": ["count", "nodes"],
+                  "required": [
+                    "count",
+                    "nodes"
+                  ],
                   "properties": {
-                    "count": { "type": "integer" },
-                    "nodes": { "type": "array", "items": { "$ref": "#/components/schemas/MemoryNode" } }
+                    "count": {
+                      "type": "integer"
+                    },
+                    "nodes": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/MemoryNode"
+                      }
+                    }
                   }
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/memory/dream": {
+      "get": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Dream scheduler status",
+        "description": "Scheduler configuration (from the `memory` section of `config.json`), whether a cycle is currently running, and the last recorded run. Returns `503` when the server started without a usable LLM backend.",
+        "operationId": "memoryDreamStatus",
+        "responses": {
+          "200": {
+            "description": "Scheduler status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "enabled",
+                    "interval_hours",
+                    "session_idle_minutes",
+                    "auto_import",
+                    "running"
+                  ],
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "interval_hours": {
+                      "type": "integer"
+                    },
+                    "session_idle_minutes": {
+                      "type": "integer"
+                    },
+                    "auto_import": {
+                      "type": "boolean"
+                    },
+                    "running": {
+                      "type": "boolean"
+                    },
+                    "last_run": {
+                      "oneOf": [
+                        {
+                          "$ref": "#/components/schemas/DreamRun"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Dreaming is not available on this server."
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Trigger a dream cycle",
+        "description": "Starts a dream cycle (harvest finished sessions, consolidate near-duplicate/contradictory memories, reflect, refresh the rollup) in the background and returns immediately. Poll `GET /api/memory/dream` for the recorded outcome.",
+        "operationId": "memoryDreamTrigger",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "dry_run": {
+                    "type": "boolean",
+                    "description": "Plan and log operations without applying anything.",
+                    "default": false
+                  },
+                  "force": {
+                    "type": "boolean",
+                    "description": "Dream even when nothing changed since the last cycle.",
+                    "default": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Cycle started.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "started"
+                  ],
+                  "properties": {
+                    "started": {
+                      "type": "boolean"
+                    },
+                    "dry_run": {
+                      "type": "boolean"
+                    },
+                    "force": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A dream cycle is already running."
+          },
+          "503": {
+            "description": "Dreaming is not available on this server."
           }
         }
       }
@@ -741,12 +1190,16 @@
           "name": "id",
           "in": "path",
           "required": true,
-          "description": "A memory item UUID, a `kind/name` reference, or a `memory://…` node URI.",
-          "schema": { "type": "string" }
+          "description": "A memory item UUID, a `kind/name` reference, or a `memory://\u2026` node URI.",
+          "schema": {
+            "type": "string"
+          }
         }
       ],
       "get": {
-        "tags": ["memory"],
+        "tags": [
+          "memory"
+        ],
         "summary": "Get one memory item or virtual-filesystem node",
         "description": "Returns `{ \"item\": MemoryItem }` for an item address, or `{ \"node\": MemoryNode }` when the id is a `memory://` URI.",
         "operationId": "memoryGet",
@@ -759,13 +1212,25 @@
                   "oneOf": [
                     {
                       "type": "object",
-                      "required": ["item"],
-                      "properties": { "item": { "$ref": "#/components/schemas/MemoryItem" } }
+                      "required": [
+                        "item"
+                      ],
+                      "properties": {
+                        "item": {
+                          "$ref": "#/components/schemas/MemoryItem"
+                        }
+                      }
                     },
                     {
                       "type": "object",
-                      "required": ["node"],
-                      "properties": { "node": { "$ref": "#/components/schemas/MemoryNode" } }
+                      "required": [
+                        "node"
+                      ],
+                      "properties": {
+                        "node": {
+                          "$ref": "#/components/schemas/MemoryNode"
+                        }
+                      }
                     }
                   ]
                 }
@@ -774,7 +1239,13 @@
           },
           "404": {
             "description": "No item or node at the given address.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -786,27 +1257,35 @@
           "in": "path",
           "required": true,
           "description": "The symbol whose call flow to explain. Interpreted as a regex when the request body sets `regex: true`.",
-          "schema": { "type": "string" }
+          "schema": {
+            "type": "string"
+          }
         }
       ],
       "get": {
-        "tags": ["stream"],
+        "tags": [
+          "stream"
+        ],
         "summary": "Stream an LLM call-flow explanation (SSE)",
-        "description": "Streams the LLM's explanation of a symbol's bidirectional call flow token by token.\n\n**Response is `text/event-stream`.** Events, in order:\n- `token` — one chunk of the explanation; payload `{ \"text\": string }`. Zero or more.\n- `done` — terminal summary; payload `SseExplainDone`. Exactly one on success.\n- `error` — terminal failure; payload `{ \"message\": string }`. Replaces `done` on failure.\n\nIf the symbol is ambiguous (matches several fully-qualified names), no `token` events are emitted and the `done` event carries `status: \"ambiguous\"` with a `candidates` list instead of an explanation.\n\nNo request body is required for `GET`; use `POST` to pass options.",
+        "description": "Streams the LLM's explanation of a symbol's bidirectional call flow token by token.\n\n**Response is `text/event-stream`.** Events, in order:\n- `token` \u2014 one chunk of the explanation; payload `{ \"text\": string }`. Zero or more.\n- `done` \u2014 terminal summary; payload `SseExplainDone`. Exactly one on success.\n- `error` \u2014 terminal failure; payload `{ \"message\": string }`. Replaces `done` on failure.\n\nIf the symbol is ambiguous (matches several fully-qualified names), no `token` events are emitted and the `done` event carries `status: \"ambiguous\"` with a `candidates` list instead of an explanation.\n\nNo request body is required for `GET`; use `POST` to pass options.",
         "operationId": "explainStreamGet",
         "responses": {
           "200": {
             "description": "SSE stream of `token` events followed by a terminal `done` or `error` event.",
             "content": {
               "text/event-stream": {
-                "schema": { "$ref": "#/components/schemas/SseExplainEvent" }
+                "schema": {
+                  "$ref": "#/components/schemas/SseExplainEvent"
+                }
               }
             }
           }
         }
       },
       "post": {
-        "tags": ["stream"],
+        "tags": [
+          "stream"
+        ],
         "summary": "Stream an LLM call-flow explanation (SSE)",
         "description": "Same as the `GET` form, but accepts an optional JSON body of options.",
         "operationId": "explainStreamPost",
@@ -814,7 +1293,9 @@
           "required": false,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/ExplainStreamRequest" }
+              "schema": {
+                "$ref": "#/components/schemas/ExplainStreamRequest"
+              }
             }
           }
         },
@@ -823,7 +1304,9 @@
             "description": "SSE stream of `token` events followed by a terminal `done` or `error` event.",
             "content": {
               "text/event-stream": {
-                "schema": { "$ref": "#/components/schemas/SseExplainEvent" }
+                "schema": {
+                  "$ref": "#/components/schemas/SseExplainEvent"
+                }
               }
             }
           }
@@ -832,15 +1315,19 @@
     },
     "/api/stream/index": {
       "post": {
-        "tags": ["stream"],
+        "tags": [
+          "stream"
+        ],
         "summary": "Stream repository indexing progress (SSE)",
-        "description": "Indexes a repository path and streams coarse lifecycle progress.\n\n**Response is `text/event-stream`.** Events, in order:\n- `progress` — a lifecycle update; payload `{ \"stage\": string, \"message\": string }`. `stage` is `started` first, then periodic `running` heartbeats.\n- `done` — terminal summary; payload `SseIndexDone`. Exactly one on success.\n- `error` — terminal failure; payload `{ \"message\": string }`. Replaces `done` on failure.\n\nProgress is coarse (start / running heartbeats / done) because the underlying use case does not yet expose a per-file progress channel.",
+        "description": "Indexes a repository path and streams coarse lifecycle progress.\n\n**Response is `text/event-stream`.** Events, in order:\n- `progress` \u2014 a lifecycle update; payload `{ \"stage\": string, \"message\": string }`. `stage` is `started` first, then periodic `running` heartbeats.\n- `done` \u2014 terminal summary; payload `SseIndexDone`. Exactly one on success.\n- `error` \u2014 terminal failure; payload `{ \"message\": string }`. Replaces `done` on failure.\n\nProgress is coarse (start / running heartbeats / done) because the underlying use case does not yet expose a per-file progress channel.",
         "operationId": "indexStream",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/IndexStreamRequest" }
+              "schema": {
+                "$ref": "#/components/schemas/IndexStreamRequest"
+              }
             }
           }
         },
@@ -849,7 +1336,9 @@
             "description": "SSE stream of `progress` events followed by a terminal `done` or `error` event.",
             "content": {
               "text/event-stream": {
-                "schema": { "$ref": "#/components/schemas/SseIndexEvent" }
+                "schema": {
+                  "$ref": "#/components/schemas/SseIndexEvent"
+                }
               }
             }
           }
@@ -862,33 +1351,63 @@
       "Error": {
         "type": "object",
         "description": "Uniform error body returned with a 4xx/5xx status.",
-        "required": ["error"],
+        "required": [
+          "error"
+        ],
         "properties": {
-          "error": { "type": "string", "description": "Human-readable failure message." }
+          "error": {
+            "type": "string",
+            "description": "Human-readable failure message."
+          }
         }
       },
       "Health": {
         "type": "object",
-        "required": ["status", "version"],
+        "required": [
+          "status",
+          "version"
+        ],
         "properties": {
-          "status": { "type": "string", "enum": ["ok"] },
-          "version": { "type": "string", "description": "Crate version of the running server." }
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "version": {
+            "type": "string",
+            "description": "Crate version of the running server."
+          }
         }
       },
       "ApiIndex": {
         "type": "object",
-        "required": ["name", "version", "endpoints"],
+        "required": [
+          "name",
+          "version",
+          "endpoints"
+        ],
         "properties": {
-          "name": { "type": "string" },
-          "version": { "type": "string" },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
           "endpoints": {
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
-                "method": { "type": "string" },
-                "path": { "type": "string" },
-                "description": { "type": "string" }
+                "method": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                }
               }
             }
           }
@@ -897,78 +1416,217 @@
       "Repository": {
         "type": "object",
         "description": "An indexed repository.",
-        "required": ["id", "name", "path", "file_count", "chunk_count", "store", "languages"],
+        "required": [
+          "id",
+          "name",
+          "path",
+          "file_count",
+          "chunk_count",
+          "store",
+          "languages"
+        ],
         "properties": {
-          "id": { "type": "string", "description": "Repository UUID." },
-          "name": { "type": "string" },
-          "path": { "type": "string" },
-          "file_count": { "type": "integer" },
-          "chunk_count": { "type": "integer" },
-          "store": { "type": "string", "description": "Backing store identifier (e.g. duckdb)." },
-          "namespace": { "type": ["string", "null"] },
+          "id": {
+            "type": "string",
+            "description": "Repository UUID."
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "file_count": {
+            "type": "integer"
+          },
+          "chunk_count": {
+            "type": "integer"
+          },
+          "store": {
+            "type": "string",
+            "description": "Backing store identifier (e.g. duckdb)."
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "languages": {
             "type": "object",
-            "description": "Map of language name → per-language stats.",
+            "description": "Map of language name \u2192 per-language stats.",
             "additionalProperties": {
               "type": "object",
-              "properties": { "file_count": { "type": "integer" } }
+              "properties": {
+                "file_count": {
+                  "type": "integer"
+                }
+              }
             }
           }
         }
       },
       "Stats": {
         "type": "object",
-        "required": ["repositories", "total_files", "total_chunks", "data_dir"],
+        "required": [
+          "repositories",
+          "total_files",
+          "total_chunks",
+          "data_dir"
+        ],
         "properties": {
-          "repositories": { "type": "integer" },
-          "total_files": { "type": "integer" },
-          "total_chunks": { "type": "integer" },
-          "data_dir": { "type": "string" },
-          "namespace": { "type": ["string", "null"] }
+          "repositories": {
+            "type": "integer"
+          },
+          "total_files": {
+            "type": "integer"
+          },
+          "total_chunks": {
+            "type": "integer"
+          },
+          "data_dir": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
         }
       },
       "RepoRef": {
         "type": "object",
         "description": "A minimal repository reference (id + name).",
-        "required": ["id", "name"],
+        "required": [
+          "id",
+          "name"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "name": { "type": "string" }
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
         }
       },
       "SearchRequest": {
         "type": "object",
-        "required": ["query"],
+        "required": [
+          "query"
+        ],
         "properties": {
-          "query": { "type": "string", "description": "Natural-language query describing what the code does." },
-          "limit": { "type": "integer", "default": 10, "description": "Maximum number of results." },
-          "min_score": { "type": ["number", "null"], "format": "float", "description": "Optional minimum relevance score." },
-          "languages": { "type": ["array", "null"], "items": { "type": "string" }, "description": "Optional language filter." },
-          "repositories": { "type": ["array", "null"], "items": { "type": "string" }, "description": "Optional repository filter (names or UUIDs)." },
-          "text_search": { "type": "boolean", "default": true, "description": "Include the keyword (BM25) leg." }
+          "query": {
+            "type": "string",
+            "description": "Natural-language query describing what the code does."
+          },
+          "limit": {
+            "type": "integer",
+            "default": 10,
+            "description": "Maximum number of results."
+          },
+          "min_score": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Optional minimum relevance score."
+          },
+          "languages": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional language filter."
+          },
+          "repositories": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional repository filter (names or UUIDs)."
+          },
+          "text_search": {
+            "type": "boolean",
+            "default": true,
+            "description": "Include the keyword (BM25) leg."
+          }
         }
       },
       "SearchHit": {
         "type": "object",
-        "required": ["file_path", "start_line", "end_line", "score", "language", "node_type", "content"],
+        "required": [
+          "file_path",
+          "start_line",
+          "end_line",
+          "score",
+          "language",
+          "node_type",
+          "content"
+        ],
         "properties": {
-          "file_path": { "type": "string" },
-          "start_line": { "type": "integer" },
-          "end_line": { "type": "integer" },
-          "score": { "type": "number", "format": "float" },
-          "language": { "type": "string" },
-          "node_type": { "type": "string", "description": "AST node type (function, class, method, …)." },
-          "symbol_name": { "type": ["string", "null"] },
-          "content": { "type": "string", "description": "Source snippet." }
+          "file_path": {
+            "type": "string"
+          },
+          "start_line": {
+            "type": "integer"
+          },
+          "end_line": {
+            "type": "integer"
+          },
+          "score": {
+            "type": "number",
+            "format": "float"
+          },
+          "language": {
+            "type": "string"
+          },
+          "node_type": {
+            "type": "string",
+            "description": "AST node type (function, class, method, \u2026)."
+          },
+          "symbol_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content": {
+            "type": "string",
+            "description": "Source snippet."
+          }
         }
       },
       "ImpactRequest": {
         "type": "object",
-        "required": ["symbol"],
+        "required": [
+          "symbol"
+        ],
         "properties": {
-          "symbol": { "type": "string", "description": "Symbol name or regex pattern." },
-          "repository": { "type": ["string", "null"], "description": "Restrict to a repository (name or UUID)." },
-          "regex": { "type": "boolean", "default": false, "description": "Treat `symbol` as a literal regex." }
+          "symbol": {
+            "type": "string",
+            "description": "Symbol name or regex pattern."
+          },
+          "repository": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Restrict to a repository (name or UUID)."
+          },
+          "regex": {
+            "type": "boolean",
+            "default": false,
+            "description": "Treat `symbol` as a literal regex."
+          }
         }
       },
       "ImpactAnalysis": {
@@ -978,7 +1636,7 @@
       },
       "SymbolContext": {
         "type": "object",
-        "description": "Serialized `SymbolContext` domain value: callers (entry points → symbol) and callees (symbol → leaves) as trees.",
+        "description": "Serialized `SymbolContext` domain value: callers (entry points \u2192 symbol) and callees (symbol \u2192 leaves) as trees.",
         "additionalProperties": true
       },
       "FileEdge": {
@@ -1008,7 +1666,7 @@
       },
       "ChannelLinkReport": {
         "type": "object",
-        "description": "Serialized `ChannelLinkReport` domain value: matched producer→consumer channel links with protocol, channel name, endpoints, and confidence.",
+        "description": "Serialized `ChannelLinkReport` domain value: matched producer\u2192consumer channel links with protocol, channel name, endpoints, and confidence.",
         "additionalProperties": true
       },
       "MemoryItem": {
@@ -1031,7 +1689,10 @@
         "description": "Optional options for the explain stream. All fields optional.",
         "properties": {
           "repository": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Restrict the explanation to a single repository (name or UUID)."
           },
           "regex": {
@@ -1040,84 +1701,174 @@
             "description": "Interpret the `{symbol}` path segment as a regular expression."
           },
           "llm": {
-            "type": ["string", "null"],
-            "enum": ["anthropic", "openai", null],
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "anthropic",
+              "openai",
+              null
+            ],
             "description": "LLM backend to use. Defaults to `anthropic`."
           }
         }
       },
       "IndexStreamRequest": {
         "type": "object",
-        "required": ["path"],
+        "required": [
+          "path"
+        ],
         "properties": {
-          "path": { "type": "string", "description": "Filesystem path of the repository to index." },
-          "name": { "type": ["string", "null"], "description": "Optional human-readable name (defaults to the directory name)." },
-          "force": { "type": "boolean", "default": false, "description": "Force a full re-index, discarding existing data for this path." }
+          "path": {
+            "type": "string",
+            "description": "Filesystem path of the repository to index."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional human-readable name (defaults to the directory name)."
+          },
+          "force": {
+            "type": "boolean",
+            "default": false,
+            "description": "Force a full re-index, discarding existing data for this path."
+          }
         }
       },
       "SseExplainEvent": {
-        "description": "One SSE frame emitted by `/api/stream/explain/{symbol}`. `event` names the frame; `data` is the JSON payload. Modelled as a union for documentation — the wire format is SSE, not JSON.",
+        "description": "One SSE frame emitted by `/api/stream/explain/{symbol}`. `event` names the frame; `data` is the JSON payload. Modelled as a union for documentation \u2014 the wire format is SSE, not JSON.",
         "oneOf": [
-          { "$ref": "#/components/schemas/SseTokenEvent" },
-          { "$ref": "#/components/schemas/SseExplainDoneEvent" },
-          { "$ref": "#/components/schemas/SseErrorEvent" }
+          {
+            "$ref": "#/components/schemas/SseTokenEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SseExplainDoneEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SseErrorEvent"
+          }
         ]
       },
       "SseIndexEvent": {
         "description": "One SSE frame emitted by `/api/stream/index`.",
         "oneOf": [
-          { "$ref": "#/components/schemas/SseProgressEvent" },
-          { "$ref": "#/components/schemas/SseIndexDoneEvent" },
-          { "$ref": "#/components/schemas/SseErrorEvent" }
+          {
+            "$ref": "#/components/schemas/SseProgressEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SseIndexDoneEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SseErrorEvent"
+          }
         ]
       },
       "SseTokenEvent": {
         "type": "object",
-        "description": "`event: token` — one chunk of streamed explanation text.",
-        "required": ["text"],
-        "properties": { "text": { "type": "string" } }
+        "description": "`event: token` \u2014 one chunk of streamed explanation text.",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        }
       },
       "SseProgressEvent": {
         "type": "object",
-        "description": "`event: progress` — a coarse lifecycle update.",
-        "required": ["stage", "message"],
+        "description": "`event: progress` \u2014 a coarse lifecycle update.",
+        "required": [
+          "stage",
+          "message"
+        ],
         "properties": {
-          "stage": { "type": "string", "enum": ["started", "running"] },
-          "message": { "type": "string" }
+          "stage": {
+            "type": "string",
+            "enum": [
+              "started",
+              "running"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
         }
       },
       "SseErrorEvent": {
         "type": "object",
-        "description": "`event: error` — terminal failure. Last frame of the stream.",
-        "required": ["message"],
-        "properties": { "message": { "type": "string" } }
+        "description": "`event: error` \u2014 terminal failure. Last frame of the stream.",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        }
       },
       "SseExplainDoneEvent": {
         "type": "object",
-        "description": "`event: done` — terminal success for the explain stream.",
+        "description": "`event: done` \u2014 terminal success for the explain stream.",
         "oneOf": [
-          { "$ref": "#/components/schemas/SseExplainDoneOk" },
-          { "$ref": "#/components/schemas/SseExplainDoneAmbiguous" }
+          {
+            "$ref": "#/components/schemas/SseExplainDoneOk"
+          },
+          {
+            "$ref": "#/components/schemas/SseExplainDoneAmbiguous"
+          }
         ]
       },
       "SseExplainDoneOk": {
         "type": "object",
-        "required": ["status", "root_symbol", "explanation", "total_affected", "max_depth_reached", "referenced"],
+        "required": [
+          "status",
+          "root_symbol",
+          "explanation",
+          "total_affected",
+          "max_depth_reached",
+          "referenced"
+        ],
         "properties": {
-          "status": { "type": "string", "enum": ["ok"] },
-          "root_symbol": { "type": "string" },
-          "explanation": { "type": "string", "description": "Full post-processed Markdown explanation (also delivered incrementally as `token` events)." },
-          "total_affected": { "type": "integer" },
-          "max_depth_reached": { "type": "integer" },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "root_symbol": {
+            "type": "string"
+          },
+          "explanation": {
+            "type": "string",
+            "description": "Full post-processed Markdown explanation (also delivered incrementally as `token` events)."
+          },
+          "total_affected": {
+            "type": "integer"
+          },
+          "max_depth_reached": {
+            "type": "integer"
+          },
           "referenced": {
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
-                "symbol": { "type": "string" },
-                "repository": { "type": "string" },
-                "file": { "type": "string" },
-                "line": { "type": "integer" }
+                "symbol": {
+                  "type": "string"
+                },
+                "repository": {
+                  "type": "string"
+                },
+                "file": {
+                  "type": "string"
+                },
+                "line": {
+                  "type": "integer"
+                }
               }
             }
           }
@@ -1125,32 +1876,115 @@
       },
       "SseExplainDoneAmbiguous": {
         "type": "object",
-        "required": ["status", "root_symbol", "candidates", "is_regex"],
+        "required": [
+          "status",
+          "root_symbol",
+          "candidates",
+          "is_regex"
+        ],
         "properties": {
-          "status": { "type": "string", "enum": ["ambiguous"] },
-          "root_symbol": { "type": "string" },
-          "candidates": { "type": "array", "items": { "type": "string" } },
-          "is_regex": { "type": "boolean" }
+          "status": {
+            "type": "string",
+            "enum": [
+              "ambiguous"
+            ]
+          },
+          "root_symbol": {
+            "type": "string"
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "is_regex": {
+            "type": "boolean"
+          }
         }
       },
       "SseIndexDoneEvent": {
         "type": "object",
-        "description": "`event: done` — terminal success for the index stream.",
-        "required": ["status", "name", "file_count", "chunk_count", "languages"],
+        "description": "`event: done` \u2014 terminal success for the index stream.",
+        "required": [
+          "status",
+          "name",
+          "file_count",
+          "chunk_count",
+          "languages"
+        ],
         "properties": {
-          "status": { "type": "string", "enum": ["ok"] },
-          "name": { "type": "string" },
-          "file_count": { "type": "integer" },
-          "chunk_count": { "type": "integer" },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "file_count": {
+            "type": "integer"
+          },
+          "chunk_count": {
+            "type": "integer"
+          },
           "languages": {
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
-                "language": { "type": "string" },
-                "files": { "type": "integer" }
+                "language": {
+                  "type": "string"
+                },
+                "files": {
+                  "type": "integer"
+                }
               }
             }
+          }
+        }
+      },
+      "DreamRun": {
+        "type": "object",
+        "description": "Record of one completed dream (offline memory consolidation) cycle.",
+        "required": [
+          "id",
+          "started_at",
+          "finished_at",
+          "sessions_imported",
+          "clusters_found",
+          "operations_applied",
+          "operations_skipped",
+          "notes"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "integer",
+            "description": "Unix seconds."
+          },
+          "finished_at": {
+            "type": "integer",
+            "description": "Unix seconds."
+          },
+          "sessions_imported": {
+            "type": "integer"
+          },
+          "clusters_found": {
+            "type": "integer"
+          },
+          "operations_applied": {
+            "type": "integer"
+          },
+          "operations_skipped": {
+            "type": "integer"
+          },
+          "notes": {
+            "type": "string",
+            "description": "Outcome note, e.g. `completed` or `skipped: nothing new to dream about`."
           }
         }
       }
