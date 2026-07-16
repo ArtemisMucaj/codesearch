@@ -375,19 +375,11 @@ impl<'a> MemoryController<'a> {
     }
 
     /// Run one dream cycle and render its report.
-    pub async fn dream(
-        &self,
-        llm: LlmTarget,
-        dry_run: bool,
-        force: bool,
-        idle_minutes: u64,
-    ) -> Result<String> {
+    pub async fn dream(&self, llm: LlmTarget, idle_minutes: u64) -> Result<String> {
         let chat_client = self.chat_client(llm)?;
         let use_case = self.container.memory_dream_use_case(chat_client)?;
         let options = DreamOptions {
             session_idle_secs: (idle_minutes * 60) as i64,
-            dry_run,
-            force,
         };
         let report = use_case.execute(&options).await?;
         Ok(render_dream_report(&report))
@@ -567,11 +559,7 @@ fn render_import_outcome(outcome: &ImportOutcome, multiple: bool) -> String {
 /// then guardrail skips.
 fn render_dream_report(report: &DreamReport) -> String {
     let mut out = String::new();
-    if report.dry_run {
-        out.push_str("Dream (dry run — nothing was applied)\n");
-    } else {
-        out.push_str("Dream cycle finished\n");
-    }
+    out.push_str("Dream cycle finished\n");
     out.push_str(&format!(
         "  sessions: {} finished and not yet imported, {} imported\n",
         report.sessions_eligible, report.sessions_imported
@@ -580,16 +568,11 @@ fn render_dream_report(report: &DreamReport) -> String {
         "  consolidation clusters examined: {}\n",
         report.clusters_found
     ));
-    if report.outcome.starts_with("skipped") {
-        out.push_str(&format!("  {}\n", report.outcome));
-        return out;
-    }
     if report.applied.is_empty() {
         out.push_str("  memory already consolidated — no operations\n");
     } else {
-        let verb = if report.dry_run { "planned" } else { "applied" };
         out.push_str(&format!(
-            "  {} operation(s) {verb}:\n",
+            "  {} operation(s) applied:\n",
             report.applied.len()
         ));
         for op in &report.applied {

@@ -445,7 +445,6 @@ async fn memory_dream_endpoints_report_unavailable_without_service() {
     let client = reqwest::Client::new();
     let status = client
         .post(format!("{base}/api/memory/dream"))
-        .json(&serde_json::json!({ "dry_run": true }))
         .send()
         .await
         .expect("POST /api/memory/dream failed")

@@ -216,19 +216,12 @@ phases:
 
 Guardrails bound the blast radius of a misbehaving model: operations are
 capped per cycle, consolidation may only delete items in the cluster it was
-shown, reflection may not delete at all, total deletions are limited to a
-fraction of the store, and a cycle is skipped entirely when nothing changed
-since the last one.
+shown, reflection may not delete at all, and total deletions are limited to
+a fraction of the store.
 
 ```bash
 # Run one cycle now
 codesearch memory dream
-
-# See what it would do without writing anything
-codesearch memory dream --dry-run
-
-# Dream even if nothing changed since the last cycle
-codesearch memory dream --force
 ```
 
 `codesearch serve` schedules dreaming automatically: a sweep every 15 minutes
@@ -248,8 +241,8 @@ imports freshly finished sessions, and a full cycle runs every 4 hours
 ```
 
 The management API exposes the same controls: `GET /api/memory/dream` returns
-scheduler status plus the last run, and `POST /api/memory/dream` (optional
-body `{"dry_run": bool, "force": bool}`) triggers a cycle in the background.
+scheduler status plus the last run, and `POST /api/memory/dream` triggers a
+cycle in the background.
 
 ## Update semantics
 

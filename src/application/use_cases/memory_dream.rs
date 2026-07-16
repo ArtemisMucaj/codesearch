@@ -20,9 +20,8 @@
 //!
 //! Guardrails keep a misbehaving model from wrecking the store: operations are
 //! capped per run, consolidation may only delete items belonging to the
-//! cluster it was shown, reflection may not delete at all, total deletions are
-//! bounded by a fraction of the store, and `dry_run` reports the plan without
-//! applying it.
+//! cluster it was shown, reflection may not delete at all, and total deletions
+//! are bounded by a fraction of the store.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -81,38 +80,29 @@ const DELETE_CAP_DIVISOR: usize = 5;
 pub struct DreamOptions {
     /// Seconds a session must have been inactive to count as finished.
     pub session_idle_secs: i64,
-    /// Plan and report operations without applying anything.
-    pub dry_run: bool,
-    /// Dream even when nothing changed since the last run.
-    pub force: bool,
 }
 
 impl Default for DreamOptions {
     fn default() -> Self {
         Self {
             session_idle_secs: DEFAULT_SESSION_IDLE_SECS,
-            dry_run: false,
-            force: false,
         }
     }
 }
 
-/// What one dream cycle did (or would do, when `dry_run`).
+/// What one dream cycle did.
 #[derive(Debug, Default)]
 pub struct DreamReport {
-    pub dry_run: bool,
     /// Finished, never-imported sessions found by discovery.
     pub sessions_eligible: usize,
     /// Sessions actually imported this cycle.
     pub sessions_imported: usize,
     /// Similarity clusters examined by consolidation.
     pub clusters_found: usize,
-    /// Operations applied (planned, when `dry_run`), in order.
+    /// Operations applied, in order.
     pub applied: Vec<MemoryOperation>,
     /// Operations rejected by a guardrail, with the reason.
     pub skipped: Vec<(MemoryOperation, String)>,
-    /// Outcome note: `"completed"` or `"skipped: <reason>"`.
-    pub outcome: String,
 }
 
 /// Result of a standalone harvest sweep (serve mode runs these between full
@@ -187,42 +177,21 @@ impl MemoryDreamUseCase {
     }
 
     /// Run one full dream cycle.
-    #[tracing::instrument(skip_all, fields(dry_run = options.dry_run))]
+    #[tracing::instrument(skip_all)]
     pub async fn execute(&self, options: &DreamOptions) -> Result<DreamReport, DomainError> {
         let _guard = self
             .running
             .try_lock()
             .map_err(|_| DomainError::invalid_input("a dream cycle is already running"))?;
         let started_at = unix_now();
-        let mut report = DreamReport {
-            dry_run: options.dry_run,
-            ..DreamReport::default()
-        };
+        let mut report = DreamReport::default();
 
-        // Phase 1 — harvest. In a dry run only count what would be imported;
-        // imports write to the store.
-        let harvest = self
-            .harvest_inner(options.session_idle_secs, options.dry_run)
-            .await?;
+        // Phase 1 — harvest.
+        let harvest = self.harvest_inner(options.session_idle_secs).await?;
         report.sessions_eligible = harvest.sessions_eligible;
         report.sessions_imported = harvest.sessions_imported;
 
         let items = self.memory_repo.list_items(None).await?;
-
-        // Skip the (expensive) consolidation phases when nothing changed since
-        // the last cycle — dreams about nothing are free.
-        if !options.force && report.sessions_imported == 0 {
-            if let Some(last) = self.memory_repo.last_dream_run().await? {
-                let newest_update = items.iter().map(MemoryItem::updated_at).max().unwrap_or(0);
-                if newest_update <= last.finished_at {
-                    report.outcome = "skipped: nothing new to dream about".to_string();
-                    if !options.dry_run {
-                        self.record_run(&report, started_at).await;
-                    }
-                    return Ok(report);
-                }
-            }
-        }
 
         // Phase 2 — consolidate near-duplicate clusters.
         let delete_budget = MIN_DELETE_CAP.max(items.len() / DELETE_CAP_DIVISOR);
@@ -247,7 +216,6 @@ impl MemoryDreamUseCase {
                 Some(&deletable),
                 delete_budget,
                 &mut deletes_used,
-                options.dry_run,
                 &mut report,
             )
             .await?;
@@ -262,7 +230,6 @@ impl MemoryDreamUseCase {
                         Some(&HashSet::new()), // nothing is deletable
                         delete_budget,
                         &mut deletes_used,
-                        options.dry_run,
                         &mut report,
                     )
                     .await?;
@@ -272,15 +239,12 @@ impl MemoryDreamUseCase {
         }
 
         // Phase 4 — refresh the rollup and record the run.
-        report.outcome = "completed".to_string();
-        if !options.dry_run {
-            if !report.applied.is_empty() {
-                if let Err(e) = self.summary.regenerate_rollup().await {
-                    warn!("dream: failed to regenerate memory rollup: {e}");
-                }
+        if !report.applied.is_empty() {
+            if let Err(e) = self.summary.regenerate_rollup().await {
+                warn!("dream: failed to regenerate memory rollup: {e}");
             }
-            self.record_run(&report, started_at).await;
         }
+        self.record_run(&report, started_at).await;
         info!(
             "dream cycle finished: {} imported, {} clusters, {} ops applied, {} skipped",
             report.sessions_imported,
@@ -298,14 +262,10 @@ impl MemoryDreamUseCase {
             .running
             .try_lock()
             .map_err(|_| DomainError::invalid_input("a dream cycle is already running"))?;
-        self.harvest_inner(session_idle_secs, false).await
+        self.harvest_inner(session_idle_secs).await
     }
 
-    async fn harvest_inner(
-        &self,
-        session_idle_secs: i64,
-        dry_run: bool,
-    ) -> Result<HarvestReport, DomainError> {
+    async fn harvest_inner(&self, session_idle_secs: i64) -> Result<HarvestReport, DomainError> {
         let mut report = HarvestReport::default();
         let sessions = self.discovery.discover().await?;
         let now = unix_now();
@@ -318,7 +278,7 @@ impl MemoryDreamUseCase {
                 continue;
             }
             report.sessions_eligible += 1;
-            if dry_run || report.sessions_imported >= MAX_HARVEST_SESSIONS {
+            if report.sessions_imported >= MAX_HARVEST_SESSIONS {
                 continue;
             }
             let transcript = match self.discovery.load_transcript(&session).await {
@@ -462,16 +422,15 @@ impl MemoryDreamUseCase {
         }
     }
 
-    /// Apply (or, in a dry run, plan) validated operations under the run-level
-    /// guardrails. `deletable` restricts which `(kind, name)` keys may be
-    /// deleted (`Some(empty)` forbids deletion outright).
+    /// Apply validated operations under the run-level guardrails. `deletable`
+    /// restricts which `(kind, name)` keys may be deleted (`Some(empty)`
+    /// forbids deletion outright).
     async fn apply(
         &self,
         operations: Vec<MemoryOperation>,
         deletable: Option<&HashSet<(MemoryKind, String)>>,
         delete_budget: usize,
         deletes_used: &mut usize,
-        dry_run: bool,
         report: &mut DreamReport,
     ) -> Result<(), DomainError> {
         // Names upserted this cycle must not be deleted by a later operation
@@ -496,9 +455,7 @@ impl MemoryDreamUseCase {
             match op {
                 MemoryOperation::Upsert { kind, ref name, .. } => {
                     upserted.insert((kind, name.clone()));
-                    if !dry_run {
-                        self.apply_upsert(&op).await?;
-                    }
+                    self.apply_upsert(&op).await?;
                     report.applied.push(op);
                 }
                 MemoryOperation::Delete { kind, ref name } => {
@@ -524,8 +481,7 @@ impl MemoryDreamUseCase {
                             .push((op, "delete budget for this cycle exhausted".to_string()));
                         continue;
                     }
-                    // Short-circuit keeps a dry run from touching the store.
-                    if dry_run || self.memory_repo.delete_item(kind, name).await? {
+                    if self.memory_repo.delete_item(kind, name).await? {
                         *deletes_used += 1;
                         report.applied.push(op);
                     } else {
@@ -606,7 +562,7 @@ impl MemoryDreamUseCase {
             clusters_found: report.clusters_found,
             operations_applied: report.applied.len(),
             operations_skipped: report.skipped.len(),
-            notes: report.outcome.clone(),
+            notes: "completed".to_string(),
         };
         if let Err(e) = self.memory_repo.record_dream_run(&run).await {
             warn!("failed to record dream run: {e}");

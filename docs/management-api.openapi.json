@@ -1128,28 +1128,6 @@
         "summary": "Trigger a dream cycle",
         "description": "Starts a dream cycle (harvest finished sessions, consolidate near-duplicate/contradictory memories, reflect, refresh the rollup) in the background and returns immediately. Poll `GET /api/memory/dream` for the recorded outcome.",
         "operationId": "memoryDreamTrigger",
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "dry_run": {
-                    "type": "boolean",
-                    "description": "Plan and log operations without applying anything.",
-                    "default": false
-                  },
-                  "force": {
-                    "type": "boolean",
-                    "description": "Dream even when nothing changed since the last cycle.",
-                    "default": false
-                  }
-                }
-              }
-            }
-          }
-        },
         "responses": {
           "202": {
             "description": "Cycle started.",
@@ -1162,12 +1140,6 @@
                   ],
                   "properties": {
                     "started": {
-                      "type": "boolean"
-                    },
-                    "dry_run": {
-                      "type": "boolean"
-                    },
-                    "force": {
                       "type": "boolean"
                     }
                   }
@@ -1984,7 +1956,7 @@
           },
           "notes": {
             "type": "string",
-            "description": "Outcome note, e.g. `completed` or `skipped: nothing new to dream about`."
+            "description": "Outcome note (`completed`)."
           }
         }
       }

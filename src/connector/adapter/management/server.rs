@@ -177,7 +177,7 @@ async fn index(State(_state): State<AppState>) -> Json<Value> {
             { "method": "GET", "path": "/api/memory/sessions", "description": "imported sessions" },
             { "method": "GET", "path": "/api/memory/tree", "description": "browse the memory filesystem (?uri=)" },
             { "method": "GET", "path": "/api/memory/dream", "description": "dream scheduler status + last run" },
-            { "method": "POST", "path": "/api/memory/dream", "description": "trigger a dream cycle ({dry_run?, force?})" },
+            { "method": "POST", "path": "/api/memory/dream", "description": "trigger a dream cycle" },
             { "method": "GET", "path": "/api/memory/{id}", "description": "one memory item or node" },
             { "method": "GET", "path": "/api/openapi.json", "description": "OpenAPI 3.1 description of this API" },
             { "method": "GET/POST", "path": "/api/stream/explain/{symbol}", "description": "SSE: stream an LLM call-flow explanation for a symbol" },

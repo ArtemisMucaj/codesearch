@@ -369,14 +369,6 @@ pub enum MemorySubcommand {
         #[arg(long, value_enum, default_value = "open-ai")]
         llm: LlmTarget,
 
-        /// Plan and print the operations without applying anything.
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Dream even when nothing changed since the last cycle.
-        #[arg(short, long)]
-        force: bool,
-
         /// Minutes a session must be inactive to count as finished.
         #[arg(long, default_value = "60")]
         idle_minutes: u64,

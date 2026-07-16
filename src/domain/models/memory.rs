@@ -373,7 +373,7 @@ pub struct DreamRun {
     pub operations_applied: usize,
     /// Operations proposed by the model but rejected by a guardrail.
     pub operations_skipped: usize,
-    /// Free-form outcome note (e.g. `"completed"`, `"skipped: nothing new"`).
+    /// Free-form outcome note (`"completed"`).
     pub notes: String,
 }
 

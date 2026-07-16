@@ -268,15 +268,8 @@ impl<'a> Router<'a> {
                 MemorySubcommand::Tree { uri, format } => {
                     self.memory_controller.tree(uri, format).await
                 }
-                MemorySubcommand::Dream {
-                    llm,
-                    dry_run,
-                    force,
-                    idle_minutes,
-                } => {
-                    self.memory_controller
-                        .dream(llm, dry_run, force, idle_minutes)
-                        .await
+                MemorySubcommand::Dream { llm, idle_minutes } => {
+                    self.memory_controller.dream(llm, idle_minutes).await
                 }
             },
             Commands::Create { .. } => Err(anyhow::anyhow!(

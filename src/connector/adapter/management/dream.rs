@@ -78,28 +78,25 @@ impl DreamService {
 
     /// Start a dream cycle in the background. Returns `false` (without
     /// spawning) when one is already in flight.
-    pub fn trigger(self: &Arc<Self>, dry_run: bool, force: bool) -> bool {
+    pub fn trigger(self: &Arc<Self>) -> bool {
         if self.running.swap(true, Ordering::SeqCst) {
             return false;
         }
         let service = Arc::clone(self);
         tokio::spawn(async move {
-            service.run_cycle(dry_run, force).await;
+            service.run_cycle().await;
             service.running.store(false, Ordering::SeqCst);
         });
         true
     }
 
-    async fn run_cycle(&self, dry_run: bool, force: bool) {
+    async fn run_cycle(&self) {
         let options = DreamOptions {
             session_idle_secs: self.idle_secs(),
-            dry_run,
-            force,
         };
         match self.use_case.execute(&options).await {
             Ok(report) => tracing::info!(
-                "dream cycle: {} ({} sessions imported, {} ops applied, {} skipped)",
-                report.outcome,
+                "dream cycle finished ({} sessions imported, {} ops applied, {} skipped)",
                 report.sessions_imported,
                 report.applied.len(),
                 report.skipped.len()
@@ -141,7 +138,7 @@ impl DreamService {
             if self.running.swap(true, Ordering::SeqCst) {
                 return; // a manual trigger is in flight; try again next tick
             }
-            self.run_cycle(false, false).await;
+            self.run_cycle().await;
             self.running.store(false, Ordering::SeqCst);
             return;
         }

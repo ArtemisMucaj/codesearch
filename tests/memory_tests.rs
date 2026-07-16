@@ -835,7 +835,6 @@ async fn dream_consolidates_duplicate_cluster() {
 
     let report = dream.execute(&DreamOptions::default()).await.unwrap();
 
-    assert_eq!(report.outcome, "completed");
     assert_eq!(report.clusters_found, 1);
     assert_eq!(report.applied.len(), 2, "one merge upsert + one delete");
     let merged = harness
@@ -863,37 +862,48 @@ async fn dream_consolidates_duplicate_cluster() {
 }
 
 #[tokio::test]
-async fn dream_skips_when_nothing_changed_since_last_run() {
+async fn dream_always_runs_a_full_cycle() {
     let harness = Harness::new();
+    // Two takes on the same topic → one cluster, examined on every cycle.
     harness
         .seed_item(
-            MemoryKind::Fact,
-            "stable_fact",
-            "unchanging",
-            &test_vector(0, 0.0),
+            MemoryKind::Experience,
+            "dup_a",
+            "first take",
+            &test_vector(0, 0.05),
+        )
+        .await;
+    harness
+        .seed_item(
+            MemoryKind::Experience,
+            "dup_b",
+            "second take",
+            &test_vector(0, 0.10),
         )
         .await;
 
-    // First cycle completes (nothing to consolidate, but no previous run).
-    let chat = Arc::new(ScriptedChatClient::new(vec![]));
+    // The model finds nothing to change on either cycle.
+    let no_op = r#"{"items": [], "delete": []}"#;
+    let chat = Arc::new(ScriptedChatClient::new(vec![no_op, no_op]));
     let dream = harness.dream_use_case(Arc::clone(&chat), StubDiscovery::empty());
+
     let first = dream.execute(&DreamOptions::default()).await.unwrap();
-    assert_eq!(first.outcome, "completed");
+    assert_eq!(first.clusters_found, 1);
 
-    // Second cycle: no imports, no item updates since → skipped, no LLM calls.
+    // A second cycle with nothing new still consolidates — a requested dream
+    // never short-circuits.
     let second = dream.execute(&DreamOptions::default()).await.unwrap();
-    assert_eq!(second.outcome, "skipped: nothing new to dream about");
-    assert!(chat.recorded_calls().await.is_empty());
+    assert_eq!(second.clusters_found, 1);
+    assert_eq!(chat.recorded_calls().await.len(), 2);
 
-    // `force` overrides the skip.
-    let forced = dream
-        .execute(&DreamOptions {
-            force: true,
-            ..DreamOptions::default()
-        })
+    // Both runs are recorded.
+    let run = harness
+        .memory_repo
+        .last_dream_run()
         .await
-        .unwrap();
-    assert_eq!(forced.outcome, "completed");
+        .unwrap()
+        .expect("dream run recorded");
+    assert_eq!(run.notes, "completed");
 }
 
 #[tokio::test]
@@ -945,64 +955,6 @@ async fn dream_rejects_deletes_outside_the_cluster() {
         .iter()
         .any(|(op, reason)| matches!(op, MemoryOperation::Delete { name, .. } if name == "innocent_bystander")
             && reason.contains("not part of the examined cluster")));
-}
-
-#[tokio::test]
-async fn dream_dry_run_plans_without_writing() {
-    let harness = Harness::new();
-    harness
-        .seed_item(
-            MemoryKind::Experience,
-            "dup_a",
-            "first take",
-            &test_vector(0, 0.05),
-        )
-        .await;
-    harness
-        .seed_item(
-            MemoryKind::Experience,
-            "dup_b",
-            "second take",
-            &test_vector(0, 0.10),
-        )
-        .await;
-
-    let chat = Arc::new(ScriptedChatClient::new(vec![
-        r#"{"items": [{"kind": "experience", "name": "dup_a", "content": "merged", "scope": null}],
-            "delete": [{"kind": "experience", "name": "dup_b"}]}"#,
-    ]));
-    let dream = harness.dream_use_case(chat, StubDiscovery::empty());
-    let report = dream
-        .execute(&DreamOptions {
-            dry_run: true,
-            ..DreamOptions::default()
-        })
-        .await
-        .unwrap();
-
-    assert!(report.dry_run);
-    assert_eq!(report.applied.len(), 2, "operations planned");
-    // Nothing was actually written or deleted.
-    let dup_b = harness
-        .memory_repo
-        .find_item(MemoryKind::Experience, "dup_b")
-        .await
-        .unwrap()
-        .expect("dry run must not delete");
-    assert_eq!(dup_b.content(), "second take");
-    let dup_a = harness
-        .memory_repo
-        .find_item(MemoryKind::Experience, "dup_a")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(dup_a.content(), "first take");
-    assert!(harness
-        .memory_repo
-        .last_dream_run()
-        .await
-        .unwrap()
-        .is_none());
 }
 
 #[tokio::test]

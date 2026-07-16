@@ -149,17 +149,6 @@ pub async fn tree(
     Ok(Json(json!({ "count": children.len(), "nodes": children })))
 }
 
-/// Optional JSON body for `POST /api/memory/dream`.
-#[derive(Debug, Default, Deserialize)]
-pub struct DreamTriggerParams {
-    /// Plan and log operations without applying anything.
-    #[serde(default)]
-    pub dry_run: bool,
-    /// Dream even when nothing changed since the last cycle.
-    #[serde(default)]
-    pub force: bool,
-}
-
 /// `GET /api/memory/dream` — scheduler configuration, whether a cycle is in
 /// flight, and the last recorded run.
 pub async fn dream_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -185,7 +174,6 @@ pub async fn dream_status(State(state): State<AppState>) -> ApiResult<Json<Value
 /// readable via `GET /api/memory/dream` once finished.
 pub async fn dream_trigger(
     State(state): State<AppState>,
-    body: Option<Json<DreamTriggerParams>>,
 ) -> ApiResult<(axum::http::StatusCode, Json<Value>)> {
     let Some(dream) = state.dream.as_ref() else {
         return Err(ApiError::new(
@@ -193,8 +181,7 @@ pub async fn dream_trigger(
             "dreaming is not available on this server (no LLM backend configured at startup)",
         ));
     };
-    let params = body.map(|Json(p)| p).unwrap_or_default();
-    if !dream.trigger(params.dry_run, params.force) {
+    if !dream.trigger() {
         return Err(ApiError::new(
             axum::http::StatusCode::CONFLICT,
             "a dream cycle is already running",
@@ -202,11 +189,7 @@ pub async fn dream_trigger(
     }
     Ok((
         axum::http::StatusCode::ACCEPTED,
-        Json(json!({
-            "started": true,
-            "dry_run": params.dry_run,
-            "force": params.force,
-        })),
+        Json(json!({ "started": true })),
     ))
 }
 
