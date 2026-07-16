@@ -373,8 +373,6 @@ pub struct DreamRun {
     pub operations_applied: usize,
     /// Operations proposed by the model but rejected by a guardrail.
     pub operations_skipped: usize,
-    /// Free-form outcome note (`"completed"`).
-    pub notes: String,
 }
 
 /// A single write/delete decided by the extraction model.

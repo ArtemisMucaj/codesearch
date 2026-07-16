@@ -1927,8 +1927,7 @@
           "sessions_imported",
           "clusters_found",
           "operations_applied",
-          "operations_skipped",
-          "notes"
+          "operations_skipped"
         ],
         "properties": {
           "id": {
@@ -1953,10 +1952,6 @@
           },
           "operations_skipped": {
             "type": "integer"
-          },
-          "notes": {
-            "type": "string",
-            "description": "Outcome note (`completed`)."
           }
         }
       }

@@ -110,8 +110,7 @@ impl DuckdbMemoryRepository {
                 sessions_imported BIGINT NOT NULL,
                 clusters_found BIGINT NOT NULL,
                 operations_applied BIGINT NOT NULL,
-                operations_skipped BIGINT NOT NULL,
-                notes TEXT NOT NULL
+                operations_skipped BIGINT NOT NULL
             );
             "#
         ))
@@ -765,16 +764,15 @@ impl MemoryRepository for DuckdbMemoryRepository {
         conn.execute(
             "INSERT INTO memory_dream_runs \
              (id, started_at, finished_at, sessions_imported, clusters_found, \
-              operations_applied, operations_skipped, notes) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+              operations_applied, operations_skipped) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
              ON CONFLICT (id) DO UPDATE SET \
                  started_at = excluded.started_at, \
                  finished_at = excluded.finished_at, \
                  sessions_imported = excluded.sessions_imported, \
                  clusters_found = excluded.clusters_found, \
                  operations_applied = excluded.operations_applied, \
-                 operations_skipped = excluded.operations_skipped, \
-                 notes = excluded.notes",
+                 operations_skipped = excluded.operations_skipped",
             params![
                 run.id,
                 run.started_at,
@@ -783,7 +781,6 @@ impl MemoryRepository for DuckdbMemoryRepository {
                 run.clusters_found as i64,
                 run.operations_applied as i64,
                 run.operations_skipped as i64,
-                run.notes,
             ],
         )
         .map_err(|e| DomainError::storage(format!("Failed to record dream run: {e}")))?;
@@ -795,7 +792,7 @@ impl MemoryRepository for DuckdbMemoryRepository {
         let mut stmt = conn
             .prepare(
                 "SELECT id, started_at, finished_at, sessions_imported, clusters_found, \
-                        operations_applied, operations_skipped, notes \
+                        operations_applied, operations_skipped \
                  FROM memory_dream_runs ORDER BY finished_at DESC LIMIT 1",
             )
             .map_err(|e| DomainError::storage(format!("Failed to prepare last_dream_run: {e}")))?;
@@ -855,7 +852,6 @@ fn dream_run_from_row(row: &Row<'_>) -> Result<DreamRun, duckdb::Error> {
         clusters_found: row.get::<_, i64>(4)? as usize,
         operations_applied: row.get::<_, i64>(5)? as usize,
         operations_skipped: row.get::<_, i64>(6)? as usize,
-        notes: row.get(7)?,
     })
 }
 

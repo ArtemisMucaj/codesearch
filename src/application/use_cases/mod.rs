@@ -20,6 +20,7 @@ mod memory_extraction;
 mod memory_extraction_prompt;
 mod memory_search;
 mod memory_summary;
+pub(crate) mod memory_support;
 pub(crate) mod pattern_utils;
 mod repository_overview;
 mod resolve_channels;

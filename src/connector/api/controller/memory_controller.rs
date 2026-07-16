@@ -4,8 +4,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use crate::application::{
-    resource_slug, ChatClient, DreamOptions, DreamReport, ImportOutcome, ImportSessionUseCase,
-    MEMORY_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
+    resource_slug, ChatClient, DreamReport, ImportOutcome, ImportSessionUseCase, MEMORY_ROOT_URI,
+    RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
 };
 use crate::cli::{LlmTarget, MemoryKindArg, OutputFormatTextJson};
 use crate::connector::adapter::{
@@ -378,10 +378,7 @@ impl<'a> MemoryController<'a> {
     pub async fn dream(&self, llm: LlmTarget, idle_minutes: u64) -> Result<String> {
         let chat_client = self.chat_client(llm)?;
         let use_case = self.container.memory_dream_use_case(chat_client)?;
-        let options = DreamOptions {
-            session_idle_secs: (idle_minutes * 60) as i64,
-        };
-        let report = use_case.execute(&options).await?;
+        let report = use_case.execute((idle_minutes * 60) as i64).await?;
         Ok(render_dream_report(&report))
     }
 
@@ -421,7 +418,7 @@ pub fn run_import_picker_ui(
     events: std::sync::mpsc::Receiver<ImportEvent>,
     import_tx: tokio::sync::mpsc::UnboundedSender<ImportRequest>,
 ) -> Result<()> {
-    let now = now_secs();
+    let now = crate::application::use_cases::memory_support::unix_now();
     let (tx, rx) = std::sync::mpsc::channel::<Vec<DiscoveredSession>>();
 
     // Kick off discovery; the picker drains `rx` as batches arrive. The thread
@@ -490,14 +487,6 @@ fn transcript_label(transcript: &crate::domain::SessionTranscript) -> String {
     }
 }
 
-/// Current Unix time in seconds.
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 /// Format one import outcome. When `multiple`, each session is prefixed so a
 /// batch report stays readable.
 fn render_import_outcome(outcome: &ImportOutcome, multiple: bool) -> String {
@@ -531,28 +520,44 @@ fn render_import_outcome(outcome: &ImportOutcome, multiple: bool) -> String {
                 output.push_str("No memories extracted — nothing durable in this session.\n");
             }
             let indent = if multiple { "    " } else { "  " };
-            if !multiple || !report.applied.is_empty() {
-                for op in &report.applied {
-                    match op {
-                        MemoryOperation::Upsert { kind, name, .. } => {
-                            output.push_str(&format!("{indent}+ [{kind}] {name}\n"));
-                        }
-                        MemoryOperation::Delete { kind, name } => {
-                            output.push_str(&format!("{indent}- [{kind}] {name}\n"));
-                        }
-                    }
-                }
-            }
-            for (op, reason) in &report.skipped {
-                let (kind, name) = match op {
-                    MemoryOperation::Upsert { kind, name, .. }
-                    | MemoryOperation::Delete { kind, name } => (kind, name),
-                };
-                output.push_str(&format!("{indent}~ [{kind}] {name} skipped: {reason}\n"));
-            }
+            let applied: &[MemoryOperation] = if multiple && report.applied.is_empty() {
+                &[]
+            } else {
+                &report.applied
+            };
+            output.push_str(&render_operations(applied, &report.skipped, indent));
             output
         }
     }
+}
+
+/// Render applied and skipped operation lines (`+`/`-`/`~ … skipped:`), shared
+/// by the import and dream reports.
+fn render_operations(
+    applied: &[MemoryOperation],
+    skipped: &[(MemoryOperation, String)],
+    indent: &str,
+) -> String {
+    let mut out = String::new();
+    for op in applied {
+        match op {
+            MemoryOperation::Upsert { kind, name, .. } => {
+                out.push_str(&format!("{indent}+ [{kind}] {name}\n"));
+            }
+            MemoryOperation::Delete { kind, name } => {
+                out.push_str(&format!("{indent}- [{kind}] {name}\n"));
+            }
+        }
+    }
+    for (op, reason) in skipped {
+        let (kind, name) = match op {
+            MemoryOperation::Upsert { kind, name, .. } | MemoryOperation::Delete { kind, name } => {
+                (kind, name)
+            }
+        };
+        out.push_str(&format!("{indent}~ [{kind}] {name} skipped: {reason}\n"));
+    }
+    out
 }
 
 /// Render a dream report for the CLI: harvest counts, then the operations,
@@ -575,25 +580,8 @@ fn render_dream_report(report: &DreamReport) -> String {
             "  {} operation(s) applied:\n",
             report.applied.len()
         ));
-        for op in &report.applied {
-            match op {
-                MemoryOperation::Upsert { kind, name, .. } => {
-                    out.push_str(&format!("    + [{kind}] {name}\n"));
-                }
-                MemoryOperation::Delete { kind, name } => {
-                    out.push_str(&format!("    - [{kind}] {name}\n"));
-                }
-            }
-        }
     }
-    for (op, reason) in &report.skipped {
-        let (kind, name) = match op {
-            MemoryOperation::Upsert { kind, name, .. } | MemoryOperation::Delete { kind, name } => {
-                (kind, name)
-            }
-        };
-        out.push_str(&format!("    ~ [{kind}] {name} skipped: {reason}\n"));
-    }
+    out.push_str(&render_operations(&report.applied, &report.skipped, "    "));
     out
 }
 

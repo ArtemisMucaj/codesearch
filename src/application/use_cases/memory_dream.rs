@@ -38,7 +38,10 @@ use crate::application::use_cases::memory_extraction::{
     extract_json_object, normalize_name, repair_json_string_escapes,
 };
 use crate::application::use_cases::memory_summary::SummarizeMemoryUseCase;
-use crate::domain::{DomainError, DreamRun, MemoryItem, MemoryKind, MemoryOperation};
+use crate::application::use_cases::memory_support::{unix_now, upsert_preserving_identity};
+use crate::domain::{
+    cosine_similarity, DomainError, DreamRun, MemoryItem, MemoryKind, MemoryOperation,
+};
 
 /// Default idle time after which a discovered session counts as finished.
 pub const DEFAULT_SESSION_IDLE_SECS: i64 = 3_600;
@@ -74,21 +77,6 @@ const MIN_REFLECTION_ITEMS: usize = 4;
 /// store in one run.
 const MIN_DELETE_CAP: usize = 4;
 const DELETE_CAP_DIVISOR: usize = 5;
-
-/// Tuning knobs for one dream cycle.
-#[derive(Debug, Clone)]
-pub struct DreamOptions {
-    /// Seconds a session must have been inactive to count as finished.
-    pub session_idle_secs: i64,
-}
-
-impl Default for DreamOptions {
-    fn default() -> Self {
-        Self {
-            session_idle_secs: DEFAULT_SESSION_IDLE_SECS,
-        }
-    }
-}
 
 /// What one dream cycle did.
 #[derive(Debug, Default)]
@@ -176,9 +164,10 @@ impl MemoryDreamUseCase {
         }
     }
 
-    /// Run one full dream cycle.
+    /// Run one full dream cycle. `session_idle_secs` is how long a session
+    /// must have been inactive to count as finished.
     #[tracing::instrument(skip_all)]
-    pub async fn execute(&self, options: &DreamOptions) -> Result<DreamReport, DomainError> {
+    pub async fn execute(&self, session_idle_secs: i64) -> Result<DreamReport, DomainError> {
         let _guard = self
             .running
             .try_lock()
@@ -187,7 +176,7 @@ impl MemoryDreamUseCase {
         let mut report = DreamReport::default();
 
         // Phase 1 — harvest.
-        let harvest = self.harvest_inner(options.session_idle_secs).await?;
+        let harvest = self.harvest_inner(session_idle_secs).await?;
         report.sessions_eligible = harvest.sessions_eligible;
         report.sessions_imported = harvest.sessions_imported;
 
@@ -268,13 +257,20 @@ impl MemoryDreamUseCase {
     async fn harvest_inner(&self, session_idle_secs: i64) -> Result<HarvestReport, DomainError> {
         let mut report = HarvestReport::default();
         let sessions = self.discovery.discover().await?;
+        let imported: HashSet<String> = self
+            .memory_repo
+            .list_sessions()
+            .await?
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
         let now = unix_now();
 
         for session in sessions {
             if session.updated_at <= 0 || now - session.updated_at < session_idle_secs {
                 continue;
             }
-            if self.memory_repo.find_session(&session.id).await?.is_some() {
+            if imported.contains(&session.id) {
                 continue;
             }
             report.sessions_eligible += 1;
@@ -330,26 +326,26 @@ impl MemoryDreamUseCase {
             }
         }
 
-        let mut groups: std::collections::HashMap<usize, Vec<MemoryItem>> =
+        // Group indices first; only the items surviving the caps get cloned.
+        let mut groups: std::collections::HashMap<usize, Vec<usize>> =
             std::collections::HashMap::new();
-        for (idx, (item, _)) in embedded.iter().enumerate() {
-            groups
-                .entry(find(&mut parent, idx))
-                .or_default()
-                .push((*item).clone());
+        for idx in 0..embedded.len() {
+            groups.entry(find(&mut parent, idx)).or_default().push(idx);
         }
 
-        let mut clusters: Vec<Vec<MemoryItem>> = groups
+        let mut clusters: Vec<Vec<usize>> = groups
             .into_values()
             .filter(|group| group.len() >= 2)
             .collect();
         for cluster in &mut clusters {
             // Most recently updated first; the model sees the freshest take at
             // the top and the prompt truncation drops the stalest.
-            cluster.sort_by(|a, b| {
-                b.updated_at()
-                    .cmp(&a.updated_at())
-                    .then_with(|| a.name().cmp(b.name()))
+            cluster.sort_by(|&a, &b| {
+                embedded[b]
+                    .0
+                    .updated_at()
+                    .cmp(&embedded[a].0.updated_at())
+                    .then_with(|| embedded[a].0.name().cmp(embedded[b].0.name()))
             });
             cluster.truncate(MAX_CLUSTER_ITEMS);
         }
@@ -358,11 +354,19 @@ impl MemoryDreamUseCase {
         clusters.sort_by(|a, b| {
             b.len()
                 .cmp(&a.len())
-                .then_with(|| a[0].name().cmp(b[0].name()))
+                .then_with(|| embedded[a[0]].0.name().cmp(embedded[b[0]].0.name()))
         });
         clusters.truncate(MAX_CLUSTERS_PER_RUN);
         debug!("dream: {} consolidation clusters", clusters.len());
-        Ok(clusters)
+        Ok(clusters
+            .into_iter()
+            .map(|group| {
+                group
+                    .into_iter()
+                    .map(|idx| embedded[idx].0.clone())
+                    .collect()
+            })
+            .collect())
     }
 
     /// One consolidation call for one cluster, with a format-recovery retry.
@@ -493,8 +497,8 @@ impl MemoryDreamUseCase {
         Ok(())
     }
 
-    /// Write one upsert, preserving the target's identity and history when it
-    /// already exists (same id, original `created_at`, bumped `update_count`).
+    /// Write one upsert through the shared identity-preserving path (dream
+    /// keeps the existing item's source session, so no override).
     async fn apply_upsert(&self, op: &MemoryOperation) -> Result<(), DomainError> {
         let MemoryOperation::Upsert {
             kind,
@@ -505,50 +509,17 @@ impl MemoryDreamUseCase {
         else {
             return Ok(());
         };
-        let now = unix_now();
-        let existing = self.memory_repo.find_item(*kind, name).await?;
-        let item = match existing {
-            Some(prev) => MemoryItem::new(
-                prev.id().to_string(),
-                *kind,
-                name.clone(),
-                content.clone(),
-                prev.source_session_id().map(str::to_string),
-                scope.clone(),
-                prev.created_at(),
-                now,
-                prev.update_count() + 1,
-            ),
-            None => MemoryItem::new(
-                uuid::Uuid::new_v4().to_string(),
-                *kind,
-                name.clone(),
-                content.clone(),
-                None,
-                scope.clone(),
-                now,
-                now,
-                0,
-            ),
-        };
-        let vector = self.embed_content(&item).await;
-        self.memory_repo.upsert_item(&item, vector.as_deref()).await
-    }
-
-    /// Embed `name + content` for semantic recall; `None` when embeddings are
-    /// disabled or fail (the item stays keyword-searchable).
-    async fn embed_content(&self, item: &MemoryItem) -> Option<Vec<f32>> {
-        if !self.embedding_service.embeddings_enabled() {
-            return None;
-        }
-        let text = format!("{}\n\n{}", item.name().replace('_', " "), item.content());
-        match self.embedding_service.embed_query(&text).await {
-            Ok(vector) => Some(vector),
-            Err(e) => {
-                warn!("failed to embed memory item '{}': {e}", item.name());
-                None
-            }
-        }
+        upsert_preserving_identity(
+            self.memory_repo.as_ref(),
+            self.embedding_service.as_ref(),
+            *kind,
+            name,
+            content,
+            scope.clone(),
+            None,
+            unix_now(),
+        )
+        .await
     }
 
     /// Best-effort persistence of the run record (a bookkeeping failure must
@@ -562,7 +533,6 @@ impl MemoryDreamUseCase {
             clusters_found: report.clusters_found,
             operations_applied: report.applied.len(),
             operations_skipped: report.skipped.len(),
-            notes: "completed".to_string(),
         };
         if let Err(e) = self.memory_repo.record_dream_run(&run).await {
             warn!("failed to record dream run: {e}");
@@ -621,22 +591,6 @@ fn parse_dream_operations(response: &str) -> Result<Vec<MemoryOperation>, Domain
     Ok(operations)
 }
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let (mut dot, mut norm_a, mut norm_b) = (0.0f32, 0.0f32, 0.0f32);
-    for (x, y) in a.iter().zip(b) {
-        dot += x * y;
-        norm_a += x * x;
-        norm_b += y * y;
-    }
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 0.0;
-    }
-    dot / (norm_a.sqrt() * norm_b.sqrt())
-}
-
 fn find(parent: &mut [usize], mut x: usize) -> usize {
     while parent[x] != x {
         parent[x] = parent[parent[x]];
@@ -650,13 +604,6 @@ fn union(parent: &mut [usize], a: usize, b: usize) {
     if ra != rb {
         parent[rb] = ra;
     }
-}
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -713,14 +660,6 @@ mod tests {
             panic!("expected upsert");
         };
         assert_eq!(*scope, None);
-    }
-
-    #[test]
-    fn cosine_similarity_basics() {
-        assert!((cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < 1e-6);
-        assert!(cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
-        assert_eq!(cosine_similarity(&[1.0], &[1.0, 0.0]), 0.0);
-        assert_eq!(cosine_similarity(&[0.0, 0.0], &[0.0, 0.0]), 0.0);
     }
 
     #[test]

@@ -694,8 +694,8 @@ async fn summarize_without_embeddings_still_stores_nodes() {
 // ─── Dream (offline consolidation) ──────────────────────────────────────────
 
 use codesearch::{
-    DiscoveredSession, DreamOptions, MemoryDreamUseCase, MemoryItem, MemoryOperation,
-    SessionDiscovery, SessionLocator, SessionSource,
+    DiscoveredSession, MemoryDreamUseCase, MemoryItem, MemoryOperation, SessionDiscovery,
+    SessionLocator, SessionSource,
 };
 
 /// Scripted [`SessionDiscovery`] source for harvest tests.
@@ -833,7 +833,7 @@ async fn dream_consolidates_duplicate_cluster() {
     ]));
     let dream = harness.dream_use_case(Arc::clone(&chat), StubDiscovery::empty());
 
-    let report = dream.execute(&DreamOptions::default()).await.unwrap();
+    let report = dream.execute(3_600).await.unwrap();
 
     assert_eq!(report.clusters_found, 1);
     assert_eq!(report.applied.len(), 2, "one merge upsert + one delete");
@@ -858,7 +858,6 @@ async fn dream_consolidates_duplicate_cluster() {
         .unwrap()
         .expect("dream run recorded");
     assert_eq!(run.operations_applied, 2);
-    assert_eq!(run.notes, "completed");
 }
 
 #[tokio::test]
@@ -887,12 +886,12 @@ async fn dream_always_runs_a_full_cycle() {
     let chat = Arc::new(ScriptedChatClient::new(vec![no_op, no_op]));
     let dream = harness.dream_use_case(Arc::clone(&chat), StubDiscovery::empty());
 
-    let first = dream.execute(&DreamOptions::default()).await.unwrap();
+    let first = dream.execute(3_600).await.unwrap();
     assert_eq!(first.clusters_found, 1);
 
     // A second cycle with nothing new still consolidates — a requested dream
     // never short-circuits.
-    let second = dream.execute(&DreamOptions::default()).await.unwrap();
+    let second = dream.execute(3_600).await.unwrap();
     assert_eq!(second.clusters_found, 1);
     assert_eq!(chat.recorded_calls().await.len(), 2);
 
@@ -903,7 +902,7 @@ async fn dream_always_runs_a_full_cycle() {
         .await
         .unwrap()
         .expect("dream run recorded");
-    assert_eq!(run.notes, "completed");
+    assert_eq!(run.operations_applied, 0);
 }
 
 #[tokio::test]
@@ -941,7 +940,7 @@ async fn dream_rejects_deletes_outside_the_cluster() {
                        {"kind": "fact", "name": "innocent_bystander"}]}"#,
     ]));
     let dream = harness.dream_use_case(chat, StubDiscovery::empty());
-    let report = dream.execute(&DreamOptions::default()).await.unwrap();
+    let report = dream.execute(3_600).await.unwrap();
 
     // In-cluster delete applied; out-of-cluster delete refused.
     assert!(harness
@@ -986,7 +985,7 @@ async fn dream_harvests_only_idle_unimported_sessions() {
         "Races in test setup cause flakiness",
     ))]));
     let dream = harness.dream_use_case(chat, discovery);
-    let report = dream.execute(&DreamOptions::default()).await.unwrap();
+    let report = dream.execute(3_600).await.unwrap();
 
     assert_eq!(report.sessions_eligible, 1, "fresh session is not eligible");
     assert_eq!(report.sessions_imported, 1);
@@ -1036,7 +1035,7 @@ async fn dream_reflection_writes_but_never_deletes() {
             "delete": [{"kind": "experience", "name": "exp_one"}]}"#,
     ]));
     let dream = harness.dream_use_case(chat, StubDiscovery::empty());
-    let report = dream.execute(&DreamOptions::default()).await.unwrap();
+    let report = dream.execute(3_600).await.unwrap();
 
     assert!(harness
         .memory_repo
@@ -1070,11 +1069,10 @@ async fn dream_run_round_trips_through_repository() {
         clusters_found: 2,
         operations_applied: 5,
         operations_skipped: 1,
-        notes: "completed".to_string(),
     };
     harness.memory_repo.record_dream_run(&run).await.unwrap();
     let loaded = harness.memory_repo.last_dream_run().await.unwrap().unwrap();
     assert_eq!(loaded.id, "run-1");
     assert_eq!(loaded.sessions_imported, 3);
-    assert_eq!(loaded.notes, "completed");
+    assert_eq!(loaded.operations_applied, 5);
 }

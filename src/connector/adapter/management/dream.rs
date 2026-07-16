@@ -19,7 +19,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use crate::application::{DreamOptions, MemoryDreamUseCase, MemoryRepository};
+use crate::application::use_cases::memory_support::unix_now;
+use crate::application::{MemoryDreamUseCase, MemoryRepository};
 use crate::connector::adapter::{CodesearchConfig, MemoryConfig};
 use crate::connector::api::Container;
 use crate::domain::DreamRun;
@@ -91,10 +92,7 @@ impl DreamService {
     }
 
     async fn run_cycle(&self) {
-        let options = DreamOptions {
-            session_idle_secs: self.idle_secs(),
-        };
-        match self.use_case.execute(&options).await {
+        match self.use_case.execute(self.idle_secs()).await {
             Ok(report) => tracing::info!(
                 "dream cycle finished ({} sessions imported, {} ops applied, {} skipped)",
                 report.sessions_imported,
@@ -172,11 +170,4 @@ impl DreamService {
             }
         }
     }
-}
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }

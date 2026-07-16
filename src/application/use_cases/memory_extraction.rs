@@ -18,6 +18,7 @@ use tracing::{debug, warn};
 
 use crate::application::interfaces::{ChatClient, EmbeddingService, MemoryRepository};
 use crate::application::use_cases::memory_extraction_prompt as prompt;
+use crate::application::use_cases::memory_support::{unix_now, upsert_preserving_identity};
 use crate::domain::{DomainError, MemoryItem, MemoryKind, MemoryOperation, SessionTranscript};
 
 /// How many existing memories are prefetched into the extraction context.
@@ -214,35 +215,17 @@ impl MemoryExtractionUseCase {
                     ref content,
                     ref scope,
                 } => {
-                    let existing = self.memory_repo.find_item(kind, name).await?;
-                    let item = match existing {
-                        Some(prev) => MemoryItem::new(
-                            prev.id().to_string(),
-                            kind,
-                            name.clone(),
-                            content.clone(),
-                            Some(transcript.id.clone()),
-                            scope.clone(),
-                            prev.created_at(),
-                            now,
-                            prev.update_count() + 1,
-                        ),
-                        None => MemoryItem::new(
-                            uuid::Uuid::new_v4().to_string(),
-                            kind,
-                            name.clone(),
-                            content.clone(),
-                            Some(transcript.id.clone()),
-                            scope.clone(),
-                            now,
-                            now,
-                            0,
-                        ),
-                    };
-                    let vector = self.embed_content(&item).await;
-                    self.memory_repo
-                        .upsert_item(&item, vector.as_deref())
-                        .await?;
+                    upsert_preserving_identity(
+                        self.memory_repo.as_ref(),
+                        self.embedding_service.as_ref(),
+                        kind,
+                        name,
+                        content,
+                        scope.clone(),
+                        Some(&transcript.id),
+                        now,
+                    )
+                    .await?;
                     report.applied.push(op);
                 }
                 MemoryOperation::Delete { kind, ref name } => {
@@ -255,22 +238,6 @@ impl MemoryExtractionUseCase {
             }
         }
         Ok(report)
-    }
-
-    /// Embed `name + content` for semantic recall; `None` when embeddings are
-    /// disabled or fail (the item stays keyword-searchable).
-    async fn embed_content(&self, item: &MemoryItem) -> Option<Vec<f32>> {
-        if !self.embedding_service.embeddings_enabled() {
-            return None;
-        }
-        let text = format!("{}\n\n{}", item.name().replace('_', " "), item.content());
-        match self.embedding_service.embed_query(&text).await {
-            Ok(vector) => Some(vector),
-            Err(e) => {
-                warn!("failed to embed memory item '{}': {e}", item.name());
-                None
-            }
-        }
     }
 }
 
@@ -486,13 +453,6 @@ pub(crate) fn normalize_name(raw: &str) -> Option<String> {
         return None;
     }
     Some(name.chars().take(MAX_NAME_CHARS).collect())
-}
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
