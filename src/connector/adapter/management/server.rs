@@ -105,7 +105,7 @@ pub fn routes(state: AppState) -> Router {
         .route("/api/couplings", get(handlers::couplings::couplings))
         // Cross-service channels.
         .route("/api/channels", get(handlers::channels::channels))
-        // Read-only memory queries.
+        // Memory queries + dream management.
         .route("/api/memory", get(handlers::memory::list))
         .route("/api/memory/search", get(handlers::memory::search))
         .route("/api/memory/stats", get(handlers::memory::stats))

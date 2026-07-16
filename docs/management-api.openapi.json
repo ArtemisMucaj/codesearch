@@ -44,7 +44,7 @@
     },
     {
       "name": "memory",
-      "description": "Read-only queries over long-term memory."
+      "description": "Long-term memory queries and dream-cycle management."
     },
     {
       "name": "stream",

@@ -72,10 +72,10 @@ const MAX_REFLECTION_ITEMS: usize = 5;
 /// cross-item patterns to exist.
 const MIN_REFLECTION_ITEMS: usize = 4;
 
-/// Delete budget per cycle: `max(MIN_DELETE_CAP, items / DELETE_CAP_DIVISOR)`.
-/// A model gone wrong can therefore never wipe more than a fraction of the
-/// store in one run.
-const MIN_DELETE_CAP: usize = 4;
+/// Delete budget per cycle: a fifth of the store, with a floor of one so a
+/// small store can still merge a duplicate pair. A model gone wrong can
+/// therefore never wipe more than a fraction of the store in one run; the
+/// rest of a large cleanup waits for later cycles.
 const DELETE_CAP_DIVISOR: usize = 5;
 
 /// What one dream cycle did.
@@ -183,7 +183,7 @@ impl MemoryDreamUseCase {
         let items = self.memory_repo.list_items(None).await?;
 
         // Phase 2 — consolidate near-duplicate clusters.
-        let delete_budget = MIN_DELETE_CAP.max(items.len() / DELETE_CAP_DIVISOR);
+        let delete_budget = (items.len() / DELETE_CAP_DIVISOR).max(1);
         let mut deletes_used = 0usize;
         let clusters = self.build_clusters(&items).await?;
         report.clusters_found = clusters.len();
@@ -211,6 +211,9 @@ impl MemoryDreamUseCase {
         }
 
         // Phase 3 — reflect over the whole store (writes only, no deletes).
+        // Reload first: consolidation just rewrote/deleted items, and stale
+        // inputs would let reflection resurrect what was merged away.
+        let items = self.memory_repo.list_items(None).await?;
         if items.len() >= MIN_REFLECTION_ITEMS {
             match self.reflect(&items).await {
                 Ok(operations) => {

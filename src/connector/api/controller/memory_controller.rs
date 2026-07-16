@@ -378,7 +378,10 @@ impl<'a> MemoryController<'a> {
     pub async fn dream(&self, llm: LlmTarget, idle_minutes: u64) -> Result<String> {
         let chat_client = self.chat_client(llm)?;
         let use_case = self.container.memory_dream_use_case(chat_client)?;
-        let report = use_case.execute((idle_minutes * 60) as i64).await?;
+        // Clamp instead of wrapping: an absurd --idle-minutes must not become
+        // a negative threshold that makes still-active sessions eligible.
+        let idle_secs = i64::try_from(idle_minutes.saturating_mul(60)).unwrap_or(i64::MAX);
+        let report = use_case.execute(idle_secs).await?;
         Ok(render_dream_report(&report))
     }
 

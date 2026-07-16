@@ -54,8 +54,14 @@ impl DreamService {
         )
         .context("failed to build the dream scheduler's chat client")?;
         Ok(Arc::new(Self {
-            use_case: Arc::new(container.memory_dream_use_case(chat_client)?),
-            memory_repo: container.memory_repository()?,
+            use_case: Arc::new(
+                container
+                    .memory_dream_use_case(chat_client)
+                    .context("failed to build the dream use case")?,
+            ),
+            memory_repo: container
+                .memory_repository()
+                .context("failed to open the memory repository for the dream scheduler")?,
             config,
             running: AtomicBool::new(false),
         }))
@@ -70,7 +76,13 @@ impl DreamService {
     }
 
     pub async fn last_run(&self) -> Option<DreamRun> {
-        self.memory_repo.last_dream_run().await.ok().flatten()
+        match self.memory_repo.last_dream_run().await {
+            Ok(run) => run,
+            Err(e) => {
+                tracing::warn!("failed to read last dream run for status: {e}");
+                None
+            }
+        }
     }
 
     fn idle_secs(&self) -> i64 {
@@ -85,8 +97,8 @@ impl DreamService {
         }
         let service = Arc::clone(self);
         tokio::spawn(async move {
+            let _reset = RunningGuard(&service.running);
             service.run_cycle().await;
-            service.running.store(false, Ordering::SeqCst);
         });
         true
     }
@@ -136,8 +148,8 @@ impl DreamService {
             if self.running.swap(true, Ordering::SeqCst) {
                 return; // a manual trigger is in flight; try again next tick
             }
+            let _reset = RunningGuard(&self.running);
             self.run_cycle().await;
-            self.running.store(false, Ordering::SeqCst);
             return;
         }
         if !self.config.auto_import() {
@@ -146,6 +158,7 @@ impl DreamService {
         if self.running.swap(true, Ordering::SeqCst) {
             return;
         }
+        let _reset = RunningGuard(&self.running);
         match self.use_case.harvest(self.idle_secs()).await {
             Ok(report) if report.sessions_imported > 0 => tracing::info!(
                 "dream sweep: imported {} finished session(s)",
@@ -154,7 +167,6 @@ impl DreamService {
             Ok(_) => {}
             Err(e) => tracing::warn!("dream sweep failed: {e}"),
         }
-        self.running.store(false, Ordering::SeqCst);
     }
 
     /// A full cycle is due when none was ever recorded or the last one
@@ -169,5 +181,15 @@ impl DreamService {
                 false
             }
         }
+    }
+}
+
+/// Resets the shared `running` flag when dropped, so a panicking cycle or
+/// sweep can never leave the scheduler wedged with `running = true`.
+struct RunningGuard<'a>(&'a AtomicBool);
+
+impl Drop for RunningGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
