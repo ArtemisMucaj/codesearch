@@ -281,6 +281,36 @@ pub struct ChannelsInput {
     pub include_tests: bool,
 }
 
+fn default_overview_top() -> usize {
+    crate::application::DEFAULT_OVERVIEW_TOP
+}
+
+/// Input parameters for the overview tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OverviewInput {
+    /// Repository name or ID to summarise. Omit to auto-detect the repository
+    /// from the connected workspace.
+    pub repository_id: Option<String>,
+
+    /// Maximum number of rows kept in ranked sections (execution features);
+    /// cluster and community lists are returned whole (default: 10).
+    #[serde(default = "default_overview_top")]
+    pub top: usize,
+}
+
+/// Input parameters for the add_memory_resource tool
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AddMemoryResourceInput {
+    /// A local file path or an http(s):// URL to store as a durable, recallable
+    /// resource. URLs and HTML are decluttered to Markdown; plain files are read
+    /// as-is.
+    pub source: String,
+
+    /// Name (slug) for the resource node under memory://resources. Derived from
+    /// the content's title when omitted. Reusing a name overwrites that resource.
+    pub name: Option<String>,
+}
+
 /// Input parameters for the list_symbol_clusters tool
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListSymbolClustersInput {
@@ -1030,6 +1060,74 @@ impl CodesearchMcpServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    /// One-shot repository dossier: index statistics, architectural modules
+    /// (file-level Leiden clusters), behavioural symbol communities, coupling
+    /// hotspots (god nodes), the most critical execution features, and
+    /// cross-service channel links — assembled into a single JSON report.
+    /// Every section is optional: a `null` section was disabled or could not be
+    /// computed (its reason is listed under `skipped`), so the report degrades
+    /// gracefully on a partially-indexed repository. Community `display_name`s
+    /// carry whatever names were cached by earlier `clusters` / `symbol-clusters`
+    /// runs; the LLM executive `summary` is not generated here and is always
+    /// `null`. Use this to orient in a repository before drilling into a section
+    /// with the more specific tools.
+    #[tool(name = "overview")]
+    async fn overview(
+        &self,
+        params: Parameters<OverviewInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let input = params.0;
+
+        let repository_id = self
+            .container
+            .resolve_repository_id(input.repository_id.as_deref())
+            .await;
+
+        // Channel links need both ends of an edge, so the join runs over the
+        // current namespace's repositories (mirroring the `channels` command and
+        // the CLI overview).
+        let namespace = self.container.namespace();
+        let channel_scope: Vec<String> = self
+            .container
+            .list_use_case()
+            .execute()
+            .await
+            .map_err(|e| {
+                McpError::internal_error(
+                    format!("Listing repositories for channel scope failed: {}", e),
+                    None,
+                )
+            })?
+            .iter()
+            .filter(|r| r.namespace() == Some(namespace))
+            .map(|r| r.id().to_string())
+            .collect();
+
+        let options = crate::application::OverviewOptions {
+            top: input.top,
+            channel_scope,
+            ..Default::default()
+        };
+
+        // No LLM enrichment over MCP: the report ships with cached community
+        // names and no executive summary (the CLI presentation layer owns the
+        // chat client). The caller can reason over the structured sections.
+        let report = self
+            .container
+            .repository_overview_use_case()
+            .execute(&repository_id, &options)
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Building overview failed: {}", e), None)
+            })?;
+
+        let json = serde_json::to_string_pretty(&report).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize overview report: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
     /// Show cross-service channel links between indexed repositories:
     /// producer/consumer call sites (Kafka topics, HTTP routes, MQTT topics)
     /// joined on their channel identifier. Returns matched producer→consumer
@@ -1225,6 +1323,68 @@ impl CodesearchMcpServer {
 
         let json = serde_json::to_string_pretty(&output).map_err(|e| {
             McpError::internal_error(format!("Failed to serialize memory node: {}", e), None)
+        })?;
+
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    /// Store a file or URL as a durable memory resource, recallable later with
+    /// `search_memory` / `read_memory`. The content is fetched (URLs and HTML are
+    /// decluttered to Markdown; plain files are read as-is), summarised into an
+    /// abstract + overview by the configured LLM, and saved under
+    /// `memory://resources/<name>` with the full text kept as its detail. Use
+    /// this to remember a design doc, spec, or reference page for future
+    /// sessions. Requires the LLM backend to be reachable, and the `defuddle`
+    /// CLI on PATH for URLs and HTML.
+    #[tool(name = "add_memory_resource")]
+    async fn add_memory_resource(
+        &self,
+        params: Parameters<AddMemoryResourceInput>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::connector::adapter::fetch_resource;
+        use crate::connector::api::controller::build_chat_client;
+
+        let input = params.0;
+
+        // Fetch first — a bad path/URL should fail before we spin up the LLM.
+        let fetched = fetch_resource(&input.source).await.map_err(|e| {
+            McpError::invalid_params(
+                format!("Failed to fetch resource '{}': {}", input.source, e),
+                None,
+            )
+        })?;
+
+        // An explicit name wins, else derive the slug from the fetched title.
+        let slug = crate::application::resource_slug(
+            input.name.as_deref().unwrap_or(&fetched.title),
+        );
+
+        let chat_client =
+            build_chat_client(self.container.llm_target(), self.container.data_dir()).map_err(
+                |e| McpError::internal_error(format!("Failed to init LLM backend: {}", e), None),
+            )?;
+        let summary = self
+            .container
+            .memory_summary_use_case(chat_client)
+            .map_err(|e| {
+                McpError::internal_error(format!("Failed to open memory store: {}", e), None)
+            })?;
+
+        let node = summary
+            .summarize_resource(&slug, &fetched.source, &fetched.text)
+            .await
+            .map_err(|e| {
+                McpError::internal_error(format!("Failed to store resource: {}", e), None)
+            })?;
+
+        // Keep the whole-memory digest in sync — best-effort, the resource is
+        // already stored, so a digest hiccup must not fail the call.
+        if let Err(e) = summary.regenerate_digest().await {
+            tracing::warn!("failed to regenerate memory digest after add_memory_resource: {e}");
+        }
+
+        let json = serde_json::to_string_pretty(&node).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize resource node: {}", e), None)
         })?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))

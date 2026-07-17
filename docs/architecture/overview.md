@@ -1,190 +1,203 @@
 # Architecture Overview
 
-CodeSearch follows Domain-Driven Design (DDD) principles with a clean separation of concerns.
-
-## Layer Structure
+CodeSearch is a single Rust binary built with **Domain-Driven Design (DDD)** and
+a strict **Ports & Adapters** (Hexagonal) layering. Dependencies always point
+inward: outer layers depend on inner layers, never the reverse.
 
 ```mermaid
 graph TB
-    subgraph CLI["CLI Layer"]
-        UI[User Interface]
+    subgraph Entry["Entry points  (src/main.rs, src/cli)"]
+        CLI[CLI / clap]
+        MCP[MCP server]
+        SERVE[serve: MCP + REST/SSE mgmt API]
+        TUI[Interactive TUI]
     end
 
-    subgraph Application["Application Layer"]
-        subgraph UseCases["Use Cases"]
-            Index[Index]
-            Search[Search]
-            List[List]
-            Delete[Delete]
-            CallGraph[CallGraph]
-        end
-        subgraph Ports["Interfaces / Ports"]
-            VectorRepo[VectorRepository]
-            RepoRepo[MetadataRepository]
-            EmbedSvc[EmbeddingService]
-            ParseSvc[ParserService]
-        end
+    subgraph App["Application layer  (src/application)"]
+        UC[Use cases — orchestration]
+        Ports[Interfaces / Ports — traits only]
     end
 
-    subgraph Domain["Domain Layer"]
-        CodeChunk[CodeChunk]
-        Repository[Repository]
-        Embedding[Embedding]
-        Language[Language]
-        SearchResult[SearchResult/Query]
-        DomainError[DomainError]
+    subgraph Domain["Domain layer  (src/domain)"]
+        Models[Value types: CodeChunk, SearchResult, Embedding, MemoryItem, …]
+        Err[CodeSearchError]
     end
 
-    subgraph Connector["Connector Layer"]
-        subgraph Adapters["Adapters"]
-            DuckDBMeta[DuckdbMetadataRepository]
-            DuckDBVec[DuckdbVectorRepository]
-            DuckDBCallGraph[DuckdbCallGraphRepository]
-            DuckDBFileHash[DuckdbFileHashRepository]
-            InMemory[InMemoryVectorRepository]
-            Ort[OrtEmbedding]
-            OrtRerank[OrtReranking]
-            Mock[MockEmbedding]
-            TreeSitter[TreeSitterParser]
-            MCP[McpServer]
-        end
+    subgraph Conn["Connector layer  (src/connector)"]
+        Adapters[Adapters: DuckDB, ONNX, tree-sitter, SCIP, LLM clients]
+        DI[DI container + CLI router]
     end
 
-    CLI --> Application
-    Application --> Domain
-    Connector -.->|implements| Application
+    Entry --> App
+    App --> Domain
+    Conn -.->|implements ports| App
+    Conn --> Domain
 ```
 
-## Layers
+## Layers at a glance
 
-### CLI Layer (`src/main.rs`)
+| Layer | Path | Responsibility |
+|---|---|---|
+| **Domain** | `src/domain/` | Pure value types and the unified `CodeSearchError`. No I/O, no async, no external crates beyond `serde` and `thiserror`. |
+| **Application** | `src/application/` | Use cases (orchestration) and port traits (`VectorRepository`, `EmbeddingService`, `ChatClient`, `MemoryRepository`, …). Depends only on Domain. |
+| **Connector** | `src/connector/` | Concrete adapters, the dependency-injection container, the CLI router, the MCP server, and the management API. Depends on Application + Domain. |
+| **Entry points** | `src/main.rs`, `src/cli/` | `clap` command definitions; parse flags, wire logging, and delegate to the Router. |
 
-The command-line interface that users interact with. Responsible for:
-- Parsing command-line arguments
-- Initializing dependencies (wiring adapters to use cases)
-- Formatting and displaying output
+Why this layering: domain logic stays isolated from infrastructure, adapters
+are trivially swappable (a different vector store, a different LLM backend), and
+tests exercise the full pipeline with in-memory/mock adapters and no network.
 
-### Application Layer (`src/application/`)
+## Application layer
 
-Contains use cases and interface definitions (ports):
+### Use cases (`src/application/use_cases/`)
 
-**Use Cases** (`src/application/use_cases/`):
-- **IndexRepositoryUseCase**: Indexes a code repository
-- **SearchCodeUseCase**: Performs hybrid search (semantic + BM25 keyword legs fused via RRF by default; semantic-only with `--no-text-search`)
-- **rrf_fuse**: Merges two ranked result lists using Reciprocal Rank Fusion (`score = 1 / (60 + rank)`, summed per leg)
-- **ImpactAnalysisUseCase**: BFS outward from a symbol through the call graph to compute the blast radius — every transitively affected symbol if the root symbol changes
-- **SymbolContextUseCase**: Returns a 360-degree view of a symbol's call-graph relationships (inbound callers + outbound callees) fetched in parallel
-- **ListRepositoriesUseCase**: Lists indexed repositories
-- **DeleteRepositoryUseCase**: Removes a repository from the index
-- **CallGraphUseCase**: Tracks and queries symbol references (callers, callees, cross-repo lookups)
+Search & indexing:
 
-**Interfaces/Ports** (`src/application/interfaces/`):
-- **VectorRepository**: Interface for vector storage and similarity search operations
-- **MetadataRepository**: Interface for repository metadata persistence
-- **EmbeddingService**: Interface for generating embeddings from text
-- **ParserService**: Interface for parsing code and extracting code chunks
+- **IndexRepositoryUseCase** — walk, parse, embed, and persist a repository.
+- **SearchCodeUseCase** — hybrid search: a semantic (vector) leg and a keyword
+  (BM25-style) leg, fused via RRF, then optionally reranked.
+- **rrf_fuse** — Reciprocal Rank Fusion of two ranked lists (`1/(60+rank)` per
+  leg, summed).
+- **ListRepositoriesUseCase** / **DeleteRepositoryUseCase** — repository
+  management; **SnippetLookupUseCase** — source-chunk retrieval.
 
-### Domain Layer (`src/domain/`)
+Call graph & explanation:
 
-Pure domain objects with encapsulated behavior. All fields are private with accessor methods.
+- **CallGraphUseCase** — tracks and queries symbol references (callers,
+  callees, imports, inheritance, tests, cross-repo).
+- **ImpactAnalysisUseCase** — BFS outward from a symbol to compute its blast
+  radius.
+- **SymbolContextUseCase** — inbound callers + outbound callees fetched in
+  parallel, for a 360° view.
+- **ExplainUseCase** — assembles a symbol's context + source snippets and asks
+  an LLM to describe its purpose, data/control flow, and business feature.
 
-**Models** (`src/domain/models/`):
-- **CodeChunk**: Represents a parsed code segment with domain methods like `line_count()`, `is_callable()`, `qualified_name()`, `preview()`
-- **Repository**: Represents an indexed repository with methods like `is_indexed()`, `average_chunks_per_file()`, `summary()`
-- **Embedding**: Vector representation with methods like `is_normalized()`, `magnitude()`, `cosine_similarity()`
-- **SearchResult/SearchQuery**: Search-related value objects with relevance checking and filter methods
-- **Language**: Programming language enum with methods like `is_known()`, `primary_extension()`, `uses_braces()`
+Architecture analysis:
 
-**Error** (`src/domain/error.rs`):
-- **DomainError**: Unified error type with helper methods like `is_not_found()`, `is_storage_error()`
+- **ExecutionFeaturesUseCase** — discovers entry-point call chains and scores
+  them by criticality.
+- **ClusterDetectionUseCase** / **SymbolClusterDetectionUseCase** — Leiden
+  community detection over the file graph and the symbol call graph.
+- **CouplingDetectionUseCase** — filter-then-verify search for the element that
+  glues a fragile community together.
+- **FileRelationshipUseCase** — file- and cross-repo dependency graph (`uses`).
+- **RepositoryOverviewUseCase** — combines every analysis into one dossier.
 
-### Connector Layer (`src/connector/`)
+Long-term memory:
 
-Implements the application interfaces with concrete adapters:
+- **memory_extraction** / **import_session** — parse a transcript, prefetch
+  related memories, extract upsert/delete operations via an LLM, apply them.
+- **memory_summary** — the L0/L1 virtual-filesystem layer and the whole-memory
+  digest.
+- **memory_search** — hybrid recall with RRF.
+- **memory_dream** — the global consolidation cycle (harvest → consolidate →
+  reflect → synthesize skills → refresh).
 
-**Adapters** (`src/connector/adapter/`):
-- **DuckdbMetadataRepository**: DuckDB implementation of MetadataRepository; stores repository metadata, chunks, and statistics
-- **DuckdbVectorRepository**: DuckDB implementation of VectorRepository with VSS (Vector Similarity Search) acceleration using HNSW indexes and cosine distance
-- **DuckdbCallGraphRepository**: DuckDB implementation storing symbol references (callers, callees, reference kind, location) with indexes for efficient lookup
-- **DuckdbFileHashRepository**: DuckDB implementation storing SHA-256 file hashes for incremental indexing change detection
-- **InMemoryVectorRepository**: In-memory implementation of VectorRepository for testing/ephemeral indexing
-- **OrtEmbedding**: ONNX Runtime implementation of EmbeddingService using sentence-transformers models
-- **OrtReranking**: ONNX Runtime cross-encoder implementation for reranking search results by query-document relevance
-- **MockEmbedding**: Mock implementation of EmbeddingService for testing
-- **TreeSitterParser**: Tree-sitter based implementation of ParserService for multi-language code parsing
-- **CodesearchMcpServer**: Model Context Protocol server exposing the `search_code` tool over stdio or HTTP
+### Ports (`src/application/interfaces/`)
 
-## Data Flow
+Trait boundaries the use cases depend on, implemented by connector adapters:
+`VectorRepository`, `MetadataRepository`, `CallGraphRepository`,
+`FileHashRepository`, `EmbeddingService`, `RerankingService`, `ParserService`,
+`ChatClient`, and `MemoryRepository`. All are `#[async_trait]`.
 
-### Indexing Flow
+## Domain layer (`src/domain/`)
+
+Pure value objects with encapsulated behaviour (private fields, accessor
+methods, a `reconstitute()` factory for adapters):
+
+- **CodeChunk** — a parsed code segment (`line_count()`, `is_callable()`,
+  `qualified_name()`, `preview()`).
+- **Repository** — an indexed repository (`is_indexed()`, `summary()`).
+- **Embedding** — a vector (`is_normalized()`, `magnitude()`,
+  `cosine_similarity()`).
+- **SearchResult / SearchQuery** — search value objects with relevance and
+  filter helpers.
+- **Language** — the supported-language enum (`primary_extension()`, …).
+- **Memory** — `MemoryKind`, `MemoryItem`, `SessionTranscript`, `MemoryNode`,
+  and the operation types.
+- **CodeSearchError** — the unified `thiserror` error enum.
+
+## Connector layer (`src/connector/`)
+
+### Adapters (`src/connector/adapter/`)
+
+- **DuckDB** (`adapter/duckdb/`, `duckdb_*.rs`) — metadata, vectors (HNSW /
+  cosine via the VSS extension), the call graph, and file hashes. Plus the
+  separate `duckdb_memory_repository.rs` for `memory.duckdb`.
+- **ONNX Runtime** (`adapter/ort/`) — `OrtEmbedding` (sentence-transformers)
+  and `OrtReranking` (cross-encoder).
+- **tree-sitter** (`adapter/tree_sitter*`) — multi-language AST parsing and
+  chunk extraction; also drives channel-endpoint detection.
+- **SCIP** (`adapter/scip/`) — imports precise call graphs from `scip-typescript`
+  (JS/TS) and `scip-php` (PHP), giving those languages full caller/callee edges
+  beyond tree-sitter heuristics.
+- **LLM clients** — `AnthropicClient` and `OpenAiChatClient` (shared by the
+  OpenAI-compatible and GitHub Copilot backends) behind the `ChatClient` port,
+  plus `copilot_auth.rs` for the Copilot OAuth device flow.
+- **MCP server** (`adapter/mcp/`) — the Model Context Protocol server (stdio +
+  HTTP) exposing 20 tools.
+- **Management API** (`adapter/management/`) — the REST/JSON + SSE server and
+  the background memory-dream scheduler started by `serve`.
+- **InMemoryVectorRepository** / **MockEmbedding** — deterministic test doubles.
+
+### Wiring (`src/connector/api/`)
+
+- `container.rs` — the dependency-injection container; wires every adapter to
+  its port and builds the use-case objects. Register new adapters/use cases
+  here.
+- `router.rs` — maps CLI commands to use cases and formats output.
+
+## Data flow
+
+### Indexing
 
 ```mermaid
 flowchart TB
-    A[Repository Path] --> B[Walk Files]
-    B --> C[Parse with Tree-sitter]
-    C --> D[Generate Embeddings]
-    D --> E[DuckDB]
+    A[Repository path] --> B[Walk files — ignore crate, respects .gitignore]
+    B --> C[Filter — supported ext, non-binary, size]
+    C --> D[Tree-sitter parse → CodeChunks]
+    D --> E[Embed chunks — ONNX or API backend]
+    D --> F[SCIP import — JS/TS/PHP precise call graph]
+    E --> G[(DuckDB: chunks, vectors, call graph, file hashes)]
+    F --> G
 
-    C -.- C1[TreeSitterParser<br/>Extract functions, classes, etc.]
-    D -.- D1[OrtEmbedding<br/>all-MiniLM-L6-v2]
-    E -.- E1[DuckdbMetadataRepository<br/>+ DuckdbVectorRepository<br/>Metadata + Vectors]
+    B -.- B1[SHA-256 hashing → only changed files re-parse]
 ```
 
-### Search Flow
+The embedding model, backend, and dimensions are fixed per **namespace** and
+recorded in `namespace_config` on first index, then validated on every open —
+mismatches are hard errors. The repository's normalized git remote is stored so
+later commands can auto-resolve the namespace.
+
+### Search
 
 ```mermaid
 flowchart TB
-    A[Query String] --> B[Embed Query]
-    A --> D[Keyword leg\nBM25 LIKE]
-    B --> C[Semantic leg\nVector Search]
+    A[Query string] --> B[Embed query]
+    A --> D[Keyword leg — BM25-style LIKE on content + symbol names]
+    B --> C[Semantic leg — DuckDB VSS, HNSW cosine]
     C --> E[rrf_fuse]
     D --> E
-    E --> F[SearchCodeUseCase\nReranking optional]
-    F --> G[Search Results]
-
-    B -.- B1[OrtEmbedding]
-    C -.- C1[DuckdbVectorRepository<br/>VSS HNSW cosine<br/>or InMemoryVectorRepository]
-    D -.- D1[DuckdbVectorRepository::run_text\nor InMemoryVectorRepository::search_text]
-    E -.- E1[rrf_fuse: score = 1/(60+rank)<br/>summed across legs]
-    F -.- F1[OrtReranking cross-encoder<br/>skip with --no-rerank]
+    E --> F[min_score filter]
+    F --> G[Reranking — cross-encoder, optional]
+    G --> H[Ranked results]
 ```
 
-> **Note:** The keyword leg and RRF fusion are only active when `query.is_text_search()` is true (the default from the CLI). Pass `--no-text-search` to use semantic-only search and bypass `rrf_fuse`.
+The keyword leg and RRF fusion run only when text search is enabled (the CLI
+default). `--no-text-search` bypasses them for pure semantic search;
+`--no-rerank` skips the reranker.
 
-## Design Decisions
+## Key design decisions
 
-### Why DDD with Ports & Adapters?
-
-- **Clear separation**: Domain logic is isolated from infrastructure
-- **Testability**: Easy to test with mock adapters
-- **Flexibility**: Easy to swap implementations (e.g., different vector databases)
-- **Dependency Inversion**: High-level modules don't depend on low-level modules
-
-### Interface Location (Application Layer)
-
-Following the Ports & Adapters pattern, interfaces (ports) are defined in the Application layer:
-- Use cases depend on interfaces they own
-- Adapters implement these interfaces
-- Domain remains pure with no external dependencies
-
-### Domain Objects with Behavior
-
-Domain models encapsulate both data and behavior:
-- Private fields with accessor methods
-- `reconstitute()` factory for adapter use
-- Domain-specific methods (e.g., `CodeChunk::is_callable()`, `Embedding::cosine_similarity()`)
-
-### Why Tree-sitter?
-
-- Fast, incremental parsing
-- Multi-language support
-- Produces concrete syntax trees
-- Battle-tested in many editors
-
-### Why ONNX Runtime?
-
-- Rust-native embedding generation
-- High-performance inference
-- Supports multiple embedding models
-- No Python dependency required
-
+- **DDD + Ports & Adapters** — isolates domain logic, keeps adapters swappable,
+  and makes the DI container the single wiring point.
+- **Ports live in the Application layer** — use cases own the traits they
+  depend on; adapters implement them; the domain stays pure.
+- **DuckDB with VSS** — persistent, embedded vector + relational storage with
+  HNSW nearest-neighbour search and no external service.
+- **tree-sitter + SCIP** — fast incremental multi-language parsing for chunks,
+  with SCIP indexers layering precise call graphs onto JS/TS and PHP.
+- **ONNX Runtime** — Rust-native, high-performance embedding and reranking
+  inference with no Python dependency.
+- **One `ChatClient` port, three backends** — OpenAI-compatible, Anthropic, and
+  GitHub Copilot are interchangeable for every LLM feature.

@@ -116,7 +116,8 @@ codesearch clusters get src/api/auth.rs my-repo
 
 For a Markdown module table combined with every other analysis (symbol
 communities, couplings, execution features, channels), use the repository-wide
-`codesearch overview` command.
+`codesearch overview` command — also exposed as the MCP tool `overview`, which
+returns the same combined report as JSON (without the LLM executive summary).
 
 ### Options
 
@@ -372,6 +373,50 @@ Files in 'web' that use files from 'core':
 Each `←` line names a consuming file; the bracketed list shows the referenced symbols.
 If there are no cross-repository references, the command reports that no dependencies
 were found.
+
+## Cross-service Channels (`codesearch channels`)
+
+Where `uses` finds *code-level* dependencies (one file referencing another's
+symbols), `channels` finds *runtime* dependencies between services that never
+call each other directly — they communicate over a **channel**: a Kafka topic,
+an HTTP route, an MQTT/AMQP topic, or a gRPC method. During indexing, tree-sitter
+detects producer and consumer endpoints in each repository; `channels` links a
+producer in one repository to the consumer of the same channel in another,
+across every repository indexed in the current namespace.
+
+```bash
+# All cross-service channel links in the namespace
+codesearch channels
+
+# Restrict to specific repositories (name or ID, repeatable)
+codesearch channels -r orders -r billing
+
+# Filter by protocol, or by confidence
+codesearch channels --protocol kafka
+codesearch channels --min-confidence 0.7
+
+# Ignore noisy channels (glob, repeatable) and include test endpoints
+codesearch channels --exclude-channel '/health*' --include-tests
+
+# JSON for tooling
+codesearch channels --format json
+```
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-r, --repository` | (all) | Restrict to specific repositories (name or ID, repeatable) |
+| `-p, --protocol` | (all) | Filter by protocol: `kafka`, `http`, `mqtt`, `amqp`, or `grpc` |
+| `--min-confidence` | (none) | Drop edges below this confidence (0.0–1.0) |
+| `--exclude-channel` | (none) | Exclude channels matching this glob (repeatable) |
+| `--include-tests` | off | Include endpoints from test files (excluded by default) |
+| `-F, --format` | `text` | Output format: `text` or `json` |
+
+Because this operates across the namespace, it is most useful once several
+services are indexed together. It is also exposed as the MCP tool `channels` and
+the REST endpoint `GET /api/channels`, and is one of the sections in
+`codesearch overview`.
 
 ## Querying the Graph from AI Tools (`query_graph`)
 

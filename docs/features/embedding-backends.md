@@ -1,182 +1,182 @@
 # Embedding Backends
 
-CodeSearch supports two embedding backends, selected with `--embedding-target`.
+CodeSearch turns code into vectors with one of two embedding backends. Which
+backend, which model, and how many dimensions are **properties of a namespace**,
+fixed once and inherited by every `index` and `search` that runs against it —
+you do not repeat embedding flags on each command.
 
-## Backends at a Glance
+## Backends at a glance
 
-| Backend | Flag | Default | Requires | Reranking |
-|---------|------|---------|----------|-----------|
-| ONNX (local) | `--embedding-target=onnx` | ✅ | Nothing — models downloaded on first run | Cross-encoder via ONNX |
-| API (remote) | `--embedding-target=api` | — | Running LM Studio (or any OpenAI-compatible server) | LLM-based via `/v1/messages` |
+| Backend | `--embedding-target` | Default | Requires | Reranking |
+|---------|----------------------|---------|----------|-----------|
+| **ONNX** (local) | `onnx` | ✅ | Nothing — model downloaded on first run | Cross-encoder via ONNX |
+| **API** | `api` | — | A reachable OpenAI-compatible `/v1/embeddings` server — local (LM Studio, vLLM, Ollama) or hosted (OpenAI). Local needs no internet; a hosted endpoint does. | LLM-based, or ONNX |
+
+The embedding target is chosen when a namespace is created (see below). The
+**reranking** backend is independent and set per-run with the global
+`--reranking-target` flag (`onnx`, `api/anthropic`, or `api/openai`).
+
+## How a namespace gets its embedding config
+
+A namespace's embedding configuration is decided **once**, in one of two ways:
+
+1. **Explicitly, with `codesearch create`** — before indexing:
+
+   ```bash
+   # A namespace backed by a remote embedding model (768-dim)
+   codesearch create my-project \
+     --embedding-target api \
+     --embedding-model nomic-embed-text \
+     --embedding-dimensions 768
+
+   # A keyword + call-graph-only namespace — skips the embed stage entirely
+   # (no model download, no inference); search uses the keyword + call-graph legs
+   codesearch create fast-index --no-embeddings
+   ```
+
+2. **Implicitly, on first `index`** — indexing a namespace that was never
+   created configures it with the **defaults**: ONNX,
+   `sentence-transformers/all-MiniLM-L6-v2`, 384 dimensions.
+
+   ```bash
+   codesearch index .        # first index → namespace "search" gets the defaults
+   ```
+
+`create` flags (only valid on `create`):
+
+| Flag | Default | Description |
+|---|---|---|
+| `--embedding-target` | `onnx` | `onnx` (bundled, offline) or `api` (OpenAI-compatible endpoint) |
+| `--embedding-model` | `all-MiniLM-L6-v2` (onnx) | HuggingFace ID (onnx) or model name (api); **required** for `api` |
+| `--embedding-dimensions` | `384` | Output dimensions of the model |
+| `--no-embeddings` | off | Create a keyword + call-graph-only namespace (no embed stage) |
+
+After creation, `index` and `search` read the stored config and need no
+embedding flags:
+
+```bash
+codesearch index . --namespace my-project
+codesearch search "database connection pool" --namespace my-project
+```
+
+Run from inside the repo and even `--namespace` is auto-resolved — see
+[Automatic namespace resolution](./indexing.md#automatic-namespace-resolution).
 
 ---
 
-## ONNX Backend (default)
+## ONNX backend (default)
 
-Embeddings are generated locally using [ONNX Runtime](https://onnxruntime.ai) with a sentence-transformer model downloaded from HuggingFace Hub on first use. No external server is required.
+Embeddings are generated locally with [ONNX Runtime](https://onnxruntime.ai)
+using a sentence-transformer model downloaded from HuggingFace Hub on first use.
+No external server, no API key.
+
+| Default model | Dimensions | Download size |
+|---|---|---|
+| `sentence-transformers/all-MiniLM-L6-v2` | 384 | ~90 MB |
 
 ```bash
-# Default — no flag needed
+# Default — nothing to configure
 codesearch index .
 codesearch search "error handling middleware"
 
-# Use a custom ONNX model (must match the dimension configured for the namespace)
-codesearch index . --embedding-model sentence-transformers/all-mpnet-base-v2 --embedding-dimensions 768
+# A different ONNX model — set it at namespace-creation time so the stored
+# dimensions match the model
+codesearch create big-model \
+  --embedding-model sentence-transformers/all-mpnet-base-v2 \
+  --embedding-dimensions 768
+codesearch index . --namespace big-model
 ```
 
-### Default ONNX Model
-
-| Model | Dimensions | Download size |
-|-------|------------|---------------|
-| `sentence-transformers/all-MiniLM-L6-v2` | 384 | ~90 MB |
-
-### Reranking (ONNX)
-
-When the ONNX backend is active, reranking uses `BAAI/bge-reranker-base` as a cross-encoder, downloaded automatically. Disable it with `--no-rerank`.
+**Reranking (ONNX):** when the reranking target is `onnx` (the default),
+reranking uses `BAAI/bge-reranker-base` as a cross-encoder, downloaded
+automatically. Disable reranking entirely with `--no-rerank`.
 
 ---
 
-## API Backend
+## API backend
 
-Embeddings are fetched from an OpenAI-compatible `/v1/embeddings` HTTP endpoint. The primary use case is [LM Studio](https://lmstudio.ai) running locally, but any compliant server works (Ollama, a remote OpenAI endpoint, etc.).
+Embeddings are fetched from an OpenAI-compatible `/v1/embeddings` HTTP endpoint.
+The common case is [LM Studio](https://lmstudio.ai) or vLLM running locally, but
+any compliant server works.
 
 ```bash
-# Index with LM Studio running nomic-embed-text (768-dimensional)
-codesearch index . \
-  --embedding-target=api \
-  --embedding-model=nomic-embed-text \
-  --embedding-dimensions=768
+# Create the namespace with the API backend and the model's dimensions
+codesearch create local-api \
+  --embedding-target api \
+  --embedding-model nomic-embed-text \
+  --embedding-dimensions 768
 
-# Search must use the same flags (validated against stored namespace config)
-codesearch search "database connection pool" \
-  --embedding-target=api \
-  --embedding-model=nomic-embed-text \
-  --embedding-dimensions=768
+# Then just index and search — no embedding flags needed
+codesearch index .  --namespace local-api
+codesearch search "database connection pool" --namespace local-api
 ```
 
-### Endpoint configuration
-
-All API-target traffic shares the same environment variables used by query expansion:
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `ANTHROPIC_BASE_URL` | `http://localhost:1234` | Base URL for embeddings (`/v1/embeddings`) and reranking (`/v1/messages`) |
-| `ANTHROPIC_MODEL` | `mistralai/ministral-3-3b` | Chat model used for reranking |
-| `ANTHROPIC_API_KEY` | `""` | API key — not required for local servers |
-
-> LM Studio exposes both `/v1/embeddings` (OpenAI-compatible) and `/v1/messages` (Anthropic-compatible) on the same port, so one `ANTHROPIC_BASE_URL` covers everything.
-
-### Reranking (API)
-
-When the API backend is active, reranking uses the same LM Studio server via `/v1/messages`. The model is prompted once with all candidates and asked to output a JSON array of relevance scores. This is LLM-based reranking — different from the ONNX cross-encoder but effective for general queries.
-
-On any error (server unreachable, unparseable response, wrong array length) the reranker falls back silently to the original retrieval scores.
+The OpenAI-compatible endpoint used for API embeddings is configured the same
+way as the OpenAI LLM backend — via `codesearch openai …` or the `OPENAI_*`
+environment variables (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`). See
+[AGENTS.md — LLM backends](../../AGENTS.md#openai-compatible-endpoints).
 
 ### LM Studio setup
 
 1. Download and start [LM Studio](https://lmstudio.ai).
-2. Load an embedding model (e.g. `nomic-ai/nomic-embed-text-v1.5`) in the **Local Server** tab.
-3. Note the output dimensions from the model card (e.g. 768 for nomic-embed-text).
-4. Optionally load a second chat model for reranking/query expansion, or use a single model for all tasks if it supports both.
-5. Start the server on the default port (`1234`).
+2. Load an embedding model (e.g. `nomic-ai/nomic-embed-text-v1.5`) in the
+   **Local Server** tab, and note its output dimensions from the model card.
+3. Start the server on the default port (`1234`).
+4. `codesearch create <ns> --embedding-target api --embedding-model <name>
+   --embedding-dimensions <n>`, then index into `<ns>`.
 
 ---
 
-## Namespace Config and Dimension Enforcement
+## Reranking backends
 
-The embedding configuration for a namespace is written to the `namespace_config` table in DuckDB the **first time** that namespace is indexed. Every subsequent open — whether for indexing or searching — validates the provided config against the stored one.
+Reranking (rescoring the retrieved candidates) is separate from embedding and
+selected per-run with the global `--reranking-target`:
 
-### What is stored
+| `--reranking-target` | Method | Model |
+|---|---|---|
+| `onnx` (default) | Cross-encoder (ONNX) | `BAAI/bge-reranker-base`, downloaded on first use |
+| `api/anthropic` | LLM-based (one prompt → JSON scores) | Anthropic-compatible `/v1/messages` (`ANTHROPIC_*`) |
+| `api/openai` | LLM-based (one prompt → JSON scores) | OpenAI-compatible `/v1/chat/completions` (`OPENAI_*`) |
 
-```
-namespace_config
-├── namespace        (e.g. "search")
-├── embedding_target (e.g. "onnx" or "api")
-├── embedding_model  (e.g. "sentence-transformers/all-MiniLM-L6-v2")
-└── dimensions       (e.g. 384)
-```
+LLM-based reranking prompts the model once with all candidates and asks for a
+JSON array of relevance scores. On any error (server unreachable, unparseable
+response, wrong length) it falls back silently to the original retrieval scores.
+`--no-rerank` skips reranking altogether.
 
-The `embeddings` table schema is created with `FLOAT[{dimensions}]`, so the column type is fixed at namespace creation time.
+---
 
-### Validation rules
+## Dimension & model enforcement
+
+The chosen backend, model, and dimensions are written to the `namespace_config`
+DuckDB table when the namespace is created (or first indexed). The `embeddings`
+column is typed `FLOAT[{dimensions}]`, so the width is fixed for the life of the
+namespace. Every later open validates against the stored config:
 
 | Condition | Result |
-|-----------|--------|
-| Stored dimensions ≠ requested | **Hard error** — schema incompatible |
-| Stored model ≠ requested model | **Hard error** — different embedding space |
+|---|---|
+| Stored dimensions ≠ current model's dimensions | **Hard error** — schema incompatible |
+| Stored model ≠ the model producing the vectors | **Hard error** — different embedding space |
 
-Both errors include an actionable message:
-
-```
-Namespace 'search' was indexed with 384-dimensional embeddings
-(model 'sentence-transformers/all-MiniLM-L6-v2', target 'onnx')
-but you are now using 768-dimensional embeddings
-(model 'nomic-embed-text', target 'api').
-Re-index with `codesearch index --force` using the original model,
-or create a new namespace with `--namespace <name>`.
-```
-
-### Switching models or dimensions
-
-**Option A — Re-index the same namespace:**
-```bash
-codesearch index . --force --embedding-model nomic-embed-text --embedding-dimensions 768 --embedding-target api
-```
-`--force` rebuilds from scratch, replacing the stored config with the new one.
-
-**Option B — Use a separate namespace:**
-```bash
-codesearch index . \
-  --namespace my-repo-768 \
-  --embedding-target api \
-  --embedding-model nomic-embed-text \
-  --embedding-dimensions 768
-
-codesearch search "query" \
-  --namespace my-repo-768 \
-  --embedding-target api \
-  --embedding-model nomic-embed-text \
-  --embedding-dimensions 768
-```
+The embedding configuration is fixed once a namespace is created — `index
+--force` re-parses and re-embeds a repository but keeps the stored config, so it
+does **not** change the model or dimensions (a `--force` run with a different
+model still hits the hard error above). To use a different model or dimension
+count, create a **new namespace** with the new configuration (`codesearch create
+<name> --embedding-…`, then index into it).
 
 ---
 
-## CLI Reference
-
-All embedding flags are global — they apply to `index`, `search`, `mcp`, and any other subcommand that opens the vector store.
-
-```
---embedding-target <onnx|api>      Embedding backend (default: onnx)
---embedding-model <name>           HuggingFace ID (onnx) or API model name
---embedding-dimensions <n>         Output dimensions (default: 384)
-```
-
-These flags should be passed consistently across `index` and `search` — the namespace config validator will catch mismatches, but it's easiest to set them in a shell alias or wrapper script.
-
-### Example aliases
-
-```bash
-# ~/.bashrc or ~/.zshrc
-
-# ONNX (default) — no flags needed
-alias cs='codesearch'
-
-# LM Studio with nomic-embed-text (768-dim)
-alias cs-lm='codesearch \
-  --embedding-target=api \
-  --embedding-model=nomic-embed-text \
-  --embedding-dimensions=768'
-```
-
----
-
-## Choosing a Backend
+## Choosing a backend
 
 | Factor | ONNX | API |
 |--------|------|-----|
-| Internet required for indexing | First run only (model download) | Never |
-| Embedding quality | Good — sentence-transformers | Depends on loaded model |
-| Indexing speed | Fast (local inference) | Depends on server |
-| Memory usage | ~200 MB (model in RAM) | Minimal |
-| Model flexibility | Any HuggingFace ONNX model | Any model LM Studio supports |
-| Reranking | Cross-encoder (BAAI/bge-reranker-base) | LLM-based (same chat model) |
+| Internet for indexing | First run only (model download) | None for a local server; required for a hosted endpoint |
+| Embedding quality | Good — sentence-transformers | Depends on the loaded model |
+| Indexing speed | Fast (local inference) | Depends on the server |
+| Memory usage | ~200 MB (model in RAM) | Minimal (in codesearch) |
+| Model flexibility | Any HuggingFace ONNX model | Any model the server supports |
+| Setup | None | Run and configure the endpoint |
+
+**Rule of thumb:** stick with the ONNX default unless you specifically want a
+particular embedding model served from a local or hosted OpenAI-compatible
+endpoint.

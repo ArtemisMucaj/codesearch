@@ -75,23 +75,24 @@ Imports are idempotent per session ID (taken from the transcript's
 ### Choosing the extraction model
 
 Extraction is a summarization-style task — a **small model is enough** and
-keeps imports fast and cheap. The `--llm` flag selects the provider
-(`anthropic` default, or `open-ai`), configured through the same environment
-variables as `explain` and query expansion:
+keeps imports fast and cheap. The `--llm` flag selects the provider (`open-ai`
+default — a local OpenAI-compatible endpoint — or `anthropic` / `copilot`),
+configured through the same backends as `explain` and query expansion:
 
 ```bash
-# Local-first default: LM Studio on http://localhost:1234 (no key needed)
+# Local-first default: an OpenAI-compatible server, e.g. LM Studio on
+# http://localhost:1234 (no key needed)
+codesearch memory import session.jsonl
+
+# Any OpenAI-compatible server, explicitly
+OPENAI_BASE_URL=http://localhost:1234 OPENAI_MODEL=qwen/qwen3.5-4b \
 codesearch memory import session.jsonl
 
 # Anthropic cloud with a small model
 ANTHROPIC_BASE_URL=https://api.anthropic.com \
 ANTHROPIC_API_KEY=sk-ant-... \
 ANTHROPIC_MODEL=claude-haiku-4-5 \
-codesearch memory import session.jsonl
-
-# Any OpenAI-compatible server
-OPENAI_BASE_URL=http://localhost:1234 OPENAI_MODEL=qwen/qwen3.5-4b \
-codesearch memory import session.jsonl --llm open-ai
+codesearch memory import session.jsonl --llm anthropic
 ```
 
 ## Virtual filesystem (L0 / L1 / L2)
@@ -220,14 +221,15 @@ store was created without embeddings, search degrades to the keyword leg.
 
 ## MCP tools
 
-When running as an MCP server (`codesearch mcp`), memory recall is exposed to
-AI tools alongside code search:
+When running as an MCP server (`codesearch mcp`), memory is exposed to AI tools
+alongside code search — recall plus adding resources:
 
 | Tool | Description |
 |------|-------------|
 | `search_memory` | Hybrid recall over the memory store. Accepts `query`, optional `kind`, `project` (defaults to the workspace's project in stdio mode; `"*"` searches all projects), and `limit`. Returns full item content with fused scores. |
 | `list_memories` | List stored memories, newest first. Accepts optional `kind` — e.g. `kind="preference"` at session start to load every known user preference. |
 | `read_memory` | Read the virtual filesystem level by level. Call with no args (or `uri="memory://memory"`) first for the whole-memory digest, then drill into a directory (`memory://sessions`) or a leaf (`memory://sessions/<id>`). Returns the node's L0/L1/L2 plus its children's abstracts. |
+| `add_memory_resource` | Store a file or URL as a durable resource under `memory://resources`. Accepts `source` (path or URL) and optional `name`. Fetches + summarizes with the configured LLM (same as `memory add`), so later sessions can recall it. |
 
 This gives agents the recall half of the loop: import sessions with the CLI
 (e.g. from a session-end hook), then at task start let the agent call

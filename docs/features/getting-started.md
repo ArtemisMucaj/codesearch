@@ -88,11 +88,13 @@ codesearch delete /path/to/your/project
 Get a natural-language explanation of a symbol's full call flow and business purpose:
 
 ```bash
-# Explain `authenticate` (requires ANTHROPIC_API_KEY by default)
+# Explain `authenticate` using the default backend (open-ai — a local
+# OpenAI-compatible endpoint such as LM Studio; no cloud key needed)
 codesearch explain authenticate
 
-# Use an OpenAI-compatible backend (e.g., LM Studio)
-codesearch explain authenticate --llm open-ai
+# Or use the Anthropic backend / a GitHub Copilot subscription
+codesearch explain authenticate --llm anthropic
+codesearch explain authenticate --llm copilot
 ```
 
 See [Call Graph Analysis](./call-graph.md#llm-explanation-codesearch-explain) for full details.
