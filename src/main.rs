@@ -18,6 +18,9 @@ use codesearch::{
 /// without an explicit `--embedding-dimensions` (matches all-MiniLM-L6-v2).
 const DEFAULT_EMBEDDING_DIMENSIONS: usize = 384;
 
+/// JSON log file written inside the data directory (alongside `config.json`).
+const LOG_FILE: &str = "codesearch.log";
+
 /// Handle `codesearch create`: persist the namespace's embedding
 /// configuration without loading any embedding model.
 fn create_namespace(
@@ -172,13 +175,21 @@ async fn main() -> Result<()> {
         EnvFilter::new("warn,codesearch=info")
     };
 
-    let log_dir = expand_tilde(&cli.data_dir);
-    std::fs::create_dir_all(&log_dir)?;
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(format!("{}/codesearch.log", log_dir))
-        .map_err(|e| anyhow::anyhow!("Failed to open log file: {}", e))?;
+    let data_dir = expand_tilde(&cli.data_dir);
+    // Creating the data dir and opening the log file are blocking syscalls, so
+    // run them off the async runtime in one hop (per the project's async rule).
+    let log_file = {
+        let data_dir = data_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&data_dir)?;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(std::path::Path::new(&data_dir).join(LOG_FILE))
+        })
+        .await?
+        .map_err(|e| anyhow::anyhow!("Failed to open log file: {}", e))?
+    };
     let json_file_layer = tracing_subscriber::fmt::layer()
         .json()
         .with_target(false)
@@ -212,8 +223,6 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let data_dir = expand_tilde(&cli.data_dir);
-    std::fs::create_dir_all(&data_dir)?;
     let db_path = std::path::Path::new(&data_dir).join("codesearch.duckdb");
 
     // `create` only writes namespace configuration — handle it before the
