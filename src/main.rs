@@ -3,6 +3,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use rmcp::ServiceExt;
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
 use codesearch::cli::{validate_namespace, EmbeddingTarget, LlmTarget, RerankingTarget};
@@ -156,45 +158,54 @@ async fn main() -> Result<()> {
         }
     );
 
-    // For MCP stdio mode, log to stderr (stdout is for MCP protocol)
-    // For HTTP mode, we can log to stdout since HTTP uses a different channel
-    // For TUI mode, log to a file so ratatui's terminal is not corrupted
+    // All logs are written as JSON to a file under the data directory (where the
+    // config lives, default `~/.codesearch/codesearch.log`) regardless of the
+    // command. Ratatui-owning commands and MCP stdio mode need this because any
+    // write to the terminal / stderr would corrupt their output channel; for the
+    // plain CLI it keeps a durable, machine-readable record.
+    //
+    // The env filter gates what reaches the file: `warn` for dependencies and
+    // `info` for codesearch (`debug` with `--verbose`).
     let filter = if cli.verbose {
         EnvFilter::new("warn,codesearch=debug")
     } else {
         EnvFilter::new("warn,codesearch=info")
     };
 
-    if is_tui || is_import_picker || is_copilot || is_openai {
-        // Ratatui owns the terminal; any write to stderr corrupts the display.
-        // Redirect logs to ~/.codesearch/tui.log so they are still accessible.
-        let log_dir = expand_tilde(&cli.data_dir);
-        std::fs::create_dir_all(&log_dir)?;
-        let log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(format!("{}/tui.log", log_dir))
-            .map_err(|e| anyhow::anyhow!("Failed to open TUI log file: {}", e))?;
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_target(false)
-            .with_writer(log_file)
-            .with_ansi(false)
-            .init();
-    } else if is_mcp && http_port.is_none() {
-        // Stdio mode - log to stderr
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_target(false)
-            .with_writer(std::io::stderr)
-            .with_ansi(false)
-            .init();
+    let log_dir = expand_tilde(&cli.data_dir);
+    std::fs::create_dir_all(&log_dir)?;
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(format!("{}/codesearch.log", log_dir))
+        .map_err(|e| anyhow::anyhow!("Failed to open log file: {}", e))?;
+    let json_file_layer = tracing_subscriber::fmt::layer()
+        .json()
+        .with_target(false)
+        .with_writer(log_file)
+        .with_filter(filter);
+
+    // A ratatui picker or the MCP stdio protocol owns the terminal, so nothing
+    // may be written to the console there. For the plain CLI we additionally
+    // surface ERROR-level logs to stderr in a human-readable text format — no
+    // warn/info/debug, so routine output stays clean.
+    let owns_terminal = is_tui || is_import_picker || is_copilot || is_openai;
+    let is_mcp_stdio = is_mcp && http_port.is_none();
+    let console_error_layer = if owns_terminal || is_mcp_stdio {
+        None
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_target(false)
-            .init();
-    }
+        Some(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_writer(std::io::stderr)
+                .with_filter(LevelFilter::ERROR),
+        )
+    };
+
+    tracing_subscriber::registry()
+        .with(json_file_layer)
+        .with(console_error_layer)
+        .init();
 
     if cli.embedding_requests == 0 {
         eprintln!("error: --embedding-requests must be greater than 0");
