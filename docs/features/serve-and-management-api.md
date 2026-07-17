@@ -142,9 +142,8 @@ Event names:
 |---|---|---|
 | `progress` | `index` | Per-stage indexing progress |
 | `token` | `explain` | One chunk of the streamed LLM explanation |
-| `ambiguous` | `explain` | The symbol matched more than one candidate |
-| `done` | both | Terminal success (final result / summary) |
-| `error` | both | Terminal failure (`{"error":"…"}`) |
+| `done` | both | Terminal success. For `explain`, a `status` field distinguishes a normal result from `"ambiguous"` (the symbol matched more than one candidate, listed under `candidates`). |
+| `error` | both | Terminal failure (`{"message":"…"}`) |
 
 The event names and payloads are mirrored in the `Sse*` component schemas of the
 OpenAPI spec (OpenAPI can't express SSE frame shapes natively).

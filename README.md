@@ -41,13 +41,23 @@ extraction.
 
 ### From a release (recommended)
 
+Download the latest release binary for your OS/arch into `~/.local/bin` with the
+install script — piped straight from the repo, so no checkout is needed:
+
 ```bash
-# Downloads the latest release binary for your OS/arch into ~/.local/bin
-INSTALL_DIR="$HOME/.local/bin" sh .claude/skills/codesearch-cli/install.sh
+curl -fsSL https://raw.githubusercontent.com/ArtemisMucaj/codesearch/main/.claude/skills/codesearch-cli/install.sh \
+  | INSTALL_DIR="$HOME/.local/bin" sh
 codesearch --version
 ```
 
-Make sure `~/.local/bin` is on your `PATH`.
+If you already have the repo checked out (or the `codesearch-cli` skill
+installed), run its bundled script directly instead:
+
+```bash
+INSTALL_DIR="$HOME/.local/bin" sh .claude/skills/codesearch-cli/install.sh
+```
+
+Either way, make sure `~/.local/bin` is on your `PATH`.
 
 ### From source
 
@@ -184,7 +194,7 @@ codesearch explain authenticate        # LLM-written purpose, data/control flow,
 
 All three accept `-r/--repository`, `-F/--format` (`text`/`json`/`vimgrep`, except
 `explain`), and resolve the symbol by **substring** by default — pass `--regex`
-to supply your own anchored POSIX pattern:
+to supply a POSIX pattern used as-is (anchor it yourself for an exact match):
 
 ```bash
 codesearch impact "^MyNs/.*Service#get$" --regex

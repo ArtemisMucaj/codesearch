@@ -134,8 +134,9 @@ Use `context` to see callers and callees, `impact` to find every place a change
 would ripple to (so you know what needs updating and how risky it is), and
 `explain` when you need the *why*, not just the edges.
 
-Symbols resolve by substring by default; pass `--regex` for an anchored
-pattern. Common flags: `-r/--repository`, `-F/--format`
+Symbols resolve by substring by default; pass `--regex` to supply a POSIX regex
+used as-is (anchor it yourself when you need an exact match). Common flags:
+`-r/--repository`, `-F/--format`
 (`text`/`json`/`vimgrep`; `explain` has no `vimgrep`).
 
 ```shell

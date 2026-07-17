@@ -10,7 +10,7 @@ you do not repeat embedding flags on each command.
 | Backend | `--embedding-target` | Default | Requires | Reranking |
 |---------|----------------------|---------|----------|-----------|
 | **ONNX** (local) | `onnx` | ✅ | Nothing — model downloaded on first run | Cross-encoder via ONNX |
-| **API** (remote) | `api` | — | An OpenAI-compatible `/v1/embeddings` server (LM Studio, vLLM, Ollama, hosted OpenAI, …) | LLM-based, or ONNX |
+| **API** | `api` | — | A reachable OpenAI-compatible `/v1/embeddings` server — local (LM Studio, vLLM, Ollama) or hosted (OpenAI). Local needs no internet; a hosted endpoint does. | LLM-based, or ONNX |
 
 The embedding target is chosen when a namespace is created (see below). The
 **reranking** backend is independent and set per-run with the global
@@ -157,8 +157,12 @@ namespace. Every later open validates against the stored config:
 | Stored dimensions ≠ current model's dimensions | **Hard error** — schema incompatible |
 | Stored model ≠ the model producing the vectors | **Hard error** — different embedding space |
 
-To change the model or dimensions, either re-index with `--force` (which
-rebuilds the namespace) or create a new namespace with the new configuration.
+The embedding configuration is fixed once a namespace is created — `index
+--force` re-parses and re-embeds a repository but keeps the stored config, so it
+does **not** change the model or dimensions (a `--force` run with a different
+model still hits the hard error above). To use a different model or dimension
+count, create a **new namespace** with the new configuration (`codesearch create
+<name> --embedding-…`, then index into it).
 
 ---
 
@@ -166,7 +170,7 @@ rebuilds the namespace) or create a new namespace with the new configuration.
 
 | Factor | ONNX | API |
 |--------|------|-----|
-| Internet for indexing | First run only (model download) | Never (local server) |
+| Internet for indexing | First run only (model download) | None for a local server; required for a hosted endpoint |
 | Embedding quality | Good — sentence-transformers | Depends on the loaded model |
 | Indexing speed | Fast (local inference) | Depends on the server |
 | Memory usage | ~200 MB (model in RAM) | Minimal (in codesearch) |

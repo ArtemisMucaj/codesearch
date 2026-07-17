@@ -38,7 +38,7 @@ graph TB
 
 | Layer | Path | Responsibility |
 |---|---|---|
-| **Domain** | `src/domain/` | Pure value types and the unified `CodeSearchError`. No I/O, no async, no external crates beyond `serde`. |
+| **Domain** | `src/domain/` | Pure value types and the unified `CodeSearchError`. No I/O, no async, no external crates beyond `serde` and `thiserror`. |
 | **Application** | `src/application/` | Use cases (orchestration) and port traits (`VectorRepository`, `EmbeddingService`, `ChatClient`, `MemoryRepository`, …). Depends only on Domain. |
 | **Connector** | `src/connector/` | Concrete adapters, the dependency-injection container, the CLI router, the MCP server, and the management API. Depends on Application + Domain. |
 | **Entry points** | `src/main.rs`, `src/cli/` | `clap` command definitions; parse flags, wire logging, and delegate to the Router. |
