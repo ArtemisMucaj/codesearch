@@ -1,327 +1,243 @@
 ---
 name: codesearch
-description: Semantic code search using ML embeddings and AST analysis. Replaces built-in search tools for intent-based code exploration. Use when the user asks to find code by describing what it does, understand code relationships, or explore a codebase semantically.
+description: Semantic code search, code-understanding, and long-term memory over a codebase, via a CLI. At the START of a session, recall the user's preferences and this project's overview from memory and get the architecture overview; then find code by what it does (hybrid ML-embedding + keyword search), and trace relationships (context / impact / explain). Use whenever the user asks to find code by behaviour, understand how symbols relate, explore structure, or recall what past sessions learned.
 metadata:
   author: ArtemisMucaj
-  version: "0.8.0"
-compatibility: Requires the codesearch binary installed and a repository indexed with `codesearch index`.
+  version: "1.7.0"
+compatibility: Requires the codesearch binary installed. Code search needs the repository indexed with `codesearch index`; memory recall works as soon as any sessions have been imported.
 ---
 
 # Codesearch
 
-Hybrid code search powered by ML embeddings, BM25-style keyword matching, and Reciprocal Rank Fusion. Finds code by meaning and by exact keyword — both in a single query, by default.
+A CLI that gives an AI assistant four capabilities over one index:
 
-## When to Use This Skill
+- Recall — long-term memory from past sessions: user preferences, project
+  overview, experiences, and facts. Load it first, every session.
+- Map — architecture at a glance: a one-page `overview`, modules and
+  communities (`clusters`, `symbol-clusters`), coupling hotspots, entry-point
+  `features`, and cross-service `channels`.
+- Search — hybrid retrieval (ML embeddings + keyword, fused via RRF, then
+  reranked). Finds code by meaning *and* exact token in one query.
+- Understand — a call graph powers caller/callee `context`, blast-radius
+  `impact`, and LLM call-flow `explain`.
 
-Invoke this skill immediately when:
-- User asks to find code by intent (e.g., "where is authentication handled?")
-- User asks to understand what code does (e.g., "how does the indexer work?")
-- User asks to explore functionality (e.g., "find error handling logic")
-- User asks about implementation details (e.g., "how are embeddings generated?")
-- You need to discover code related to a concept rather than an exact string
-- User asks about blast radius or impact of changing a function/symbol
-- User asks who calls a function or what does a function call (symbol context)
-- User asks for an explanation of a symbol's full call flow or business purpose (`explain`)
-- User asks about the architectural structure of a repo — modules, clusters, entry-point features
-- User asks which symbols form a feature/community together, or which community a symbol belongs to (`symbol-clusters`)
-- User asks which files one repository uses from another (cross-repo dependencies)
+Search by intent when you don't know the identifier. When you do have a symbol
+name, `codesearch context <symbol>` shows who calls it and what it calls, and
+`codesearch impact <symbol>` shows everything a change would break — real
+call-graph relationships, not just where the text appears.
 
-## When to Use Built-in Tools Instead
+---
 
-Use Grep/Glob for:
-- Exact text matching: `Grep "fn new_indexer"` (find exact function name)
-- Specific imports: `Grep "use tokio"` (find import statements)
-- File patterns: `Glob "**/*.rs"` (find files by extension)
-- Variable references: `Grep "config_path"` (find exact variable name)
+# The runbook
 
-## Installation
+Follow these phases in order. Run every command from inside the repository —
+codesearch auto-resolves the namespace and embedding config from the repo's git
+remote, so you almost never need `--namespace` or any embedding flags.
 
-If the `codesearch` binary is not found, install it automatically by running the install script bundled with this skill:
+## Phase 1 — Recall memory (do this first)
 
-```shell
-INSTALL_DIR="$HOME/.local/bin" sh .claude/skills/codesearch/install.sh
-```
-
-After installation, verify it works:
+Before any substantive work, load what past sessions learned. It is cheap and
+keeps you from re-asking things the user already told you or working against
+their conventions.
 
 ```shell
-codesearch --version
+# The "read this first" digest across all memory (project + preferences overview)
+codesearch memory show memory://memory
+
+# The user's standing preferences (code style, tooling, workflow)
+codesearch memory list --kind preference
+
+# Anything specific to the task you're about to start
+codesearch memory search "how do we handle <the thing you're about to touch>"
 ```
 
-> Note: The script downloads the latest release binary from GitHub for the current OS/architecture. It installs to `$INSTALL_DIR` (defaults to `$HOME/.local/bin` above). Ensure `$HOME/.local/bin` is in your `PATH`. If it's not already in your PATH, add this line to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.):
-> ```shell
-> export PATH="$HOME/.local/bin:$PATH"
-> ```
-> Then reload your shell configuration: `source ~/.bashrc` (or `source ~/.zshrc`).
+`memory search` is auto-scoped to this project + globals. If memory is empty
+(nothing imported yet) these return little — that's fine, proceed. Don't skip
+the check just because it *might* be empty. (Full memory reference below.)
 
-## Prerequisites
+## Phase 2 — Get the architecture overview
 
-Before using codesearch, the target repository must be indexed:
+Orient in the codebase before diving in. Start broad, then zoom in only if the
+task needs it.
 
 ```shell
-# Index a repository (run once, supports incremental updates)
-codesearch index /path/to/repo
-
-# Index with a custom name
-codesearch index /path/to/repo --name my-project
-
-# Force full re-index (ignores cached file hashes)
-codesearch index /path/to/repo --force
+codesearch overview                       # one-page dossier: modules, communities,
+                                          #   couplings, critical features, channels
 ```
 
-## Search
-
-Use `codesearch search` to find code. By default it runs hybrid search (semantic vector similarity + BM25 keyword matching, fused via RRF) for best precision and recall.
+Zoom in when relevant:
 
 ```shell
-# Hybrid search — default, no flag needed
-codesearch search "user authentication flow"
-codesearch search "error handling middleware"
-codesearch search "database connection setup"
-codesearch search "API request validation"
-
-# Semantic-only search (disable keyword leg, pure vector similarity)
-codesearch search "user authentication flow" --no-text-search
-
-# Limit number of results (default: 10)
-codesearch search "error handling" --num 5
-
-# Filter by minimum relevance score
-# Note: hybrid RRF scores are ~0.016–0.033; semantic cosine scores are 0.0–1.0
-codesearch search "authentication" --min-score 0.02   # for hybrid results
-codesearch search "authentication" --no-text-search --min-score 0.5  # for semantic-only
-
-# Filter by programming language
-codesearch search "struct definition" --language rust
-codesearch search "class hierarchy" --language python --language typescript
-
-# Filter by repository (when multiple repos are indexed)
-codesearch search "config loading" --repository my-project
+codesearch features list                  # entry-point flows ranked by criticality
+codesearch clusters list                  # architectural modules (file-level)
+codesearch symbol-clusters list           # behavioural communities (symbol-level)
+codesearch couplings                      # what single element glues a module together
+codesearch channels                       # cross-service Kafka/HTTP/MQTT/AMQP/gRPC links
+codesearch uses <from> <to>               # files in one repo that reference another
+codesearch visualize -o graph.html        # interactive community graph
 ```
 
-### Hybrid vs Semantic-only
+`overview` caches its analysis and refreshes automatically when you re-index.
+Add `-r/--repository` if several repos are indexed.
 
-| Mode | Flag | Best for |
-|------|------|----------|
-| Hybrid (default) | *(none)* | Most queries — combines meaning and keyword precision |
-| Semantic-only | `--no-text-search` | Abstract intent queries where exact keywords unlikely to match |
+## Phase 3 — Search by intent
 
-### Supported Languages
-
-Codesearch supports: Rust, Python, JavaScript, TypeScript, Go, HCL, PHP, C++
-
-### What Gets Indexed
-
-Codesearch uses Tree-sitter to extract and index these code constructs:
-- Functions and methods
-- Structs, classes, and enums
-- Traits and implementations
-- Modules, constants, and typedefs
-- Import statements
-
-## Call Graph Analysis
-
-Once a repository is indexed, the call graph powers several complementary commands.
-
-### Impact Analysis — blast radius of a change
+Describe *what the code does* — include the domain noun and the behaviour.
+Prefer a short phrase or question over one word.
 
 ```shell
-# Who breaks if `authenticate` changes? (BFS over the call graph)
-codesearch impact authenticate
+# Good — behaviour + domain
+codesearch search "how are file chunks created and stored"
+codesearch search "middleware that validates auth tokens before issuing a session"
 
-# Restrict to one repository; JSON output for scripts
-codesearch impact authenticate --repository my-api --format json
+# Weak — fix by choosing the right tool
+codesearch search "error"           # too generic → "error handling for X"
+codesearch search "HandleRequest"   # you already know the symbol → skip search;
+                                    #   go to Phase 4 (context / impact) instead
 ```
 
-### Symbol Context — full caller/callee call-chain tree
+Then read the top hits (each result has `file_path`, line range, symbol, and
+a preview): search → Read the top 3–5 at their lines → confirm. Treat the
+ranking as a lead, not a verdict.
+
+> If you already have the exact symbol name, `search` is the wrong phase — jump
+> straight to Phase 4 (`context` / `impact`) to see its callers, callees, and
+> blast radius.
+
+If the first query misses, refine rather than repeat:
 
 ```shell
-# Who calls `authenticate`, and what does it call?
-codesearch context authenticate
-
-# Restrict to one repository; JSON output
-codesearch context authenticate --repository my-api --format json
+codesearch search "..." --no-text-search       # semantic-only: abstract intent, no exact tokens
+codesearch search "..." --language rust         # narrow by language (repeatable)
+codesearch search "..." --repository my-project # narrow by repo (repeatable)
+codesearch search "..." --num 25                # widen the result set (default 10)
+codesearch search "..." --format json           # structured output when you'll parse it
 ```
 
-### Matching symbols by regex
+Rephrase using vocabulary you saw in the first batch. Scoring note: hybrid RRF
+scores are ~0.016–0.033; semantic-only cosine scores are 0.0–1.0 — set
+`--min-score` to match the mode.
 
-`impact`, `context`, and `explain` resolve the symbol name with a substring match
-by default (`load` matches any fully-qualified name containing `load`). Pass
-`--regex` to supply your own POSIX pattern with explicit anchoring:
+## Phase 4 — Understand a symbol (start here when you know its name)
+
+Once you have a symbol name — from Phase 3, or because the user named it — this
+is how you learn where it's used and where a change lands. These query the call
+graph, so they report real callers, callees, and blast radius.
+
+```shell
+codesearch context authenticate     # who calls it / what it calls (immediate neighbourhood)
+codesearch impact authenticate      # everything a change transitively breaks (blast radius)
+codesearch explain authenticate     # LLM narrative: purpose, data/control flow, business feature
+```
+
+Use `context` to see callers and callees, `impact` to find every place a change
+would ripple to (so you know what needs updating and how risky it is), and
+`explain` when you need the *why*, not just the edges.
+
+Symbols resolve by substring by default; pass `--regex` for an anchored
+pattern. Common flags: `-r/--repository`, `-F/--format`
+(`text`/`json`/`vimgrep`; `explain` has no `vimgrep`).
 
 ```shell
 codesearch impact "^MyNs/.*Service#get$" --regex
-codesearch context ".*Repository.*" --regex
+codesearch features impacted authenticate hash_password   # which features a change touches
 ```
 
-### Explain — LLM-generated call-flow explanation
+## Phase 5 — Change, re-index, record
 
-Produces a structured natural-language description of a symbol's purpose, data/control
-flow, business feature, and key dependencies. Requires `ANTHROPIC_API_KEY` (default
-backend) or an OpenAI-compatible endpoint.
+After editing, keep the index (and thus the call graph and architecture
+analysis) in sync, and capture what you learned:
 
 ```shell
-# Explain a symbol using the default Anthropic backend
-codesearch explain authenticate
-
-# Use an OpenAI-compatible backend (e.g. LM Studio)
-codesearch explain authenticate --llm open-ai
-
-# Also dump every analyzed symbol's source chunk
-codesearch explain authenticate --dump-symbols
+codesearch index <path>                     # incremental — only changed files re-parse
+codesearch memory import <transcript.jsonl> # distill this session for next time
 ```
 
-## Architecture & Dependency Analysis
+---
 
-These commands operate on the file- and repository-level dependency graph built during
-indexing. They help answer "how is this codebase structured?" rather than "where is X?".
+# Reference
 
-### Execution Features — entry-point flows ranked by criticality
+## First-time setup
 
 ```shell
-# List the most critical entry-point features in a repository
-codesearch features list my-repo
+# Install the binary if it's missing (also installs scip-php / scip-typescript
+# for precise PHP / JS / TS call graphs)
+INSTALL_DIR="$HOME/.local/bin" sh .claude/skills/codesearch/install.sh
+codesearch --version   # ensure ~/.local/bin is on PATH
 
-# Limit the number of features and emit JSON
-codesearch features list my-repo --limit 10 --format json
-
-# Inspect a single feature by its entry-point symbol
-codesearch features get handle_request
-
-# Which features are impacted by changing one or more symbols?
-codesearch features impacted authenticate hash_password
+# Index the repository (run once; incremental afterward)
+codesearch index /path/to/repo
+codesearch index /path/to/repo --force   # full re-index, ignore cached hashes
 ```
 
-### Clusters — architectural modules (Leiden community detection)
+Supported languages: Rust, Python, JavaScript, TypeScript, Go, HCL/Terraform,
+PHP, C++. Indexing extracts functions, methods, classes/structs/enums, traits,
+impls, modules, constants, typedefs, and imports.
 
-Runs Leiden community detection over the file dependency graph to find
-tightly-coupled groups of files (architectural modules).
+## Memory in depth
+
+Four kinds: preference (how the user likes to work), fact (project facts
+and decisions), experience (a reusable insight — trigger, approach,
+guardrails), and skill (a reusable procedure).
+
+Recall (Phase 1) — more ways to read:
 
 ```shell
-# List tightly-coupled file clusters (architectural modules)
-codesearch clusters list my-repo
-
-# Which cluster does a given file belong to?
-codesearch clusters get src/api/auth.rs my-repo
-
-# Print a high-level Markdown architecture overview table
-codesearch clusters overview my-repo
+codesearch memory list --kind fact                  # project facts & decisions
+codesearch memory search "deploy steps" --kind skill
+codesearch memory search "..." --project <name>     # another project (or --all-projects)
+codesearch memory tree                              # browse the memory:// virtual filesystem
+codesearch memory show memory://sessions/<id>       # a past session's transcript
+codesearch memory show experience/<name>            # one item by kind/name
 ```
 
-### Symbol Clusters — behavioural communities (Leiden over the call graph)
+`memory://memory` is the digest across all memory; `memory://projects/<project>`
+is one project's overview. `memory search` auto-scopes to the current project +
+globals; `memory list` lists all items of a kind, newest first.
 
-The same Leiden algorithm one level finer: it clusters the symbol call graph
-(functions, methods, types) instead of files, so the communities are
-behavioural units — a feature, a subsystem, a collaborating set of functions —
-that frequently cut across file boundaries. Use file-level `clusters` to answer
-"what are this repo's modules?"; use `symbol-clusters` to answer "which symbols
-form a feature together, regardless of where they live?".
+Record (Phase 5) — more ways to write:
 
 ```shell
-# List symbol communities (size, dominant language, cohesion, sample members)
-codesearch symbol-clusters list my-repo
-
-# Which community does a given symbol belong to?
-# Resolves by exact fully-qualified name, then short-name suffix, then substring.
-codesearch symbol-clusters get authenticate my-repo
-codesearch symbol-clusters get "MyNs/Auth#authenticate()." my-repo
-
-# JSON output for scripting (both subcommands; vimgrep is not supported)
-codesearch symbol-clusters list my-repo --format json
-```
-
-Requires the repository to have been indexed with call-graph support (the
-default). When the call graph is empty, the list is empty.
-
-### Uses — cross-repository file dependencies
-
-```shell
-# List the files in repo `web` that use files from repo `core`
-codesearch uses web core
+codesearch memory add ./docs/design.md               # store a file as a summarized resource
+codesearch memory add https://example.com/g --name g # store a URL
+codesearch memory dream                              # consolidate: merge dupes, resolve conflicts
 ```
 
 ## Interactive TUI
 
-For exploratory sessions a full-screen terminal UI bundles search, impact, and context:
-
 ```shell
-codesearch tui                       # open in search mode
-codesearch tui --mode impact         # open in impact mode
-codesearch tui --query "auth flow"   # pre-populate and dispatch a query
+codesearch tui                      # search mode
+codesearch tui --mode impact        # impact mode
+codesearch tui --query "auth flow"  # pre-populate and dispatch
 ```
 
-## Repository Management
+## Repository & namespace management
 
 ```shell
-# List all indexed repositories
-codesearch list
-
-# View indexing statistics
-codesearch stats
-
-# Delete a repository from the index
-codesearch delete <id-or-path>
+codesearch list                     # indexed repositories in the namespace
+codesearch stats                    # index statistics
+codesearch delete <id-or-path>      # remove a repository
 ```
 
-## Query Best Practices
-
-Do:
-```shell
-codesearch search "How are file chunks created and stored?"
-codesearch search "Vector embedding generation process"
-codesearch search "Configuration loading and validation"
-codesearch search "HTTP request routing logic"
-```
-
-Don't:
-```shell
-codesearch search "func"          # Too vague
-codesearch search "error"         # Too generic
-codesearch search "HandleRequest" # Use Grep for exact name matches
-```
-
-## Recommended Workflow
-
-1. Start with `codesearch search` to find relevant code semantically
-2. Use `Read` tool to examine the files and lines from search results
-3. Use `Grep` only for exact string searches when you know the identifier name
-4. Use `codesearch search` again with refined queries if initial results aren't specific enough
-
-## Namespace Resolution Is Automatic
-
-Do not pass `--namespace` or the embedding flags (`--embedding-target`,
-`--embedding-model`, `--embedding-dimensions`). Run commands from inside the
-repository and codesearch selects the correct namespace and embedding
-configuration on its own.
+Namespace resolution is automatic from the repo's git remote — an explicit
+`--namespace` overrides it. Rarely needed global flags:
 
 ```shell
-# Index once (under a custom namespace if you want).
-codesearch --namespace my-project index /path/to/repo
-
-# From then on, just run commands inside the repo. No flags.
-cd /path/to/repo
-codesearch search "user authentication flow"
-```
-
-Rely on this. Only set `--namespace` explicitly to override the resolved
-value — an explicit flag always wins.
-
-## Advanced Configuration
-
-```shell
-# Use a custom data directory for the index
-codesearch --data-dir /custom/path search "query"
-
-# Force a specific namespace (overrides auto-resolution)
-codesearch --namespace my-project search "query"
-
-# Use in-memory storage (no persistence, useful for one-off searches)
-codesearch --memory-storage search "query"
-
-# Disable result reranking (faster but less accurate)
-codesearch --no-rerank search "query"
+codesearch --namespace my-project search "query"    # force a namespace
+codesearch --data-dir /custom/path search "query"   # custom index location
+codesearch --no-rerank search "query"               # skip reranking (faster)
+codesearch --memory-storage search "query"          # ephemeral, no persistence
 ```
 
 ## Keywords
 
-semantic search, hybrid search, code search, natural language search, find code, explore codebase, code understanding, intent search, AST analysis, embeddings, code discovery, code exploration, BM25, keyword search, RRF, reciprocal rank fusion, call graph, impact analysis, blast radius, symbol context, callers, callees, dependency analysis, explain, call flow, execution features, criticality, clusters, architecture overview, Leiden, module detection, symbol clusters, symbol communities, community detection, cross-repository dependencies, uses, regex symbol match
+semantic search, hybrid search, code search, natural language search, find code,
+explore codebase, code understanding, intent search, AST analysis, embeddings,
+code discovery, BM25, keyword search, RRF, reciprocal rank fusion, reranking,
+call graph, impact analysis, blast radius, symbol context, callers, callees,
+explain, call flow, execution features, criticality, clusters, modules,
+architecture overview, dossier, Leiden, community detection, symbol clusters,
+communities, coupling, hub dependency, cross-service channels, kafka, cross-
+repository dependencies, uses, visualize, graph, TUI, regex symbol match,
+long-term memory, recall preferences, project overview, session start memory,
+remember decisions, user preferences, project facts

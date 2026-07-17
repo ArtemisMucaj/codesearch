@@ -159,7 +159,7 @@ verify_session [call]  src/middleware/session.rs:18
 
 ## LLM Explanation (`codesearch explain`)
 
-Uses an LLM to produce a natural-language explanation of a symbol's complete call flow, data flow, and business purpose. It runs the same context analysis as `codesearch context`, collects source snippets for every symbol in the call chain, and sends everything to the configured LLM.
+Uses an LLM to produce a natural-language explanation of a symbol's complete call flow, data flow, and business purpose. It runs the same context analysis as `codesearch context`, collects source snippets for every symbol in the call chain, and sends everything to the configured LLM backend (default `open-ai`; see [LLM backends](../../AGENTS.md#llm-backends)).
 
 The LLM response is structured into four sections:
 
@@ -171,11 +171,13 @@ The LLM response is structured into four sections:
 ### Usage
 
 ```bash
-# Explain `authenticate` using the default Anthropic backend
+# Explain `authenticate` using the default backend (open-ai — a local
+# OpenAI-compatible endpoint such as LM Studio)
 codesearch explain authenticate
 
-# Use an OpenAI-compatible backend (e.g., LM Studio)
-codesearch explain authenticate --llm open-ai
+# Use the Anthropic-compatible backend, or a GitHub Copilot subscription
+codesearch explain authenticate --llm anthropic
+codesearch explain authenticate --llm copilot
 
 # Restrict to a specific repository
 codesearch explain authenticate --repository my-api
@@ -191,21 +193,26 @@ codesearch explain ".*authenticate.*" --regex
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--llm` | `anthropic` | LLM backend: `anthropic` (default) or `open-ai` |
+| `--llm` | `open-ai` | LLM backend: `open-ai` (default), `anthropic`, or `copilot` |
 | `-r, --repository` | (none) | Restrict analysis to one repository |
 | `--dump-symbols` | off | Print each analyzed symbol's source chunk after the explanation |
 | `--regex` | off | Treat SYMBOL as an explicit regex (no auto-wrapping) |
 
 ### Environment Variables
 
+The `open-ai` backend defaults to a local endpoint (LM Studio on
+`http://localhost:1234`) and can also be configured with `codesearch openai …`.
+See [AGENTS.md — LLM backends](../../AGENTS.md#llm-backends) for the complete
+backend and configuration reference.
+
 | Variable | Backend | Description |
 |----------|---------|-------------|
+| `OPENAI_BASE_URL` | `open-ai` | API base URL (default: `http://localhost:1234`) |
+| `OPENAI_MODEL` | `open-ai` | Model name |
+| `OPENAI_API_KEY` | `open-ai` | API key (any non-empty value for local servers) |
+| `ANTHROPIC_BASE_URL` | `anthropic` | API base URL (default: Anthropic cloud) |
+| `ANTHROPIC_MODEL` | `anthropic` | Model name |
 | `ANTHROPIC_API_KEY` | `anthropic` | API key for Anthropic |
-| `ANTHROPIC_BASE_URL` | `anthropic` | Override API base URL (default: Anthropic cloud) |
-| `ANTHROPIC_MODEL` | `anthropic` | Override model name |
-| `OPENAI_API_KEY` | `open-ai` | API key (or any non-empty value for local servers) |
-| `OPENAI_BASE_URL` | `open-ai` | Override API base URL (default: `http://localhost:1234`) |
-| `OPENAI_MODEL` | `open-ai` | Override model name |
 
 ### Example Output
 

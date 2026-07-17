@@ -75,23 +75,24 @@ Imports are idempotent per session ID (taken from the transcript's
 ### Choosing the extraction model
 
 Extraction is a summarization-style task — a **small model is enough** and
-keeps imports fast and cheap. The `--llm` flag selects the provider
-(`anthropic` default, or `open-ai`), configured through the same environment
-variables as `explain` and query expansion:
+keeps imports fast and cheap. The `--llm` flag selects the provider (`open-ai`
+default — a local OpenAI-compatible endpoint — or `anthropic` / `copilot`),
+configured through the same backends as `explain` and query expansion:
 
 ```bash
-# Local-first default: LM Studio on http://localhost:1234 (no key needed)
+# Local-first default: an OpenAI-compatible server, e.g. LM Studio on
+# http://localhost:1234 (no key needed)
+codesearch memory import session.jsonl
+
+# Any OpenAI-compatible server, explicitly
+OPENAI_BASE_URL=http://localhost:1234 OPENAI_MODEL=qwen/qwen3.5-4b \
 codesearch memory import session.jsonl
 
 # Anthropic cloud with a small model
 ANTHROPIC_BASE_URL=https://api.anthropic.com \
 ANTHROPIC_API_KEY=sk-ant-... \
 ANTHROPIC_MODEL=claude-haiku-4-5 \
-codesearch memory import session.jsonl
-
-# Any OpenAI-compatible server
-OPENAI_BASE_URL=http://localhost:1234 OPENAI_MODEL=qwen/qwen3.5-4b \
-codesearch memory import session.jsonl --llm open-ai
+codesearch memory import session.jsonl --llm anthropic
 ```
 
 ## Virtual filesystem (L0 / L1 / L2)

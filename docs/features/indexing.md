@@ -71,12 +71,17 @@ Two backends are available — see [Embedding Backends](./embedding-backends.md)
 
 #### Embedding Backends
 
-| Backend | Flag | Default model | Dimensions |
-|---------|------|---------------|------------|
-| ONNX (local, default) | `--embedding-target=onnx` | `sentence-transformers/all-MiniLM-L6-v2` | 384 |
-| API (OpenAI-compatible) | `--embedding-target=api` | Configured via `--embedding-model` | Configured via `--embedding-dimensions` |
+| Backend | Default model | Dimensions |
+|---------|---------------|------------|
+| ONNX (local, default) | `sentence-transformers/all-MiniLM-L6-v2` | 384 |
+| API (OpenAI-compatible) | Configured at namespace creation | Configured at namespace creation |
 
-The model and dimension count are stored in the `namespace_config` DuckDB table on first index and validated on every subsequent open — mismatches are hard errors.
+The embedding backend, model, and dimensions are **properties of the namespace**,
+set once with `codesearch create` (or defaulted on first index) and stored in
+the `namespace_config` DuckDB table — not repeated per command. Every later open
+validates against the stored config; mismatches are hard errors. See
+[Embedding Backends](./embedding-backends.md) for the `create` flags and the API
+backend setup.
 
 ### 5. Persistence
 
@@ -96,7 +101,7 @@ Data is stored using configurable backends:
 > The `repositories` and `namespace_config` tables are **global** (one per database file, not namespace-scoped), so each row records which namespace it belongs to. This is what makes [automatic namespace resolution](#automatic-namespace-resolution) a single cheap lookup.
 
 **Vectors** (via `DuckdbVectorRepository` with VSS):
-- Stores `FLOAT[{dimensions}]` embedding vectors directly in DuckDB — the column width is fixed at namespace creation time based on `--embedding-dimensions` (default 384)
+- Stores `FLOAT[{dimensions}]` embedding vectors directly in DuckDB — the column width is fixed at namespace creation time based on the namespace's configured dimensions (default 384)
 - **VSS (Vector Similarity Search) acceleration**:
   - Uses HNSW (Hierarchical Navigable Small World) index
   - Cosine distance metric for similarity calculations
@@ -242,10 +247,13 @@ Return Results
 
 ### Reranking by Backend
 
-| Backend | Reranking method | Model |
+Selected with the global `--reranking-target` flag:
+
+| `--reranking-target` | Reranking method | Model |
 |---------|-----------------|-------|
-| ONNX | Cross-encoder (ONNX) | `BAAI/bge-reranker-base` (~220 MB, downloaded automatically) |
-| API | LLM-based (single prompt, JSON scores) | Chat model at `ANTHROPIC_BASE_URL` (`ANTHROPIC_MODEL`) |
+| `onnx` (default) | Cross-encoder (ONNX) | `BAAI/bge-reranker-base` (~220 MB, downloaded automatically) |
+| `api/anthropic` | LLM-based (single prompt, JSON scores) | Anthropic-compatible `/v1/messages` (`ANTHROPIC_*`) |
+| `api/openai` | LLM-based (single prompt, JSON scores) | OpenAI-compatible `/v1/chat/completions` (`OPENAI_*`) |
 
 ### Usage
 

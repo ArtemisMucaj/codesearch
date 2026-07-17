@@ -1,667 +1,364 @@
 # codesearch
 
-A semantic code search tool that indexes code repositories using embeddings and AST analysis for intelligent code discovery.
-
-## Features
-
-- **Hybrid search** (default): combines semantic vector search with BM25-style keyword matching, fused via Reciprocal Rank Fusion (RRF) for best-of-both precision and recall
-- **Semantic search**: uses ML embeddings to find conceptually similar code even without exact keyword matches
-- **AST-aware**: parses code using tree-sitter for structure-aware indexing
-- **Multi-language support**: supports Rust, Python, JavaScript, TypeScript, Go, HCL, PHP, C++
-- **Persistent storage**: DuckDB with VSS (Vector Similarity Search) acceleration
-- **Fast indexing**: efficient batch processing with ONNX embedding generation
-
-## Architecture
-
-This project follows Domain-Driven Design (DDD) principles:
-
-```
-src/
-├── domain/
-├── application/
-├── connector/
-└── cli/
-```
-
-## Installation
+**Semantic code search powered by embeddings** — index a repository once, then
+find code by *what it does*, understand how symbols connect, and see how the
+whole thing is structured. A single Rust binary. No external services required.
 
 ```bash
-cargo build --release
-# Binary will be placed in bin/
-cp target/release/codesearch bin/
+codesearch index .
+codesearch search "where do we validate the auth token before issuing a session"
 ```
 
-## Usage
+---
 
-### Getting Started
+## What it does
 
-No external services required! CodeSearch uses DuckDB by default for persistent storage.
+codesearch is three tools in one binary, all built on a single index:
+
+- **Search** — hybrid retrieval that fuses a semantic (vector) leg with a
+  keyword (BM25-style) leg via Reciprocal Rank Fusion, then reranks with a
+  cross-encoder. Finds code by meaning *and* by exact token, in one query.
+- **Understand** — a call graph built during indexing powers blast-radius
+  (`impact`), 360° caller/callee context (`context`), and LLM-written
+  call-flow explanations (`explain`).
+- **Map** — file- and symbol-level community detection (Leiden), coupling
+  hotspots, entry-point execution features, cross-service channels, and a
+  one-page repository dossier (`overview`) — plus interactive graph rendering.
+
+It also ships an **MCP server** (so AI agents can call it), a **REST + SSE
+management API**, an **interactive TUI**, editor integrations (Neovim,
+Zed), and a **long-term memory** subsystem that distills finished assistant
+sessions into searchable knowledge.
+
+**Languages:** Rust, Python, JavaScript, TypeScript, Go, HCL/Terraform, PHP,
+C++. JavaScript/TypeScript and PHP get a precise call graph via SCIP
+(`scip-typescript` / `scip-php`); every language gets tree-sitter chunk
+extraction.
+
+---
+
+## Install
+
+### From a release (recommended)
 
 ```bash
-# Build the project
-cargo build --release
-
-# Index a repository
-./target/release/codesearch index /path/to/repo --name my-repo
-
-# Search
-./target/release/codesearch search "function that handles authentication"
-
-# List indexed repositories
-./target/release/codesearch list
+# Downloads the latest release binary for your OS/arch into ~/.local/bin
+INSTALL_DIR="$HOME/.local/bin" sh .claude/skills/codesearch/install.sh
+codesearch --version
 ```
 
-### Commands
+Make sure `~/.local/bin` is on your `PATH`.
+
+### From source
 
 ```bash
+git clone https://github.com/ArtemisMucaj/codesearch
+cd codesearch
+cargo build --release        # binary at ./target/release/codesearch
+cargo install --path .       # or install to ~/.cargo/bin
+```
+
+No system dependencies — DuckDB and ONNX Runtime are bundled through Cargo.
+(For sandboxed/offline builds where the ONNX Runtime download is blocked, see
+[AGENTS.md](AGENTS.md#building-in-a-sandboxed--offline-environment).)
+
+---
+
+## Quick start
+
+```bash
+# 1. Index a repository (incremental on re-run — only changed files re-parse)
 codesearch index /path/to/repo
 
-# Search for code
-codesearch search "function that handles authentication"
+# 2. Search it
+codesearch search "retry logic for network timeouts"
 
-# Show indexed repositories
-codesearch list
+# 3. Understand a symbol
+codesearch impact authenticate       # what breaks if this changes?
+codesearch context authenticate      # who calls it / what it calls
+codesearch explain authenticate      # LLM-written call-flow summary
 
-# Show indexing statistics
-codesearch stats
+# 4. Map the codebase
+codesearch overview                  # one-page dossier for the current repo
 
-# Delete a repository by name or path
-codesearch delete my-repo
-codesearch delete /path/to/repo
-
-# Show the blast radius of a symbol change (BFS over call graph)
-codesearch impact authenticate
-
-# Show full caller/callee call-chain context for a symbol
-codesearch context authenticate
-
-# LLM-powered explanation of a symbol's full call flow and business purpose
-codesearch explain authenticate
-
-# Rank entry-point execution features by criticality
-codesearch features list my-repo
-
-# Detect architectural clusters in the file dependency graph
-codesearch clusters list my-repo
-
-# Render the communities as an interactive HTML graph (or svg/canvas)
-codesearch visualize my-repo --output graph.html
-
-# List the files one repository uses from another
-codesearch uses web core
-
-# Launch the interactive TUI (search, impact, and context in one terminal UI)
-codesearch tui
-
-# Start MCP server (stdio, for AI tool integration)
-codesearch mcp
-
-# Start MCP server over HTTP
-codesearch mcp --http 8080
-
-# Run the MCP server AND the REST/JSON management API together
-codesearch serve
+# 5. Serve it to your editor / AI agent
+codesearch mcp                       # MCP server over stdio
 ```
 
-### Configuration Options
+Run commands from *inside* a repository and codesearch resolves the right
+namespace and embedding configuration automatically — you rarely need any
+global flags. See [Namespaces & automatic resolution](#namespaces--automatic-resolution).
+
+---
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `index <path>` | Parse, embed, and store a repository for search |
+| `search <query>` | Hybrid semantic + keyword search |
+| `list` / `stats` | List indexed repositories / show index statistics |
+| `delete <id-or-path>` | Remove a repository from the index |
+| `create [name]` | Create a namespace with a fixed embedding configuration |
+| `impact <symbol>` | Blast radius of changing a symbol (BFS over the call graph) |
+| `context <symbol>` | 360° caller/callee call-chain tree for a symbol |
+| `explain <symbol>` | LLM explanation of a symbol's call flow & business purpose |
+| `features <sub>` | Entry-point execution flows ranked by criticality |
+| `clusters <sub>` | Architectural modules — Leiden over the file graph |
+| `symbol-clusters <sub>` | Behavioural communities — Leiden over the call graph |
+| `couplings` | Files/edges whose removal would split a community in two |
+| `channels` | Cross-service links (Kafka, HTTP, MQTT, AMQP, gRPC) |
+| `uses <from> <to>` | Files in one repo that reference symbols in another |
+| `overview` | One-page Markdown dossier combining every analysis |
+| `visualize` | Render communities as interactive HTML, SVG, or Obsidian canvas |
+| `memory <sub>` | Long-term memory from finished assistant sessions |
+| `tui` | Interactive terminal UI (search + impact + context) |
+| `mcp` | Start the MCP server (stdio or HTTP) |
+| `serve` | Run the MCP server **and** the REST/SSE management API together |
+| `copilot <sub>` / `openai <sub>` | Configure LLM backends |
+
+Every command has `--help`. Full reference lives in [`docs/`](docs/README.md).
+
+### Global flags
+
+These apply to any subcommand that opens the index:
 
 | Flag | Default | Description |
-|------|---------|-------------|
-| `--data-dir` | `~/.codesearch` | Directory for DuckDB database files |
-| `--namespace` | `search` | DuckDB schema namespace for vector storage |
-| `--memory-storage` | `false` | Use in-memory storage (no persistence) |
-| `--mock-embeddings` | `false` | Use mock embeddings (for testing) |
-| `--no-rerank` | `false` | Disable reranking|
-| `-v, --verbose` | `false` | Enable debug logging |
+|---|---|---|
+| `-d, --data-dir <dir>` | `~/.codesearch` | Directory for the DuckDB database and `config.json` |
+| `--namespace <ns>` | `search` | DuckDB schema namespace (usually auto-resolved) |
+| `--memory-storage` | off | Ephemeral in-memory storage (no persistence) |
+| `--mock-embeddings` | off | Deterministic mock embeddings (testing) |
+| `--no-rerank` | off | Skip the cross-encoder reranking stage |
+| `--expand-query` | off | Expand the query into LLM-generated variants, fuse via RRF |
+| `--reranking-target <t>` | `onnx` | `onnx`, `api/anthropic`, or `api/openai` |
+| `--llm-target <t>` | `open-ai` | LLM backend: `open-ai`, `anthropic`, or `copilot` |
+| `-v, --verbose` | off | Debug-level logging |
 
-### Search Options
+---
+
+## Search
+
+By default `search` runs **hybrid** retrieval: a semantic vector leg and a
+keyword leg, fused with Reciprocal Rank Fusion (each hit scores `1/(60+rank)`
+per leg it appears in), then reranked by a cross-encoder.
+
+```bash
+codesearch search "parse and validate a configuration file"   # hybrid (default)
+codesearch search "..." --no-text-search                      # semantic-only
+codesearch search "async task queue" --num 25                 # more results
+codesearch search "struct definition" --language rust         # filter by language
+codesearch search "config loading" --repository my-project    # filter by repo
+codesearch search "..." --format json                         # JSON for tooling
+codesearch search "..." --format vimgrep | nvim -q /dev/stdin # Neovim quickfix
+```
 
 | Flag | Default | Description |
-|------|---------|-------------|
-| `--num` | `10` | Number of results to return |
-| `-m, --min-score` | (none) | Minimum relevance score threshold (0.0-1.0) |
-| `-L, --language` | (none) | Filter by programming language (can specify multiple) |
-| `-r, --repository` | (none) | Filter by repository (can specify multiple) |
-| `-F, --format` | `text` | Output format: `text`, `json`, or `vimgrep` |
-| `--no-text-search` | (off) | Disable the keyword leg; use only vector/semantic search |
+|---|---|---|
+| `--num` | `10` | Number of results |
+| `-m, --min-score` | (none) | Minimum relevance score (see scoring note below) |
+| `-L, --language` | (none) | Filter by language (repeatable) |
+| `-r, --repository` | (none) | Filter by repository (repeatable) |
+| `-F, --format` | `text` | `text`, `json`, or `vimgrep` |
+| `--no-text-search` | off | Disable the keyword leg (pure semantic search) |
 
-### Output Formats
+> **Scoring:** hybrid RRF scores land in ~0.016–0.033; semantic-only cosine
+> scores are 0.0–1.0. Tune `--min-score` to whichever mode you're in.
 
-| Format | Description |
-|--------|-------------|
-| `text` | Human-readable output with code previews (default) |
-| `json` | Structured JSON array for programmatic use and editor integrations |
-| `vimgrep` | `file:line:col:text` format for Neovim quickfix list and Telescope |
+See [docs/features/search.md](docs/features/search.md) for the full pipeline
+and [docs/features/embedding-backends.md](docs/features/embedding-backends.md)
+for local (ONNX) vs API embedding backends.
 
-### Examples
+---
 
-```bash
-# Index with a custom data directory
-codesearch --data-dir /var/lib/codesearch index /path/to/repo --name my-repo
+## Understand: the call graph
 
-# Use a separate namespace for different projects
-codesearch --namespace project-a index /path/to/repo-a --name repo-a
-codesearch --namespace project-b index /path/to/repo-b --name repo-b
-
-# Verbose logging with debug output
-codesearch -v search "authentication error handling"
-
-# Use mock embeddings for testing
-codesearch --mock-embeddings index ./test-repo --name test
-
-codesearch search "error handling" --num 25
-
-# Filter by language
-codesearch search "async function" --language rust
-
-# JSON output for scripts or editor integrations
-codesearch search "error handling" --format json
-
-# Vimgrep format for Neovim quickfix
-codesearch search "error handling" --format vimgrep
-```
-
-## Call Graph Analysis
-
-CodeSearch builds a call graph during indexing and exposes two commands to query it: **`impact`** for blast-radius analysis and **`context`** for 360-degree dependency views.
-
-### Impact Analysis
-
-Shows every symbol that would be affected (transitively) if a given symbol changes. Uses BFS over the call graph, grouping affected symbols by hop depth.
+`index` builds a call graph — caller→callee edges with reference kind and
+location. Three commands query it.
 
 ```bash
-# Show what breaks if `authenticate` changes
-codesearch impact authenticate
-
-# Restrict to a specific repository
-codesearch impact authenticate --repository my-api
-
-# JSON output (for scripts)
-codesearch impact authenticate --format json
-
-# Vimgrep output for Neovim quickfix
-codesearch impact authenticate --format vimgrep
+codesearch impact authenticate         # everything transitively affected by a change
+codesearch context authenticate        # callers (as trees) + callees hanging off the symbol
+codesearch explain authenticate        # LLM-written purpose, data/control flow, business feature
 ```
 
-**Example output:**
-```
-Impact analysis for 'authenticate'
-─────────────────────────────────────────
-process_request [call]  src/router.rs:10
-└── handle_login [call]  src/api/auth.rs:42
-    └── authenticate
-
-run_tests [call]  tests/integration.rs:5
-└── verify_token [call]  src/middleware/auth.rs:18
-    └── authenticate
-```
-
-### Symbol Context
-
-Shows the 360-degree dependency view for a symbol: who calls it (callers) and what it calls (callees).
+All three accept `-r/--repository`, `-F/--format` (`text`/`json`/`vimgrep`, except
+`explain`), and resolve the symbol by **substring** by default — pass `--regex`
+to supply your own anchored POSIX pattern:
 
 ```bash
-# Show callers and callees of `authenticate`
-codesearch context authenticate
-
-# Restrict to a specific repository
-codesearch context authenticate --repository my-api
-
-# JSON output
-codesearch context authenticate --format json
-
-# Vimgrep output for Neovim quickfix
-codesearch context authenticate --format vimgrep
+codesearch impact "^MyNs/.*Service#get$" --regex
 ```
 
-**Example output** (caller chains as trees, callees hanging off the queried symbol):
-```
-Context for 'authenticate'
-─────────────────────────────────────────
-process_request [call]  src/router.rs:10
-└── handle_login [call]  src/api/auth.rs:42
-    └── authenticate
-        ├── hash_password [call]  src/crypto/hash.rs:10
-        └── lookup_user [call]  src/db/users.rs:55
-```
+`explain` needs an LLM backend (defaults to a local OpenAI-compatible endpoint;
+select another with `--llm`). Full reference:
+[docs/features/call-graph.md](docs/features/call-graph.md).
 
-### Call Graph Options
+---
 
-| Flag | Command | Default | Description |
-|------|---------|---------|-------------|
-| `-r, --repository` | both | (none) | Restrict to a specific repository |
-| `-F, --format` | both | `text` | Output format: `text`, `json`, or `vimgrep` |
-| `--regex` | both | off | Treat the symbol as an explicit POSIX regex (no auto-wrapping) |
-
-> **Symbol matching:** By default the symbol argument is matched as a substring
-> (`load` matches any fully-qualified name containing `load`). Pass `--regex` to
-> supply your own anchored pattern, e.g. `codesearch impact "^MyNs/.*Service#get$" --regex`.
-
-> **Note:** Call graph data is populated during `codesearch index`. Re-index after code changes to keep the graph up to date.
-
-## LLM Explanation (`explain`)
-
-Uses an LLM to explain a symbol's complete call flow, data flow, and business purpose — requires `ANTHROPIC_API_KEY` (default) or an OpenAI-compatible endpoint.
+## Map: architecture & dependency analysis
 
 ```bash
-codesearch explain authenticate
-codesearch explain authenticate --llm open-ai
+codesearch overview                          # one-page dossier for the current repo
+codesearch features list my-repo             # entry-point flows by criticality
+codesearch clusters list my-repo             # architectural modules (file-level Leiden)
+codesearch symbol-clusters list my-repo      # behavioural communities (symbol-level Leiden)
+codesearch couplings -r my-repo              # what glues a community together
+codesearch channels                          # cross-service Kafka/HTTP/MQTT links
+codesearch uses web core                     # files in `web` that use `core`
+codesearch visualize my-repo -o graph.html   # interactive community graph
 ```
 
-See [Call Graph Analysis — LLM Explanation](docs/features/call-graph.md#llm-explanation-codesearch-explain) for the full flag reference, environment variables, and example output.
+`overview` combines all of the above into a single Markdown report (index
+stats, modules, communities, coupling hotspots, critical features, channels,
+and an optional LLM executive summary), degrading gracefully when a section's
+data is missing. Detected clusters and features are cached in DuckDB and
+invalidated automatically on re-index.
 
-## Long-Term Memory (`memory`)
+Full reference:
+[docs/features/architecture-analysis.md](docs/features/architecture-analysis.md).
 
-Import finished assistant sessions (Claude Code transcripts or generic JSONL
-chat logs) and distill them into durable, searchable memories — user
-preferences, reusable experiences, procedural skills, and project facts.
-Extraction uses a small LLM via the same provider configuration as `explain`;
-memories live in their own database (`~/.codesearch/memory.duckdb`), separate
-from the code index.
+---
+
+## Namespaces & automatic resolution
+
+A namespace is a DuckDB schema with a fixed embedding configuration (backend,
+model, dimensions), decided once at creation and inherited by every later
+`index` and `search` against it. Indexing into a namespace that was never
+explicitly created configures it with the defaults (ONNX,
+`all-MiniLM-L6-v2`, 384 dimensions).
 
 ```bash
-codesearch memory import ~/.claude/projects/<project>/<session-id>.jsonl
-codesearch memory search "how do we handle lock conflicts"
-codesearch memory list --kind preference
+# Create a namespace with a specific embedding setup (optional)
+codesearch create my-project --embedding-target api \
+  --embedding-model nomic-embed-text --embedding-dimensions 768
 
-# Add a file or URL as a resource (fetched, summarized, stored)
-codesearch memory add ./docs/design.md
-codesearch memory add https://example.com/guide --name guide
-
-# Browse the memory virtual filesystem (L0/L1 abstracts)
-codesearch memory tree                     # roots: the rollup + stored sessions + resources
-codesearch memory show memory://memory     # the "read this first" summary
-codesearch memory show memory://sessions/<id>   # one session's transcript
+# Or a lightweight keyword + call-graph-only namespace (no embed stage)
+codesearch create fast-index --no-embeddings
 ```
 
-Each import also stores the session as a node in a `memory://` virtual
-filesystem (with a generated L0 abstract, L1 overview, and its full transcript)
-and regenerates a whole-memory rollup at `memory://memory` — a summary an agent
-reads first before drilling into individual memories. `memory add` stores files
-and URLs the same way under `memory://resources` (URLs and HTML are decluttered
-with the [`defuddle`](https://github.com/kepano/defuddle-cli) CLI).
+At index time codesearch records the repository's **normalized git remote**
+(e.g. `github.com/owner/repo`). Any later command run from inside that repo
+does a cheap read-only lookup and adopts the correct namespace and embedding
+config automatically — no flags needed, and it survives re-clones and moves
+because the key is the remote, not the path. An explicit `--namespace` always
+wins. See
+[docs/features/indexing.md](docs/features/indexing.md#automatic-namespace-resolution).
 
-See [Long-Term Memory](docs/features/memory.md) for the memory kinds, the
-virtual filesystem, update semantics, and model configuration.
+---
 
-## Interactive TUI (`tui`)
+## Integrations
 
-A full-screen terminal UI combining search, impact analysis, and context lookup in one interface.
+### MCP server (AI agents)
 
 ```bash
-codesearch tui
-codesearch tui --mode impact
-codesearch tui --query "authentication"
+codesearch mcp                       # stdio (Claude Desktop, Cursor, Zed, …)
+codesearch mcp --http 8080           # HTTP; endpoint at /mcp
+codesearch mcp --http 8080 --public  # bind 0.0.0.0
 ```
 
-See [Getting Started — Launch the Interactive TUI](docs/features/getting-started.md#launch-the-interactive-tui) for all options.
+Exposes 18 tools: `search_code`, `analyze_impact`, `get_symbol_context`,
+`query_graph`, `list_repositories`, `list_features`, `get_feature`,
+`get_impacted_features`, `file_uses`, `list_clusters`, `get_file_cluster`,
+`list_symbol_clusters`, `get_symbol_cluster`, `couplings`, `channels`,
+`search_memory`, `list_memories`, and `read_memory`. `query_graph` supports
+eight intention-named patterns (`callers_of`, `callees_of`, `imports_of`,
+`importers_of`, `inheritors_of`, `children_of`, `tests_for`, `file_summary`).
 
-## Architecture & Dependency Analysis
-
-Beyond per-symbol call graphs, CodeSearch analyses the file- and repository-level
-dependency graph built during indexing.
-
-### Repository Overview (`overview`)
-
-Combines every analysis into a one-page Markdown dossier for a repository:
-index statistics, architectural modules (file clusters), behavioural symbol
-communities, coupling hotspots (god nodes), the most critical execution
-features, and cross-service channels — plus an optional LLM-written executive
-summary. Each section degrades gracefully when its underlying data is missing
-(e.g. no SCIP call graph yet), and community display names are generated and
-cached the same way as in `clusters` / `symbol-clusters`.
+### `serve` — MCP + management API
 
 ```bash
-# Full dossier for the repository in the current directory
-codesearch overview
-
-# For a specific repository, as JSON (for tooling)
-codesearch overview -r my-repo -F json
-
-# Show more rows per section, skip the expensive coupling analysis
-codesearch overview --top 20 --skip couplings
-
-# No LLM: keep cached community names, skip naming + the executive summary
-codesearch overview --no-llm
-```
-
-### Execution Features (`features`)
-
-Discovers entry-point execution flows (forward call chains rooted at entry-point
-symbols) and ranks them by a criticality score.
-
-```bash
-# List the most critical features in a repository
-codesearch features list my-repo --limit 20
-
-# Show a single feature by its entry-point symbol
-codesearch features get handle_request
-
-# Show which features are impacted by changing one or more symbols
-codesearch features impacted authenticate hash_password
-```
-
-### Clusters (`clusters`)
-
-Runs the [Leiden](https://en.wikipedia.org/wiki/Leiden_algorithm) community-detection
-algorithm over the file-level call graph to surface tightly-coupled groups of files
-(architectural modules).
-
-```bash
-# List detected clusters
-codesearch clusters list my-repo
-
-# Find which cluster a file belongs to
-codesearch clusters get src/api/auth.rs my-repo
-```
-
-For a Markdown module table (plus every other analysis), use `codesearch overview`.
-
-### Symbol Clusters (`symbol-clusters`)
-
-Runs the same Leiden algorithm over the **symbol** call graph instead of files,
-grouping individual functions, methods, and types into behavioural communities
-that often cut across file boundaries.
-
-```bash
-# List detected symbol communities
-codesearch symbol-clusters list my-repo
-
-# Find which community a symbol belongs to (exact, short-name, or substring)
-codesearch symbol-clusters get authenticate my-repo
-
-# JSON output (vimgrep is not supported for either subcommand)
-codesearch symbol-clusters list my-repo --format json
-```
-
-### Visualize (`visualize`)
-
-Renders the Leiden communities — file-level or symbol-level — to a shareable
-file, coloured by community. Formats: an interactive **HTML** graph
-(vis-network; search, per-community filters, click-to-inspect), a static
-**SVG**, or an Obsidian **canvas**.
-
-```bash
-# Interactive HTML of the file-dependency graph (defaults)
-codesearch visualize my-repo --output graph.html
-
-# Symbol call graph instead of files
-codesearch visualize my-repo --level symbol --output symbols.html
-
-# Other formats
-codesearch visualize my-repo --format svg    --output graph.svg
-codesearch visualize my-repo --format canvas --output graph.canvas
-
-# One node per community (auto-applied above --node-limit, default 5000)
-codesearch visualize my-repo --aggregate --output overview.html
-```
-
-See [Architecture & Dependency Analysis](docs/features/architecture-analysis.md#visualizing-the-graph-codesearch-visualize)
-for the full option reference.
-
-### Cross-repository Usage (`uses`)
-
-Lists every file in one repository that references symbols defined in another,
-grouped by the target file they depend on.
-
-```bash
-# Files in the `web` repo that use files from the `core` repo
-codesearch uses web core
-```
-
-See [Architecture & Dependency Analysis](docs/features/architecture-analysis.md) for
-output examples, flags, and JSON schemas.
-
-## Editor Integrations
-
-### Neovim / Telescope
-
-A [Telescope](https://github.com/nvim-telescope/telescope.nvim) extension is included under `ide/nvim/`. It provides a fuzzy picker over semantic search results, with file preview at the correct line.
-
-**Setup:**
-
-1. Add `ide/nvim` to your Neovim runtime path (Neovim resolves the `lua/` subdirectory automatically):
-
-```lua
-vim.opt.runtimepath:append("/path/to/codesearch/ide/nvim")
-```
-
-2. Load the extension:
-
-```lua
-require("telescope").load_extension("codesearch")
-```
-
-3. Bind a key:
-
-```lua
-vim.keymap.set("n", "<leader>cs", function()
-  require("telescope").extensions.codesearch.codesearch()
-end, { desc = "Semantic code search" })
-```
-
-**Configuration (optional):**
-
-```lua
-require("telescope").setup({
-  extensions = {
-    codesearch = {
-      bin = "codesearch",     -- path to binary
-      num = 20,               -- number of results
-      min_score = 0.3,        -- minimum relevance score
-      data_dir = nil,         -- custom data directory
-      namespace = nil,        -- custom namespace
-    },
-  },
-})
-```
-
-**Quick use without Telescope:**
-
-```bash
-# Load results directly into Neovim's quickfix list
-codesearch search "error handling" --format vimgrep | nvim -q /dev/stdin
-```
-
-### MCP Server
-
-CodeSearch can run as a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server, allowing AI tools (Claude, Cursor, etc.) to search your codebase semantically.
-
-**Stdio mode** (default, for local AI tool integration):
-
-```bash
-codesearch mcp
-```
-
-**HTTP mode** (for network-accessible deployments):
-
-```bash
-# Listen on localhost:8080
-codesearch mcp --http 8080
-
-# Listen on all interfaces (public)
-codesearch mcp --http 8080 --public
-```
-
-The HTTP server exposes the MCP endpoint at `/mcp`.
-
-**Exposed tools:**
-
-| Tool | Description |
-|------|-------------|
-| `search_code` | Hybrid/semantic search. Accepts `query`, `limit`, `min_score`, `languages`, `repositories`, and `text_search`. |
-| `analyze_impact` | Blast-radius analysis for a symbol. Accepts `symbol`, `repository_id`, and `regex`. |
-| `get_symbol_context` | 360° caller/callee context for a symbol. Accepts `symbol`, `repository_id`, and `regex`. |
-| `query_graph` | Precise relationship queries over the call graph. Accepts `pattern`, `target`, `repository_id`, and `limit`. |
-| `list_repositories` | List indexed repositories with file/chunk counts and language breakdown (also serves as stats). Takes no arguments. |
-| `list_features` | Entry-point execution features scored by criticality. Accepts `repository_id` and `limit`. |
-| `get_feature` | A single execution feature by entry-point symbol. Accepts `symbol` and `repository_id`. |
-| `get_impacted_features` | Features whose call chain includes any changed symbol. Accepts `symbols` and `repository_id`. |
-| `file_uses` | Files in one repository that depend on files in another. Accepts `from` and `to` (repository name or ID). |
-| `list_clusters` | Architectural clusters via Leiden community detection. Accepts `repository_id`. |
-| `get_file_cluster` | The cluster a given file belongs to. Accepts `file_path` and `repository_id`. |
-| `list_symbol_clusters` | Symbol-level communities via Leiden over the call graph. Accepts `repository_id`. |
-| `get_symbol_cluster` | The symbol community a given symbol belongs to. Accepts `symbol` and `repository_id`. |
-| `search_memory` | Recall long-term memories (preferences, experiences, skills, facts) extracted from imported sessions. Accepts `query`, `kind`, and `limit`. |
-| `list_memories` | List stored memories, newest first. Accepts `kind`. |
-| `read_memory` | Read the memory virtual filesystem. Call with no args first for the whole-memory rollup, then drill into `memory://` nodes (sessions, resources). Accepts `uri`. |
-
-The `query_graph` tool supports eight intention-named relationship `pattern`s, returning
-only the requested edge type instead of every relationship at once:
-
-`callers_of`, `callees_of`, `imports_of`, `importers_of`, `inheritors_of`,
-`children_of`, `tests_for`, and `file_summary`.
-
-### Combined Server (`serve`)
-
-`codesearch serve` runs **both** servers side by side in one process: the MCP
-HTTP server (as above) and a new REST/JSON **management API**. Both shut down
-gracefully on ctrl-c.
-
-```bash
-# MCP on 8677, management API on 8676 (defaults), bound to 127.0.0.1
-codesearch serve
-
-# Custom ports
+codesearch serve                            # MCP on :8677, management API on :8676
 codesearch serve --mcp-port 3000 --mgmt-port 3001
-
-# Bind both on all interfaces (public)
 codesearch serve --public
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--mcp-port` | `8677` | Port for the MCP HTTP server (endpoint at `/mcp`). |
-| `--mgmt-port` | `8676` | Port for the REST/JSON management API. |
-| `--public` | off | Bind to `0.0.0.0` instead of `127.0.0.1`. |
+`serve` runs the MCP HTTP server and a **REST/JSON + SSE management API** side
+by side, and schedules memory dreaming in the background. The management API
+covers search, call-graph, clusters, couplings, channels, memory, LLM backend
+management, and streaming (`/api/stream/index`, `/api/stream/explain/{symbol}`).
+The full contract is the checked-in OpenAPI spec at
+[`docs/management-api.openapi.json`](docs/management-api.openapi.json) (served
+verbatim at `GET /api/openapi.json`). Overview:
+[docs/features/serve-and-management-api.md](docs/features/serve-and-management-api.md).
 
-The management API currently exposes `GET /health`
-(`{"status":"ok","version":"…"}`) and a `GET /` (or `/api`) index. Per-command
-REST endpoints and streaming are being added in follow-up work.
+### Editor integrations
 
-### Storage Backends
+- **Neovim / Telescope** — a fuzzy picker over semantic results (`ide/nvim/`).
+- **Zed** — MCP context server, command-palette tasks, and keybindings
+  (`ide/zed/`).
 
-| Mode | Persistence | Use Case |
-|------|-------------|----------|
-| **DuckDB** (default) | Persistent | Fast semantic search with VSS acceleration, no external dependencies |
-| **In-memory** (`--memory-storage`) | None | Testing, development, ephemeral indexing |
+See [docs/features/editor-integrations.md](docs/features/editor-integrations.md).
 
-**Storage Details:**
-- **Metadata**: Always stored in DuckDB locally via `DuckdbMetadataRepository` (repository info, chunks, file paths, statistics)
-- **Vectors**: DuckDB with HNSW (Hierarchical Navigable Small World) for Vector Similarity Search with cosine distance
-
-## Hybrid Search
-
-By default, every `search` query runs two complementary retrieval legs and fuses them with Reciprocal Rank Fusion (RRF):
-
-1. **Semantic leg** — vector similarity via HNSW cosine distance (finds conceptually related code)
-2. **Keyword leg** — BM25-style LIKE matching on content and symbol names (finds exact keyword occurrences)
-
-RRF assigns each result a score of `1 / (60 + rank)` from each leg it appears in; items found by both legs accumulate the highest fused scores. Final scores are in the ~0.016–0.033 range.
+### Interactive TUI
 
 ```bash
-# Hybrid search (default — no flag needed)
-codesearch search "parse configuration file"
-
-# Semantic-only (disable keyword leg)
-codesearch search "parse configuration file" --no-text-search
+codesearch tui                       # search mode
+codesearch tui --mode impact         # impact mode
+codesearch tui --query "auth flow"   # pre-populate and dispatch
 ```
 
-## Reranking
+---
 
-CodeSearch supports optional reranking to improve search result relevance using cross-encoder models.
+## Long-term memory
 
-### How It Works
-
-1. Initial hybrid/vector search retrieves candidates using inverse-log scaling: `num + ⌈num / ln(num)⌉` (defaults to 20 base candidates when `num ≤ 10`)
-2. For semantic-only results, candidates with vector similarity score below 0.1 are excluded (too irrelevant to benefit from reranking); hybrid RRF results bypass this filter because RRF scores are intentionally small (~0.016–0.033)
-3. A cross-encoder model (bge-reranker-base) reranks remaining candidates based on query-document relevance
-4. Top `num` reranked results are returned
-
-### Usage
+Import finished assistant sessions (Claude Code transcripts or generic JSONL
+chat logs) and distill them into durable, searchable memories — preferences,
+experiences, skills, and facts — in a separate `memory.duckdb`.
 
 ```bash
-codesearch search "authentication"
-
-# Customize number of results
-codesearch search "error handling" --num 20
-
-# Combine with filters
-codesearch search "validation" --language rust --min-score 0.7
+codesearch memory import ~/.claude/projects/<project>/<session>.jsonl
+codesearch memory search "how do we handle lock conflicts"
+codesearch memory add https://example.com/guide --name guide   # add a file/URL
+codesearch memory tree                                          # browse the memory:// VFS
+codesearch memory dream                                         # consolidate the store
 ```
 
-### Models
+`serve` schedules importing and consolidation automatically. Full design:
+[docs/features/memory.md](docs/features/memory.md).
 
-- **Default**: `BAAI/bge-reranker-base` (110M parameters, ONNX)
-- Downloaded automatically from HuggingFace Hub on first use
-- No API key or external service required
+---
 
-## Logging
+## LLM backends
 
-CodeSearch uses structured logging with sensible defaults to keep output clean while providing detailed information when needed.
+LLM features (`explain`, community naming, query expansion, memory extraction,
+dreaming) run through one of three interchangeable backends, selected with the
+global `--llm-target`:
 
-### Default Behavior
-
-By default, only application-level logs are shown:
-- Indexing progress and completion
-- Search queries and results
-- Reranking operations
-- Repository deletion
-
-Logs from external dependencies (ONNX runtime, tokenizers, database drivers, etc.) are suppressed to reduce noise.
-
-### Verbose Mode
-
-Use `-v` or `--verbose` to enable debug-level logging for troubleshooting:
+| Target | Backend | Configure with |
+|---|---|---|
+| `open-ai` (default) | OpenAI-compatible `/v1/chat/completions` (LM Studio, vLLM, hosted OpenAI) | `codesearch openai …` or `OPENAI_*` env vars |
+| `anthropic` | Anthropic-compatible `/v1/messages` | `ANTHROPIC_*` env vars |
+| `copilot` | A GitHub Copilot subscription | `codesearch copilot login` |
 
 ```bash
-codesearch -v index /path/to/repo
-codesearch -v search "authentication"
+codesearch openai add lmstudio --base-url http://localhost:1234 --set-active
+codesearch copilot login
+codesearch explain some_function --llm copilot
 ```
 
-This shows additional details like:
-- File processing progress
-- Model initialization
-- Storage backend configuration
+See [AGENTS.md — LLM backends](AGENTS.md#llm-backends) for the full details,
+including runtime backend management through the `serve` API.
 
-### Advanced: External Crate Logs
-
-To debug issues with external dependencies, use the `RUST_LOG` environment variable:
-
-```bash
-# Debug ONNX runtime issues
-RUST_LOG=warn,codesearch=info,ort=debug codesearch index /path/to/repo
-
-# Debug database issues
-RUST_LOG=warn,codesearch=info,duckdb=debug codesearch search "query"
-
-# Debug everything (very verbose)
-RUST_LOG=debug codesearch index /path/to/repo
-```
+---
 
 ## Development
 
 ```bash
-# Run tests
-cargo test
-
-# Run with logging
-RUST_LOG=debug cargo run -- index /path/to/repo
-
-# Format code
-cargo fmt
-
-# Run linter
-cargo clippy
+cargo build --release
+cargo test                    # in-memory storage + mock embeddings; no network
+cargo fmt && cargo clippy
 ```
 
-## Dependencies
+Architecture (Domain-Driven Design, Ports & Adapters), conventions, commit
+style, and contribution workflows are documented in **[AGENTS.md](AGENTS.md)**
+(the canonical agent & contributor guide; `CLAUDE.md` is a symlink to it).
 
-- [ort](https://github.com/pykeio/ort) - ONNX Runtime for ML embedding inference
-- [tree-sitter](https://tree-sitter.github.io/) - AST parsing and code extraction
-- [duckdb-rs](https://github.com/duckdb/duckdb-rs) - DuckDB Rust bindings with VSS extension
-- [tokio](https://tokio.rs/) - Async runtime
+## Documentation
+
+- **[docs/](docs/README.md)** — the full documentation index
+- **[AGENTS.md](AGENTS.md)** — architecture & contributor guide
 
 ## License
 
-MIT License
+MIT
