@@ -18,7 +18,7 @@ separate from the code index (`codesearch.duckdb`):
 | `memory_items` | One row per memory (`kind`, `name`, Markdown `content`, provenance, timestamps, update count). Unique per `(kind, name)`. |
 | `memory_vectors` | `FLOAT[dims]` embedding per item for semantic search. |
 | `memory_sessions` | Imported-session markers (idempotence + audit). |
-| `memory_nodes` | Virtual-filesystem nodes (`uri`, `kind`, `parent_uri`, L0 `abstract`, L1 `overview`, L2 `content`). Holds the whole-memory rollup and one node per imported session. |
+| `memory_nodes` | Virtual-filesystem nodes (`uri`, `kind`, `parent_uri`, L0 `abstract`, L1 `overview`, L2 `content`). Holds the whole-memory digest and one node per imported session. |
 | `memory_node_vectors` | `FLOAT[dims]` embedding per node (its L0/L1 summary) for semantic recall. |
 | `memory_meta` | Embedding model + dimensions the store was created with; mismatched opens are rejected. |
 
@@ -109,8 +109,8 @@ The tree has four top-level kinds — `memory` / `project` / `session` /
 `resource` context types:
 
 ```text
-memory://memory                 ← the whole-memory rollup ("read this first")
-memory://projects/<scope>       ← rollup of one project/namespace scope
+memory://memory                 ← the whole-memory digest ("read this first")
+memory://projects/<project>     ← digest of one project/namespace
 memory://sessions/<id>          ← one imported session (transcript = L2)
 memory://resources/...          ← files/URLs added explicitly (reserved)
 ```
@@ -122,15 +122,15 @@ deterministic fallback so a flaky model never blocks the import or loses data:
 1. **The session** → a node at `memory://sessions/<id>` whose L2 is the full
    normalized transcript (so the conversation can be re-read later), plus a
    generated L0 abstract and L1 overview.
-2. **The whole memory store** → the `memory://memory` rollup is regenerated
+2. **The whole memory store** → the `memory://memory` digest is regenerated
    from the current set of items: an abstract + overview meant to be read
    first, before drilling into individual memories. With fewer than two items
    this is a deterministic placeholder (no LLM call).
 
-Per-scope rollups (`memory://projects/<scope>`, one per distinct project or
-namespace scope found on stored items) are also refreshed on import and during
-dream cycles. Each is only regenerated when one of its scope's items actually
-changed, and a rollup whose scope vanished (all items deleted or generalized
+Per-project digests (`memory://projects/<project>`, one per distinct project
+or namespace found on stored items) are also refreshed on import and during
+dream cycles. Each is only regenerated when one of its project's items actually
+changed, and a digest whose project vanished (all items deleted or generalized
 to global) is removed.
 
 Resources — files and website links — are added explicitly with `memory add`.
@@ -149,42 +149,42 @@ codesearch memory add https://example.com/guide --name guide   # a URL
 Browse and drill in from the CLI:
 
 ```bash
-codesearch memory tree                        # roots: rollup + sessions
+codesearch memory tree                        # roots: digest + sessions
 codesearch memory tree memory://sessions      # list stored sessions (L0 lines)
-codesearch memory show memory://memory        # the rollup abstract + overview
+codesearch memory show memory://memory        # the digest abstract + overview
 codesearch memory show memory://sessions/<id> # a session's abstract + transcript
 ```
 
-## Project & namespace scoping
+## Project & namespace assignment
 
 Every memory item is either **global** (applies everywhere) or carries a
-**scope** naming the project it belongs to, so one project's conventions never
-surface as advice in another. The scope of a session is resolved from its
-working directory when the transcript is imported:
+**project** it belongs to, so one project's conventions never surface as advice
+in another. A session's project is resolved from its working directory when the
+transcript is imported:
 
-1. **Indexed under a user-created namespace** → the scope is the *namespace*.
+1. **Indexed under a user-created namespace** → the project is the *namespace*.
    Repositories deliberately indexed together in a namespace are correlated —
    they work together — so their sessions share one memory pool.
 2. **Otherwise** (not indexed, or indexed under the default namespace) → the
-   scope is the project directory name.
+   project is the working-directory name.
 
-Recall applies the same idea in reverse: a scoped search returns that scope's
-items *plus* globals. `codesearch memory search` resolves the scope from the
-directory it runs in automatically; `--scope <name>` overrides it and
-`--all-scopes` disables the filter. The extraction prefetch is scoped the same
-way, so session imports merge new information into the memories that are
+Recall applies the same idea in reverse: a project-filtered search returns that
+project's items *plus* globals. `codesearch memory search` resolves the project
+from the directory it runs in automatically; `--project <name>` overrides it and
+`--all-projects` disables the filter. The extraction prefetch is filtered the
+same way, so session imports merge new information into the memories that are
 actually about the same project.
 
 ## Recalling memories
 
 ```bash
 # Hybrid search (semantic + keyword, fused with RRF); results are filtered to
-# the current directory's scope + globals automatically
+# the current directory's project + globals automatically
 codesearch memory search "how do we handle duckdb lock conflicts"
 
 # Search another project's memory, or everything
-codesearch memory search "deploy steps" --scope backend-team
-codesearch memory search "deploy steps" --all-scopes
+codesearch memory search "deploy steps" --project backend-team
+codesearch memory search "deploy steps" --all-projects
 
 # Restrict to one kind
 codesearch memory search "code style" --kind preference
@@ -213,23 +213,23 @@ AI tools alongside code search:
 
 | Tool | Description |
 |------|-------------|
-| `search_memory` | Hybrid recall over the memory store. Accepts `query`, optional `kind`, `scope` (defaults to the workspace's scope in stdio mode; `"*"` searches all scopes), and `limit`. Returns full item content with fused scores. |
+| `search_memory` | Hybrid recall over the memory store. Accepts `query`, optional `kind`, `project` (defaults to the workspace's project in stdio mode; `"*"` searches all projects), and `limit`. Returns full item content with fused scores. |
 | `list_memories` | List stored memories, newest first. Accepts optional `kind` — e.g. `kind="preference"` at session start to load every known user preference. |
-| `read_memory` | Read the virtual filesystem level by level. Call with no args (or `uri="memory://memory"`) first for the whole-memory rollup, then drill into a directory (`memory://sessions`) or a leaf (`memory://sessions/<id>`). Returns the node's L0/L1/L2 plus its children's abstracts. |
+| `read_memory` | Read the virtual filesystem level by level. Call with no args (or `uri="memory://memory"`) first for the whole-memory digest, then drill into a directory (`memory://sessions`) or a leaf (`memory://sessions/<id>`). Returns the node's L0/L1/L2 plus its children's abstracts. |
 
 This gives agents the recall half of the loop: import sessions with the CLI
 (e.g. from a session-end hook), then at task start let the agent call
-`read_memory` (no args) to load the whole-memory rollup, and `search_memory`
+`read_memory` (no args) to load the whole-memory digest, and `search_memory`
 to pull the specific preferences, experiences, and facts a task needs. The MCP
 server holds a single shared connection to `memory.duckdb`, so concurrent
 tool calls do not contend for DuckDB's single-writer lock.
 
-## Dreaming (offline consolidation)
+## Dreaming
 
 Per-session extraction only merges new information into the handful of
 memories it prefetches, so duplicates, contradictions, and cross-session
 patterns accumulate between items that were never in the same extraction
-context. A **dream cycle** is the global pass that cleans this up, in four
+context. A **dream cycle** is the global pass that cleans this up, in five
 phases:
 
 1. **Harvest** — discover finished sessions (Claude Code / OpenCode / Zed,
@@ -242,8 +242,11 @@ phases:
    transaction") instead of silently dropping a side.
 3. **Reflect** — one pass over the whole store proposing a few higher-level
    items: repeated experiences promoted to a `skill`, the same fact recorded
-   under several project scopes generalized to one global item.
-4. **Refresh** — regenerate the `memory://memory` rollup and record the run in
+   under several projects generalized to one global item.
+4. **Synthesize skills** — a focused pass over the `experience`/`skill` items,
+   distilling procedures that recur across sessions into reusable `skill` items
+   (when to use, steps, prerequisites, failure modes). Write-only, like reflect.
+5. **Refresh** — regenerate the `memory://memory` digest and record the run in
    `memory_dream_runs`.
 
 Guardrails bound the blast radius of a misbehaving model: operations are
@@ -296,12 +299,12 @@ Following the ports & adapters layering:
 - `src/application/use_cases/memory_extraction.rs` (+ `_prompt.rs`) —
   extraction orchestration: prefetch → LLM call → parse/validate → apply.
 - `src/application/use_cases/memory_summary.rs` — the L0/L1 layer:
-  per-session node summarization and whole-memory rollup regeneration.
+  per-session node summarization and whole-memory digest regeneration.
 - `src/application/use_cases/import_session.rs` — idempotence + session
   recording around extraction + summarization.
 - `src/application/use_cases/memory_search.rs` — hybrid recall with RRF.
 - `src/application/use_cases/memory_dream.rs` (+ `_prompt.rs`) — the dream
-  cycle: harvest → similarity clustering → consolidation/reflection → rollup
+  cycle: harvest → similarity clustering → consolidation/reflection → digest
   refresh, with per-phase guardrails.
 - `src/connector/adapter/management/dream.rs` — the serve-mode scheduler and
   the shared state behind `GET/POST /api/memory/dream`.

@@ -82,11 +82,11 @@ pub struct MemoryItem {
     content: String,
     /// Identifier of the session this memory was last extracted from.
     source_session_id: Option<String>,
-    /// Project this memory is scoped to (e.g. a repository directory name), or
+    /// Project this memory belongs to (e.g. a repository directory name), or
     /// `None` when it applies globally across all projects. Project-specific
     /// insights (a fix for one codebase's SDK, a repo's build quirk) carry a
-    /// scope so they don't surface as advice in unrelated projects.
-    scope: Option<String>,
+    /// project so they don't surface as advice in unrelated projects.
+    project: Option<String>,
     created_at: i64,
     updated_at: i64,
     /// Number of times this item has been re-extracted/updated.
@@ -101,7 +101,7 @@ impl MemoryItem {
         name: String,
         content: String,
         source_session_id: Option<String>,
-        scope: Option<String>,
+        project: Option<String>,
         created_at: i64,
         updated_at: i64,
         update_count: u32,
@@ -112,7 +112,7 @@ impl MemoryItem {
             name,
             content,
             source_session_id,
-            scope,
+            project,
             created_at,
             updated_at,
             update_count,
@@ -139,9 +139,9 @@ impl MemoryItem {
         self.source_session_id.as_deref()
     }
 
-    /// Project scope, or `None` for a global memory.
-    pub fn scope(&self) -> Option<&str> {
-        self.scope.as_deref()
+    /// Project, or `None` for a global memory.
+    pub fn project(&self) -> Option<&str> {
+        self.project.as_deref()
     }
 
     pub fn created_at(&self) -> i64 {
@@ -220,12 +220,12 @@ pub struct ImportedSession {
 /// read the summary first and drill into detail (`content`, the L2 layer) only
 /// when needed.
 ///
-/// - `Memory` — the whole-memory rollup (`memory://memory`): a regenerated
+/// - `Memory` — the whole-memory digest (`memory://memory`): a regenerated
 ///   abstract + overview over every stored [`MemoryItem`], read first before
 ///   drilling into individual memories.
-/// - `Project` — the rollup of one project/namespace scope
-///   (`memory://projects/<scope>`): a regenerated abstract + overview over
-///   the items carrying that scope, read first when working in that project.
+/// - `Project` — the digest of one project/namespace
+///   (`memory://projects/<project>`): a regenerated abstract + overview over
+///   the items belonging to that project, read first when working in it.
 /// - `Session` — one imported session (`memory://sessions/<id>`): its L2 is
 ///   the full normalized transcript, kept so the conversation can be re-read.
 /// - `Resource` — a file or URL added explicitly via `memory add`
@@ -280,7 +280,7 @@ impl std::fmt::Display for NodeKind {
 /// L0 `abstract` (the one-line summary retrieval ranks on), L1 `overview`
 /// (a paragraph/outline to orient before reading), and L2 `content` (the full
 /// detail — e.g. a session's transcript). `content` is empty for pure index
-/// nodes such as the memory rollup, whose value is entirely in L0/L1.
+/// nodes such as the memory digest, whose value is entirely in L0/L1.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryNode {
     /// `memory://` URI uniquely identifying this node (also the primary key).
@@ -365,8 +365,8 @@ impl MemoryNode {
     }
 }
 
-/// Record of one completed dream cycle — the offline consolidation pass that
-/// harvests finished sessions and reorganizes the memory store.
+/// Record of one completed dream cycle — the pass that harvests finished
+/// sessions and reorganizes the memory store.
 ///
 /// Stored so the next cycle can tell whether anything changed since the last
 /// one (and skip itself when nothing did), and so users can inspect what
@@ -384,6 +384,10 @@ pub struct DreamRun {
     pub operations_applied: usize,
     /// Operations proposed by the model but rejected by a guardrail.
     pub operations_skipped: usize,
+    /// Outcome of the cycle: `"completed"`, or `"failed: <reason>"` when a
+    /// phase errored after earlier phases may have already written. Recorded
+    /// so a partially-applied cycle still leaves an inspectable trace.
+    pub status: String,
 }
 
 /// A single write/delete decided by the extraction model.
@@ -396,7 +400,7 @@ pub enum MemoryOperation {
         content: String,
         /// Project this memory is specific to, or `None` if it applies
         /// globally. Set by the extraction model per item.
-        scope: Option<String>,
+        project: Option<String>,
     },
     /// Remove the item identified by `(kind, name)`.
     Delete { kind: MemoryKind, name: String },

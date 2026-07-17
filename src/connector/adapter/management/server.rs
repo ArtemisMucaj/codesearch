@@ -111,7 +111,7 @@ pub fn routes(state: AppState) -> Router {
         .route("/api/memory/stats", get(handlers::memory::stats))
         .route("/api/memory/sessions", get(handlers::memory::sessions))
         .route("/api/memory/tree", get(handlers::memory::tree))
-        // Dream (offline memory consolidation) status + manual trigger.
+        // Dream (memory consolidation) status + manual trigger.
         .route(
             "/api/memory/dream",
             get(handlers::memory::dream_status).post(handlers::memory::dream_trigger),

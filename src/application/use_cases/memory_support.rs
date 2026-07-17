@@ -7,21 +7,34 @@ use tracing::warn;
 use crate::application::interfaces::{EmbeddingService, MemoryRepository};
 use crate::domain::{DomainError, MemoryItem, MemoryKind};
 
-/// Embed `name + content` for semantic recall; `None` when embeddings are
-/// disabled or fail (the item stays keyword-searchable).
+/// Outcome of embedding a memory item, distinguishing an intentional no-vector
+/// (embeddings switched off) from a transient failure. The two must be handled
+/// differently on update: `Disabled` means "no vector by design", while
+/// `Failed` must not silently drop an item's existing vector from recall.
+pub(crate) enum ItemEmbedding {
+    /// A fresh embedding to store.
+    Ready(Vec<f32>),
+    /// Embeddings are turned off — write no vector.
+    Disabled,
+    /// Embedding was attempted and failed — keep any existing vector.
+    Failed,
+}
+
+/// Embed `name + content` for semantic recall, distinguishing "disabled" from
+/// "failed" so callers can preserve an existing vector on a transient failure.
 pub(crate) async fn embed_memory_item(
     embedding_service: &dyn EmbeddingService,
     item: &MemoryItem,
-) -> Option<Vec<f32>> {
+) -> ItemEmbedding {
     if !embedding_service.embeddings_enabled() {
-        return None;
+        return ItemEmbedding::Disabled;
     }
     let text = format!("{}\n\n{}", item.name().replace('_', " "), item.content());
     match embedding_service.embed_query(&text).await {
-        Ok(vector) => Some(vector),
+        Ok(vector) => ItemEmbedding::Ready(vector),
         Err(e) => {
             warn!("failed to embed memory item '{}': {e}", item.name());
-            None
+            ItemEmbedding::Failed
         }
     }
 }
@@ -37,11 +50,12 @@ pub(crate) async fn upsert_preserving_identity(
     kind: MemoryKind,
     name: &str,
     content: &str,
-    scope: Option<String>,
+    project: Option<String>,
     source_override: Option<&str>,
     now: i64,
 ) -> Result<(), DomainError> {
     let existing = memory_repo.find_item(kind, name).await?;
+    let previous_id = existing.as_ref().map(|prev| prev.id().to_string());
     let item = match existing {
         Some(prev) => MemoryItem::new(
             prev.id().to_string(),
@@ -51,7 +65,7 @@ pub(crate) async fn upsert_preserving_identity(
             source_override
                 .or(prev.source_session_id())
                 .map(str::to_string),
-            scope,
+            project,
             prev.created_at(),
             now,
             prev.update_count() + 1,
@@ -62,13 +76,24 @@ pub(crate) async fn upsert_preserving_identity(
             name.to_string(),
             content.to_string(),
             source_override.map(str::to_string),
-            scope,
+            project,
             now,
             now,
             0,
         ),
     };
-    let vector = embed_memory_item(embedding_service, &item).await;
+    // `upsert_item` clears any prior vector and only re-inserts the one passed
+    // in, so a transient embedding failure must not fall through as `None` —
+    // that would permanently drop an updated item from semantic recall. On
+    // failure, carry the existing item's stored vector forward instead.
+    let vector = match embed_memory_item(embedding_service, &item).await {
+        ItemEmbedding::Ready(vector) => Some(vector),
+        ItemEmbedding::Disabled => None,
+        ItemEmbedding::Failed => match &previous_id {
+            Some(id) => memory_repo.find_item_vector(id).await?,
+            None => None,
+        },
+    };
     memory_repo.upsert_item(&item, vector.as_deref()).await
 }
 

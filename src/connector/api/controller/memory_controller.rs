@@ -24,15 +24,15 @@ pub struct MemoryController<'a> {
 }
 
 impl<'a> MemoryController<'a> {
-    /// Memory scope of the directory this command runs in: the namespace it
+    /// Memory project of the directory this command runs in: the namespace it
     /// was indexed under when that namespace is user-created, else the
     /// directory name. `None` when the cwd is unavailable.
-    async fn current_dir_scope(&self) -> Option<String> {
+    async fn current_dir_project(&self) -> Option<String> {
         let db_path = self.container.metadata_db_path();
         let cwd = std::env::current_dir().ok()?.to_string_lossy().into_owned();
         // Resolution opens DuckDB read-only (blocking I/O).
         tokio::task::spawn_blocking(move || {
-            crate::connector::api::repo_resolver::resolve_memory_scope(&db_path, &cwd)
+            crate::connector::api::repo_resolver::resolve_memory_project(&db_path, &cwd)
         })
         .await
         .ok()
@@ -200,10 +200,10 @@ impl<'a> MemoryController<'a> {
         let node = summary
             .summarize_resource(&slug, &fetched.source, &fetched.text)
             .await?;
-        // Keep the whole-memory rollup in sync (best-effort — the resource is
-        // already stored, so a rollup hiccup must not fail the command).
-        if let Err(e) = summary.regenerate_rollup().await {
-            tracing::warn!("failed to regenerate memory rollup after `memory add`: {e}");
+        // Keep the whole-memory digest in sync (best-effort — the resource is
+        // already stored, so a digest hiccup must not fail the command).
+        if let Err(e) = summary.regenerate_digest().await {
+            tracing::warn!("failed to regenerate memory digest after `memory add`: {e}");
         }
 
         Ok(format!(
@@ -220,23 +220,23 @@ impl<'a> MemoryController<'a> {
         query: String,
         num: usize,
         kind: Option<MemoryKindArg>,
-        scope: Option<String>,
-        all_scopes: bool,
+        project: Option<String>,
+        all_projects: bool,
         format: OutputFormatTextJson,
     ) -> Result<String> {
         let use_case = self.container.memory_search_use_case()?;
         let kind = kind.map(MemoryKind::from);
-        // Explicit --scope wins; --all-scopes disables filtering; otherwise
-        // resolve the scope from the directory the command runs in.
-        let scope = if all_scopes {
+        // Explicit --project wins; --all-projects disables filtering; otherwise
+        // resolve the project from the directory the command runs in.
+        let project = if all_projects {
             None
-        } else if scope.is_some() {
-            scope
+        } else if project.is_some() {
+            project
         } else {
-            self.current_dir_scope().await
+            self.current_dir_project().await
         };
         let results = use_case
-            .execute(&query, kind, scope.as_deref(), num)
+            .execute(&query, kind, project.as_deref(), num)
             .await?;
 
         match format {
@@ -264,7 +264,7 @@ impl<'a> MemoryController<'a> {
                         score,
                         item.kind(),
                         item.name(),
-                        scope_tag(item),
+                        project_tag(item),
                         item.id()
                     ));
                     output.push_str(&format!(
@@ -299,7 +299,7 @@ impl<'a> MemoryController<'a> {
                         "[{}] {}{} ({})\n",
                         item.kind(),
                         item.name(),
-                        scope_tag(item),
+                        project_tag(item),
                         item.id()
                     ));
                     output.push_str(&format!(
@@ -316,7 +316,7 @@ impl<'a> MemoryController<'a> {
         let repo = self.container.memory_repository()?;
 
         // A 'memory://' URI addresses a virtual-filesystem node (the memory
-        // rollup, a stored session, …) rather than a flat item.
+        // digest, a stored session, …) rather than a flat item.
         if id.starts_with("memory://") {
             return match repo.find_node(&id).await? {
                 Some(node) => Ok(render_node(&node)),
@@ -340,17 +340,17 @@ impl<'a> MemoryController<'a> {
     }
 
     /// Browse the memory virtual filesystem. With no URI, show the top-level
-    /// roots (rollup abstract + sessions/resources directories). With a
+    /// roots (digest abstract + sessions/resources directories). With a
     /// directory URI, list its children and their one-line abstracts.
     pub async fn tree(&self, uri: Option<String>, format: OutputFormatTextJson) -> Result<String> {
         let repo = self.container.memory_repository()?;
 
         let (children, header) = match uri.as_deref() {
-            // Root view: the rollup node plus each directory's children.
+            // Root view: the digest node plus each directory's children.
             None => {
                 let mut nodes = Vec::new();
-                if let Some(rollup) = repo.find_node(MEMORY_ROOT_URI).await? {
-                    nodes.push(rollup);
+                if let Some(digest) = repo.find_node(MEMORY_ROOT_URI).await? {
+                    nodes.push(digest);
                 }
                 nodes.extend(repo.list_child_nodes(SESSIONS_ROOT_URI).await?);
                 nodes.extend(repo.list_child_nodes(RESOURCES_ROOT_URI).await?);
@@ -460,7 +460,7 @@ pub fn run_import_picker_ui(
         crate::connector::adapter::discover_all_sessions_streaming(tx);
     });
 
-    // Preview only needs the messages; scope resolution is skipped here (the
+    // Preview only needs the messages; project resolution is skipped here (the
     // picker runs before the container/database is available).
     let loader = |s: &DiscoveredSession| {
         load_discovered_transcript(s, None)
@@ -621,9 +621,9 @@ fn render_dream_report(report: &DreamReport) -> String {
 }
 
 fn render_item(item: &MemoryItem) -> String {
-    let scope = match item.scope() {
-        Some(project) => format!(", scope: {project}"),
-        None => ", scope: global".to_string(),
+    let project = match item.project() {
+        Some(project) => format!(", project: {project}"),
+        None => ", project: global".to_string(),
     };
     format!(
         "[{}] {} ({})\nupdated {} time(s), source session: {}{}\n\n{}\n",
@@ -632,7 +632,7 @@ fn render_item(item: &MemoryItem) -> String {
         item.id(),
         item.update_count(),
         item.source_session_id().unwrap_or("(unknown)"),
-        scope,
+        project,
         item.content()
     )
 }
@@ -645,7 +645,7 @@ fn render_node(node: &MemoryNode) -> String {
     if !node.overview().trim().is_empty() {
         out.push_str(&format!("## Overview (L1)\n{}\n\n", node.overview()));
     }
-    // Mask internal manifest for Project rollup nodes (index nodes have
+    // Mask internal manifest for Project digest nodes (index nodes have
     // empty content by invariant; the manifest is bookkeeping).
     let content = if node.kind() == crate::domain::NodeKind::Project {
         ""
@@ -658,9 +658,10 @@ fn render_node(node: &MemoryNode) -> String {
     out
 }
 
-/// A compact ` @project` suffix for a scoped memory, or empty for a global one.
-fn scope_tag(item: &MemoryItem) -> String {
-    match item.scope() {
+/// A compact ` @project` suffix for a project-specific memory, or empty for a
+/// global one.
+fn project_tag(item: &MemoryItem) -> String {
+    match item.project() {
         Some(project) => format!(" @{project}"),
         None => String::new(),
     }

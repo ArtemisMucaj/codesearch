@@ -303,15 +303,15 @@ pub enum MemorySubcommand {
         #[arg(short, long, value_enum)]
         kind: Option<MemoryKindArg>,
 
-        /// Restrict to memories relevant in this project/namespace scope
-        /// (its items plus globals). Defaults to the scope resolved from the
-        /// current directory; pass --all-scopes to search everything.
-        #[arg(long, conflicts_with = "all_scopes")]
-        scope: Option<String>,
+        /// Restrict to memories relevant in this project/namespace (its items
+        /// plus globals). Defaults to the project resolved from the current
+        /// directory; pass --all-projects to search everything.
+        #[arg(long, conflicts_with = "all_projects")]
+        project: Option<String>,
 
-        /// Search across every scope instead of the current directory's.
+        /// Search across every project instead of the current directory's.
         #[arg(long)]
-        all_scopes: bool,
+        all_projects: bool,
 
         /// Output format: text or json.
         #[arg(short = 'F', long, value_enum, default_value = "text")]
@@ -392,7 +392,7 @@ pub enum MemorySubcommand {
 
     /// Browse the memory virtual filesystem (L0/L1 abstracts).
     ///
-    /// With no URI, lists the top-level roots (the whole-memory rollup and the
+    /// With no URI, lists the top-level roots (the whole-memory digest and the
     /// sessions/resources directories). With a directory URI, lists its
     /// children with their one-line abstracts — the "read this first" view
     /// before drilling into a node with `memory show <uri>`.

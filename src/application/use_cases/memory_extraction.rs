@@ -70,7 +70,7 @@ struct RawItem {
     name: String,
     #[serde(default)]
     content: String,
-    /// Optional project scope: `true`/the project name marks this item as
+    /// Optional project marker: `true`/the project name marks this item as
     /// specific to the session's project; absent/`false` means global. The
     /// model is told to set it only for project-specific insights.
     #[serde(default)]
@@ -126,9 +126,9 @@ impl MemoryExtractionUseCase {
             }
             match self.embedding_service.embed_query(&query).await {
                 Ok(vector) => {
-                    // Prefetch within the session's scope (its items + globals)
-                    // so merging happens against memories that are actually
-                    // relevant to this project/namespace.
+                    // Prefetch within the session's project (its items +
+                    // globals) so merging happens against memories that are
+                    // actually relevant to this project/namespace.
                     match self
                         .memory_repo
                         .search_semantic(
@@ -147,17 +147,19 @@ impl MemoryExtractionUseCase {
             }
         }
         // No embeddings: surface the most recent items instead so merging
-        // still has a chance to happen. Filter to the transcript's scope
+        // still has a chance to happen. Filter to the transcript's project
         // (global memories plus its project/namespace items) before the limit.
         match self.memory_repo.list_items(None).await {
             Ok(items) => {
                 let mut filtered: Vec<MemoryItem> = items
                     .into_iter()
-                    .filter(|item| match (item.scope(), transcript.project.as_deref()) {
-                        (None, _) => true,
-                        (Some(item_scope), Some(project)) => item_scope == project,
-                        (Some(_), None) => false,
-                    })
+                    .filter(
+                        |item| match (item.project(), transcript.project.as_deref()) {
+                            (None, _) => true,
+                            (Some(item_project), Some(project)) => item_project == project,
+                            (Some(_), None) => false,
+                        },
+                    )
                     .collect();
                 filtered.truncate(PREFETCH_LIMIT);
                 filtered
@@ -230,7 +232,7 @@ impl MemoryExtractionUseCase {
                     kind,
                     ref name,
                     ref content,
-                    ref scope,
+                    ref project,
                 } => {
                     upsert_preserving_identity(
                         self.memory_repo.as_ref(),
@@ -238,7 +240,7 @@ impl MemoryExtractionUseCase {
                         kind,
                         name,
                         content,
-                        scope.clone(),
+                        project.clone(),
                         Some(&transcript.id),
                         now,
                     )
@@ -305,8 +307,9 @@ fn extraction_schema() -> serde_json::Value {
 ///
 /// Tolerates surrounding prose or a markdown fence by extracting the first
 /// balanced top-level JSON object. `project` is the session's project name; an
-/// item the model flagged `project_specific` is scoped to it (items stay global
-/// when the session had no known project, since there is nothing to scope to).
+/// item the model flagged `project_specific` is assigned to it (items stay
+/// global when the session had no known project, since there is nothing to
+/// assign them to).
 fn parse_operations(
     response: &str,
     project: Option<&str>,
@@ -342,9 +345,10 @@ fn parse_operations(
             if content.is_empty() {
                 continue;
             }
-            // Scope only when the model marked the item project-specific AND we
-            // actually know the project; otherwise keep it global.
-            let scope = if item.project_specific {
+            // Assign a project only when the model marked the item
+            // project-specific AND we actually know the project; otherwise
+            // keep it global.
+            let item_project = if item.project_specific {
                 project.map(str::to_string)
             } else {
                 None
@@ -353,7 +357,7 @@ fn parse_operations(
                 kind,
                 name,
                 content: content.to_string(),
-                scope,
+                project: item_project,
             });
         }
     }
@@ -491,7 +495,7 @@ mod tests {
             .map(|v| v.as_str().unwrap())
             .collect();
         assert!(required.contains(&"facts"));
-        // Item objects require the fields RawItem reads, including the scope flag.
+        // Item objects require the fields RawItem reads, including the project flag.
         let item_props = &schema["properties"]["facts"]["items"]["properties"];
         assert!(item_props.get("name").is_some());
         assert!(item_props.get("content").is_some());
@@ -504,16 +508,16 @@ mod tests {
         let response = r#"{
             "preferences": [{"name": "tabs", "content": "prefers tabs", "project_specific": false}],
             "experiences": [], "skills": [],
-            "facts": [{"name": "sdk", "content": "uses matter.js", "project_specific": true}],
+            "facts": [{"name": "sdk", "content": "uses the vendor SDK", "project_specific": true}],
             "delete": [{"kind": "fact", "name": "old"}]
         }"#;
-        let ops = parse_operations(response, Some("home-framework")).unwrap();
-        // 2 upserts + 1 delete; the project-specific fact is scoped.
+        let ops = parse_operations(response, Some("svc-a")).unwrap();
+        // 2 upserts + 1 delete; the project-specific fact carries the project.
         assert_eq!(ops.len(), 3);
-        let scoped = ops.iter().any(|op| {
-            matches!(op, MemoryOperation::Upsert { scope: Some(s), .. } if s == "home-framework")
-        });
-        assert!(scoped, "project_specific fact should be scoped");
+        let assigned = ops.iter().any(
+            |op| matches!(op, MemoryOperation::Upsert { project: Some(p), .. } if p == "svc-a"),
+        );
+        assert!(assigned, "project_specific fact should carry the project");
     }
 
     #[test]
@@ -532,7 +536,7 @@ mod tests {
                 kind: MemoryKind::Preference,
                 name: "rust_style".to_string(),
                 content: "Prefers ? over unwrap".to_string(),
-                scope: None,
+                project: None,
             }
         );
         assert_eq!(
@@ -616,35 +620,35 @@ mod tests {
     }
 
     #[test]
-    fn project_specific_item_is_scoped_to_the_project() {
+    fn project_specific_item_is_assigned_to_the_project() {
         let response = r#"{"facts": [
-            {"name": "sdk_quirk", "content": "matter transport needs a wrapper", "project_specific": true},
+            {"name": "sdk_quirk", "content": "the transport needs a wrapper", "project_specific": true},
             {"name": "prefers_short_fns", "content": "keep functions small", "project_specific": false}
         ], "preferences": [], "experiences": [], "skills": [], "delete": []}"#;
-        let ops = parse_operations(response, Some("home-framework")).unwrap();
-        let scopes: Vec<Option<&str>> = ops
+        let ops = parse_operations(response, Some("svc-a")).unwrap();
+        let projects: Vec<Option<&str>> = ops
             .iter()
             .map(|op| match op {
-                MemoryOperation::Upsert { scope, .. } => scope.as_deref(),
+                MemoryOperation::Upsert { project, .. } => project.as_deref(),
                 _ => None,
             })
             .collect();
-        // First is project-specific → scoped; second is global → None.
-        assert_eq!(scopes, vec![Some("home-framework"), None]);
+        // First is project-specific → carries the project; second is global → None.
+        assert_eq!(projects, vec![Some("svc-a"), None]);
     }
 
     #[test]
     fn project_specific_stays_global_when_project_unknown() {
         // Even when flagged project_specific, an item stays global if the
-        // session had no known project — there is nothing to scope it to.
+        // session had no known project — there is nothing to assign it to.
         let response = r#"{"facts": [
             {"name": "sdk_quirk", "content": "x", "project_specific": true}
         ], "preferences": [], "experiences": [], "skills": [], "delete": []}"#;
         let ops = parse_operations(response, None).unwrap();
-        let MemoryOperation::Upsert { scope, .. } = &ops[0] else {
+        let MemoryOperation::Upsert { project, .. } = &ops[0] else {
             panic!("expected upsert");
         };
-        assert_eq!(*scope, None);
+        assert_eq!(*project, None);
     }
 
     #[test]
@@ -653,9 +657,9 @@ mod tests {
         let response = r#"{"facts": [{"name": "n", "content": "c"}],
             "preferences": [], "experiences": [], "skills": [], "delete": []}"#;
         let ops = parse_operations(response, Some("proj")).unwrap();
-        let MemoryOperation::Upsert { scope, .. } = &ops[0] else {
+        let MemoryOperation::Upsert { project, .. } = &ops[0] else {
             panic!("expected upsert");
         };
-        assert_eq!(*scope, None);
+        assert_eq!(*project, None);
     }
 }

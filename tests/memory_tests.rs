@@ -24,7 +24,7 @@ use codesearch::{
 const SUMMARY_REPLY: &str = r#"{"abstract": "Test session summary.", "overview": "- did a thing"}"#;
 
 /// Chat client that replays a fixed sequence of responses for *extraction*
-/// calls, while answering *summarization* calls (session L0/L1 + rollup) with
+/// calls, while answering *summarization* calls (session L0/L1 + digest) with
 /// a fixed valid reply. Routing is by system prompt so summary calls don't
 /// drain the extraction script; only extraction calls are recorded.
 struct ScriptedChatClient {
@@ -476,7 +476,7 @@ async fn import_stores_session_node_with_full_transcript() {
 }
 
 #[tokio::test]
-async fn import_regenerates_whole_memory_rollup() {
+async fn import_regenerates_whole_memory_digest() {
     let harness = Harness::new();
     let chat = Arc::new(ScriptedChatClient::new(vec![
         r#"{"preferences": [{"name": "a", "content": "one"}],
@@ -485,21 +485,21 @@ async fn import_regenerates_whole_memory_rollup() {
     ]));
     let use_case = harness.import_use_case(chat);
     let transcript = transcript(
-        "session-rollup",
+        "session-digest",
         &[("user", "remember these"), ("assistant", "ok")],
     );
     use_case.execute(&transcript, false).await.unwrap();
 
-    // With ≥2 items the model-generated rollup is written at memory://memory.
-    let rollup = harness
+    // With ≥2 items the model-generated digest is written at memory://memory.
+    let digest = harness
         .memory_repo
         .find_node(MEMORY_ROOT_URI)
         .await
         .unwrap()
-        .expect("rollup node should exist");
-    assert_eq!(rollup.kind(), NodeKind::Memory);
-    assert_eq!(rollup.parent_uri(), None);
-    assert!(!rollup.abstract_().is_empty());
+        .expect("digest node should exist");
+    assert_eq!(digest.kind(), NodeKind::Memory);
+    assert_eq!(digest.parent_uri(), None);
+    assert!(!digest.abstract_().is_empty());
 }
 
 #[tokio::test]
@@ -576,15 +576,15 @@ async fn browse_shows_filesystem_then_search_filters() {
         Arc::clone(&harness.embedding),
     );
 
-    // Empty query = browse: the whole virtual filesystem as a tree. The rollup
+    // Empty query = browse: the whole virtual filesystem as a tree. The digest
     // leads at depth 0, with its L0/L1 as nested child rows; sessions and
     // resources each get a directory header with node rows + level children.
     let all = browse.execute("", 50).await.unwrap();
     assert!(
         matches!(&all[0].target, RowTarget::Node(node) if node.uri() == "memory://memory"),
-        "rollup node should be the first browse row"
+        "digest node should be the first browse row"
     );
-    // The rollup's level rows are nested directly beneath it.
+    // The digest's level rows are nested directly beneath it.
     assert!(
         matches!(
             &all[1].target,
@@ -593,7 +593,7 @@ async fn browse_shows_filesystem_then_search_filters() {
                 ..
             }
         ) && all[1].depth == all[0].depth + 1,
-        "the row after the rollup is its nested L0 level"
+        "the row after the digest is its nested L0 level"
     );
 
     let has_dir = |name: &str| {
@@ -603,11 +603,11 @@ async fn browse_shows_filesystem_then_search_filters() {
     assert!(has_dir("sessions/"), "sessions directory header present");
     assert!(has_dir("resources/"), "resources directory header present");
     // Items are grouped by category; the seeded fact lands in a `facts/`
-    // sub-directory nested under the `memory://memory` rollup (depth 1),
-    // alongside the rollup's L0/L1 levels — not in a separate top-level dir.
+    // sub-directory nested under the `memory://memory` digest (depth 1),
+    // alongside the digest's L0/L1 levels — not in a separate top-level dir.
     assert!(has_dir("facts/"), "facts category sub-directory present");
 
-    let rollup_at = all
+    let digest_at = all
         .iter()
         .position(|r| matches!(&r.target, RowTarget::Node(n) if n.uri() == "memory://memory"))
         .unwrap();
@@ -619,10 +619,10 @@ async fn browse_shows_filesystem_then_search_filters() {
         .iter()
         .position(|r| matches!(&r.target, RowTarget::Item(_)))
         .unwrap();
-    // Order: rollup → its category dir → the item, all before sessions/.
-    assert!(rollup_at < facts_at && facts_at < item_at, "nesting order");
-    assert_eq!(all[rollup_at].depth, 0, "rollup at root");
-    assert_eq!(all[facts_at].depth, 1, "category nested under the rollup");
+    // Order: digest → its category dir → the item, all before sessions/.
+    assert!(digest_at < facts_at && facts_at < item_at, "nesting order");
+    assert_eq!(all[digest_at].depth, 0, "digest at root");
+    assert_eq!(all[facts_at].depth, 1, "category nested under the digest");
     assert_eq!(all[item_at].depth, 2, "item under its category");
 
     let has_session_node = all
@@ -647,7 +647,7 @@ async fn browse_shows_filesystem_then_search_filters() {
     );
 
     // Non-empty query = search: a flat ranked list (no directory rows, no tree
-    // depth), scored, and not led by the rollup like browse is.
+    // depth), scored, and not led by the digest like browse is.
     let hits = browse.execute("duckdb storage engine", 50).await.unwrap();
     assert!(!hits.is_empty());
     assert!(
@@ -689,10 +689,10 @@ async fn summarize_without_embeddings_still_stores_nodes() {
     assert_eq!(node.kind(), NodeKind::Session);
     assert!(node.content().contains("hello there"));
 
-    // Empty store → rollup falls back to a placeholder without an LLM call.
-    let rollup = summary.regenerate_rollup().await.unwrap();
-    assert_eq!(rollup.kind(), NodeKind::Memory);
-    assert!(!rollup.abstract_().is_empty());
+    // Empty store → digest falls back to a placeholder without an LLM call.
+    let digest = summary.regenerate_digest().await.unwrap();
+    assert_eq!(digest.kind(), NodeKind::Memory);
+    assert!(!digest.abstract_().is_empty());
 }
 
 // ─── Dream (offline consolidation) ──────────────────────────────────────────
@@ -832,7 +832,7 @@ async fn dream_consolidates_duplicate_cluster() {
     // the absorbed one.
     let chat = Arc::new(ScriptedChatClient::new(vec![
         r#"{"items": [{"kind": "experience", "name": "db_lock_fix",
-            "content": "Write-lock conflicts: writers must retry with backoff.", "scope": null}],
+            "content": "Write-lock conflicts: writers must retry with backoff.", "project": null}],
             "delete": [{"kind": "experience", "name": "db_lock_retry"}]}"#,
     ]));
     let dream = harness.dream_use_case(Arc::clone(&chat), StubDiscovery::empty());
@@ -939,7 +939,7 @@ async fn dream_rejects_deletes_outside_the_cluster() {
 
     // A misbehaving model tries to delete an item it was never shown.
     let chat = Arc::new(ScriptedChatClient::new(vec![
-        r#"{"items": [{"kind": "experience", "name": "dup_a", "content": "merged take", "scope": null}],
+        r#"{"items": [{"kind": "experience", "name": "dup_a", "content": "merged take", "project": null}],
             "delete": [{"kind": "experience", "name": "dup_b"},
                        {"kind": "fact", "name": "innocent_bystander"}]}"#,
     ]));
@@ -1035,7 +1035,7 @@ async fn dream_reflection_writes_but_never_deletes() {
     // tries to delete one of them.
     let chat = Arc::new(ScriptedChatClient::new(vec![
         r#"{"items": [{"kind": "skill", "name": "migration_checklist",
-            "content": "Before deploying: run the migration checklist.", "scope": null}],
+            "content": "Before deploying: run the migration checklist.", "project": null}],
             "delete": [{"kind": "experience", "name": "exp_one"}]}"#,
     ]));
     let dream = harness.dream_use_case(chat, StubDiscovery::empty());
@@ -1063,6 +1063,73 @@ async fn dream_reflection_writes_but_never_deletes() {
 }
 
 #[tokio::test]
+async fn dream_synthesizes_skills_from_recurring_experiences() {
+    let harness = Harness::new();
+    // Three experiences on orthogonal axes: no clusters (so consolidation makes
+    // no LLM call), but enough procedural items to trigger skill synthesis.
+    for (i, name) in ["debug_flaky_one", "debug_flaky_two", "debug_flaky_three"]
+        .iter()
+        .enumerate()
+    {
+        harness
+            .seed_item(
+                MemoryKind::Experience,
+                name,
+                "reproduced the flaky test, added a barrier, verified",
+                &test_vector(i * 3, 0.0),
+            )
+            .await;
+    }
+
+    // With three items, reflection is skipped (its floor is higher), so skill
+    // synthesis is the only dream LLM call. It distills a reusable skill, plus
+    // a non-skill item that must be dropped and an illegal delete that must be
+    // rejected — synthesis is write-only.
+    let chat = Arc::new(ScriptedChatClient::new(vec![
+        r#"{"items": [
+            {"kind": "skill", "name": "fix_flaky_test",
+             "content": "When to use: a test fails intermittently. Steps: reproduce, add a barrier, verify.",
+             "project": null},
+            {"kind": "fact", "name": "not_a_skill", "content": "should be dropped", "project": null}
+        ], "delete": [{"kind": "experience", "name": "debug_flaky_one"}]}"#,
+    ]));
+    let dream = harness.dream_use_case(chat, StubDiscovery::empty());
+    let report = dream.execute(3_600).await.unwrap();
+
+    // The skill was written.
+    assert!(
+        harness
+            .memory_repo
+            .find_item(MemoryKind::Skill, "fix_flaky_test")
+            .await
+            .unwrap()
+            .is_some(),
+        "recurring procedure should be distilled into a skill"
+    );
+    // The non-skill item proposed by synthesis was dropped, not written.
+    assert!(harness
+        .memory_repo
+        .find_item(MemoryKind::Fact, "not_a_skill")
+        .await
+        .unwrap()
+        .is_none());
+    // Synthesis is write-only: the source experience survives.
+    assert!(
+        harness
+            .memory_repo
+            .find_item(MemoryKind::Experience, "debug_flaky_one")
+            .await
+            .unwrap()
+            .is_some(),
+        "skill synthesis must not delete"
+    );
+    assert!(report
+        .applied
+        .iter()
+        .any(|op| matches!(op, MemoryOperation::Upsert { name, .. } if name == "fix_flaky_test")));
+}
+
+#[tokio::test]
 async fn dream_run_round_trips_through_repository() {
     let harness = Harness::new();
     let run = codesearch::DreamRun {
@@ -1073,25 +1140,27 @@ async fn dream_run_round_trips_through_repository() {
         clusters_found: 2,
         operations_applied: 5,
         operations_skipped: 1,
+        status: "completed".to_string(),
     };
     harness.memory_repo.record_dream_run(&run).await.unwrap();
     let loaded = harness.memory_repo.last_dream_run().await.unwrap().unwrap();
     assert_eq!(loaded.id, "run-1");
     assert_eq!(loaded.sessions_imported, 3);
     assert_eq!(loaded.operations_applied, 5);
+    assert_eq!(loaded.status, "completed");
 }
 
 // ---------------------------------------------------------------------------
-// Scoped memory: retrieval filtering + per-scope rollups
+// Project-scoped memory: retrieval filtering + per-project digests
 // ---------------------------------------------------------------------------
 
-/// Seed one item (optionally scoped) with the mock embedding of its content.
-async fn seed_scoped(
+/// Seed one item (optionally project-specific) with the mock embedding of its content.
+async fn seed_project_item(
     repo: &Arc<dyn MemoryRepository>,
     embedding: &Arc<dyn EmbeddingService>,
     name: &str,
     content: &str,
-    scope: Option<&str>,
+    project: Option<&str>,
 ) {
     let item = MemoryItem::new(
         format!("id-{name}"),
@@ -1099,7 +1168,7 @@ async fn seed_scoped(
         name.to_string(),
         content.to_string(),
         None,
-        scope.map(str::to_string),
+        project.map(str::to_string),
         100,
         100,
         0,
@@ -1109,12 +1178,12 @@ async fn seed_scoped(
 }
 
 #[tokio::test]
-async fn scope_filter_returns_scoped_plus_global_items() {
+async fn project_filter_returns_project_plus_global_items() {
     let harness = Harness::new();
     // Identical content so every item matches the query equally; only the
-    // scope filter separates them.
+    // project filter separates them.
     let content = "the service uses postgres for persistence";
-    seed_scoped(
+    seed_project_item(
         &harness.memory_repo,
         &harness.embedding,
         "global_fact",
@@ -1122,7 +1191,7 @@ async fn scope_filter_returns_scoped_plus_global_items() {
         None,
     )
     .await;
-    seed_scoped(
+    seed_project_item(
         &harness.memory_repo,
         &harness.embedding,
         "alpha_fact",
@@ -1130,7 +1199,7 @@ async fn scope_filter_returns_scoped_plus_global_items() {
         Some("alpha"),
     )
     .await;
-    seed_scoped(
+    seed_project_item(
         &harness.memory_repo,
         &harness.embedding,
         "beta_fact",
@@ -1148,7 +1217,7 @@ async fn scope_filter_returns_scoped_plus_global_items() {
     let all = search.execute("postgres", None, None, 10).await.unwrap();
     assert_eq!(all.len(), 3);
 
-    // Scoped: that scope's items plus globals, never the other scope's.
+    // Scoped: that project's items plus globals, never the other project's.
     let alpha = search
         .execute("postgres", None, Some("alpha"), 10)
         .await
@@ -1170,7 +1239,7 @@ async fn scope_filter_returns_scoped_plus_global_items() {
 }
 
 #[tokio::test]
-async fn scope_rollups_track_scopes_and_remove_stale_ones() {
+async fn project_digests_track_projects_and_remove_stale_ones() {
     let harness = Harness::new();
     let chat = Arc::new(ScriptedChatClient::new(vec![]));
     let summary = SummarizeMemoryUseCase::new(
@@ -1179,7 +1248,7 @@ async fn scope_rollups_track_scopes_and_remove_stale_ones() {
         Arc::clone(&harness.embedding),
     );
 
-    seed_scoped(
+    seed_project_item(
         &harness.memory_repo,
         &harness.embedding,
         "alpha_style",
@@ -1187,7 +1256,7 @@ async fn scope_rollups_track_scopes_and_remove_stale_ones() {
         Some("alpha"),
     )
     .await;
-    seed_scoped(
+    seed_project_item(
         &harness.memory_repo,
         &harness.embedding,
         "alpha_ci",
@@ -1195,7 +1264,7 @@ async fn scope_rollups_track_scopes_and_remove_stale_ones() {
         Some("alpha"),
     )
     .await;
-    seed_scoped(
+    seed_project_item(
         &harness.memory_repo,
         &harness.embedding,
         "beta_db",
@@ -1203,7 +1272,7 @@ async fn scope_rollups_track_scopes_and_remove_stale_ones() {
         Some("beta"),
     )
     .await;
-    seed_scoped(
+    seed_project_item(
         &harness.memory_repo,
         &harness.embedding,
         "global_editor",
@@ -1212,8 +1281,8 @@ async fn scope_rollups_track_scopes_and_remove_stale_ones() {
     )
     .await;
 
-    // One rollup per scope; the global item contributes to neither.
-    let regenerated = summary.regenerate_scope_rollups().await.unwrap();
+    // One digest per project; the global item contributes to neither.
+    let regenerated = summary.regenerate_project_digests().await.unwrap();
     assert_eq!(regenerated, 2);
 
     let alpha = harness
@@ -1221,7 +1290,7 @@ async fn scope_rollups_track_scopes_and_remove_stale_ones() {
         .find_node("memory://projects/alpha")
         .await
         .unwrap()
-        .expect("alpha rollup should exist");
+        .expect("alpha digest should exist");
     assert_eq!(alpha.kind(), NodeKind::Project);
     assert!(!alpha.abstract_().is_empty());
 
@@ -1231,19 +1300,19 @@ async fn scope_rollups_track_scopes_and_remove_stale_ones() {
         .find_node("memory://projects/beta")
         .await
         .unwrap()
-        .expect("beta rollup should exist");
+        .expect("beta digest should exist");
     assert!(beta.overview().contains("beta_db"));
 
     // Nothing changed since: a second pass regenerates nothing.
-    assert_eq!(summary.regenerate_scope_rollups().await.unwrap(), 0);
+    assert_eq!(summary.regenerate_project_digests().await.unwrap(), 0);
 
-    // Remove beta's only item: its rollup disappears, alpha's stays.
+    // Remove beta's only item: its digest disappears, alpha's stays.
     harness
         .memory_repo
         .delete_item(MemoryKind::Fact, "beta_db")
         .await
         .unwrap();
-    summary.regenerate_scope_rollups().await.unwrap();
+    summary.regenerate_project_digests().await.unwrap();
     assert!(harness
         .memory_repo
         .find_node("memory://projects/beta")
@@ -1259,7 +1328,7 @@ async fn scope_rollups_track_scopes_and_remove_stale_ones() {
 }
 
 #[tokio::test]
-async fn memory_scope_prefers_indexed_namespace_over_project_name() {
+async fn memory_project_prefers_indexed_namespace_over_directory_name() {
     let dir = tempfile::TempDir::new().unwrap();
     let repo_root = dir.path().join("myrepo");
     std::fs::create_dir(&repo_root).unwrap();
@@ -1283,28 +1352,28 @@ async fn memory_scope_prefers_indexed_namespace_over_project_name() {
     }
 
     let cwd = canonical.to_string_lossy().into_owned();
-    // Indexed under a user-created namespace: sessions share its scope.
+    // Indexed under a user-created namespace: sessions share its project.
     assert_eq!(
-        codesearch::resolve_memory_scope(&db_path, &cwd),
+        codesearch::resolve_memory_project(&db_path, &cwd),
         Some("teamns".to_string())
     );
 
-    // Indexed under the default namespace: falls back to per-project scope.
+    // Indexed under the default namespace: falls back to the directory name.
     {
         let conn = duckdb::Connection::open(&db_path).unwrap();
         conn.execute("UPDATE repositories SET namespace = 'search'", [])
             .unwrap();
     }
     assert_eq!(
-        codesearch::resolve_memory_scope(&db_path, &cwd),
+        codesearch::resolve_memory_project(&db_path, &cwd),
         Some("myrepo".to_string())
     );
 
-    // Not indexed at all: per-project scope.
+    // Not indexed at all: falls back to the directory name.
     let other = dir.path().join("otherproj");
     std::fs::create_dir(&other).unwrap();
     assert_eq!(
-        codesearch::resolve_memory_scope(&db_path, &other.to_string_lossy()),
+        codesearch::resolve_memory_project(&db_path, &other.to_string_lossy()),
         Some("otherproj".to_string())
     );
 }

@@ -64,10 +64,10 @@ pub struct MemorySearchParams {
     /// Restrict to one memory kind.
     #[serde(default)]
     pub kind: Option<String>,
-    /// Restrict to memories relevant in this project/namespace scope (its
-    /// items plus globals). Omit to search every scope.
+    /// Restrict to memories relevant in this project/namespace (its items plus
+    /// globals). Omit to search every project.
     #[serde(default)]
-    pub scope: Option<String>,
+    pub project: Option<String>,
 }
 
 fn default_memory_limit() -> usize {
@@ -83,7 +83,7 @@ pub async fn search(
     let kind = parse_kind(params.kind.as_deref())?;
     let use_case = state.container.memory_search_use_case()?;
     let results = use_case
-        .execute(&params.query, kind, params.scope.as_deref(), params.num)
+        .execute(&params.query, kind, params.project.as_deref(), params.num)
         .await?;
 
     let items: Vec<Value> = results
@@ -134,7 +134,7 @@ pub struct MemoryTreeParams {
 }
 
 /// `GET /api/memory/tree` — browse the memory virtual filesystem. With no
-/// `uri`, returns the rollup node plus the sessions/resources directories.
+/// `uri`, returns the digest node plus the sessions/resources directories.
 pub async fn tree(
     State(state): State<AppState>,
     Query(params): Query<MemoryTreeParams>,
@@ -143,8 +143,8 @@ pub async fn tree(
     let children = match params.uri.as_deref() {
         None => {
             let mut nodes = Vec::new();
-            if let Some(rollup) = repo.find_node(MEMORY_ROOT_URI).await? {
-                nodes.push(rollup);
+            if let Some(digest) = repo.find_node(MEMORY_ROOT_URI).await? {
+                nodes.push(digest);
             }
             nodes.extend(repo.list_child_nodes(SESSIONS_ROOT_URI).await?);
             nodes.extend(repo.list_child_nodes(RESOURCES_ROOT_URI).await?);

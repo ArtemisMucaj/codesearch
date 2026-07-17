@@ -26,9 +26,9 @@ use crate::domain::{
 /// the async runtime via `spawn_blocking`.
 pub struct LocalSessionDiscovery {
     /// Metadata database consulted to map a session's working directory to
-    /// the namespace it was indexed under, so its memories can be scoped per
-    /// namespace instead of per project. `None` skips the lookup (memories
-    /// fall back to per-project scoping).
+    /// the namespace it was indexed under, so its memories carry that
+    /// namespace as their project instead of the bare directory name. `None`
+    /// skips the lookup (memories fall back to the directory name).
     db_path: Option<std::path::PathBuf>,
 }
 
@@ -115,7 +115,7 @@ pub fn discover_all_sessions_streaming(sink: std::sync::mpsc::Sender<Vec<Discove
 
 /// Materialize the full transcript for a discovered session, so it can be run
 /// through the import pipeline. The session's working directory (when known)
-/// is carried into the transcript as its memory scope: the namespace the
+/// is carried into the transcript as its memory project: the namespace the
 /// directory was indexed under when `db_path` resolves one (repositories
 /// deliberately grouped in a namespace share memory), otherwise the project
 /// directory name.
@@ -147,10 +147,10 @@ pub fn load_transcript(
     }?;
 
     // The discovery layer knows the session's cwd; resolve it to a memory
-    // scope (indexed namespace, else the last path component) so extracted
-    // memories can be scoped to it.
+    // project (indexed namespace, else the last path component) so extracted
+    // memories can be assigned to it.
     transcript.project = session.cwd.as_deref().and_then(|cwd| match db_path {
-        Some(db) => crate::connector::api::repo_resolver::resolve_memory_scope(db, cwd),
+        Some(db) => crate::connector::api::repo_resolver::resolve_memory_project(db, cwd),
         None => project_from_cwd(cwd),
     });
     Ok(transcript)

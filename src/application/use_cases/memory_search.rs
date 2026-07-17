@@ -33,13 +33,13 @@ impl MemorySearchUseCase {
     /// Search memories by natural-language query.
     /// Returns `(item, fused_score)` pairs, best first.
     ///
-    /// `scope` restricts results to global items plus items scoped to that
+    /// `project` restricts results to global items plus items belonging to that
     /// project/namespace; `None` searches the whole store.
     pub async fn execute(
         &self,
         query: &str,
         kind: Option<MemoryKind>,
-        scope: Option<&str>,
+        project: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(MemoryItem, f32)>, DomainError> {
         let query = query.trim();
@@ -50,14 +50,14 @@ impl MemorySearchUseCase {
         let semantic = if self.embedding_service.embeddings_enabled() {
             let vector = self.embedding_service.embed_query(query).await?;
             self.memory_repo
-                .search_semantic(&vector, kind, scope, CANDIDATES_PER_LEG)
+                .search_semantic(&vector, kind, project, CANDIDATES_PER_LEG)
                 .await?
         } else {
             Vec::new()
         };
         let keyword = self
             .memory_repo
-            .search_keyword(query, kind, scope, CANDIDATES_PER_LEG)
+            .search_keyword(query, kind, project, CANDIDATES_PER_LEG)
             .await?;
 
         // Reciprocal Rank Fusion over the two ranked lists.

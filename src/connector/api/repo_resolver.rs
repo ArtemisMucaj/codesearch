@@ -184,21 +184,21 @@ fn query_repo(conn: &Connection, sql: &str, key: &str) -> Option<(String, String
     .ok()
 }
 
-/// Resolve the memory scope for a working directory.
+/// Resolve the memory project for a working directory.
 ///
 /// Repositories the user deliberately indexed together under a named
 /// namespace are correlated — they work together — so their sessions share
-/// one memory scope: the namespace. A directory that is not indexed (or was
-/// indexed into the catch-all default namespace) gets a per-project scope:
+/// one memory project: the namespace. A directory that is not indexed (or was
+/// indexed into the catch-all default namespace) gets a per-directory project:
 /// its directory name.
 ///
 /// Returns `None` only for an empty/root-only path. All resolution failures
-/// (missing database, lock timeouts) degrade to the per-project fallback.
-pub fn resolve_memory_scope(db_path: &Path, cwd: &str) -> Option<String> {
+/// (missing database, lock timeouts) degrade to the per-directory fallback.
+pub fn resolve_memory_project(db_path: &Path, cwd: &str) -> Option<String> {
     if let Some(ctx) = resolve(db_path, Path::new(cwd)) {
         if ctx.namespace != crate::cli::DEFAULT_NAMESPACE {
             debug!(
-                "memory scope for '{}' resolved to namespace '{}' (matched by {})",
+                "memory project for '{}' resolved to namespace '{}' (matched by {})",
                 cwd, ctx.namespace, ctx.matched_by
             );
             return Some(ctx.namespace);

@@ -310,10 +310,10 @@ pub struct SearchMemoryInput {
     /// "fact". Omit to search across all kinds.
     pub kind: Option<String>,
 
-    /// Restrict to memories relevant in one project/namespace scope (its
-    /// items plus globals). Omit to use the server's default scope (the
-    /// workspace it serves); pass "*" to search across all scopes.
-    pub scope: Option<String>,
+    /// Restrict to memories relevant in one project/namespace (its items plus
+    /// globals). Omit to use the server's default project (the workspace it
+    /// serves); pass "*" to search across all projects.
+    pub project: Option<String>,
 
     /// Maximum number of results to return (default: 10, server cap: 100)
     #[serde(default = "default_limit")]
@@ -332,7 +332,7 @@ pub struct ListMemoriesInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadMemoryInput {
     /// A `memory://` node URI. Omit (or pass "memory://memory") to read the
-    /// whole-memory rollup — the "read this first" summary of everything
+    /// whole-memory digest — the "read this first" summary of everything
     /// stored. Use "memory://sessions" to see stored sessions, or a specific
     /// "memory://sessions/<id>" to read one session's transcript.
     pub uri: Option<String>,
@@ -401,10 +401,10 @@ fn parse_kind_filter(kind: &Option<String>) -> Result<Option<MemoryKind>, McpErr
 #[derive(Clone)]
 pub struct CodesearchMcpServer {
     container: Arc<Container>,
-    /// Memory scope applied to `search_memory` when the caller does not pass
+    /// Memory project applied to `search_memory` when the caller does not pass
     /// one. Set in stdio mode (where the process cwd is the workspace the
     /// assistant is working in); `None` for shared HTTP servers.
-    default_memory_scope: Option<String>,
+    default_memory_project: Option<String>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -413,16 +413,16 @@ impl CodesearchMcpServer {
     pub fn new(container: Arc<Container>) -> Self {
         Self {
             container,
-            default_memory_scope: None,
+            default_memory_project: None,
             tool_router: Self::tool_router(),
         }
     }
 
-    /// Like [`Self::new`], with a default memory scope for `search_memory`.
-    pub fn with_default_memory_scope(container: Arc<Container>, scope: Option<String>) -> Self {
+    /// Like [`Self::new`], with a default memory project for `search_memory`.
+    pub fn with_default_memory_project(container: Arc<Container>, project: Option<String>) -> Self {
         Self {
             container,
-            default_memory_scope: scope,
+            default_memory_project: project,
             tool_router: Self::tool_router(),
         }
     }
@@ -1091,17 +1091,17 @@ impl CodesearchMcpServer {
         let input = params.0;
         let kind = parse_kind_filter(&input.kind)?;
         let limit = input.limit.min(MAX_LIMIT);
-        let scope = match input.scope.as_deref() {
+        let project = match input.project.as_deref() {
             Some("*") => None,
             Some(s) => Some(s.to_string()),
-            None => self.default_memory_scope.clone(),
+            None => self.default_memory_project.clone(),
         };
 
         let use_case = self.container.memory_search_use_case().map_err(|e| {
             McpError::internal_error(format!("Failed to open memory store: {}", e), None)
         })?;
         let results = use_case
-            .execute(&input.query, kind, scope.as_deref(), limit)
+            .execute(&input.query, kind, project.as_deref(), limit)
             .await
             .map_err(|e| McpError::internal_error(format!("Memory search failed: {}", e), None))?;
 
@@ -1153,7 +1153,7 @@ impl CodesearchMcpServer {
 
     /// Read the memory virtual filesystem, level by level. Call this FIRST at
     /// the start of a task with no arguments (or uri="memory://memory") to get
-    /// the whole-memory rollup — a single abstract + overview of everything
+    /// the whole-memory digest — a single abstract + overview of everything
     /// known about the user and project — then drill in only where relevant.
     /// A directory URI (e.g. "memory://sessions") returns its children with
     /// one-line abstracts; a leaf URI (e.g. "memory://sessions/<id>") returns
@@ -1190,7 +1190,7 @@ impl CodesearchMcpServer {
 
         let output = match node {
             Some(node) => {
-                // Mask internal manifest for Project rollup nodes (index nodes
+                // Mask internal manifest for Project digest nodes (index nodes
                 // have empty content by invariant; the manifest is bookkeeping).
                 let content = if node.kind() == crate::domain::NodeKind::Project {
                     String::new()
@@ -1314,7 +1314,7 @@ impl ServerHandler for CodesearchMcpServer {
                    facts) extracted from previous sessions\n\
                  • list_memories — list stored memories, optionally filtered by kind\n\
                  • read_memory — read the memory virtual filesystem; call with no args first for \
-                   the whole-memory rollup, then drill into memory:// nodes (sessions, resources)"
+                   the whole-memory digest, then drill into memory:// nodes (sessions, resources)"
                     .into(),
             ),
         }

@@ -1,4 +1,4 @@
-//! Dream — offline consolidation of the memory store.
+//! Dream — the global consolidation pass over the memory store.
 //!
 //! Per-session extraction ([`memory_extraction`](super::memory_extraction))
 //! merges new information only into the handful of memories it prefetches, so
@@ -16,7 +16,10 @@
 //! 3. **Reflect** — one pass over the whole store proposing a few higher-level
 //!    items: repeated experiences promoted to a skill, per-project facts
 //!    generalized to global.
-//! 4. **Refresh** — regenerate the whole-memory rollup and record the run.
+//! 3b. **Synthesize skills** — a focused pass over the `experience`/`skill`
+//!    items, distilling procedures that recur across sessions into reusable
+//!    `skill` items (steps, prerequisites, failure modes).
+//! 4. **Refresh** — regenerate the whole-memory digest and record the run.
 //!
 //! Guardrails keep a misbehaving model from wrecking the store: operations are
 //! capped per run, consolidation may only delete items belonging to the
@@ -24,6 +27,7 @@
 //! are bounded by a fraction of the store.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -72,6 +76,13 @@ const MAX_REFLECTION_ITEMS: usize = 5;
 /// cross-item patterns to exist.
 const MIN_REFLECTION_ITEMS: usize = 4;
 
+/// Most skill items synthesis may propose per cycle.
+const MAX_SKILL_SYNTHESIS_ITEMS: usize = 3;
+
+/// Skill synthesis is skipped below this many procedural (`experience`/`skill`)
+/// items — a procedure has to recur to be worth distilling.
+const MIN_SKILL_SYNTHESIS_ITEMS: usize = 3;
+
 /// Delete budget per cycle: a fifth of the store, with a floor of one so a
 /// small store can still merge a duplicate pair. A model gone wrong can
 /// therefore never wipe more than a fraction of the store in one run; the
@@ -118,9 +129,9 @@ struct RawDreamItem {
     name: String,
     #[serde(default)]
     content: String,
-    /// Project scope, or `null`/absent for a global item.
+    /// Project project, or `null`/absent for a global item.
     #[serde(default)]
-    scope: Option<String>,
+    project: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,9 +150,21 @@ pub struct MemoryDreamUseCase {
     import: ImportSessionUseCase,
     summary: SummarizeMemoryUseCase,
     /// Serializes cycles: a scheduled dream and a manual trigger must never
-    /// interleave writes. `try_lock` makes the loser fail fast instead of
-    /// queueing a redundant second cycle.
-    running: tokio::sync::Mutex<()>,
+    /// interleave writes. A plain atomic flag (rather than a `MutexGuard`) is
+    /// used because the guard is held across the cycle's `.await` points, and
+    /// `MutexGuard` must not cross an await. The loser of the CAS fails fast
+    /// instead of queueing a redundant second cycle.
+    running: AtomicBool,
+}
+
+/// RAII guard clearing [`MemoryDreamUseCase::running`] when a cycle ends,
+/// including on early return via `?`, so a failed cycle never wedges the flag.
+struct RunningGuard<'a>(&'a AtomicBool);
+
+impl Drop for RunningGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl MemoryDreamUseCase {
@@ -160,21 +183,62 @@ impl MemoryDreamUseCase {
             discovery,
             import,
             summary,
-            running: tokio::sync::Mutex::new(()),
+            running: AtomicBool::new(false),
         }
+    }
+
+    /// Acquire the single-cycle guard, failing fast if another cycle is active.
+    fn begin_cycle(&self) -> Result<RunningGuard<'_>, DomainError> {
+        self.running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| DomainError::invalid_input("a dream cycle is already running"))?;
+        Ok(RunningGuard(&self.running))
     }
 
     /// Run one full dream cycle. `session_idle_secs` is how long a session
     /// must have been inactive to count as finished.
     #[tracing::instrument(skip_all)]
     pub async fn execute(&self, session_idle_secs: i64) -> Result<DreamReport, DomainError> {
-        let _guard = self
-            .running
-            .try_lock()
-            .map_err(|_| DomainError::invalid_input("a dream cycle is already running"))?;
+        let _guard = self.begin_cycle()?;
         let started_at = unix_now();
         let mut report = DreamReport::default();
 
+        // Any phase can write memory before a later phase errors out, so run
+        // the cycle body separately and record the run either way — a failed
+        // cycle that already harvested or consolidated must still leave a trace
+        // in history with the counts it managed to apply.
+        match self.run_cycle(session_idle_secs, &mut report).await {
+            Ok(()) => {
+                self.record_run(&report, started_at, "completed").await;
+                info!(
+                    "dream cycle finished: {} imported, {} clusters, {} ops applied, {} skipped",
+                    report.sessions_imported,
+                    report.clusters_found,
+                    report.applied.len(),
+                    report.skipped.len()
+                );
+                Ok(report)
+            }
+            Err(e) => {
+                self.record_run(&report, started_at, &format!("failed: {e}"))
+                    .await;
+                warn!(
+                    "dream cycle failed after {} ops applied, {} imported: {e}",
+                    report.applied.len(),
+                    report.sessions_imported
+                );
+                Err(e)
+            }
+        }
+    }
+
+    /// The body of one dream cycle (all four phases), factored out so
+    /// [`execute`](Self::execute) can record the run on both success and error.
+    async fn run_cycle(
+        &self,
+        session_idle_secs: i64,
+        report: &mut DreamReport,
+    ) -> Result<(), DomainError> {
         // Phase 1 — harvest.
         let harvest = self.harvest_inner(session_idle_secs).await?;
         report.sessions_eligible = harvest.sessions_eligible;
@@ -205,7 +269,7 @@ impl MemoryDreamUseCase {
                 Some(&deletable),
                 delete_budget,
                 &mut deletes_used,
-                &mut report,
+                report,
             )
             .await?;
         }
@@ -222,7 +286,7 @@ impl MemoryDreamUseCase {
                         Some(&HashSet::new()), // nothing is deletable
                         delete_budget,
                         &mut deletes_used,
-                        &mut report,
+                        report,
                     )
                     .await?;
                 }
@@ -230,36 +294,50 @@ impl MemoryDreamUseCase {
             }
         }
 
-        // Phase 4 — refresh the rollups and record the run.
-        if !report.applied.is_empty() {
-            if let Err(e) = self.summary.regenerate_rollup().await {
-                warn!("dream: failed to regenerate memory rollup: {e}");
+        // Phase 3.5 — synthesize skills from recurring procedural memory.
+        // Reload so freshly reflected items are in view, then look only at the
+        // `experience`/`skill` items — the raw material for reusable procedures.
+        let items = self.memory_repo.list_items(None).await?;
+        let procedural: Vec<MemoryItem> = items
+            .into_iter()
+            .filter(|item| matches!(item.kind(), MemoryKind::Experience | MemoryKind::Skill))
+            .collect();
+        if procedural.len() >= MIN_SKILL_SYNTHESIS_ITEMS {
+            match self.synthesize_skills(&procedural).await {
+                Ok(operations) => {
+                    self.apply(
+                        operations,
+                        Some(&HashSet::new()), // write-only, like reflection
+                        delete_budget,
+                        &mut deletes_used,
+                        report,
+                    )
+                    .await?;
+                }
+                Err(e) => warn!("dream skill synthesis call failed, skipping: {e}"),
             }
         }
-        // Per-scope rollups check their own staleness, so this only spends
-        // model calls on scopes the cycle (or anything since the last one)
-        // actually touched.
-        if let Err(e) = self.summary.regenerate_scope_rollups().await {
-            warn!("dream: failed to regenerate scope rollups: {e}");
+
+        // Phase 4 — refresh the digests (the run itself is recorded by the
+        // caller, on both success and failure).
+        if !report.applied.is_empty() {
+            if let Err(e) = self.summary.regenerate_digest().await {
+                warn!("dream: failed to regenerate memory digest: {e}");
+            }
         }
-        self.record_run(&report, started_at).await;
-        info!(
-            "dream cycle finished: {} imported, {} clusters, {} ops applied, {} skipped",
-            report.sessions_imported,
-            report.clusters_found,
-            report.applied.len(),
-            report.skipped.len()
-        );
-        Ok(report)
+        // Per-project digests check their own staleness, so this only spends
+        // model calls on projects the cycle (or anything since the last one)
+        // actually touched.
+        if let Err(e) = self.summary.regenerate_project_digests().await {
+            warn!("dream: failed to regenerate project digests: {e}");
+        }
+        Ok(())
     }
 
     /// Import finished, never-imported sessions (the harvest phase alone).
     /// Serve mode calls this on a short interval between full dream cycles.
     pub async fn harvest(&self, session_idle_secs: i64) -> Result<HarvestReport, DomainError> {
-        let _guard = self
-            .running
-            .try_lock()
-            .map_err(|_| DomainError::invalid_input("a dream cycle is already running"))?;
+        let _guard = self.begin_cycle()?;
         self.harvest_inner(session_idle_secs).await
     }
 
@@ -405,6 +483,33 @@ impl MemoryDreamUseCase {
         Ok(operations)
     }
 
+    /// One skill-synthesis call over the store's procedural (`experience`/
+    /// `skill`) items, with a format-recovery retry. Only `skill` upserts are
+    /// kept (the prompt asks for skills; a stray other-kind item is dropped),
+    /// capped to [`MAX_SKILL_SYNTHESIS_ITEMS`]; deletes are stripped by the
+    /// caller.
+    async fn synthesize_skills(
+        &self,
+        items: &[MemoryItem],
+    ) -> Result<Vec<MemoryOperation>, DomainError> {
+        let system = prompt::skill_synthesis_system_prompt(MAX_SKILL_SYNTHESIS_ITEMS);
+        let refs: Vec<&MemoryItem> = items.iter().collect();
+        let user = prompt::skill_synthesis_user_prompt(&refs);
+        let mut operations = self.complete_operations(&system, &user).await?;
+        let mut kept = 0usize;
+        operations.retain(|op| match op {
+            MemoryOperation::Upsert { kind, .. } => {
+                if *kind != MemoryKind::Skill {
+                    return false;
+                }
+                kept += 1;
+                kept <= MAX_SKILL_SYNTHESIS_ITEMS
+            }
+            MemoryOperation::Delete { .. } => true, // rejected later with a reason
+        });
+        Ok(operations)
+    }
+
     /// Send one dream prompt and parse its operations, retrying once with a
     /// format-correction message when the output is unparseable.
     async fn complete_operations(
@@ -513,7 +618,7 @@ impl MemoryDreamUseCase {
             kind,
             name,
             content,
-            scope,
+            project,
         } = op
         else {
             return Ok(());
@@ -524,7 +629,7 @@ impl MemoryDreamUseCase {
             *kind,
             name,
             content,
-            scope.clone(),
+            project.clone(),
             None,
             unix_now(),
         )
@@ -532,8 +637,10 @@ impl MemoryDreamUseCase {
     }
 
     /// Best-effort persistence of the run record (a bookkeeping failure must
-    /// not fail a cycle whose memory writes already succeeded).
-    async fn record_run(&self, report: &DreamReport, started_at: i64) {
+    /// not fail a cycle whose memory writes already succeeded). `status` is
+    /// `"completed"` or `"failed: <reason>"`, carrying the counts applied so
+    /// far so a partial run is still inspectable.
+    async fn record_run(&self, report: &DreamReport, started_at: i64, status: &str) {
         let run = DreamRun {
             id: uuid::Uuid::new_v4().to_string(),
             started_at,
@@ -542,6 +649,7 @@ impl MemoryDreamUseCase {
             clusters_found: report.clusters_found,
             operations_applied: report.applied.len(),
             operations_skipped: report.skipped.len(),
+            status: status.to_string(),
         };
         if let Err(e) = self.memory_repo.record_dream_run(&run).await {
             warn!("failed to record dream run: {e}");
@@ -575,8 +683,8 @@ fn parse_dream_operations(response: &str) -> Result<Vec<MemoryOperation>, Domain
         if content.is_empty() {
             continue;
         }
-        let scope = item
-            .scope
+        let project = item
+            .project
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("null"))
@@ -585,7 +693,7 @@ fn parse_dream_operations(response: &str) -> Result<Vec<MemoryOperation>, Domain
             kind,
             name,
             content: content.to_string(),
-            scope,
+            project,
         });
     }
     for del in output.delete {
@@ -622,8 +730,8 @@ mod tests {
     #[test]
     fn parses_dream_items_and_deletes() {
         let response = r#"{"items": [
-            {"kind": "experience", "name": "Duckdb Locking", "content": "conflicts on concurrent writers", "scope": null},
-            {"kind": "fact", "name": "sdk_version", "content": "pinned to 2.1", "scope": "svc-a"}
+            {"kind": "experience", "name": "Duckdb Locking", "content": "conflicts on concurrent writers", "project": null},
+            {"kind": "fact", "name": "sdk_version", "content": "pinned to 2.1", "project": "svc-a"}
         ], "delete": [{"kind": "fact", "name": "old_take"}]}"#;
         let ops = parse_dream_operations(response).unwrap();
         assert_eq!(ops.len(), 3);
@@ -633,13 +741,13 @@ mod tests {
                 kind: MemoryKind::Experience,
                 name: "duckdb_locking".to_string(),
                 content: "conflicts on concurrent writers".to_string(),
-                scope: None,
+                project: None,
             }
         );
-        let MemoryOperation::Upsert { scope, .. } = &ops[1] else {
+        let MemoryOperation::Upsert { project, .. } = &ops[1] else {
             panic!("expected upsert");
         };
-        assert_eq!(scope.as_deref(), Some("svc-a"));
+        assert_eq!(project.as_deref(), Some("svc-a"));
         assert_eq!(
             ops[2],
             MemoryOperation::Delete {
@@ -652,23 +760,23 @@ mod tests {
     #[test]
     fn dream_parse_skips_unknown_kinds_and_empty_content() {
         let response = r#"{"items": [
-            {"kind": "opinion", "name": "x", "content": "y", "scope": null},
-            {"kind": "fact", "name": "ok", "content": "  ", "scope": null}
+            {"kind": "opinion", "name": "x", "content": "y", "project": null},
+            {"kind": "fact", "name": "ok", "content": "  ", "project": null}
         ], "delete": [{"kind": "nope", "name": "x"}]}"#;
         let ops = parse_dream_operations(response).unwrap();
         assert!(ops.is_empty());
     }
 
     #[test]
-    fn dream_parse_treats_string_null_scope_as_global() {
+    fn dream_parse_treats_string_null_project_as_global() {
         let response = r#"{"items": [
-            {"kind": "fact", "name": "n", "content": "c", "scope": "null"}
+            {"kind": "fact", "name": "n", "content": "c", "project": "null"}
         ], "delete": []}"#;
         let ops = parse_dream_operations(response).unwrap();
-        let MemoryOperation::Upsert { scope, .. } = &ops[0] else {
+        let MemoryOperation::Upsert { project, .. } = &ops[0] else {
             panic!("expected upsert");
         };
-        assert_eq!(*scope, None);
+        assert_eq!(*project, None);
     }
 
     #[test]

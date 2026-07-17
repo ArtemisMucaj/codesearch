@@ -42,25 +42,25 @@ pub trait MemoryRepository: Send + Sync {
     /// Cosine-similarity search over item embeddings.
     /// Returns `(item, score)` pairs, best first, score in `[0, 1]`.
     ///
-    /// `scope` filters to items relevant in that project/namespace scope —
-    /// global items plus items carrying exactly that scope. `None` searches
-    /// everything.
+    /// `project` filters to items relevant in that project/namespace —
+    /// global items plus items belonging to exactly that project. `None`
+    /// searches everything.
     async fn search_semantic(
         &self,
         vector: &[f32],
         kind: Option<MemoryKind>,
-        scope: Option<&str>,
+        project: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(MemoryItem, f32)>, DomainError>;
 
     /// Case-insensitive keyword search over item names and content.
-    /// Returns `(item, score)` pairs, best first. `scope` filters as in
+    /// Returns `(item, score)` pairs, best first. `project` filters as in
     /// [`Self::search_semantic`].
     async fn search_keyword(
         &self,
         query: &str,
         kind: Option<MemoryKind>,
-        scope: Option<&str>,
+        project: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(MemoryItem, f32)>, DomainError>;
 
@@ -68,6 +68,11 @@ pub trait MemoryRepository: Send + Sync {
     /// Items without a vector (embeddings disabled at write time) are omitted.
     /// Used by dream consolidation to cluster near-duplicate memories.
     async fn list_item_vectors(&self) -> Result<Vec<(String, Vec<f32>)>, DomainError>;
+
+    /// Stored embedding for a single item by ID, or `None` if it has none.
+    /// Used to preserve an item's existing vector across an update whose
+    /// re-embedding transiently failed, so it is not dropped from recall.
+    async fn find_item_vector(&self, id: &str) -> Result<Option<Vec<f32>>, DomainError>;
 
     /// Record that a session has been imported (idempotence marker).
     async fn record_session(&self, session: &ImportedSession) -> Result<(), DomainError>;

@@ -894,10 +894,10 @@
             }
           },
           {
-            "name": "scope",
+            "name": "project",
             "in": "query",
             "required": false,
-            "description": "Restrict to memories relevant in this project/namespace scope (its items plus globals). Omit to search every scope.",
+            "description": "Restrict to memories relevant in this project/namespace (its items plus globals). Omit to search every project.",
             "schema": {
               "type": "string"
             }
@@ -1030,7 +1030,7 @@
           "memory"
         ],
         "summary": "Browse the memory virtual filesystem",
-        "description": "With no `uri`, returns the rollup node plus the sessions and resources directories. With a `uri`, returns that directory's children.",
+        "description": "With no `uri`, returns the digest node plus the sessions and resources directories. With a `uri`, returns that directory's children.",
         "operationId": "memoryTree",
         "parameters": [
           {
@@ -1135,7 +1135,7 @@
           "memory"
         ],
         "summary": "Trigger a dream cycle",
-        "description": "Starts a dream cycle (harvest finished sessions, consolidate near-duplicate/contradictory memories, reflect, refresh the rollup) in the background and returns immediately. Poll `GET /api/memory/dream` for the recorded outcome.",
+        "description": "Starts a dream cycle (harvest finished sessions, consolidate near-duplicate/contradictory memories, reflect, refresh the digest) in the background and returns immediately. Poll `GET /api/memory/dream` for the recorded outcome.",
         "operationId": "memoryDreamTrigger",
         "responses": {
           "202": {
@@ -1657,7 +1657,7 @@
       },
       "MemoryNode": {
         "type": "object",
-        "description": "Serialized memory virtual-filesystem node (rollup, session, or resource directory/leaf).",
+        "description": "Serialized memory virtual-filesystem node (digest, session, or resource directory/leaf).",
         "additionalProperties": true
       },
       "ImportedSession": {
@@ -1691,7 +1691,7 @@
               "openai",
               null
             ],
-            "description": "LLM backend to use. Defaults to `anthropic`."
+            "description": "LLM backend to use. Defaults to the server's configured LLM backend."
           }
         }
       },
@@ -1928,7 +1928,7 @@
       },
       "DreamRun": {
         "type": "object",
-        "description": "Record of one completed dream (offline memory consolidation) cycle.",
+        "description": "Record of one completed dream (memory consolidation) cycle.",
         "required": [
           "id",
           "started_at",
@@ -1936,7 +1936,8 @@
           "sessions_imported",
           "clusters_found",
           "operations_applied",
-          "operations_skipped"
+          "operations_skipped",
+          "status"
         ],
         "properties": {
           "id": {
@@ -1961,6 +1962,10 @@
           },
           "operations_skipped": {
             "type": "integer"
+          },
+          "status": {
+            "type": "string",
+            "description": "Cycle outcome: `completed`, or `failed: <reason>` when a phase errored after earlier phases may have already written."
           }
         }
       }

@@ -65,7 +65,7 @@ pub use domain::{
 pub use domain::{CommunityMeta, GraphEdge, GraphLevel, GraphNode, GraphView};
 
 pub use connector::api::{
-    namespace_embedding_config, resolve_memory_scope, resolve_repo_context, run_copilot_command,
+    namespace_embedding_config, resolve_memory_project, resolve_repo_context, run_copilot_command,
     run_import_picker_ui, run_openai_command, Container, ContainerConfig, MemoryController,
     ResolvedContext, Router,
 };
