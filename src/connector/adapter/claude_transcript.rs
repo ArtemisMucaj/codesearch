@@ -84,18 +84,17 @@ pub fn parse_transcript(
     Ok(SessionTranscript {
         id: session_id.unwrap_or_else(|| fallback_id.to_string()),
         source: source.to_string(),
-        project: cwd.as_deref().and_then(project_from_cwd),
+        // Key on the recorded cwd's git remote — stable across clones and
+        // indexing. This parser has no metadata database, so it cannot infer a
+        // namespace; a cwd with no remote leaves the session global rather than
+        // scoping it to a throwaway directory name. When this transcript is
+        // materialized through session discovery, the db-aware resolver refines
+        // this further (namespace, or namespace inferred from the tree).
+        project: cwd
+            .as_deref()
+            .and_then(|c| crate::application::git_remote::detect_remote(std::path::Path::new(c))),
         messages,
     })
-}
-
-/// Reduce a working-directory path to a short project name (its last non-empty
-/// path component).
-fn project_from_cwd(cwd: &str) -> Option<String> {
-    cwd.trim_end_matches(['/', '\\'])
-        .rsplit(['/', '\\'])
-        .find(|c| !c.is_empty())
-        .map(str::to_string)
 }
 
 /// Parse one JSONL line into a normalized message, or `None` when the line

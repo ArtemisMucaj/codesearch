@@ -186,23 +186,32 @@ fn query_repo(conn: &Connection, sql: &str, key: &str) -> Option<(String, String
 
 /// Resolve the memory project for a working directory.
 ///
-/// Resolution order, most stable identifier first:
+/// Resolution order, most stable identifier first; each step falls through to
+/// the next when it cannot produce a confident, stable key:
 ///
-/// 1. **Indexed under a named namespace** → the namespace. Repositories the
-///    user deliberately indexed together are correlated — they work together —
-///    so their sessions share one memory pool.
-/// 2. **Has a git remote** (not indexed, or indexed under the catch-all default
-///    namespace) → the normalized remote (e.g. `github.com/owner/repo`). The
-///    remote survives clones, moves, and renames, and is the same key indexing
-///    later matches on — so memories written *before* a repo is indexed still
-///    line up with sessions run *after*, instead of being orphaned under a
-///    directory name that stops being used.
-/// 3. **No remote** → the working-directory name (the best stable key left).
+/// 1. **Indexed under a named namespace** (direct git-remote/path match) → the
+///    namespace. Repositories the user deliberately indexed together are
+///    correlated — they work together — so their sessions share one memory
+///    pool.
+/// 2. **Has a git remote** → the normalized remote (e.g. `github.com/owner/repo`).
+///    The remote survives clones, moves, and renames, and is the same key
+///    indexing matches on — so memories written *before* a repo is indexed
+///    still line up with sessions run *after*, instead of being orphaned.
+/// 3. **Namespace inferred from the directory tree** → when the session ran in
+///    a directory that is an ancestor *or* a descendant of an indexed repo, and
+///    every such repo (in a user-created namespace) belongs to the *same*
+///    namespace, attribute the session to it. A conflict — indexed repos from
+///    two different namespaces along that path — is ambiguous, so it infers
+///    nothing.
+/// 4. **Nothing stable to key on** → `None` (global). A bare directory name is
+///    a weak, collision-prone key that also breaks the moment the directory is
+///    indexed, so an un-inferable location contributes global memories rather
+///    than a throwaway project.
 ///
-/// Returns `None` only for an empty/root-only path with no remote. All
-/// resolution failures (missing database, lock timeouts) degrade to the
-/// remote/directory fallback.
+/// All resolution failures (missing database, lock timeouts) degrade to a later
+/// step and, ultimately, to `None`.
 pub fn resolve_memory_project(db_path: &Path, cwd: &str) -> Option<String> {
+    // 1. Direct match → the namespace the repo was indexed under.
     if let Some(ctx) = resolve(db_path, Path::new(cwd)) {
         if ctx.namespace != crate::cli::DEFAULT_NAMESPACE {
             debug!(
@@ -212,9 +221,8 @@ pub fn resolve_memory_project(db_path: &Path, cwd: &str) -> Option<String> {
             return Some(ctx.namespace);
         }
     }
-    // No namespace: prefer the git remote (stable across indexing) over the
-    // bare directory name, so a repo's memories keep the same project whether
-    // or not it has been indexed yet.
+    // 2. Git remote — stable across indexing, so a repo's memories keep the same
+    //    project whether or not it has been indexed yet.
     if let Some(remote) = detect_remote(Path::new(cwd)) {
         debug!(
             "memory project for '{}' resolved to remote '{}'",
@@ -222,7 +230,64 @@ pub fn resolve_memory_project(db_path: &Path, cwd: &str) -> Option<String> {
         );
         return Some(remote);
     }
-    crate::connector::adapter::project_from_cwd(cwd)
+    // 3. Infer the namespace from indexed repos along this path (ancestor or
+    //    descendant), when they agree on one namespace.
+    if let Some(namespace) = infer_namespace_from_tree(db_path, cwd) {
+        debug!(
+            "memory project for '{}' inferred namespace '{}' from the directory tree",
+            cwd, namespace
+        );
+        return Some(namespace);
+    }
+    // 4. Nothing stable to key on → global.
+    None
+}
+
+/// Infer a namespace for `cwd` from indexed repositories whose canonical path
+/// is an ancestor or descendant of `cwd`, restricted to user-created
+/// namespaces. Returns the namespace when every matching repo agrees on it, and
+/// `None` when nothing matches or the matches span more than one namespace
+/// (ambiguous — the directory relates to several unrelated pools).
+fn infer_namespace_from_tree(db_path: &Path, cwd: &str) -> Option<String> {
+    if !db_path.exists() {
+        return None;
+    }
+    let cwd_canonical = canonical(Path::new(cwd))?;
+    let cwd_str = cwd_canonical.to_string_lossy().into_owned();
+    let conn = open_read_only_with_retry(db_path)?;
+
+    // Path is stored canonical-absolute, so "on the same branch of the tree"
+    // is: the repo path is a prefix of the cwd (repo is an ancestor), or the
+    // cwd is a prefix of the repo path (repo is a descendant). A prefix must
+    // end at a path boundary so `/a/repo` never matches `/a/repose`.
+    let sep = std::path::MAIN_SEPARATOR;
+    let cwd_prefix = format!("{cwd_str}{sep}");
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT namespace FROM repositories \
+             WHERE namespace IS NOT NULL AND namespace <> ?1 \
+             AND (path = ?2 OR path LIKE ?3 || '%' OR ?2 LIKE path || ?4)",
+        )
+        .ok()?;
+    let namespaces: Vec<String> = stmt
+        .query_map(
+            params![
+                crate::cli::DEFAULT_NAMESPACE,
+                cwd_str,
+                cwd_prefix,
+                format!("{sep}%")
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()?
+        .filter_map(Result::ok)
+        .collect();
+
+    match namespaces.as_slice() {
+        [only] => Some(only.clone()),
+        // Zero matches, or a conflict across namespaces → infer nothing.
+        _ => None,
+    }
 }
 
 #[allow(clippy::type_complexity)]

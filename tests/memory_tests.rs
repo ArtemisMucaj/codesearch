@@ -1358,23 +1358,116 @@ async fn memory_project_prefers_indexed_namespace_over_directory_name() {
         Some("teamns".to_string())
     );
 
-    // Indexed under the default namespace: falls back to the directory name.
+    // Indexed under the default namespace, no remote: nothing stable to key on,
+    // so the session is global rather than scoped to a throwaway directory name.
     {
         let conn = duckdb::Connection::open(&db_path).unwrap();
         conn.execute("UPDATE repositories SET namespace = 'search'", [])
             .unwrap();
     }
-    assert_eq!(
-        codesearch::resolve_memory_project(&db_path, &cwd),
-        Some("myrepo".to_string())
-    );
+    assert_eq!(codesearch::resolve_memory_project(&db_path, &cwd), None);
 
-    // Not indexed at all: falls back to the directory name.
+    // Not indexed at all, no remote, nothing indexed along the path: global.
     let other = dir.path().join("otherproj");
     std::fs::create_dir(&other).unwrap();
     assert_eq!(
         codesearch::resolve_memory_project(&db_path, &other.to_string_lossy()),
-        Some("otherproj".to_string())
+        None
+    );
+}
+
+/// A session run in a directory that *contains* indexed repos — all in one
+/// user-created namespace — is attributed to that namespace, even though the
+/// directory itself is not a git repo and is not indexed.
+#[tokio::test]
+async fn memory_project_infers_namespace_from_contained_repos() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let repo_a = workspace.join("svc-a");
+    let repo_b = workspace.join("svc-b");
+    std::fs::create_dir(&repo_a).unwrap();
+    std::fs::create_dir(&repo_b).unwrap();
+    let ws = std::fs::canonicalize(&workspace).unwrap();
+    let pa = std::fs::canonicalize(&repo_a).unwrap();
+    let pb = std::fs::canonicalize(&repo_b).unwrap();
+    let db_path = dir.path().join("codesearch.duckdb");
+
+    let seed = |extra: &str| {
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS repositories (
+                id TEXT, name TEXT, path TEXT, namespace TEXT,
+                git_remote TEXT, updated_at BIGINT
+            )",
+        )
+        .unwrap();
+        conn.execute_batch(extra).unwrap();
+    };
+    seed(&format!(
+        "INSERT INTO repositories VALUES \
+         ('a', 'svc-a', '{}', 'backend', NULL, 1), \
+         ('b', 'svc-b', '{}', 'backend', NULL, 1);",
+        pa.to_string_lossy(),
+        pb.to_string_lossy(),
+    ));
+
+    // Running in the workspace root (not itself a repo) infers the shared ns.
+    assert_eq!(
+        codesearch::resolve_memory_project(&db_path, &ws.to_string_lossy()),
+        Some("backend".to_string())
+    );
+
+    // A conflict — a second repo under the workspace in a DIFFERENT namespace —
+    // is ambiguous, so nothing is inferred and the session stays global.
+    {
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        // Path is built under the canonical workspace so the prefix match fires;
+        // it need not exist on disk for the query, the row is enough.
+        conn.execute(
+            "INSERT INTO repositories VALUES ('c', 'svc-c', ?1, 'frontend', NULL, 1)",
+            duckdb::params![ws.join("svc-c").to_string_lossy()],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        codesearch::resolve_memory_project(&db_path, &ws.to_string_lossy()),
+        None
+    );
+}
+
+/// A session run in a subfolder *inside* an indexed repo (with no remote and no
+/// direct row for that subfolder) is attributed to the enclosing repo's
+/// namespace — inference looks upward as well as downward.
+#[tokio::test]
+async fn memory_project_infers_namespace_from_enclosing_repo() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo_root = dir.path().join("svc-a");
+    let nested = repo_root.join("src").join("inner");
+    std::fs::create_dir_all(&nested).unwrap();
+    let pa = std::fs::canonicalize(&repo_root).unwrap();
+    let cwd = std::fs::canonicalize(&nested).unwrap();
+    let db_path = dir.path().join("codesearch.duckdb");
+
+    {
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE repositories (
+                id TEXT, name TEXT, path TEXT, namespace TEXT,
+                git_remote TEXT, updated_at BIGINT
+            )",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO repositories VALUES ('a', 'svc-a', ?1, 'backend', NULL, 1)",
+            duckdb::params![pa.to_string_lossy()],
+        )
+        .unwrap();
+    }
+
+    assert_eq!(
+        codesearch::resolve_memory_project(&db_path, &cwd.to_string_lossy()),
+        Some("backend".to_string())
     );
 }
 

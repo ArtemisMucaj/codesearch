@@ -147,22 +147,15 @@ pub fn load_transcript(
     }?;
 
     // The discovery layer knows the session's cwd; resolve it to a memory
-    // project (indexed namespace, else the last path component) so extracted
-    // memories can be assigned to it.
+    // project (namespace, git remote, or inferred from the directory tree —
+    // else global) so extracted memories can be assigned to it. Without a
+    // metadata database there is nothing to match against, so fall back to the
+    // git remote alone and otherwise leave the session global.
     transcript.project = session.cwd.as_deref().and_then(|cwd| match db_path {
         Some(db) => crate::connector::api::repo_resolver::resolve_memory_project(db, cwd),
-        None => project_from_cwd(cwd),
+        None => crate::application::git_remote::detect_remote(std::path::Path::new(cwd)),
     });
     Ok(transcript)
-}
-
-/// Reduce a working-directory path to a short project name (its last non-empty
-/// path component). `None` for an empty or root-only path.
-pub(crate) fn project_from_cwd(cwd: &str) -> Option<String> {
-    cwd.trim_end_matches(['/', '\\'])
-        .rsplit(['/', '\\'])
-        .find(|c| !c.is_empty())
-        .map(str::to_string)
 }
 
 /// The absolute path to `$HOME`, or an error when it cannot be determined.

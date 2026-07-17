@@ -170,7 +170,15 @@ transcript is imported:
    remote survives clones, moves, and renames, and is the same key indexing
    matches on — so memories written *before* a repo is indexed still line up
    with sessions run *after*, instead of being orphaned.
-3. **No git remote** → the project is the working-directory name.
+3. **Namespace inferred from the directory tree** → when the session ran in a
+   directory that contains (or sits inside) indexed repositories that all
+   belong to one user-created namespace, the session is attributed to that
+   namespace. If indexed repos along the path span *different* namespaces the
+   result is ambiguous, so nothing is inferred.
+4. **Nothing stable to key on** → the session is **global**. A bare directory
+   name is a weak, collision-prone key that stops matching the moment the
+   directory is indexed, so an un-inferable location contributes global
+   memories rather than a throwaway project.
 
 Recall applies the same idea in reverse: a project-filtered search returns that
 project's items *plus* globals. `codesearch memory search` resolves the project

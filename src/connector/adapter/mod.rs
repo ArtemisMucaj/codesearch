@@ -66,7 +66,6 @@ pub use openai_reranking::*;
 pub use ort_embedding::*;
 pub use ort_reranking::*;
 pub use resource_fetch::*;
-pub(crate) use session_discovery::project_from_cwd;
 pub use session_discovery::{
     discover_all_sessions, discover_all_sessions_streaming, load_transcript, LocalSessionDiscovery,
 };
