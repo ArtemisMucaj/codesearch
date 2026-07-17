@@ -610,7 +610,7 @@ impl CodesearchMcpServer {
             QueryPattern::InheritorsOf => {
                 // Halve the per-query limit so the combined result stays within the
                 // requested bound before deduplication.
-                let per_limit = input.limit.map(|n| ((n + 1) / 2) as u32);
+                let per_limit = input.limit.map(|n| n.div_ceil(2) as u32);
                 let q_inh = {
                     let q = base_query.clone().with_reference_kind("inheritance");
                     match per_limit {
@@ -642,7 +642,7 @@ impl CodesearchMcpServer {
                 (refs, true)
             }
             QueryPattern::ChildrenOf => {
-                let per_limit = input.limit.map(|n| ((n + 1) / 2) as u32);
+                let per_limit = input.limit.map(|n| n.div_ceil(2) as u32);
                 let q_inh = {
                     let q = base_query.clone().with_reference_kind("inheritance");
                     match per_limit {

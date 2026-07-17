@@ -424,7 +424,7 @@ impl Graph {
                 }
             }
         }
-        edges.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        edges.sort_unstable_by_key(|a| (a.0, a.1));
         edges
     }
 }
@@ -885,8 +885,8 @@ fn modularity(graph: &Graph, partition: &[usize], gamma: f64) -> f64 {
     // Subtract expected: Σ_c (Σ_i∈c k_i)^2 / (2m)^2
     let k = graph.n;
     let mut cluster_degree: HashMap<usize, f64> = HashMap::with_capacity(k);
-    for u in 0..graph.n {
-        *cluster_degree.entry(partition[u]).or_insert(0.0) += graph.degree[u];
+    for (u, &cluster) in partition.iter().enumerate().take(graph.n) {
+        *cluster_degree.entry(cluster).or_insert(0.0) += graph.degree[u];
     }
     let penalty: f64 = gamma * cluster_degree.values().map(|&d| d * d).sum::<f64>() / (m2 * m2);
     q - penalty
@@ -895,10 +895,10 @@ fn modularity(graph: &Graph, partition: &[usize], gamma: f64) -> f64 {
 /// Local moving phase: repeatedly scan all nodes and move each to the
 /// neighbouring cluster that maximises the modularity gain at resolution
 /// `gamma` (which scales the null-model term of every gain).
-fn local_moving_phase(graph: &Graph, partition: &mut Vec<usize>, gamma: f64) {
+fn local_moving_phase(graph: &Graph, partition: &mut [usize], gamma: f64) {
     let mut cluster_total: HashMap<usize, f64> = HashMap::new();
-    for u in 0..graph.n {
-        *cluster_total.entry(partition[u]).or_insert(0.0) += graph.degree[u];
+    for (u, &cluster) in partition.iter().enumerate().take(graph.n) {
+        *cluster_total.entry(cluster).or_insert(0.0) += graph.degree[u];
     }
 
     let m2 = 2.0 * graph.total_weight;
@@ -1072,7 +1072,7 @@ fn refine_partition(
 }
 
 /// Renumber partition labels to be contiguous starting from 0.
-pub(crate) fn renumber(partition: &mut Vec<usize>) {
+pub(crate) fn renumber(partition: &mut [usize]) {
     let mut remap: HashMap<usize, usize> = HashMap::new();
     for label in partition.iter_mut() {
         let next = remap.len();

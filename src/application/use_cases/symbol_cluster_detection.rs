@@ -361,7 +361,7 @@ impl SymbolClusterDetectionUseCase {
                 Some(((lo, hi), w))
             })
             .collect();
-        pairs.sort_unstable_by(|x, y| x.0.cmp(&y.0));
+        pairs.sort_unstable_by_key(|x| x.0);
 
         let mut graph = Graph::new(symbols.len());
         let mut edges: Vec<(usize, usize, f64)> = Vec::with_capacity(pairs.len());
@@ -397,10 +397,9 @@ fn dominant_language(members: &[String], language_of: &HashMap<String, String>) 
 /// e.g. `pkg/Auth#authenticate().` → `authenticate`.
 fn short_symbol_name(symbol: &str) -> &str {
     symbol
-        .trim_end_matches(|c: char| matches!(c, '.' | '(' | ')'))
-        .split(|c: char| matches!(c, ':' | '/' | '#' | '.' | '\\'))
-        .filter(|s| !s.is_empty())
-        .next_back()
+        .trim_end_matches(['.', '(', ')'])
+        .split([':', '/', '#', '.', '\\'])
+        .rfind(|s| !s.is_empty())
         .unwrap_or(symbol)
 }
 

@@ -156,7 +156,10 @@ async fn test_repository_and_protocol_filters() {
 
     // Restricting to a single repo leaves its endpoints dangling.
     let orders_only = use_case
-        .link(Some(&[orders_id.clone()]), &ChannelLinkOptions::default())
+        .link(
+            Some(std::slice::from_ref(&orders_id)),
+            &ChannelLinkOptions::default(),
+        )
         .await
         .expect("Channel linking failed");
     assert!(orders_only.edges.is_empty());

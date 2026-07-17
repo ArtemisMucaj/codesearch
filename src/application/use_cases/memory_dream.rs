@@ -4,7 +4,7 @@
 //! merges new information only into the handful of memories it prefetches, so
 //! duplicates, contradictions, and cross-session patterns accumulate between
 //! items that were never in the same extraction context. A dream cycle is the
-//! global pass that cleans this up, in four phases:
+//! global pass that cleans this up, in five phases:
 //!
 //! 1. **Harvest** — discover finished sessions (idle for at least an hour)
 //!    that were never imported, and run them through the import pipeline.
@@ -16,10 +16,10 @@
 //! 3. **Reflect** — one pass over the whole store proposing a few higher-level
 //!    items: repeated experiences promoted to a skill, per-project facts
 //!    generalized to global.
-//! 3b. **Synthesize skills** — a focused pass over the `experience`/`skill`
+//! 4. **Synthesize skills** — a focused pass over the `experience`/`skill`
 //!    items, distilling procedures that recur across sessions into reusable
 //!    `skill` items (steps, prerequisites, failure modes).
-//! 4. **Refresh** — regenerate the whole-memory digest and record the run.
+//! 5. **Refresh** — regenerate the whole-memory digest and record the run.
 //!
 //! Guardrails keep a misbehaving model from wrecking the store: operations are
 //! capped per run, consolidation may only delete items belonging to the

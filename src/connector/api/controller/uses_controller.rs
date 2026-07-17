@@ -13,7 +13,7 @@ fn short_symbol_name(symbol: &str) -> &str {
     // Strip common SCIP method-descriptor suffix `().`
     let s = symbol.trim_end_matches("().");
     // Take the portion after the last `#`, `::`, `.`, `/`, or `\`
-    s.rfind(|c| c == '#' || c == ':' || c == '.' || c == '/' || c == '\\')
+    s.rfind(['#', ':', '.', '/', '\\'])
         .map(|i| &s[i + 1..])
         .filter(|part| !part.is_empty())
         .unwrap_or(s)
