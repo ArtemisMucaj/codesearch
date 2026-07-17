@@ -84,7 +84,7 @@ The two boundaries that get confused most — resolve them like this:
 - To remove an existing memory that the session proves wrong or obsolete, add an entry to "delete".
 - Never invent information that is not supported by the transcript.
 
-## Project project
+## Project specificity
 Each item has a `"project_specific"` boolean:
 - `true` — the memory is useless outside THIS repo (its SDK, build quirk, architecture, a fact about its code).
 - `false` — it generalizes across all projects (a user taste/habit, a language idiom, a general technique).

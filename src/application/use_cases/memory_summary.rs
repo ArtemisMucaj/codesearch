@@ -452,9 +452,18 @@ fn digest_user_prompt(items: &[MemoryItem]) -> String {
     clamp(&prompt, MAX_SUMMARY_INPUT_CHARS)
 }
 
-/// URI of the digest node for one project/namespace project.
+/// URI of the digest node for one project/namespace.
+///
+/// `resource_slug` is lossy — `docs/api.v2` and `docs_api_v2` slug identically —
+/// so a short hash of the *original* project string is appended to keep distinct
+/// projects on distinct URIs (otherwise their digests would overwrite each other
+/// and stale-node cleanup could not tell them apart). The readable slug is kept
+/// as a human-friendly prefix.
 fn project_digest_uri(project: &str) -> String {
-    format!("{PROJECTS_ROOT_URI}/{}", resource_slug(project))
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(project.as_bytes());
+    let short: String = hash.iter().take(4).map(|b| format!("{b:02x}")).collect();
+    format!("{PROJECTS_ROOT_URI}/{}-{short}", resource_slug(project))
 }
 
 fn project_digest_system_prompt() -> String {

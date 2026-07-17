@@ -1281,25 +1281,32 @@ async fn project_digests_track_projects_and_remove_stale_ones() {
     )
     .await;
 
-    // One digest per project; the global item contributes to neither.
+    // One digest per project; the global item contributes to neither. Digest
+    // URIs carry a hash suffix (project names are not injective through the
+    // slug), so match project digests by content rather than by exact URI.
     let regenerated = summary.regenerate_project_digests().await.unwrap();
     assert_eq!(regenerated, 2);
 
-    let alpha = harness
-        .memory_repo
-        .find_node("memory://projects/alpha")
+    let project_digest = |needle: &'static str| {
+        let repo = Arc::clone(&harness.memory_repo);
+        async move {
+            repo.list_nodes(Some(NodeKind::Project))
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|n| n.uri().contains(needle))
+        }
+    };
+
+    let alpha = project_digest("alpha")
         .await
-        .unwrap()
         .expect("alpha digest should exist");
     assert_eq!(alpha.kind(), NodeKind::Project);
     assert!(!alpha.abstract_().is_empty());
 
     // Beta had a single item: written via the deterministic fallback.
-    let beta = harness
-        .memory_repo
-        .find_node("memory://projects/beta")
+    let beta = project_digest("beta")
         .await
-        .unwrap()
         .expect("beta digest should exist");
     assert!(beta.overview().contains("beta_db"));
 
@@ -1313,18 +1320,8 @@ async fn project_digests_track_projects_and_remove_stale_ones() {
         .await
         .unwrap();
     summary.regenerate_project_digests().await.unwrap();
-    assert!(harness
-        .memory_repo
-        .find_node("memory://projects/beta")
-        .await
-        .unwrap()
-        .is_none());
-    assert!(harness
-        .memory_repo
-        .find_node("memory://projects/alpha")
-        .await
-        .unwrap()
-        .is_some());
+    assert!(project_digest("beta").await.is_none());
+    assert!(project_digest("alpha").await.is_some());
 }
 
 #[tokio::test]

@@ -318,19 +318,17 @@ impl MemoryDreamUseCase {
             }
         }
 
-        // Phase 4 — refresh the digests (the run itself is recorded by the
-        // caller, on both success and failure).
+        // Phase 5 — refresh the digests. A failure here means memory writes
+        // landed but their digests are now stale, so it is propagated (not
+        // swallowed): the caller then finalizes the run as failed rather than
+        // recording a misleading "completed".
         if !report.applied.is_empty() {
-            if let Err(e) = self.summary.regenerate_digest().await {
-                warn!("dream: failed to regenerate memory digest: {e}");
-            }
+            self.summary.regenerate_digest().await?;
         }
         // Per-project digests check their own staleness, so this only spends
         // model calls on projects the cycle (or anything since the last one)
         // actually touched.
-        if let Err(e) = self.summary.regenerate_project_digests().await {
-            warn!("dream: failed to regenerate project digests: {e}");
-        }
+        self.summary.regenerate_project_digests().await?;
         Ok(())
     }
 

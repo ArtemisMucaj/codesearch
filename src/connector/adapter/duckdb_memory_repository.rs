@@ -117,25 +117,6 @@ impl DuckdbMemoryRepository {
         ))
         .map_err(|e| DomainError::storage(format!("Failed to initialize memory schema: {e}")))?;
 
-        // Migration: databases created before per-project memory existed have
-        // neither column; those from the earlier `scope` naming have a `scope`
-        // column that must be renamed to `project`. Both paths are idempotent.
-        conn.execute_batch("ALTER TABLE memory_items ADD COLUMN IF NOT EXISTS project TEXT")
-            .map_err(|e| {
-                DomainError::storage(format!("Failed to add memory project column: {e}"))
-            })?;
-        Self::migrate_scope_to_project(&conn)?;
-
-        // Migration: add the dream-run `status` column to databases created
-        // before failed runs were tracked. DuckDB rejects a NOT NULL/DEFAULT
-        // constraint on ALTER, so the column is added plain and back-filled.
-        // Idempotent.
-        conn.execute_batch(
-            "ALTER TABLE memory_dream_runs ADD COLUMN IF NOT EXISTS status TEXT; \
-             UPDATE memory_dream_runs SET status = 'completed' WHERE status IS NULL;",
-        )
-        .map_err(|e| DomainError::storage(format!("Failed to add dream-run status column: {e}")))?;
-
         Self::check_meta(&conn, "dimensions", &dimensions.to_string())?;
         Self::check_meta(&conn, "embedding_model", embedding_model)?;
 
@@ -179,32 +160,6 @@ impl DuckdbMemoryRepository {
                 Ok(())
             }
         }
-    }
-
-    /// Fold a legacy `scope` column (the earlier name for `project`) into
-    /// `project`, then drop it. A no-op on databases that never had `scope`.
-    fn migrate_scope_to_project(conn: &Connection) -> Result<(), DomainError> {
-        let has_scope: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM information_schema.columns \
-                 WHERE table_name = 'memory_items' AND column_name = 'scope'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map(|n| n > 0)
-            .map_err(|e| {
-                DomainError::storage(format!("Failed to inspect memory_items columns: {e}"))
-            })?;
-        if !has_scope {
-            return Ok(());
-        }
-        conn.execute_batch(
-            "UPDATE memory_items SET project = scope WHERE project IS NULL AND scope IS NOT NULL; \
-             ALTER TABLE memory_items DROP COLUMN scope;",
-        )
-        .map_err(|e| {
-            DomainError::storage(format!("Failed to migrate scope column to project: {e}"))
-        })
     }
 
     /// Render a vector as a DuckDB `[..]::FLOAT[n]` literal (FLOAT arrays
