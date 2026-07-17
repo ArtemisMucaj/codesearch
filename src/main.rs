@@ -176,12 +176,20 @@ async fn main() -> Result<()> {
     };
 
     let data_dir = expand_tilde(&cli.data_dir);
-    std::fs::create_dir_all(&data_dir)?;
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(std::path::Path::new(&data_dir).join(LOG_FILE))
-        .map_err(|e| anyhow::anyhow!("Failed to open log file: {}", e))?;
+    // Creating the data dir and opening the log file are blocking syscalls, so
+    // run them off the async runtime in one hop (per the project's async rule).
+    let log_file = {
+        let data_dir = data_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&data_dir)?;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(std::path::Path::new(&data_dir).join(LOG_FILE))
+        })
+        .await?
+        .map_err(|e| anyhow::anyhow!("Failed to open log file: {}", e))?
+    };
     let json_file_layer = tracing_subscriber::fmt::layer()
         .json()
         .with_target(false)
