@@ -18,6 +18,9 @@ use codesearch::{
 /// without an explicit `--embedding-dimensions` (matches all-MiniLM-L6-v2).
 const DEFAULT_EMBEDDING_DIMENSIONS: usize = 384;
 
+/// JSON log file written inside the data directory (alongside `config.json`).
+const LOG_FILE: &str = "codesearch.log";
+
 /// Handle `codesearch create`: persist the namespace's embedding
 /// configuration without loading any embedding model.
 fn create_namespace(
@@ -172,12 +175,12 @@ async fn main() -> Result<()> {
         EnvFilter::new("warn,codesearch=info")
     };
 
-    let log_dir = expand_tilde(&cli.data_dir);
-    std::fs::create_dir_all(&log_dir)?;
+    let data_dir = expand_tilde(&cli.data_dir);
+    std::fs::create_dir_all(&data_dir)?;
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(format!("{}/codesearch.log", log_dir))
+        .open(std::path::Path::new(&data_dir).join(LOG_FILE))
         .map_err(|e| anyhow::anyhow!("Failed to open log file: {}", e))?;
     let json_file_layer = tracing_subscriber::fmt::layer()
         .json()
@@ -212,8 +215,6 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let data_dir = expand_tilde(&cli.data_dir);
-    std::fs::create_dir_all(&data_dir)?;
     let db_path = std::path::Path::new(&data_dir).join("codesearch.duckdb");
 
     // `create` only writes namespace configuration — handle it before the
