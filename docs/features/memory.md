@@ -165,8 +165,12 @@ transcript is imported:
 1. **Indexed under a user-created namespace** → the project is the *namespace*.
    Repositories deliberately indexed together in a namespace are correlated —
    they work together — so their sessions share one memory pool.
-2. **Otherwise** (not indexed, or indexed under the default namespace) → the
-   project is the working-directory name.
+2. **Has a git remote** (not indexed, or indexed under the default namespace) →
+   the project is the normalized remote (e.g. `github.com/owner/repo`). The
+   remote survives clones, moves, and renames, and is the same key indexing
+   matches on — so memories written *before* a repo is indexed still line up
+   with sessions run *after*, instead of being orphaned.
+3. **No git remote** → the project is the working-directory name.
 
 Recall applies the same idea in reverse: a project-filtered search returns that
 project's items *plus* globals. `codesearch memory search` resolves the project

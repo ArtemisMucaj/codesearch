@@ -1377,3 +1377,49 @@ async fn memory_project_prefers_indexed_namespace_over_directory_name() {
         Some("otherproj".to_string())
     );
 }
+
+/// A repo with a git remote keeps the SAME memory project whether or not it has
+/// been indexed, so memories written before indexing still match sessions run
+/// after — they are not orphaned under a directory name that stops being used.
+#[tokio::test]
+async fn memory_project_uses_stable_remote_when_not_yet_indexed() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let repo_root = dir.path().join("myrepo");
+    std::fs::create_dir(&repo_root).unwrap();
+    // Give it a git remote (no network — just `.git/config`).
+    let git = repo_root.join(".git");
+    std::fs::create_dir(&git).unwrap();
+    std::fs::write(
+        git.join("config"),
+        "[remote \"origin\"]\n\turl = git@github.com:owner/repo.git\n",
+    )
+    .unwrap();
+
+    let canonical = std::fs::canonicalize(&repo_root).unwrap();
+    let cwd = canonical.to_string_lossy().into_owned();
+    let db_path = dir.path().join("codesearch.duckdb");
+
+    // Not indexed at all: the remote is the project, not the directory name.
+    let before = codesearch::resolve_memory_project(&db_path, &cwd);
+    assert_eq!(before.as_deref(), Some("github.com/owner/repo"));
+
+    // Later indexed under the default namespace: the project is unchanged, so
+    // pre-index memories still line up with post-index sessions.
+    {
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE repositories (
+                id TEXT, name TEXT, path TEXT, namespace TEXT,
+                git_remote TEXT, updated_at BIGINT
+            )",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO repositories VALUES ('id-1', 'myrepo', ?1, 'search', ?2, 1)",
+            duckdb::params![cwd, "github.com/owner/repo"],
+        )
+        .unwrap();
+    }
+    let after = codesearch::resolve_memory_project(&db_path, &cwd);
+    assert_eq!(after, before, "remote-keyed project must survive indexing");
+}

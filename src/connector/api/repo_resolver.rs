@@ -186,14 +186,22 @@ fn query_repo(conn: &Connection, sql: &str, key: &str) -> Option<(String, String
 
 /// Resolve the memory project for a working directory.
 ///
-/// Repositories the user deliberately indexed together under a named
-/// namespace are correlated — they work together — so their sessions share
-/// one memory project: the namespace. A directory that is not indexed (or was
-/// indexed into the catch-all default namespace) gets a per-directory project:
-/// its directory name.
+/// Resolution order, most stable identifier first:
 ///
-/// Returns `None` only for an empty/root-only path. All resolution failures
-/// (missing database, lock timeouts) degrade to the per-directory fallback.
+/// 1. **Indexed under a named namespace** → the namespace. Repositories the
+///    user deliberately indexed together are correlated — they work together —
+///    so their sessions share one memory pool.
+/// 2. **Has a git remote** (not indexed, or indexed under the catch-all default
+///    namespace) → the normalized remote (e.g. `github.com/owner/repo`). The
+///    remote survives clones, moves, and renames, and is the same key indexing
+///    later matches on — so memories written *before* a repo is indexed still
+///    line up with sessions run *after*, instead of being orphaned under a
+///    directory name that stops being used.
+/// 3. **No remote** → the working-directory name (the best stable key left).
+///
+/// Returns `None` only for an empty/root-only path with no remote. All
+/// resolution failures (missing database, lock timeouts) degrade to the
+/// remote/directory fallback.
 pub fn resolve_memory_project(db_path: &Path, cwd: &str) -> Option<String> {
     if let Some(ctx) = resolve(db_path, Path::new(cwd)) {
         if ctx.namespace != crate::cli::DEFAULT_NAMESPACE {
@@ -203,6 +211,16 @@ pub fn resolve_memory_project(db_path: &Path, cwd: &str) -> Option<String> {
             );
             return Some(ctx.namespace);
         }
+    }
+    // No namespace: prefer the git remote (stable across indexing) over the
+    // bare directory name, so a repo's memories keep the same project whether
+    // or not it has been indexed yet.
+    if let Some(remote) = detect_remote(Path::new(cwd)) {
+        debug!(
+            "memory project for '{}' resolved to remote '{}'",
+            cwd, remote
+        );
+        return Some(remote);
     }
     crate::connector::adapter::project_from_cwd(cwd)
 }
