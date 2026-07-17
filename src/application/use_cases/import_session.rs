@@ -83,7 +83,7 @@ impl ImportSessionUseCase {
 
         // Build the virtual-filesystem layer over the flat items:
         //   1. store this session as a node (transcript L2 + generated L0/L1),
-        //   2. regenerate the whole-memory rollup so it reflects the new items.
+        //   2. regenerate the whole-memory digest so it reflects the new items.
         // Both are best-effort — extraction already succeeded, so a summary
         // failure must not fail the import. Errors are logged and swallowed.
         if let Err(e) = self.summary.summarize_session(transcript).await {
@@ -92,9 +92,17 @@ impl ImportSessionUseCase {
                 transcript.id
             );
         }
-        if let Err(e) = self.summary.regenerate_rollup().await {
+        if let Err(e) = self.summary.regenerate_digest().await {
             warn!(
-                "session '{}': failed to regenerate memory rollup: {e}",
+                "session '{}': failed to regenerate memory digest: {e}",
+                transcript.id
+            );
+        }
+        // Per-project digests check their own staleness, so this typically
+        // regenerates only the project this session's items landed in.
+        if let Err(e) = self.summary.regenerate_project_digests().await {
+            warn!(
+                "session '{}': failed to regenerate project digests: {e}",
                 transcript.id
             );
         }

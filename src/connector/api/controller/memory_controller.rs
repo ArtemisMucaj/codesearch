@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use crate::application::{
-    resource_slug, ChatClient, ImportOutcome, ImportSessionUseCase, MEMORY_ROOT_URI,
+    resource_slug, ChatClient, DreamReport, ImportOutcome, ImportSessionUseCase, MEMORY_ROOT_URI,
     RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
 };
 use crate::cli::{LlmTarget, MemoryKindArg, OutputFormatTextJson};
@@ -24,6 +24,21 @@ pub struct MemoryController<'a> {
 }
 
 impl<'a> MemoryController<'a> {
+    /// Memory project of the directory this command runs in: the namespace it
+    /// was indexed under when that namespace is user-created, else the
+    /// directory name. `None` when the cwd is unavailable.
+    async fn current_dir_project(&self) -> Option<String> {
+        let db_path = self.container.metadata_db_path();
+        let cwd = std::env::current_dir().ok()?.to_string_lossy().into_owned();
+        // Resolution opens DuckDB read-only (blocking I/O).
+        tokio::task::spawn_blocking(move || {
+            crate::connector::api::repo_resolver::resolve_memory_project(Some(&db_path), &cwd)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
     pub fn new(container: &'a Container) -> Self {
         Self { container }
     }
@@ -107,10 +122,12 @@ impl<'a> MemoryController<'a> {
         // async worker thread.
         let title = session.display_title().to_string();
         let owned = session.clone();
-        let transcript = tokio::task::spawn_blocking(move || load_discovered_transcript(&owned))
-            .await
-            .map_err(|e| anyhow::anyhow!("transcript load task panicked: {e}"))?
-            .with_context(|| format!("could not load '{title}'"))?;
+        let db_path = self.container.metadata_db_path();
+        let transcript =
+            tokio::task::spawn_blocking(move || load_discovered_transcript(&owned, Some(&db_path)))
+                .await
+                .map_err(|e| anyhow::anyhow!("transcript load task panicked: {e}"))?
+                .with_context(|| format!("could not load '{title}'"))?;
         let outcome = use_case.execute(&transcript, true).await?;
         Ok(import_outcome_summary(&outcome))
     }
@@ -183,10 +200,10 @@ impl<'a> MemoryController<'a> {
         let node = summary
             .summarize_resource(&slug, &fetched.source, &fetched.text)
             .await?;
-        // Keep the whole-memory rollup in sync (best-effort — the resource is
-        // already stored, so a rollup hiccup must not fail the command).
-        if let Err(e) = summary.regenerate_rollup().await {
-            tracing::warn!("failed to regenerate memory rollup after `memory add`: {e}");
+        // Keep the whole-memory digest in sync (best-effort — the resource is
+        // already stored, so a digest hiccup must not fail the command).
+        if let Err(e) = summary.regenerate_digest().await {
+            tracing::warn!("failed to regenerate memory digest after `memory add`: {e}");
         }
 
         Ok(format!(
@@ -203,11 +220,24 @@ impl<'a> MemoryController<'a> {
         query: String,
         num: usize,
         kind: Option<MemoryKindArg>,
+        project: Option<String>,
+        all_projects: bool,
         format: OutputFormatTextJson,
     ) -> Result<String> {
         let use_case = self.container.memory_search_use_case()?;
         let kind = kind.map(MemoryKind::from);
-        let results = use_case.execute(&query, kind, num).await?;
+        // Explicit --project wins; --all-projects disables filtering; otherwise
+        // resolve the project from the directory the command runs in.
+        let project = if all_projects {
+            None
+        } else if project.is_some() {
+            project
+        } else {
+            self.current_dir_project().await
+        };
+        let results = use_case
+            .execute(&query, kind, project.as_deref(), num)
+            .await?;
 
         match format {
             OutputFormatTextJson::Json => {
@@ -234,7 +264,7 @@ impl<'a> MemoryController<'a> {
                         score,
                         item.kind(),
                         item.name(),
-                        scope_tag(item),
+                        project_tag(item),
                         item.id()
                     ));
                     output.push_str(&format!(
@@ -269,7 +299,7 @@ impl<'a> MemoryController<'a> {
                         "[{}] {}{} ({})\n",
                         item.kind(),
                         item.name(),
-                        scope_tag(item),
+                        project_tag(item),
                         item.id()
                     ));
                     output.push_str(&format!(
@@ -286,7 +316,7 @@ impl<'a> MemoryController<'a> {
         let repo = self.container.memory_repository()?;
 
         // A 'memory://' URI addresses a virtual-filesystem node (the memory
-        // rollup, a stored session, …) rather than a flat item.
+        // digest, a stored session, …) rather than a flat item.
         if id.starts_with("memory://") {
             return match repo.find_node(&id).await? {
                 Some(node) => Ok(render_node(&node)),
@@ -310,17 +340,17 @@ impl<'a> MemoryController<'a> {
     }
 
     /// Browse the memory virtual filesystem. With no URI, show the top-level
-    /// roots (rollup abstract + sessions/resources directories). With a
+    /// roots (digest abstract + sessions/resources directories). With a
     /// directory URI, list its children and their one-line abstracts.
     pub async fn tree(&self, uri: Option<String>, format: OutputFormatTextJson) -> Result<String> {
         let repo = self.container.memory_repository()?;
 
         let (children, header) = match uri.as_deref() {
-            // Root view: the rollup node plus each directory's children.
+            // Root view: the digest node plus each directory's children.
             None => {
                 let mut nodes = Vec::new();
-                if let Some(rollup) = repo.find_node(MEMORY_ROOT_URI).await? {
-                    nodes.push(rollup);
+                if let Some(digest) = repo.find_node(MEMORY_ROOT_URI).await? {
+                    nodes.push(digest);
                 }
                 nodes.extend(repo.list_child_nodes(SESSIONS_ROOT_URI).await?);
                 nodes.extend(repo.list_child_nodes(RESOURCES_ROOT_URI).await?);
@@ -374,6 +404,17 @@ impl<'a> MemoryController<'a> {
         }
     }
 
+    /// Run one dream cycle and render its report.
+    pub async fn dream(&self, llm: LlmTarget, idle_minutes: u64) -> Result<String> {
+        let chat_client = self.chat_client(llm)?;
+        let use_case = self.container.memory_dream_use_case(chat_client)?;
+        // Clamp instead of wrapping: an absurd --idle-minutes must not become
+        // a negative threshold that makes still-active sessions eligible.
+        let idle_secs = i64::try_from(idle_minutes.saturating_mul(60)).unwrap_or(i64::MAX);
+        let report = use_case.execute(idle_secs).await?;
+        Ok(render_dream_report(&report))
+    }
+
     pub async fn sessions(&self, format: OutputFormatTextJson) -> Result<String> {
         let repo = self.container.memory_repository()?;
         let sessions = repo.list_sessions().await?;
@@ -410,7 +451,7 @@ pub fn run_import_picker_ui(
     events: std::sync::mpsc::Receiver<ImportEvent>,
     import_tx: tokio::sync::mpsc::UnboundedSender<ImportRequest>,
 ) -> Result<()> {
-    let now = now_secs();
+    let now = crate::application::use_cases::memory_support::unix_now();
     let (tx, rx) = std::sync::mpsc::channel::<Vec<DiscoveredSession>>();
 
     // Kick off discovery; the picker drains `rx` as batches arrive. The thread
@@ -419,8 +460,10 @@ pub fn run_import_picker_ui(
         crate::connector::adapter::discover_all_sessions_streaming(tx);
     });
 
+    // Preview only needs the messages; project resolution is skipped here (the
+    // picker runs before the container/database is available).
     let loader = |s: &DiscoveredSession| {
-        load_discovered_transcript(s)
+        load_discovered_transcript(s, None)
             .map(|t| t.messages)
             .map_err(|e| e.to_string())
     };
@@ -479,14 +522,6 @@ fn transcript_label(transcript: &crate::domain::SessionTranscript) -> String {
     }
 }
 
-/// Current Unix time in seconds.
-fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 /// Format one import outcome. When `multiple`, each session is prefixed so a
 /// batch report stays readable.
 fn render_import_outcome(outcome: &ImportOutcome, multiple: bool) -> String {
@@ -520,34 +555,75 @@ fn render_import_outcome(outcome: &ImportOutcome, multiple: bool) -> String {
                 output.push_str("No memories extracted — nothing durable in this session.\n");
             }
             let indent = if multiple { "    " } else { "  " };
-            if !multiple || !report.applied.is_empty() {
-                for op in &report.applied {
-                    match op {
-                        MemoryOperation::Upsert { kind, name, .. } => {
-                            output.push_str(&format!("{indent}+ [{kind}] {name}\n"));
-                        }
-                        MemoryOperation::Delete { kind, name } => {
-                            output.push_str(&format!("{indent}- [{kind}] {name}\n"));
-                        }
-                    }
-                }
-            }
-            for (op, reason) in &report.skipped {
-                let (kind, name) = match op {
-                    MemoryOperation::Upsert { kind, name, .. }
-                    | MemoryOperation::Delete { kind, name } => (kind, name),
-                };
-                output.push_str(&format!("{indent}~ [{kind}] {name} skipped: {reason}\n"));
-            }
+            let applied: &[MemoryOperation] = if multiple && report.applied.is_empty() {
+                &[]
+            } else {
+                &report.applied
+            };
+            output.push_str(&render_operations(applied, &report.skipped, indent));
             output
         }
     }
 }
 
+/// Render applied and skipped operation lines (`+`/`-`/`~ … skipped:`), shared
+/// by the import and dream reports.
+fn render_operations(
+    applied: &[MemoryOperation],
+    skipped: &[(MemoryOperation, String)],
+    indent: &str,
+) -> String {
+    let mut out = String::new();
+    for op in applied {
+        match op {
+            MemoryOperation::Upsert { kind, name, .. } => {
+                out.push_str(&format!("{indent}+ [{kind}] {name}\n"));
+            }
+            MemoryOperation::Delete { kind, name } => {
+                out.push_str(&format!("{indent}- [{kind}] {name}\n"));
+            }
+        }
+    }
+    for (op, reason) in skipped {
+        let (kind, name) = match op {
+            MemoryOperation::Upsert { kind, name, .. } | MemoryOperation::Delete { kind, name } => {
+                (kind, name)
+            }
+        };
+        out.push_str(&format!("{indent}~ [{kind}] {name} skipped: {reason}\n"));
+    }
+    out
+}
+
+/// Render a dream report for the CLI: harvest counts, then the operations,
+/// then guardrail skips.
+fn render_dream_report(report: &DreamReport) -> String {
+    let mut out = String::new();
+    out.push_str("Dream cycle finished\n");
+    out.push_str(&format!(
+        "  sessions: {} finished and not yet imported, {} imported\n",
+        report.sessions_eligible, report.sessions_imported
+    ));
+    out.push_str(&format!(
+        "  consolidation clusters examined: {}\n",
+        report.clusters_found
+    ));
+    if report.applied.is_empty() {
+        out.push_str("  memory already consolidated — no operations\n");
+    } else {
+        out.push_str(&format!(
+            "  {} operation(s) applied:\n",
+            report.applied.len()
+        ));
+    }
+    out.push_str(&render_operations(&report.applied, &report.skipped, "    "));
+    out
+}
+
 fn render_item(item: &MemoryItem) -> String {
-    let scope = match item.scope() {
-        Some(project) => format!(", scope: {project}"),
-        None => ", scope: global".to_string(),
+    let project = match item.project() {
+        Some(project) => format!(", project: {project}"),
+        None => ", project: global".to_string(),
     };
     format!(
         "[{}] {} ({})\nupdated {} time(s), source session: {}{}\n\n{}\n",
@@ -556,7 +632,7 @@ fn render_item(item: &MemoryItem) -> String {
         item.id(),
         item.update_count(),
         item.source_session_id().unwrap_or("(unknown)"),
-        scope,
+        project,
         item.content()
     )
 }
@@ -569,15 +645,23 @@ fn render_node(node: &MemoryNode) -> String {
     if !node.overview().trim().is_empty() {
         out.push_str(&format!("## Overview (L1)\n{}\n\n", node.overview()));
     }
-    if !node.content().trim().is_empty() {
-        out.push_str(&format!("## Detail (L2)\n{}\n", node.content()));
+    // Mask internal manifest for Project digest nodes (index nodes have
+    // empty content by invariant; the manifest is bookkeeping).
+    let content = if node.kind() == crate::domain::NodeKind::Project {
+        ""
+    } else {
+        node.content()
+    };
+    if !content.trim().is_empty() {
+        out.push_str(&format!("## Detail (L2)\n{}\n", content));
     }
     out
 }
 
-/// A compact ` @project` suffix for a scoped memory, or empty for a global one.
-fn scope_tag(item: &MemoryItem) -> String {
-    match item.scope() {
+/// A compact ` @project` suffix for a project-specific memory, or empty for a
+/// global one.
+fn project_tag(item: &MemoryItem) -> String {
+    match item.project() {
         Some(project) => format!(" @{project}"),
         None => String::new(),
     }

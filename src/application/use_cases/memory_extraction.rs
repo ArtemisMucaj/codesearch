@@ -18,6 +18,7 @@ use tracing::{debug, warn};
 
 use crate::application::interfaces::{ChatClient, EmbeddingService, MemoryRepository};
 use crate::application::use_cases::memory_extraction_prompt as prompt;
+use crate::application::use_cases::memory_support::{unix_now, upsert_preserving_identity};
 use crate::domain::{DomainError, MemoryItem, MemoryKind, MemoryOperation, SessionTranscript};
 
 /// How many existing memories are prefetched into the extraction context.
@@ -69,7 +70,7 @@ struct RawItem {
     name: String,
     #[serde(default)]
     content: String,
-    /// Optional project scope: `true`/the project name marks this item as
+    /// Optional project marker: `true`/the project name marks this item as
     /// specific to the session's project; absent/`false` means global. The
     /// model is told to set it only for project-specific insights.
     #[serde(default)]
@@ -125,9 +126,17 @@ impl MemoryExtractionUseCase {
             }
             match self.embedding_service.embed_query(&query).await {
                 Ok(vector) => {
+                    // Prefetch within the session's project (its items +
+                    // globals) so merging happens against memories that are
+                    // actually relevant to this project/namespace.
                     match self
                         .memory_repo
-                        .search_semantic(&vector, None, PREFETCH_LIMIT)
+                        .search_semantic(
+                            &vector,
+                            None,
+                            transcript.project.as_deref(),
+                            PREFETCH_LIMIT,
+                        )
                         .await
                     {
                         Ok(results) => return results.into_iter().map(|(item, _)| item).collect(),
@@ -138,11 +147,22 @@ impl MemoryExtractionUseCase {
             }
         }
         // No embeddings: surface the most recent items instead so merging
-        // still has a chance to happen.
+        // still has a chance to happen. Filter to the transcript's project
+        // (global memories plus its project/namespace items) before the limit.
         match self.memory_repo.list_items(None).await {
-            Ok(mut items) => {
-                items.truncate(PREFETCH_LIMIT);
-                items
+            Ok(items) => {
+                let mut filtered: Vec<MemoryItem> = items
+                    .into_iter()
+                    .filter(
+                        |item| match (item.project(), transcript.project.as_deref()) {
+                            (None, _) => true,
+                            (Some(item_project), Some(project)) => item_project == project,
+                            (Some(_), None) => false,
+                        },
+                    )
+                    .collect();
+                filtered.truncate(PREFETCH_LIMIT);
+                filtered
             }
             Err(e) => {
                 warn!("memory prefetch list failed: {e}");
@@ -212,37 +232,19 @@ impl MemoryExtractionUseCase {
                     kind,
                     ref name,
                     ref content,
-                    ref scope,
+                    ref project,
                 } => {
-                    let existing = self.memory_repo.find_item(kind, name).await?;
-                    let item = match existing {
-                        Some(prev) => MemoryItem::new(
-                            prev.id().to_string(),
-                            kind,
-                            name.clone(),
-                            content.clone(),
-                            Some(transcript.id.clone()),
-                            scope.clone(),
-                            prev.created_at(),
-                            now,
-                            prev.update_count() + 1,
-                        ),
-                        None => MemoryItem::new(
-                            uuid::Uuid::new_v4().to_string(),
-                            kind,
-                            name.clone(),
-                            content.clone(),
-                            Some(transcript.id.clone()),
-                            scope.clone(),
-                            now,
-                            now,
-                            0,
-                        ),
-                    };
-                    let vector = self.embed_content(&item).await;
-                    self.memory_repo
-                        .upsert_item(&item, vector.as_deref())
-                        .await?;
+                    upsert_preserving_identity(
+                        self.memory_repo.as_ref(),
+                        self.embedding_service.as_ref(),
+                        kind,
+                        name,
+                        content,
+                        project.clone(),
+                        Some(&transcript.id),
+                        now,
+                    )
+                    .await?;
                     report.applied.push(op);
                 }
                 MemoryOperation::Delete { kind, ref name } => {
@@ -255,22 +257,6 @@ impl MemoryExtractionUseCase {
             }
         }
         Ok(report)
-    }
-
-    /// Embed `name + content` for semantic recall; `None` when embeddings are
-    /// disabled or fail (the item stays keyword-searchable).
-    async fn embed_content(&self, item: &MemoryItem) -> Option<Vec<f32>> {
-        if !self.embedding_service.embeddings_enabled() {
-            return None;
-        }
-        let text = format!("{}\n\n{}", item.name().replace('_', " "), item.content());
-        match self.embedding_service.embed_query(&text).await {
-            Ok(vector) => Some(vector),
-            Err(e) => {
-                warn!("failed to embed memory item '{}': {e}", item.name());
-                None
-            }
-        }
     }
 }
 
@@ -321,8 +307,9 @@ fn extraction_schema() -> serde_json::Value {
 ///
 /// Tolerates surrounding prose or a markdown fence by extracting the first
 /// balanced top-level JSON object. `project` is the session's project name; an
-/// item the model flagged `project_specific` is scoped to it (items stay global
-/// when the session had no known project, since there is nothing to scope to).
+/// item the model flagged `project_specific` is assigned to it (items stay
+/// global when the session had no known project, since there is nothing to
+/// assign them to).
 fn parse_operations(
     response: &str,
     project: Option<&str>,
@@ -358,9 +345,10 @@ fn parse_operations(
             if content.is_empty() {
                 continue;
             }
-            // Scope only when the model marked the item project-specific AND we
-            // actually know the project; otherwise keep it global.
-            let scope = if item.project_specific {
+            // Assign a project only when the model marked the item
+            // project-specific AND we actually know the project; otherwise
+            // keep it global.
+            let item_project = if item.project_specific {
                 project.map(str::to_string)
             } else {
                 None
@@ -369,7 +357,7 @@ fn parse_operations(
                 kind,
                 name,
                 content: content.to_string(),
-                scope,
+                project: item_project,
             });
         }
     }
@@ -394,7 +382,7 @@ fn parse_operations(
 /// context and, inside strings, passes valid JSON escapes through untouched
 /// while escaping anything else so the result parses. Text outside strings is
 /// left exactly as-is.
-fn repair_json_string_escapes(json: &str) -> String {
+pub(crate) fn repair_json_string_escapes(json: &str) -> String {
     let mut out = String::with_capacity(json.len() + json.len() / 16);
     let mut in_string = false;
     let mut chars = json.chars().peekable();
@@ -435,7 +423,7 @@ fn repair_json_string_escapes(json: &str) -> String {
 }
 
 /// Extract the first balanced `{ ... }` object from mixed model output.
-fn extract_json_object(text: &str) -> Option<&str> {
+pub(crate) fn extract_json_object(text: &str) -> Option<&str> {
     let start = text.find('{')?;
     let mut depth = 0usize;
     let mut in_string = false;
@@ -467,7 +455,7 @@ fn extract_json_object(text: &str) -> Option<&str> {
 }
 
 /// Normalize an item name to lowercase snake_case; `None` when empty.
-fn normalize_name(raw: &str) -> Option<String> {
+pub(crate) fn normalize_name(raw: &str) -> Option<String> {
     let name: String = raw
         .trim()
         .to_lowercase()
@@ -486,13 +474,6 @@ fn normalize_name(raw: &str) -> Option<String> {
         return None;
     }
     Some(name.chars().take(MAX_NAME_CHARS).collect())
-}
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -514,7 +495,7 @@ mod tests {
             .map(|v| v.as_str().unwrap())
             .collect();
         assert!(required.contains(&"facts"));
-        // Item objects require the fields RawItem reads, including the scope flag.
+        // Item objects require the fields RawItem reads, including the project flag.
         let item_props = &schema["properties"]["facts"]["items"]["properties"];
         assert!(item_props.get("name").is_some());
         assert!(item_props.get("content").is_some());
@@ -527,16 +508,16 @@ mod tests {
         let response = r#"{
             "preferences": [{"name": "tabs", "content": "prefers tabs", "project_specific": false}],
             "experiences": [], "skills": [],
-            "facts": [{"name": "sdk", "content": "uses matter.js", "project_specific": true}],
+            "facts": [{"name": "sdk", "content": "uses the vendor SDK", "project_specific": true}],
             "delete": [{"kind": "fact", "name": "old"}]
         }"#;
-        let ops = parse_operations(response, Some("home-framework")).unwrap();
-        // 2 upserts + 1 delete; the project-specific fact is scoped.
+        let ops = parse_operations(response, Some("svc-a")).unwrap();
+        // 2 upserts + 1 delete; the project-specific fact carries the project.
         assert_eq!(ops.len(), 3);
-        let scoped = ops.iter().any(|op| {
-            matches!(op, MemoryOperation::Upsert { scope: Some(s), .. } if s == "home-framework")
-        });
-        assert!(scoped, "project_specific fact should be scoped");
+        let assigned = ops.iter().any(
+            |op| matches!(op, MemoryOperation::Upsert { project: Some(p), .. } if p == "svc-a"),
+        );
+        assert!(assigned, "project_specific fact should carry the project");
     }
 
     #[test]
@@ -555,7 +536,7 @@ mod tests {
                 kind: MemoryKind::Preference,
                 name: "rust_style".to_string(),
                 content: "Prefers ? over unwrap".to_string(),
-                scope: None,
+                project: None,
             }
         );
         assert_eq!(
@@ -639,35 +620,35 @@ mod tests {
     }
 
     #[test]
-    fn project_specific_item_is_scoped_to_the_project() {
+    fn project_specific_item_is_assigned_to_the_project() {
         let response = r#"{"facts": [
-            {"name": "sdk_quirk", "content": "matter transport needs a wrapper", "project_specific": true},
+            {"name": "sdk_quirk", "content": "the transport needs a wrapper", "project_specific": true},
             {"name": "prefers_short_fns", "content": "keep functions small", "project_specific": false}
         ], "preferences": [], "experiences": [], "skills": [], "delete": []}"#;
-        let ops = parse_operations(response, Some("home-framework")).unwrap();
-        let scopes: Vec<Option<&str>> = ops
+        let ops = parse_operations(response, Some("svc-a")).unwrap();
+        let projects: Vec<Option<&str>> = ops
             .iter()
             .map(|op| match op {
-                MemoryOperation::Upsert { scope, .. } => scope.as_deref(),
+                MemoryOperation::Upsert { project, .. } => project.as_deref(),
                 _ => None,
             })
             .collect();
-        // First is project-specific → scoped; second is global → None.
-        assert_eq!(scopes, vec![Some("home-framework"), None]);
+        // First is project-specific → carries the project; second is global → None.
+        assert_eq!(projects, vec![Some("svc-a"), None]);
     }
 
     #[test]
     fn project_specific_stays_global_when_project_unknown() {
         // Even when flagged project_specific, an item stays global if the
-        // session had no known project — there is nothing to scope it to.
+        // session had no known project — there is nothing to assign it to.
         let response = r#"{"facts": [
             {"name": "sdk_quirk", "content": "x", "project_specific": true}
         ], "preferences": [], "experiences": [], "skills": [], "delete": []}"#;
         let ops = parse_operations(response, None).unwrap();
-        let MemoryOperation::Upsert { scope, .. } = &ops[0] else {
+        let MemoryOperation::Upsert { project, .. } = &ops[0] else {
             panic!("expected upsert");
         };
-        assert_eq!(*scope, None);
+        assert_eq!(*project, None);
     }
 
     #[test]
@@ -676,9 +657,9 @@ mod tests {
         let response = r#"{"facts": [{"name": "n", "content": "c"}],
             "preferences": [], "experiences": [], "skills": [], "delete": []}"#;
         let ops = parse_operations(response, Some("proj")).unwrap();
-        let MemoryOperation::Upsert { scope, .. } = &ops[0] else {
+        let MemoryOperation::Upsert { project, .. } = &ops[0] else {
             panic!("expected upsert");
         };
-        assert_eq!(*scope, None);
+        assert_eq!(*project, None);
     }
 }

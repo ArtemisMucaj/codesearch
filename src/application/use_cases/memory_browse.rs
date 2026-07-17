@@ -1,7 +1,7 @@
 //! Unified memory recall for the TUI, as a navigable virtual filesystem.
 //!
 //! - **Browse** (empty query) returns the whole store as a flattened *tree* of
-//!   [`MemoryRow`]s: the `memory://memory` rollup (with its L0/L1 levels and the
+//!   [`MemoryRow`]s: the `memory://memory` digest (with its L0/L1 levels and the
 //!   memory items grouped by category beneath it), then directory headers
 //!   (`sessions/`, `resources/`) with each node under them, and — nested one
 //!   level deeper — that node's L0/L1/L2 levels as their own selectable rows.
@@ -20,7 +20,7 @@ use std::sync::Arc;
 use crate::application::interfaces::{EmbeddingService, MemoryRepository};
 use crate::application::use_cases::memory_search::MemorySearchUseCase;
 use crate::application::use_cases::memory_summary::{
-    MEMORY_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
+    MEMORY_ROOT_URI, PROJECTS_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
 };
 use crate::domain::{DomainError, MemoryItem, MemoryKind, MemoryNode, NodeKind};
 
@@ -31,12 +31,13 @@ const RRF_K: f32 = 60.0;
 const NODE_CANDIDATES_PER_LEG: usize = 20;
 
 /// Sort rank for a node kind in the browse view, so the filesystem reads
-/// top-down: the rollup first, then sessions, then resources.
+/// top-down: the digest first, then project digests, sessions, resources.
 fn node_kind_rank(kind: NodeKind) -> u8 {
     match kind {
         NodeKind::Memory => 0,
-        NodeKind::Session => 1,
-        NodeKind::Resource => 2,
+        NodeKind::Project => 1,
+        NodeKind::Session => 2,
+        NodeKind::Resource => 3,
     }
 }
 
@@ -130,7 +131,7 @@ impl MemoryBrowseUseCase {
     /// Hybrid semantic + keyword recall over items *and* nodes, fused per
     /// modality and interleaved by score into a flat list of depth-0 rows.
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryRow>, DomainError> {
-        let items = self.item_search.execute(query, None, limit).await?;
+        let items = self.item_search.execute(query, None, None, limit).await?;
         let nodes = self.search_nodes(query, limit).await?;
 
         let mut scored: Vec<(f32, MemoryRow)> = Vec::new();
@@ -184,10 +185,10 @@ impl MemoryBrowseUseCase {
     ///
     /// Layout (always fully expanded):
     /// ```text
-    /// memory://memory            (rollup node)
+    /// memory://memory            (digest node)
     ///   L0 · abstract
     ///   L1 · overview
-    ///   preferences/             (item categories nest under the rollup)
+    ///   preferences/             (item categories nest under the digest)
     ///     [preference] commit_style
     ///   facts/
     ///     [fact] duckdb_locks
@@ -200,7 +201,7 @@ impl MemoryBrowseUseCase {
     ///   memory://resources/<slug>
     ///     L0 · abstract  …
     /// ```
-    /// Before the first rollup exists, items fall back to a top-level
+    /// Before the first digest exists, items fall back to a top-level
     /// `memory/` directory so they are never orphaned.
     async fn browse_tree(&self) -> Result<Vec<MemoryRow>, DomainError> {
         let items = self.memory_repo.list_items(None).await?;
@@ -215,25 +216,25 @@ impl MemoryBrowseUseCase {
 
         let mut rows: Vec<MemoryRow> = Vec::new();
 
-        // The rollup sits at the filesystem root (depth 0), with its levels
+        // The digest sits at the filesystem root (depth 0), with its levels
         // (L0/L1) and the grouped memory items nested directly beneath it, so
         // everything durable lives under one `memory` root.
-        let rollup: Vec<&MemoryNode> = nodes
+        let digest: Vec<&MemoryNode> = nodes
             .iter()
             .filter(|n| n.kind() == NodeKind::Memory)
             .collect();
-        let has_rollup = !rollup.is_empty();
-        for node in rollup {
+        let has_digest = !digest.is_empty();
+        for node in digest {
             push_node_with_levels(&mut rows, node, 0);
         }
 
         // Items grouped by kind: one sub-directory per category
         // (preferences/experiences/skills/facts), each holding its items, empty
-        // categories omitted. Nest them under the rollup (depth 1/2) when it
+        // categories omitted. Nest them under the digest (depth 1/2) when it
         // exists; otherwise fall back to a top-level `memory/` dir so items are
-        // never orphaned before the first rollup is generated.
+        // never orphaned before the first digest is generated.
         if !items.is_empty() {
-            let base_depth = if has_rollup {
+            let base_depth = if has_digest {
                 1
             } else {
                 rows.push(dir_row("memory/", 0));
@@ -242,8 +243,15 @@ impl MemoryBrowseUseCase {
             push_item_groups(&mut rows, &items, base_depth);
         }
 
-        // Sessions and resources each get a directory header, with their nodes
-        // (and each node's levels) nested underneath.
+        // Project digests, sessions, and resources each get a directory header,
+        // with their nodes (and each node's levels) nested underneath.
+        push_dir_group(
+            &mut rows,
+            "projects/",
+            PROJECTS_ROOT_URI,
+            NodeKind::Project,
+            &nodes,
+        );
         push_dir_group(
             &mut rows,
             "sessions/",
@@ -305,7 +313,14 @@ fn push_node_with_levels(rows: &mut Vec<MemoryRow>, node: &MemoryNode, depth: u8
     if !node.overview().trim().is_empty() {
         rows.push(level_row(node, MemoryLevel::Overview, child_depth));
     }
-    if !node.content().trim().is_empty() {
+    // Mask internal manifest for Project digest nodes (index nodes have
+    // empty content by invariant; the manifest is bookkeeping).
+    let has_content = if node.kind() == NodeKind::Project {
+        false
+    } else {
+        !node.content().trim().is_empty()
+    };
+    if has_content {
         rows.push(level_row(node, MemoryLevel::Detail, child_depth));
     }
 }
@@ -336,7 +351,15 @@ fn level_row(node: &MemoryNode, level: MemoryLevel, depth: u8) -> MemoryRow {
     let text = match level {
         MemoryLevel::Abstract => node.abstract_(),
         MemoryLevel::Overview => node.overview(),
-        MemoryLevel::Detail => node.content(),
+        MemoryLevel::Detail => {
+            // Mask internal manifest for Project digest nodes (index nodes have
+            // empty content by invariant; the manifest is bookkeeping).
+            if node.kind() == NodeKind::Project {
+                ""
+            } else {
+                node.content()
+            }
+        }
     };
     MemoryRow {
         depth,
@@ -447,7 +470,7 @@ mod tests {
         ];
         let mut rows = Vec::new();
         // Category dirs at depth 1, items at depth 2 (as when nested under the
-        // rollup).
+        // digest).
         push_item_groups(&mut rows, &items, 1);
 
         // Categories follow MemoryKind::ALL order (preferences before facts);

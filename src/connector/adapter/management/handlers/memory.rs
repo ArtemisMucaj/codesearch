@@ -6,6 +6,8 @@
 //! - `GET /api/memory/stats`      — item / session counts
 //! - `GET /api/memory/sessions`   — imported sessions
 //! - `GET /api/memory/tree`       — browse the memory virtual filesystem (`?uri=`)
+//! - `GET /api/memory/dream`      — dream scheduler status + last recorded run
+//! - `POST /api/memory/dream`     — trigger a dream cycle in the background
 //! - `GET /api/memory/:id`        — one memory item (ID, `kind/name`, or URI node)
 
 use axum::extract::{Path, Query, State};
@@ -62,6 +64,10 @@ pub struct MemorySearchParams {
     /// Restrict to one memory kind.
     #[serde(default)]
     pub kind: Option<String>,
+    /// Restrict to memories relevant in this project/namespace (its items plus
+    /// globals). Omit to search every project.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 fn default_memory_limit() -> usize {
@@ -76,7 +82,9 @@ pub async fn search(
 ) -> ApiResult<Json<Value>> {
     let kind = parse_kind(params.kind.as_deref())?;
     let use_case = state.container.memory_search_use_case()?;
-    let results = use_case.execute(&params.query, kind, params.num).await?;
+    let results = use_case
+        .execute(&params.query, kind, params.project.as_deref(), params.num)
+        .await?;
 
     let items: Vec<Value> = results
         .iter()
@@ -126,7 +134,7 @@ pub struct MemoryTreeParams {
 }
 
 /// `GET /api/memory/tree` — browse the memory virtual filesystem. With no
-/// `uri`, returns the rollup node plus the sessions/resources directories.
+/// `uri`, returns the digest node plus the sessions/resources directories.
 pub async fn tree(
     State(state): State<AppState>,
     Query(params): Query<MemoryTreeParams>,
@@ -135,8 +143,8 @@ pub async fn tree(
     let children = match params.uri.as_deref() {
         None => {
             let mut nodes = Vec::new();
-            if let Some(rollup) = repo.find_node(MEMORY_ROOT_URI).await? {
-                nodes.push(rollup);
+            if let Some(digest) = repo.find_node(MEMORY_ROOT_URI).await? {
+                nodes.push(digest);
             }
             nodes.extend(repo.list_child_nodes(SESSIONS_ROOT_URI).await?);
             nodes.extend(repo.list_child_nodes(RESOURCES_ROOT_URI).await?);
@@ -145,6 +153,50 @@ pub async fn tree(
         Some(dir) => repo.list_child_nodes(dir).await?,
     };
     Ok(Json(json!({ "count": children.len(), "nodes": children })))
+}
+
+/// `GET /api/memory/dream` — scheduler configuration, whether a cycle is in
+/// flight, and the last recorded run.
+pub async fn dream_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let Some(dream) = state.dream.as_ref() else {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "dreaming is not available on this server (no LLM backend configured at startup)",
+        ));
+    };
+    let config = dream.config();
+    Ok(Json(json!({
+        "enabled": config.dream_enabled(),
+        "interval_hours": config.dream_interval_hours(),
+        "session_idle_minutes": config.session_idle_minutes(),
+        "auto_import": config.auto_import(),
+        "running": dream.is_running(),
+        "last_run": dream.last_run().await,
+    })))
+}
+
+/// `POST /api/memory/dream` — start a dream cycle in the background. Returns
+/// `202` immediately; progress lands in the server log and the run record is
+/// readable via `GET /api/memory/dream` once finished.
+pub async fn dream_trigger(
+    State(state): State<AppState>,
+) -> ApiResult<(axum::http::StatusCode, Json<Value>)> {
+    let Some(dream) = state.dream.as_ref() else {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "dreaming is not available on this server (no LLM backend configured at startup)",
+        ));
+    };
+    if !dream.trigger() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            "a dream cycle is already running",
+        ));
+    }
+    Ok((
+        axum::http::StatusCode::ACCEPTED,
+        Json(json!({ "started": true })),
+    ))
 }
 
 /// `GET /api/memory/:id` — resolve one memory item or virtual-filesystem node.

@@ -85,7 +85,7 @@ struct Cli {
     #[arg(long, global = true)]
     mock_embeddings: bool,
 
-    #[arg(long, global = true, default_value = "search", value_parser = validate_namespace)]
+    #[arg(long, global = true, default_value = codesearch::cli::DEFAULT_NAMESPACE, value_parser = validate_namespace)]
     namespace: String,
 
     #[arg(long, global = true)]
@@ -347,9 +347,24 @@ async fn main() -> Result<()> {
             // HTTP mode
             run_http_server(container, port, public_bind).await?;
         } else {
-            // Stdio mode
+            // Stdio mode: the process cwd is the workspace this server was
+            // launched for, so memory searches default to its project.
             tracing::info!("Starting codesearch MCP server (stdio)");
-            let server = CodesearchMcpServer::new(container);
+            let db_path = container.metadata_db_path();
+            let cwd = std::env::current_dir().ok();
+            let default_project = if let Some(cwd) = cwd {
+                let cwd_str = cwd.to_string_lossy().to_string();
+                tokio::task::spawn_blocking(move || {
+                    codesearch::resolve_memory_project(Some(&db_path), &cwd_str)
+                })
+                .await
+                .ok()
+                .flatten()
+            } else {
+                None
+            };
+            let server =
+                CodesearchMcpServer::with_default_memory_project(container, default_project);
             let service = server.serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
         }
@@ -367,8 +382,24 @@ async fn main() -> Result<()> {
 
         let container = Arc::new(Container::new(config).await?);
 
+        // Dream scheduler: harvests finished sessions and consolidates memory
+        // on the configured cadence (config.json `memory` section). Built
+        // best-effort — a server without a usable LLM backend still serves,
+        // it just cannot dream.
+        let dream = match codesearch::DreamService::build(&container) {
+            Ok(service) => {
+                tokio::spawn(Arc::clone(&service).run_scheduler());
+                Some(service)
+            }
+            Err(e) => {
+                tracing::warn!("dreaming disabled: {e:#}");
+                None
+            }
+        };
+
         let mcp = run_http_server(container.clone(), serve_mcp_port, serve_public);
-        let mgmt = codesearch::run_management_server(container, serve_mgmt_port, serve_public);
+        let mgmt =
+            codesearch::run_management_server(container, serve_mgmt_port, serve_public, dream);
 
         tracing::info!(
             "codesearch serve: MCP on port {}, management API on port {}",

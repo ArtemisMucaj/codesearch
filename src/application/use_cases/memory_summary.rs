@@ -5,14 +5,17 @@
 //! them: nodes carrying an L0 abstract and an L1 overview so an agent reads a
 //! summary first and drills into detail only when needed.
 //!
-//! Three things get summarized:
+//! Four things get summarized:
 //!
 //! 1. **Each imported session** → `memory://sessions/<id>` with its full
 //!    normalized transcript as L2, plus a generated abstract + overview.
 //! 2. **Each explicitly-added resource** → `memory://resources/<slug>` with the
 //!    fetched file/page text as L2, plus a generated abstract + overview.
-//! 3. **The whole memory store** → the `memory://memory` rollup: a regenerated
+//! 3. **The whole memory store** → the `memory://memory` digest: a regenerated
 //!    abstract + overview over every stored item, meant to be read first.
+//! 4. **Each project/namespace project** → `memory://projects/<project>`: a digest
+//!    over the items carrying that project, read first when working in that
+//!    project. Regenerated lazily — only when the project's items changed.
 //!
 //! Each uses one small LLM call (the same [`ChatClient`] extraction uses), with
 //! a single format-recovery retry and a deterministic fallback so a flaky model
@@ -28,8 +31,10 @@ use crate::domain::{
     DomainError, MemoryItem, MemoryNode, NodeKind, SessionMessage, SessionTranscript,
 };
 
-/// Root URI of the memory rollup node ("read this first").
+/// Root URI of the memory digest node ("read this first").
 pub const MEMORY_ROOT_URI: &str = "memory://memory";
+/// Parent directory URI under which per-project/namespace project digests live.
+pub const PROJECTS_ROOT_URI: &str = "memory://projects";
 /// Parent directory URI under which per-session nodes live.
 pub const SESSIONS_ROOT_URI: &str = "memory://sessions";
 /// Parent directory URI under which explicitly-added resources (files/URLs)
@@ -166,24 +171,24 @@ impl SummarizeMemoryUseCase {
         Ok(node)
     }
 
-    /// Regenerate the whole-memory rollup (`memory://memory`) from the current
+    /// Regenerate the whole-memory digest (`memory://memory`) from the current
     /// set of stored items: a fresh L0 abstract + L1 overview read before
     /// drilling into individual memories.
     ///
     /// With zero or one item there is nothing to summarize, so a deterministic
     /// placeholder is written without spending an LLM call.
     #[tracing::instrument(skip_all)]
-    pub async fn regenerate_rollup(&self) -> Result<MemoryNode, DomainError> {
+    pub async fn regenerate_digest(&self) -> Result<MemoryNode, DomainError> {
         let items = self.memory_repo.list_items(None).await?;
         let (abstract_, overview) = if items.len() < 2 {
-            fallback_rollup_summary(&items)
+            fallback_digest_summary(&items)
         } else {
             match self
-                .generate(&rollup_system_prompt(), &rollup_user_prompt(&items))
+                .generate(&digest_system_prompt(), &digest_user_prompt(&items))
                 .await
             {
                 Some(summary) => summary,
-                None => fallback_rollup_summary(&items),
+                None => fallback_digest_summary(&items),
             }
         };
 
@@ -207,6 +212,104 @@ impl SummarizeMemoryUseCase {
             .upsert_node(&node, vector.as_deref())
             .await?;
         Ok(node)
+    }
+
+    /// Regenerate the per-project digest nodes (`memory://projects/<project>`),
+    /// one per distinct project/namespace project found on stored items: the
+    /// index an agent reads first when working in that project.
+    ///
+    /// Cheap to call repeatedly: a project's digest is only regenerated when one
+    /// of its items changed since the node was last written, and digests whose
+    /// project no longer exists (all items deleted or promoted to global) are
+    /// removed. Returns how many digests were (re)generated.
+    #[tracing::instrument(skip_all)]
+    pub async fn regenerate_project_digests(&self) -> Result<usize, DomainError> {
+        let items = self.memory_repo.list_items(None).await?;
+        let mut by_project: std::collections::BTreeMap<&str, Vec<&MemoryItem>> =
+            std::collections::BTreeMap::new();
+        for item in &items {
+            if let Some(project) = item.project() {
+                by_project.entry(project).or_default().push(item);
+            }
+        }
+
+        // Drop digests for projects that vanished from the store.
+        let existing = self.memory_repo.list_nodes(Some(NodeKind::Project)).await?;
+        let live_uris: std::collections::HashSet<String> = by_project
+            .keys()
+            .map(|project| project_digest_uri(project))
+            .collect();
+        for node in &existing {
+            if !live_uris.contains(node.uri()) {
+                if let Err(e) = self.memory_repo.delete_node(node.uri()).await {
+                    warn!(
+                        "failed to delete stale project digest '{}': {e}",
+                        node.uri()
+                    );
+                }
+            }
+        }
+
+        let mut regenerated = 0usize;
+        for (project, project_items) in by_project {
+            let uri = project_digest_uri(project);
+            let previous = self.memory_repo.find_node(&uri).await?;
+            // A sorted concatenation of item IDs + timestamps: it changes on any
+            // content edit, deletion, move, or addition, and is stored as the
+            // node's content so the next run can detect a change. Computed once
+            // and reused for both the staleness check and the written node.
+            let manifest: String = {
+                let mut pairs: Vec<String> = project_items
+                    .iter()
+                    .map(|i| format!("{}:{}", i.id(), i.updated_at()))
+                    .collect();
+                pairs.sort_unstable();
+                pairs.join(";")
+            };
+            // Skip projects whose items haven't changed. Compare both the newest
+            // updated_at (catches item content edits) and the manifest (catches
+            // deletions/moves/additions).
+            if let Some(ref prev) = previous {
+                let newest = project_items.iter().map(|i| i.updated_at()).max();
+                if newest.is_some_and(|t| t < prev.updated_at()) && prev.content() == manifest {
+                    continue;
+                }
+            }
+
+            let (abstract_, overview) = if project_items.len() < 2 {
+                fallback_project_digest_summary(project, &project_items)
+            } else {
+                match self
+                    .generate(
+                        &project_digest_system_prompt(),
+                        &project_digest_user_prompt(project, &project_items),
+                    )
+                    .await
+                {
+                    Some(summary) => summary,
+                    None => fallback_project_digest_summary(project, &project_items),
+                }
+            };
+
+            let now = unix_now();
+            let created_at = previous.map(|p| p.created_at()).unwrap_or(now);
+            let node = MemoryNode::new(
+                uri,
+                NodeKind::Project,
+                Some(PROJECTS_ROOT_URI.to_string()),
+                clamp(&abstract_, MAX_ABSTRACT_CHARS),
+                clamp(&overview, MAX_OVERVIEW_CHARS),
+                manifest,
+                created_at,
+                now,
+            );
+            let vector = self.embed_node(&node).await;
+            self.memory_repo
+                .upsert_node(&node, vector.as_deref())
+                .await?;
+            regenerated += 1;
+        }
+        Ok(regenerated)
     }
 
     /// Run one summarization call, parsing `{abstract, overview}` JSON with a
@@ -323,7 +426,7 @@ fn resource_user_prompt(source: &str, content: &str) -> String {
     prompt
 }
 
-fn rollup_system_prompt() -> String {
+fn digest_system_prompt() -> String {
     r#"You maintain a top-level index of an assistant's long-term memory about a user and their project.
 You are given the full list of stored memory items (preferences, experiences, skills, facts).
 Produce a summary an agent reads FIRST, before drilling into individual memories:
@@ -334,7 +437,7 @@ Do not invent anything not present in the items. Output ONLY a JSON object: {"ab
         .to_string()
 }
 
-fn rollup_user_prompt(items: &[MemoryItem]) -> String {
+fn digest_user_prompt(items: &[MemoryItem]) -> String {
     const MAX_ITEM_CHARS: usize = 400;
     let mut prompt = String::from("## Stored memory items\n\n");
     for item in items {
@@ -347,6 +450,59 @@ fn rollup_user_prompt(items: &[MemoryItem]) -> String {
     }
     prompt.push_str("\n\nSummarize the memory store as the specified JSON object.");
     clamp(&prompt, MAX_SUMMARY_INPUT_CHARS)
+}
+
+/// URI of the digest node for one project/namespace.
+///
+/// `resource_slug` is lossy — `docs/api.v2` and `docs_api_v2` slug identically —
+/// so a short hash of the *original* project string is appended to keep distinct
+/// projects on distinct URIs (otherwise their digests would overwrite each other
+/// and stale-node cleanup could not tell them apart). The readable slug is kept
+/// as a human-friendly prefix.
+fn project_digest_uri(project: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(project.as_bytes());
+    let short: String = hash.iter().take(4).map(|b| format!("{b:02x}")).collect();
+    format!("{PROJECTS_ROOT_URI}/{}-{short}", resource_slug(project))
+}
+
+fn project_digest_system_prompt() -> String {
+    r#"You maintain the index of an assistant's long-term memory about ONE project (or one namespace of related projects).
+You are given the memory items belonging to that project (preferences, experiences, skills, facts).
+Produce a summary an agent working in this project reads FIRST, before drilling into individual memories:
+- "abstract": ONE sentence (max ~35 words) capturing what this project is and what the memory covers at a glance.
+- "overview": a markdown outline grouping what is known by theme, naming the notable items so the reader knows what exists and can drill in. Keep it scannable.
+
+Do not invent anything not present in the items. Output ONLY a JSON object: {"abstract": "...", "overview": "..."}"#
+        .to_string()
+}
+
+fn project_digest_user_prompt(project: &str, items: &[&MemoryItem]) -> String {
+    const MAX_ITEM_CHARS: usize = 400;
+    let mut prompt = format!("## Memory items belonging to project '{project}'\n\n");
+    for item in items {
+        prompt.push_str(&format!(
+            "- [{}] {}: {}\n",
+            item.kind(),
+            item.name(),
+            clamp(&one_line(item.content()), MAX_ITEM_CHARS)
+        ));
+    }
+    prompt.push_str("\n\nSummarize this project's memory as the specified JSON object.");
+    clamp(&prompt, MAX_SUMMARY_INPUT_CHARS)
+}
+
+/// Deterministic fallback for a project digest when there is little to summarize
+/// or the model is unavailable.
+fn fallback_project_digest_summary(project: &str, items: &[&MemoryItem]) -> (String, String) {
+    let mut overview = format!("Memories belonging to '{project}':\n");
+    for item in items {
+        overview.push_str(&format!("- [{}] {}\n", item.kind(), item.name()));
+    }
+    (
+        format!("{} stored memories about project '{project}'.", items.len()),
+        overview,
+    )
 }
 
 /// Deterministic fallback used when a session cannot be summarized by the model.
@@ -374,9 +530,9 @@ fn fallback_session_summary(transcript: &SessionTranscript) -> (String, String) 
     )
 }
 
-/// Deterministic fallback for the rollup when there is nothing to summarize or
+/// Deterministic fallback for the digest when there is nothing to summarize or
 /// the model is unavailable.
-fn fallback_rollup_summary(items: &[MemoryItem]) -> (String, String) {
+fn fallback_digest_summary(items: &[MemoryItem]) -> (String, String) {
     if items.is_empty() {
         return (
             "No memories stored yet.".to_string(),
@@ -581,8 +737,8 @@ mod tests {
     }
 
     #[test]
-    fn empty_store_rollup_fallback() {
-        let (a, o) = fallback_rollup_summary(&[]);
+    fn empty_store_digest_fallback() {
+        let (a, o) = fallback_digest_summary(&[]);
         assert!(a.contains("No memories"));
         assert!(o.contains("empty"));
     }

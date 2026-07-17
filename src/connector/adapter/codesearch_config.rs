@@ -31,6 +31,62 @@ pub struct CodesearchConfig {
     /// Named OpenAI-compatible endpoints (LM Studio, vLLM, hosted OpenAI, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai: Option<OpenAiConfig>,
+
+    /// Long-term memory / dream-cycle configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryConfig>,
+}
+
+/// Configuration for the memory dream scheduler run by `codesearch serve`.
+///
+/// Every field is optional so a hand-edited partial section round-trips; the
+/// accessor methods apply the defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    /// Master switch for scheduled dreaming in serve mode (default `true`).
+    /// `codesearch memory dream` always works regardless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dream_enabled: Option<bool>,
+
+    /// Hours between full dream cycles in serve mode (default 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dream_interval_hours: Option<u64>,
+
+    /// Minutes a session must be inactive before it counts as finished and is
+    /// harvested (default 60).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_idle_minutes: Option<u64>,
+
+    /// Whether serve mode automatically imports finished sessions between
+    /// dream cycles (default `true`). Each import spends LLM extraction calls,
+    /// so users on paid endpoints may want this off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_import: Option<bool>,
+}
+
+impl MemoryConfig {
+    pub const DEFAULT_DREAM_INTERVAL_HOURS: u64 = 4;
+    pub const DEFAULT_SESSION_IDLE_MINUTES: u64 = 60;
+
+    pub fn dream_enabled(&self) -> bool {
+        self.dream_enabled.unwrap_or(true)
+    }
+
+    pub fn dream_interval_hours(&self) -> u64 {
+        self.dream_interval_hours
+            .filter(|h| *h > 0)
+            .unwrap_or(Self::DEFAULT_DREAM_INTERVAL_HOURS)
+    }
+
+    pub fn session_idle_minutes(&self) -> u64 {
+        self.session_idle_minutes
+            .filter(|m| *m > 0)
+            .unwrap_or(Self::DEFAULT_SESSION_IDLE_MINUTES)
+    }
+
+    pub fn auto_import(&self) -> bool {
+        self.auto_import.unwrap_or(true)
+    }
 }
 
 /// A set of named OpenAI-compatible endpoints plus which one is active.

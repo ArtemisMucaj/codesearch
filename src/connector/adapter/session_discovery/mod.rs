@@ -20,6 +20,44 @@ use crate::domain::{
     DiscoveredSession, DomainError, SessionLocator, SessionSource, SessionTranscript,
 };
 
+/// [`crate::application::SessionDiscovery`] adapter over the local session
+/// stores, used by the dream use case to harvest finished sessions. Discovery
+/// and transcript loading are blocking file/SQLite I/O, so both are pushed off
+/// the async runtime via `spawn_blocking`.
+pub struct LocalSessionDiscovery {
+    /// Metadata database consulted to map a session's working directory to
+    /// the namespace it was indexed under, so its memories carry that
+    /// namespace as their project. `None` skips the lookup (memories fall back
+    /// to the git remote, otherwise global).
+    db_path: Option<std::path::PathBuf>,
+}
+
+impl LocalSessionDiscovery {
+    pub fn new(db_path: Option<std::path::PathBuf>) -> Self {
+        Self { db_path }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::application::SessionDiscovery for LocalSessionDiscovery {
+    async fn discover(&self) -> Result<Vec<DiscoveredSession>, DomainError> {
+        tokio::task::spawn_blocking(discover_all_sessions)
+            .await
+            .map_err(|e| DomainError::internal(format!("session discovery task panicked: {e}")))
+    }
+
+    async fn load_transcript(
+        &self,
+        session: &DiscoveredSession,
+    ) -> Result<SessionTranscript, DomainError> {
+        let owned = session.clone();
+        let db_path = self.db_path.clone();
+        tokio::task::spawn_blocking(move || load_transcript(&owned, db_path.as_deref()))
+            .await
+            .map_err(|e| DomainError::internal(format!("transcript load task panicked: {e}")))?
+    }
+}
+
 /// Characters of end-of-session preview surfaced in the picker.
 pub(crate) const PREVIEW_CHARS: usize = 240;
 
@@ -45,7 +83,7 @@ pub fn discover_all_sessions() -> Vec<DiscoveredSession> {
             Err(e) => tracing::warn!("session discovery for {name} failed: {e}"),
         }
     }
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
     sessions
 }
 
@@ -76,9 +114,14 @@ pub fn discover_all_sessions_streaming(sink: std::sync::mpsc::Sender<Vec<Discove
 }
 
 /// Materialize the full transcript for a discovered session, so it can be run
-/// through the import pipeline. The session's working directory (when known) is
-/// carried into the transcript as its `project` scope.
-pub fn load_transcript(session: &DiscoveredSession) -> Result<SessionTranscript, DomainError> {
+/// through the import pipeline. The session's working directory (when known)
+/// is carried into the transcript as its memory project, resolved through the
+/// shared [`resolve_memory_project`](crate::connector::api::repo_resolver::resolve_memory_project)
+/// chain (namespace → git remote → tree inference → global).
+pub fn load_transcript(
+    session: &DiscoveredSession,
+    db_path: Option<&std::path::Path>,
+) -> Result<SessionTranscript, DomainError> {
     let mut transcript = match (&session.source, &session.locator) {
         (SessionSource::Claude, SessionLocator::File(path)) => {
             crate::connector::adapter::parse_transcript_file(std::path::Path::new(path))
@@ -102,19 +145,16 @@ pub fn load_transcript(session: &DiscoveredSession) -> Result<SessionTranscript,
         ))),
     }?;
 
-    // The discovery layer knows the session's cwd; reduce it to a project name
-    // (the last path component) so extracted memories can be scoped to it.
-    transcript.project = session.cwd.as_deref().and_then(project_from_cwd);
+    // The discovery layer knows the session's cwd; resolve it to a memory
+    // project (namespace, git remote, or inferred from the directory tree —
+    // else global) so extracted memories can be assigned to it. Passing the
+    // optional db through the one resolver keeps the fallback chain in a single
+    // place; without a database it degrades to the git remote alone.
+    transcript.project = session
+        .cwd
+        .as_deref()
+        .and_then(|cwd| crate::connector::api::repo_resolver::resolve_memory_project(db_path, cwd));
     Ok(transcript)
-}
-
-/// Reduce a working-directory path to a short project name (its last non-empty
-/// path component). `None` for an empty or root-only path.
-pub(crate) fn project_from_cwd(cwd: &str) -> Option<String> {
-    cwd.trim_end_matches(['/', '\\'])
-        .rsplit(['/', '\\'])
-        .find(|c| !c.is_empty())
-        .map(str::to_string)
 }
 
 /// The absolute path to `$HOME`, or an error when it cannot be determined.

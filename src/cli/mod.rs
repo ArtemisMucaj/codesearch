@@ -6,6 +6,12 @@ pub const DEFAULT_MCP_PORT: u16 = 8677;
 /// Default port for the REST/JSON management API started by `codesearch serve`.
 pub const DEFAULT_MGMT_PORT: u16 = 8676;
 
+/// Namespace used when `--namespace` is not given. Repositories indexed here
+/// were not deliberately grouped by the user, so features that treat a shared
+/// namespace as "these projects belong together" (e.g. memory scoping) must
+/// not apply that meaning to this one.
+pub const DEFAULT_NAMESPACE: &str = "search";
+
 /// Validates a namespace for use as a DuckDB schema name.
 ///
 /// Schema names are always double-quoted in generated SQL, so almost any
@@ -297,6 +303,16 @@ pub enum MemorySubcommand {
         #[arg(short, long, value_enum)]
         kind: Option<MemoryKindArg>,
 
+        /// Restrict to memories relevant in this project/namespace (its items
+        /// plus globals). Defaults to the project resolved from the current
+        /// directory; pass --all-projects to search everything.
+        #[arg(long, conflicts_with = "all_projects")]
+        project: Option<String>,
+
+        /// Search across every project instead of the current directory's.
+        #[arg(long)]
+        all_projects: bool,
+
         /// Output format: text or json.
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormatTextJson,
@@ -353,9 +369,30 @@ pub enum MemorySubcommand {
         llm: LlmTarget,
     },
 
+    /// Run one dream cycle: harvest finished sessions, then consolidate the
+    /// memory store.
+    ///
+    /// Harvest imports sessions that have been inactive for at least the idle
+    /// window and were never imported. Consolidation clusters near-duplicate
+    /// memories by embedding similarity and asks the configured LLM to merge
+    /// them — resolving contradictions into boundary insights ("X holds in
+    /// context A, Y in context B") rather than dropping a side — then a
+    /// reflection pass promotes cross-session patterns (repeated experiences
+    /// into a skill, per-project facts into globals). `codesearch serve` runs
+    /// this automatically on a schedule; this command runs one cycle now.
+    Dream {
+        /// LLM provider: 'open-ai' (default), 'anthropic', or 'copilot'.
+        #[arg(long, value_enum, default_value = "open-ai")]
+        llm: LlmTarget,
+
+        /// Minutes a session must be inactive to count as finished.
+        #[arg(long, default_value = "60")]
+        idle_minutes: u64,
+    },
+
     /// Browse the memory virtual filesystem (L0/L1 abstracts).
     ///
-    /// With no URI, lists the top-level roots (the whole-memory rollup and the
+    /// With no URI, lists the top-level roots (the whole-memory digest and the
     /// sessions/resources directories). With a directory URI, lists its
     /// children with their one-line abstracts — the "read this first" view
     /// before drilling into a node with `memory show <uri>`.

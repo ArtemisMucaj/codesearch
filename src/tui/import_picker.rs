@@ -194,7 +194,7 @@ fn drain_incoming(state: &mut PickerState, incoming: &Receiver<Vec<DiscoveredSes
     if changed {
         state
             .sessions
-            .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            .sort_by_key(|s| std::cmp::Reverse(s.updated_at));
         // The transcript cache is keyed by index, which the re-sort invalidates;
         // clear it and let the highlighted session reload lazily next tick.
         state.cache.clear();

@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 
-use crate::domain::{DomainError, ImportedSession, MemoryItem, MemoryKind, MemoryNode, NodeKind};
+use crate::domain::{
+    DomainError, DreamRun, ImportedSession, MemoryItem, MemoryKind, MemoryNode, NodeKind,
+};
 
 /// Persistence port for long-term memory items and imported-session records.
 ///
@@ -39,21 +41,38 @@ pub trait MemoryRepository: Send + Sync {
 
     /// Cosine-similarity search over item embeddings.
     /// Returns `(item, score)` pairs, best first, score in `[0, 1]`.
+    ///
+    /// `project` filters to items relevant in that project/namespace —
+    /// global items plus items belonging to exactly that project. `None`
+    /// searches everything.
     async fn search_semantic(
         &self,
         vector: &[f32],
         kind: Option<MemoryKind>,
+        project: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(MemoryItem, f32)>, DomainError>;
 
     /// Case-insensitive keyword search over item names and content.
-    /// Returns `(item, score)` pairs, best first.
+    /// Returns `(item, score)` pairs, best first. `project` filters as in
+    /// [`Self::search_semantic`].
     async fn search_keyword(
         &self,
         query: &str,
         kind: Option<MemoryKind>,
+        project: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(MemoryItem, f32)>, DomainError>;
+
+    /// Stored embedding for every item that has one, as `(item_id, vector)`.
+    /// Items without a vector (embeddings disabled at write time) are omitted.
+    /// Used by dream consolidation to cluster near-duplicate memories.
+    async fn list_item_vectors(&self) -> Result<Vec<(String, Vec<f32>)>, DomainError>;
+
+    /// Stored embedding for a single item by ID, or `None` if it has none.
+    /// Used to preserve an item's existing vector across an update whose
+    /// re-embedding transiently failed, so it is not dropped from recall.
+    async fn find_item_vector(&self, id: &str) -> Result<Option<Vec<f32>>, DomainError>;
 
     /// Record that a session has been imported (idempotence marker).
     async fn record_session(&self, session: &ImportedSession) -> Result<(), DomainError>;
@@ -79,6 +98,9 @@ pub trait MemoryRepository: Send + Sync {
     /// Fetch a single node by its `memory://` URI.
     async fn find_node(&self, uri: &str) -> Result<Option<MemoryNode>, DomainError>;
 
+    /// Delete a node (and its embedding) by URI. Returns whether it existed.
+    async fn delete_node(&self, uri: &str) -> Result<bool, DomainError>;
+
     /// List the direct children of a directory URI (its immediate members in
     /// the virtual filesystem), newest first.
     async fn list_child_nodes(&self, parent_uri: &str) -> Result<Vec<MemoryNode>, DomainError>;
@@ -103,6 +125,14 @@ pub trait MemoryRepository: Send + Sync {
         kind: Option<NodeKind>,
         limit: usize,
     ) -> Result<Vec<(MemoryNode, f32)>, DomainError>;
+
+    // ── Dream runs ───────────────────────────────────────────────────────
+
+    /// Record a completed dream cycle.
+    async fn record_dream_run(&self, run: &DreamRun) -> Result<(), DomainError>;
+
+    /// The most recently finished dream run, if any.
+    async fn last_dream_run(&self) -> Result<Option<DreamRun>, DomainError>;
 
     /// Aggregate memory-store statistics: item counts by kind, session count,
     /// and node counts by kind.

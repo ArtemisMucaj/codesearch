@@ -278,7 +278,7 @@ struct ScopeDef {
 /// function.  Fixing this would require end-line information, which SCIP does
 /// not provide for definition occurrences.
 fn find_enclosing_scope(scope_defs: &[ScopeDef], line: u32) -> Option<ScopeDef> {
-    scope_defs.iter().filter(|s| s.line <= line).last().cloned()
+    scope_defs.iter().rfind(|s| s.line <= line).cloned()
 }
 
 // ---------------------------------------------------------------------------
@@ -435,7 +435,7 @@ fn extract_enclosing_scope(symbol: &str) -> Option<String> {
     let descriptor = parts.get(4)?;
 
     // Find the last `#` or `/` separator — anything before it is the scope.
-    if let Some(pos) = descriptor.rfind(|c| c == '#' || c == '/') {
+    if let Some(pos) = descriptor.rfind(['#', '/']) {
         let scope = descriptor[..pos]
             .trim_end_matches('.')
             .trim_end_matches('#')

@@ -106,11 +106,7 @@ impl ImpactAnalysis {
 
         let mut path: Vec<&'a ImpactNode> = vec![leaf];
         let mut current = leaf;
-        loop {
-            let via = match current.via_symbol.as_deref() {
-                Some(v) => v,
-                None => break,
-            };
+        while let Some(via) = current.via_symbol.as_deref() {
             let parent_depth = current.depth.saturating_sub(1);
             if parent_depth == 0 {
                 break;

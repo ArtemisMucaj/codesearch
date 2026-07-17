@@ -10,9 +10,11 @@
 //! handlers (explain / index) mounted under `/api/stream/...`, plus the
 //! `/api/openapi.json` document, all wired in [`server::routes`].
 
+mod dream;
 mod error;
 mod handlers;
 mod server;
 mod streaming;
 
+pub use dream::DreamService;
 pub use server::{routes, run_management_server, AppState};

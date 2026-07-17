@@ -244,7 +244,7 @@ impl RepositoryOverviewUseCase {
                 chunk_count: stats.chunk_count,
             })
             .collect();
-        languages.sort_by(|a, b| b.chunk_count.cmp(&a.chunk_count));
+        languages.sort_by_key(|l| std::cmp::Reverse(l.chunk_count));
 
         Ok(Some(OverviewStats {
             name: repo.name().to_string(),

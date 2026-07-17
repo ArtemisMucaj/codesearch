@@ -14,7 +14,9 @@ use tokio::sync::Mutex;
 use tracing::debug;
 
 use crate::application::{MemoryRepository, MemoryStats};
-use crate::domain::{DomainError, ImportedSession, MemoryItem, MemoryKind, MemoryNode, NodeKind};
+use crate::domain::{
+    DomainError, DreamRun, ImportedSession, MemoryItem, MemoryKind, MemoryNode, NodeKind,
+};
 
 /// File name of the memory database inside the data directory.
 pub const MEMORY_DB_FILE: &str = "memory.duckdb";
@@ -70,7 +72,7 @@ impl DuckdbMemoryRepository {
                 name TEXT NOT NULL,
                 content TEXT NOT NULL,
                 source_session_id TEXT,
-                scope TEXT,
+                project TEXT,
                 created_at BIGINT NOT NULL,
                 updated_at BIGINT NOT NULL,
                 update_count BIGINT NOT NULL DEFAULT 0,
@@ -101,14 +103,19 @@ impl DuckdbMemoryRepository {
                 node_uri TEXT PRIMARY KEY,
                 vector FLOAT[{dimensions}] NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS memory_dream_runs (
+                id TEXT PRIMARY KEY,
+                started_at BIGINT NOT NULL,
+                finished_at BIGINT NOT NULL,
+                sessions_imported BIGINT NOT NULL,
+                clusters_found BIGINT NOT NULL,
+                operations_applied BIGINT NOT NULL,
+                operations_skipped BIGINT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'completed'
+            );
             "#
         ))
         .map_err(|e| DomainError::storage(format!("Failed to initialize memory schema: {e}")))?;
-
-        // Migration: add the project `scope` column to databases created before
-        // scoping existed. Idempotent — a no-op once the column is present.
-        conn.execute_batch("ALTER TABLE memory_items ADD COLUMN IF NOT EXISTS scope TEXT")
-            .map_err(|e| DomainError::storage(format!("Failed to add memory scope column: {e}")))?;
 
         Self::check_meta(&conn, "dimensions", &dimensions.to_string())?;
         Self::check_meta(&conn, "embedding_model", embedding_model)?;
@@ -178,6 +185,21 @@ impl DuckdbMemoryRepository {
         Ok(s)
     }
 
+    /// Run a blocking DuckDB query off the async runtime. DuckDB calls are
+    /// synchronous I/O, so they must not execute on a Tokio worker thread; this
+    /// clones the connection handle, runs `f` under the blocking lock inside
+    /// `spawn_blocking`, and propagates a join failure as a storage error.
+    async fn query_blocking<T, F>(&self, f: F) -> Result<T, DomainError>
+    where
+        F: FnOnce(&Connection) -> Result<T, DomainError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || f(&conn.blocking_lock()))
+            .await
+            .map_err(|e| DomainError::storage(format!("Blocking task panicked: {e}")))?
+    }
+
     fn item_from_row(row: &Row<'_>) -> Result<MemoryItem, duckdb::Error> {
         let kind_str: String = row.get(1)?;
         let kind = MemoryKind::parse(&kind_str).unwrap_or(MemoryKind::Fact);
@@ -211,7 +233,7 @@ impl DuckdbMemoryRepository {
 }
 
 const ITEM_COLUMNS: &str =
-    "id, kind, name, content, source_session_id, scope, created_at, updated_at, update_count";
+    "id, kind, name, content, source_session_id, project, created_at, updated_at, update_count";
 
 const NODE_COLUMNS: &str =
     "uri, kind, parent_uri, abstract, overview, content, created_at, updated_at";
@@ -251,7 +273,7 @@ impl MemoryRepository for DuckdbMemoryRepository {
                 item.name(),
                 item.content(),
                 item.source_session_id(),
-                item.scope(),
+                item.project(),
                 item.created_at(),
                 item.updated_at(),
                 item.update_count() as i64,
@@ -363,12 +385,24 @@ impl MemoryRepository for DuckdbMemoryRepository {
         &self,
         vector: &[f32],
         kind: Option<MemoryKind>,
+        project: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(MemoryItem, f32)>, DomainError> {
         let literal = self.vector_literal(vector)?;
-        let kind_clause = match kind {
-            Some(k) => format!("WHERE i.kind = '{}'", k.as_str()),
-            None => String::new(),
+        let mut conditions: Vec<String> = Vec::new();
+        if let Some(k) = kind {
+            conditions.push(format!("i.kind = '{}'", k.as_str()));
+        }
+        if let Some(p) = project {
+            conditions.push(format!(
+                "(i.project IS NULL OR i.project = '{}')",
+                sql_quote(p)
+            ));
+        }
+        let kind_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
         };
         let sql = format!(
             "SELECT {cols}, 1.0 - array_cosine_distance(v.vector, {literal}) AS score \
@@ -403,6 +437,7 @@ impl MemoryRepository for DuckdbMemoryRepository {
         &self,
         query: &str,
         kind: Option<MemoryKind>,
+        project: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(MemoryItem, f32)>, DomainError> {
         let terms: Vec<String> = query
@@ -433,10 +468,16 @@ impl MemoryRepository for DuckdbMemoryRepository {
             })
             .collect();
         let score_expr = format!("({}) / {}.0", match_cases.join(" + "), terms.len());
-        let kind_clause = match kind {
+        let mut kind_clause = match kind {
             Some(k) => format!("AND kind = '{}'", k.as_str()),
             None => String::new(),
         };
+        if let Some(p) = project {
+            kind_clause.push_str(&format!(
+                " AND (project IS NULL OR project = '{}')",
+                sql_quote(p)
+            ));
+        }
         let sql = format!(
             "SELECT {ITEM_COLUMNS}, {score_expr} AS score \
              FROM memory_items \
@@ -458,6 +499,60 @@ impl MemoryRepository for DuckdbMemoryRepository {
             .map_err(|e| DomainError::storage(format!("Keyword memory search failed: {e}")))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| DomainError::storage(format!("Failed to read keyword search row: {e}")))
+    }
+
+    async fn list_item_vectors(&self) -> Result<Vec<(String, Vec<f32>)>, DomainError> {
+        // The full vector table is scanned and every row JSON-decoded here, so
+        // this must not run on a Tokio worker thread.
+        self.query_blocking(|conn| {
+            // FLOAT[n] values cannot be fetched as a native Rust type through
+            // duckdb-rs, so round-trip them through JSON text.
+            let mut stmt = conn
+                .prepare("SELECT item_id, to_json(vector)::VARCHAR FROM memory_vectors")
+                .map_err(|e| {
+                    DomainError::storage(format!("Failed to prepare list_item_vectors: {e}"))
+                })?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| DomainError::storage(format!("Failed to list item vectors: {e}")))?;
+            let mut vectors = Vec::new();
+            for row in rows {
+                let (item_id, json) = row
+                    .map_err(|e| DomainError::storage(format!("Failed to read vector row: {e}")))?;
+                let vector: Vec<f32> = serde_json::from_str(&json).map_err(|e| {
+                    DomainError::storage(format!("Failed to parse vector for '{item_id}': {e}"))
+                })?;
+                vectors.push((item_id, vector));
+            }
+            Ok(vectors)
+        })
+        .await
+    }
+
+    async fn find_item_vector(&self, id: &str) -> Result<Option<Vec<f32>>, DomainError> {
+        let id = id.to_string();
+        self.query_blocking(move |conn| {
+            let mut stmt = conn
+                .prepare("SELECT to_json(vector)::VARCHAR FROM memory_vectors WHERE item_id = ?1")
+                .map_err(|e| {
+                    DomainError::storage(format!("Failed to prepare find_item_vector: {e}"))
+                })?;
+            match stmt.query_row(params![id], |row| row.get::<_, String>(0)) {
+                Ok(json) => {
+                    let vector: Vec<f32> = serde_json::from_str(&json).map_err(|e| {
+                        DomainError::storage(format!("Failed to parse vector for '{id}': {e}"))
+                    })?;
+                    Ok(Some(vector))
+                }
+                Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(DomainError::storage(format!(
+                    "Failed to query item vector: {e}"
+                ))),
+            }
+        })
+        .await
     }
 
     async fn record_session(&self, session: &ImportedSession) -> Result<(), DomainError> {
@@ -577,6 +672,25 @@ impl MemoryRepository for DuckdbMemoryRepository {
             Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(DomainError::storage(format!("Failed to query node: {e}"))),
         }
+    }
+
+    async fn delete_node(&self, uri: &str) -> Result<bool, DomainError> {
+        let conn = self.conn.clone();
+        let uri = uri.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            conn.execute(
+                "DELETE FROM memory_node_vectors WHERE node_uri = ?1",
+                params![&uri],
+            )
+            .map_err(|e| DomainError::storage(format!("Failed to delete node vector: {e}")))?;
+            let deleted = conn
+                .execute("DELETE FROM memory_nodes WHERE uri = ?1", params![&uri])
+                .map_err(|e| DomainError::storage(format!("Failed to delete node: {e}")))?;
+            Ok(deleted > 0)
+        })
+        .await
+        .map_err(|e| DomainError::storage(format!("Blocking task panicked: {e}")))?
     }
 
     async fn list_child_nodes(&self, parent_uri: &str) -> Result<Vec<MemoryNode>, DomainError> {
@@ -722,42 +836,116 @@ impl MemoryRepository for DuckdbMemoryRepository {
             .map_err(|e| DomainError::storage(format!("Failed to read node search row: {e}")))
     }
 
-    async fn stats(&self) -> Result<MemoryStats, DomainError> {
-        let conn = self.conn.lock().await;
-
-        // Count items by kind
-        let mut items_by_kind: Vec<(String, u64)> = Vec::new();
-        for kind in MemoryKind::ALL {
-            let kind_str = kind.as_str();
-            let sql = format!("SELECT COUNT(*) FROM memory_items WHERE kind = '{kind_str}'");
-            let count: u64 = conn.query_row(&sql, [], |row| row.get(0)).unwrap_or(0);
-            items_by_kind.push((kind_str.to_string(), count));
-        }
-        let total_items: u64 = items_by_kind.iter().map(|(_, c)| c).sum();
-
-        // Count sessions
-        let total_sessions: u64 = conn
-            .query_row("SELECT COUNT(*) FROM memory_sessions", [], |row| row.get(0))
-            .unwrap_or(0);
-
-        // Count nodes by kind
-        let mut nodes_by_kind: Vec<(String, u64)> = Vec::new();
-        for kind in NodeKind::ALL {
-            let kind_str = kind.as_str();
-            let sql = format!("SELECT COUNT(*) FROM memory_nodes WHERE kind = '{kind_str}'");
-            let count: u64 = conn.query_row(&sql, [], |row| row.get(0)).unwrap_or(0);
-            nodes_by_kind.push((kind_str.to_string(), count));
-        }
-        let total_nodes: u64 = nodes_by_kind.iter().map(|(_, c)| c).sum();
-
-        Ok(MemoryStats {
-            total_items,
-            items_by_kind,
-            total_sessions,
-            total_nodes,
-            nodes_by_kind,
+    async fn record_dream_run(&self, run: &DreamRun) -> Result<(), DomainError> {
+        let run = run.clone();
+        self.query_blocking(move |conn| {
+            conn.execute(
+                "INSERT INTO memory_dream_runs \
+                 (id, started_at, finished_at, sessions_imported, clusters_found, \
+                  operations_applied, operations_skipped, status) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                 ON CONFLICT (id) DO UPDATE SET \
+                     started_at = excluded.started_at, \
+                     finished_at = excluded.finished_at, \
+                     sessions_imported = excluded.sessions_imported, \
+                     clusters_found = excluded.clusters_found, \
+                     operations_applied = excluded.operations_applied, \
+                     operations_skipped = excluded.operations_skipped, \
+                     status = excluded.status",
+                params![
+                    run.id,
+                    run.started_at,
+                    run.finished_at,
+                    run.sessions_imported as i64,
+                    run.clusters_found as i64,
+                    run.operations_applied as i64,
+                    run.operations_skipped as i64,
+                    run.status,
+                ],
+            )
+            .map_err(|e| DomainError::storage(format!("Failed to record dream run: {e}")))?;
+            Ok(())
         })
+        .await
     }
+
+    async fn last_dream_run(&self) -> Result<Option<DreamRun>, DomainError> {
+        self.query_blocking(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, started_at, finished_at, sessions_imported, clusters_found, \
+                            operations_applied, operations_skipped, status \
+                     FROM memory_dream_runs ORDER BY finished_at DESC LIMIT 1",
+                )
+                .map_err(|e| {
+                    DomainError::storage(format!("Failed to prepare last_dream_run: {e}"))
+                })?;
+            match stmt.query_row([], dream_run_from_row) {
+                Ok(run) => Ok(Some(run)),
+                Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(DomainError::storage(format!(
+                    "Failed to query dream run: {e}"
+                ))),
+            }
+        })
+        .await
+    }
+
+    async fn stats(&self) -> Result<MemoryStats, DomainError> {
+        self.query_blocking(|conn| {
+            // Count items by kind
+            let mut items_by_kind: Vec<(String, u64)> = Vec::new();
+            for kind in MemoryKind::ALL {
+                let kind_str = kind.as_str();
+                let sql = format!("SELECT COUNT(*) FROM memory_items WHERE kind = '{kind_str}'");
+                let count: u64 = conn.query_row(&sql, [], |row| row.get(0)).unwrap_or(0);
+                items_by_kind.push((kind_str.to_string(), count));
+            }
+            let total_items: u64 = items_by_kind.iter().map(|(_, c)| c).sum();
+
+            // Count sessions
+            let total_sessions: u64 = conn
+                .query_row("SELECT COUNT(*) FROM memory_sessions", [], |row| row.get(0))
+                .unwrap_or(0);
+
+            // Count nodes by kind
+            let mut nodes_by_kind: Vec<(String, u64)> = Vec::new();
+            for kind in NodeKind::ALL {
+                let kind_str = kind.as_str();
+                let sql = format!("SELECT COUNT(*) FROM memory_nodes WHERE kind = '{kind_str}'");
+                let count: u64 = conn.query_row(&sql, [], |row| row.get(0)).unwrap_or(0);
+                nodes_by_kind.push((kind_str.to_string(), count));
+            }
+            let total_nodes: u64 = nodes_by_kind.iter().map(|(_, c)| c).sum();
+
+            Ok(MemoryStats {
+                total_items,
+                items_by_kind,
+                total_sessions,
+                total_nodes,
+                nodes_by_kind,
+            })
+        })
+        .await
+    }
+}
+
+/// Escape a string for interpolation into a single-quoted SQL literal.
+fn sql_quote(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+fn dream_run_from_row(row: &Row<'_>) -> Result<DreamRun, duckdb::Error> {
+    Ok(DreamRun {
+        id: row.get(0)?,
+        started_at: row.get(1)?,
+        finished_at: row.get(2)?,
+        sessions_imported: row.get::<_, i64>(3)? as usize,
+        clusters_found: row.get::<_, i64>(4)? as usize,
+        operations_applied: row.get::<_, i64>(5)? as usize,
+        operations_skipped: row.get::<_, i64>(6)? as usize,
+        status: row.get(7)?,
+    })
 }
 
 fn session_from_row(row: &Row<'_>) -> Result<ImportedSession, duckdb::Error> {

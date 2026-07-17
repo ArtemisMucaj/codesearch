@@ -248,10 +248,12 @@ impl<'a> Router<'a> {
                     query,
                     num,
                     kind,
+                    project,
+                    all_projects,
                     format,
                 } => {
                     self.memory_controller
-                        .search(query, num, kind, format)
+                        .search(query, num, kind, project, all_projects, format)
                         .await
                 }
                 MemorySubcommand::List { kind, format } => {
@@ -267,6 +269,9 @@ impl<'a> Router<'a> {
                 }
                 MemorySubcommand::Tree { uri, format } => {
                     self.memory_controller.tree(uri, format).await
+                }
+                MemorySubcommand::Dream { llm, idle_minutes } => {
+                    self.memory_controller.dream(llm, idle_minutes).await
                 }
             },
             Commands::Create { .. } => Err(anyhow::anyhow!(

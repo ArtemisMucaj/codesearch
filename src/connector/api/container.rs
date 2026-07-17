@@ -8,8 +8,8 @@ use tracing::{debug, warn};
 use crate::application::{
     AnalysisRepository, CallGraphRepository, CallGraphUseCase, ChannelEndpointRepository,
     ChannelLinkUseCase, ChatClient, FileHashRepository, ImportSessionUseCase, MemoryBrowseUseCase,
-    MemoryExtractionUseCase, MemoryRepository, MemorySearchUseCase, MetadataRepository,
-    QueryExpander, SummarizeMemoryUseCase,
+    MemoryDreamUseCase, MemoryExtractionUseCase, MemoryRepository, MemorySearchUseCase,
+    MetadataRepository, QueryExpander, SummarizeMemoryUseCase,
 };
 use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::scip::ScipRunner;
@@ -854,8 +854,33 @@ impl Container {
         ))
     }
 
-    /// Summarization use case (session/resource nodes + rollup), driven by the
-    /// given chat model. Used to add resources and regenerate the rollup.
+    /// The dream cycle (harvest finished sessions + consolidate the memory
+    /// store), driven by the given chat model.
+    pub fn memory_dream_use_case(
+        &self,
+        chat_client: Arc<dyn ChatClient>,
+    ) -> Result<MemoryDreamUseCase> {
+        let memory_repo = self.memory_repository()?;
+        let import = self.memory_import_use_case(Arc::clone(&chat_client))?;
+        let summary = SummarizeMemoryUseCase::new(
+            Arc::clone(&chat_client),
+            Arc::clone(&memory_repo),
+            self.embedding_service.clone(),
+        );
+        Ok(MemoryDreamUseCase::new(
+            memory_repo,
+            chat_client,
+            self.embedding_service.clone(),
+            Arc::new(crate::connector::adapter::LocalSessionDiscovery::new(Some(
+                self.metadata_db_path(),
+            ))),
+            import,
+            summary,
+        ))
+    }
+
+    /// Summarization use case (session/resource nodes + digest), driven by the
+    /// given chat model. Used to add resources and regenerate the digest.
     pub fn memory_summary_use_case(
         &self,
         chat_client: Arc<dyn ChatClient>,
@@ -869,6 +894,11 @@ impl Container {
 
     pub fn data_dir(&self) -> &str {
         &self.config.data_dir
+    }
+
+    /// Path of the global metadata database (repositories, namespace config).
+    pub fn metadata_db_path(&self) -> PathBuf {
+        PathBuf::from(&self.config.data_dir).join("codesearch.duckdb")
     }
 
     /// The LLM backend this container was configured with (`--llm-target`).
