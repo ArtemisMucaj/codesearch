@@ -230,6 +230,21 @@ impl DuckdbMemoryRepository {
         Ok(s)
     }
 
+    /// Run a blocking DuckDB query off the async runtime. DuckDB calls are
+    /// synchronous I/O, so they must not execute on a Tokio worker thread; this
+    /// clones the connection handle, runs `f` under the blocking lock inside
+    /// `spawn_blocking`, and propagates a join failure as a storage error.
+    async fn query_blocking<T, F>(&self, f: F) -> Result<T, DomainError>
+    where
+        F: FnOnce(&Connection) -> Result<T, DomainError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || f(&conn.blocking_lock()))
+            .await
+            .map_err(|e| DomainError::storage(format!("Blocking task panicked: {e}")))?
+    }
+
     fn item_from_row(row: &Row<'_>) -> Result<MemoryItem, duckdb::Error> {
         let kind_str: String = row.get(1)?;
         let kind = MemoryKind::parse(&kind_str).unwrap_or(MemoryKind::Fact);
@@ -532,11 +547,9 @@ impl MemoryRepository for DuckdbMemoryRepository {
     }
 
     async fn list_item_vectors(&self) -> Result<Vec<(String, Vec<f32>)>, DomainError> {
-        let conn = self.conn.clone();
         // The full vector table is scanned and every row JSON-decoded here, so
         // this must not run on a Tokio worker thread.
-        tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
+        self.query_blocking(|conn| {
             // FLOAT[n] values cannot be fetched as a native Rust type through
             // duckdb-rs, so round-trip them through JSON text.
             let mut stmt = conn
@@ -561,14 +574,11 @@ impl MemoryRepository for DuckdbMemoryRepository {
             Ok(vectors)
         })
         .await
-        .map_err(|e| DomainError::storage(format!("Blocking task panicked: {e}")))?
     }
 
     async fn find_item_vector(&self, id: &str) -> Result<Option<Vec<f32>>, DomainError> {
-        let conn = self.conn.clone();
         let id = id.to_string();
-        tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
+        self.query_blocking(move |conn| {
             let mut stmt = conn
                 .prepare("SELECT to_json(vector)::VARCHAR FROM memory_vectors WHERE item_id = ?1")
                 .map_err(|e| {
@@ -588,7 +598,6 @@ impl MemoryRepository for DuckdbMemoryRepository {
             }
         })
         .await
-        .map_err(|e| DomainError::storage(format!("Blocking task panicked: {e}")))?
     }
 
     async fn record_session(&self, session: &ImportedSession) -> Result<(), DomainError> {
@@ -873,10 +882,8 @@ impl MemoryRepository for DuckdbMemoryRepository {
     }
 
     async fn record_dream_run(&self, run: &DreamRun) -> Result<(), DomainError> {
-        let conn = self.conn.clone();
         let run = run.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
+        self.query_blocking(move |conn| {
             conn.execute(
                 "INSERT INTO memory_dream_runs \
                  (id, started_at, finished_at, sessions_imported, clusters_found, \
@@ -905,13 +912,10 @@ impl MemoryRepository for DuckdbMemoryRepository {
             Ok(())
         })
         .await
-        .map_err(|e| DomainError::storage(format!("Blocking task panicked: {e}")))?
     }
 
     async fn last_dream_run(&self) -> Result<Option<DreamRun>, DomainError> {
-        let conn = self.conn.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
+        self.query_blocking(|conn| {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, started_at, finished_at, sessions_imported, clusters_found, \
@@ -930,14 +934,10 @@ impl MemoryRepository for DuckdbMemoryRepository {
             }
         })
         .await
-        .map_err(|e| DomainError::storage(format!("Blocking task panicked: {e}")))?
     }
 
     async fn stats(&self) -> Result<MemoryStats, DomainError> {
-        let conn = self.conn.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-
+        self.query_blocking(|conn| {
             // Count items by kind
             let mut items_by_kind: Vec<(String, u64)> = Vec::new();
             for kind in MemoryKind::ALL {
@@ -972,7 +972,6 @@ impl MemoryRepository for DuckdbMemoryRepository {
             })
         })
         .await
-        .map_err(|e| DomainError::storage(format!("Blocking task panicked: {e}")))?
     }
 }
 

@@ -32,7 +32,7 @@ impl<'a> MemoryController<'a> {
         let cwd = std::env::current_dir().ok()?.to_string_lossy().into_owned();
         // Resolution opens DuckDB read-only (blocking I/O).
         tokio::task::spawn_blocking(move || {
-            crate::connector::api::repo_resolver::resolve_memory_project(&db_path, &cwd)
+            crate::connector::api::repo_resolver::resolve_memory_project(Some(&db_path), &cwd)
         })
         .await
         .ok()

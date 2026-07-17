@@ -55,7 +55,6 @@ pub(crate) async fn upsert_preserving_identity(
     now: i64,
 ) -> Result<(), DomainError> {
     let existing = memory_repo.find_item(kind, name).await?;
-    let previous_id = existing.as_ref().map(|prev| prev.id().to_string());
     let item = match existing {
         Some(prev) => MemoryItem::new(
             prev.id().to_string(),
@@ -85,14 +84,12 @@ pub(crate) async fn upsert_preserving_identity(
     // `upsert_item` clears any prior vector and only re-inserts the one passed
     // in, so a transient embedding failure must not fall through as `None` —
     // that would permanently drop an updated item from semantic recall. On
-    // failure, carry the existing item's stored vector forward instead.
+    // failure, carry the item's existing stored vector forward instead (`item`
+    // reuses the previous id when updating; a brand-new item simply has none).
     let vector = match embed_memory_item(embedding_service, &item).await {
         ItemEmbedding::Ready(vector) => Some(vector),
         ItemEmbedding::Disabled => None,
-        ItemEmbedding::Failed => match &previous_id {
-            Some(id) => memory_repo.find_item_vector(id).await?,
-            None => None,
-        },
+        ItemEmbedding::Failed => memory_repo.find_item_vector(item.id()).await?,
     };
     memory_repo.upsert_item(&item, vector.as_deref()).await
 }

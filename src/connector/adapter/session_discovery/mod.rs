@@ -27,8 +27,8 @@ use crate::domain::{
 pub struct LocalSessionDiscovery {
     /// Metadata database consulted to map a session's working directory to
     /// the namespace it was indexed under, so its memories carry that
-    /// namespace as their project instead of the bare directory name. `None`
-    /// skips the lookup (memories fall back to the directory name).
+    /// namespace as their project. `None` skips the lookup (memories fall back
+    /// to the git remote, otherwise global).
     db_path: Option<std::path::PathBuf>,
 }
 
@@ -115,10 +115,9 @@ pub fn discover_all_sessions_streaming(sink: std::sync::mpsc::Sender<Vec<Discove
 
 /// Materialize the full transcript for a discovered session, so it can be run
 /// through the import pipeline. The session's working directory (when known)
-/// is carried into the transcript as its memory project: the namespace the
-/// directory was indexed under when `db_path` resolves one (repositories
-/// deliberately grouped in a namespace share memory), otherwise the project
-/// directory name.
+/// is carried into the transcript as its memory project, resolved through the
+/// shared [`resolve_memory_project`](crate::connector::api::repo_resolver::resolve_memory_project)
+/// chain (namespace → git remote → tree inference → global).
 pub fn load_transcript(
     session: &DiscoveredSession,
     db_path: Option<&std::path::Path>,
@@ -148,13 +147,13 @@ pub fn load_transcript(
 
     // The discovery layer knows the session's cwd; resolve it to a memory
     // project (namespace, git remote, or inferred from the directory tree —
-    // else global) so extracted memories can be assigned to it. Without a
-    // metadata database there is nothing to match against, so fall back to the
-    // git remote alone and otherwise leave the session global.
-    transcript.project = session.cwd.as_deref().and_then(|cwd| match db_path {
-        Some(db) => crate::connector::api::repo_resolver::resolve_memory_project(db, cwd),
-        None => crate::application::git_remote::detect_remote(std::path::Path::new(cwd)),
-    });
+    // else global) so extracted memories can be assigned to it. Passing the
+    // optional db through the one resolver keeps the fallback chain in a single
+    // place; without a database it degrades to the git remote alone.
+    transcript.project = session
+        .cwd
+        .as_deref()
+        .and_then(|cwd| crate::connector::api::repo_resolver::resolve_memory_project(db_path, cwd));
     Ok(transcript)
 }
 

@@ -1354,7 +1354,7 @@ async fn memory_project_prefers_indexed_namespace_over_directory_name() {
     let cwd = canonical.to_string_lossy().into_owned();
     // Indexed under a user-created namespace: sessions share its project.
     assert_eq!(
-        codesearch::resolve_memory_project(&db_path, &cwd),
+        codesearch::resolve_memory_project(Some(&db_path), &cwd),
         Some("teamns".to_string())
     );
 
@@ -1365,13 +1365,16 @@ async fn memory_project_prefers_indexed_namespace_over_directory_name() {
         conn.execute("UPDATE repositories SET namespace = 'search'", [])
             .unwrap();
     }
-    assert_eq!(codesearch::resolve_memory_project(&db_path, &cwd), None);
+    assert_eq!(
+        codesearch::resolve_memory_project(Some(&db_path), &cwd),
+        None
+    );
 
     // Not indexed at all, no remote, nothing indexed along the path: global.
     let other = dir.path().join("otherproj");
     std::fs::create_dir(&other).unwrap();
     assert_eq!(
-        codesearch::resolve_memory_project(&db_path, &other.to_string_lossy()),
+        codesearch::resolve_memory_project(Some(&db_path), &other.to_string_lossy()),
         None
     );
 }
@@ -1414,7 +1417,7 @@ async fn memory_project_infers_namespace_from_contained_repos() {
 
     // Running in the workspace root (not itself a repo) infers the shared ns.
     assert_eq!(
-        codesearch::resolve_memory_project(&db_path, &ws.to_string_lossy()),
+        codesearch::resolve_memory_project(Some(&db_path), &ws.to_string_lossy()),
         Some("backend".to_string())
     );
 
@@ -1431,7 +1434,7 @@ async fn memory_project_infers_namespace_from_contained_repos() {
         .unwrap();
     }
     assert_eq!(
-        codesearch::resolve_memory_project(&db_path, &ws.to_string_lossy()),
+        codesearch::resolve_memory_project(Some(&db_path), &ws.to_string_lossy()),
         None
     );
 }
@@ -1466,7 +1469,7 @@ async fn memory_project_infers_namespace_from_enclosing_repo() {
     }
 
     assert_eq!(
-        codesearch::resolve_memory_project(&db_path, &cwd.to_string_lossy()),
+        codesearch::resolve_memory_project(Some(&db_path), &cwd.to_string_lossy()),
         Some("backend".to_string())
     );
 }
@@ -1493,7 +1496,7 @@ async fn memory_project_uses_stable_remote_when_not_yet_indexed() {
     let db_path = dir.path().join("codesearch.duckdb");
 
     // Not indexed at all: the remote is the project, not the directory name.
-    let before = codesearch::resolve_memory_project(&db_path, &cwd);
+    let before = codesearch::resolve_memory_project(Some(&db_path), &cwd);
     assert_eq!(before.as_deref(), Some("github.com/owner/repo"));
 
     // Later indexed under the default namespace: the project is unchanged, so
@@ -1513,6 +1516,6 @@ async fn memory_project_uses_stable_remote_when_not_yet_indexed() {
         )
         .unwrap();
     }
-    let after = codesearch::resolve_memory_project(&db_path, &cwd);
+    let after = codesearch::resolve_memory_project(Some(&db_path), &cwd);
     assert_eq!(after, before, "remote-keyed project must survive indexing");
 }

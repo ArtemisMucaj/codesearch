@@ -232,7 +232,7 @@ impl MemoryDreamUseCase {
         }
     }
 
-    /// The body of one dream cycle (all four phases), factored out so
+    /// The body of one dream cycle (all five phases), factored out so
     /// [`execute`](Self::execute) can record the run on both success and error.
     async fn run_cycle(
         &self,
@@ -472,14 +472,7 @@ impl MemoryDreamUseCase {
         let system = prompt::reflection_system_prompt(MAX_REFLECTION_ITEMS);
         let user = prompt::reflection_user_prompt(items);
         let mut operations = self.complete_operations(&system, &user).await?;
-        let mut kept = 0usize;
-        operations.retain(|op| match op {
-            MemoryOperation::Upsert { .. } => {
-                kept += 1;
-                kept <= MAX_REFLECTION_ITEMS
-            }
-            MemoryOperation::Delete { .. } => true, // rejected later with a reason
-        });
+        cap_upserts(&mut operations, MAX_REFLECTION_ITEMS, None);
         Ok(operations)
     }
 
@@ -496,17 +489,11 @@ impl MemoryDreamUseCase {
         let refs: Vec<&MemoryItem> = items.iter().collect();
         let user = prompt::skill_synthesis_user_prompt(&refs);
         let mut operations = self.complete_operations(&system, &user).await?;
-        let mut kept = 0usize;
-        operations.retain(|op| match op {
-            MemoryOperation::Upsert { kind, .. } => {
-                if *kind != MemoryKind::Skill {
-                    return false;
-                }
-                kept += 1;
-                kept <= MAX_SKILL_SYNTHESIS_ITEMS
-            }
-            MemoryOperation::Delete { .. } => true, // rejected later with a reason
-        });
+        cap_upserts(
+            &mut operations,
+            MAX_SKILL_SYNTHESIS_ITEMS,
+            Some(MemoryKind::Skill),
+        );
         Ok(operations)
     }
 
@@ -655,6 +642,28 @@ impl MemoryDreamUseCase {
             warn!("failed to record dream run: {e}");
         }
     }
+}
+
+/// Cap a write-only pass's proposed upserts: keep at most `max_upserts`
+/// upserts, dropping any whose kind does not match `required_kind` (when set).
+/// Deletes are left in place — the caller rejects them with a reason so the
+/// skip is recorded.
+fn cap_upserts(
+    operations: &mut Vec<MemoryOperation>,
+    max_upserts: usize,
+    required_kind: Option<MemoryKind>,
+) {
+    let mut kept = 0usize;
+    operations.retain(|op| match op {
+        MemoryOperation::Upsert { kind, .. } => {
+            if required_kind.is_some_and(|required| *kind != required) {
+                return false;
+            }
+            kept += 1;
+            kept <= max_upserts
+        }
+        MemoryOperation::Delete { .. } => true,
+    });
 }
 
 /// Parse the model's dream JSON into validated, normalized operations,

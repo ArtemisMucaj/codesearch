@@ -84,15 +84,16 @@ pub fn parse_transcript(
     Ok(SessionTranscript {
         id: session_id.unwrap_or_else(|| fallback_id.to_string()),
         source: source.to_string(),
-        // Key on the recorded cwd's git remote — stable across clones and
-        // indexing. This parser has no metadata database, so it cannot infer a
-        // namespace; a cwd with no remote leaves the session global rather than
-        // scoping it to a throwaway directory name. When this transcript is
-        // materialized through session discovery, the db-aware resolver refines
-        // this further (namespace, or namespace inferred from the tree).
+        // Resolve the project through the one shared resolver. This parser has
+        // no metadata database, so it passes `None`: the resolver degrades to
+        // the git remote (stable across clones and indexing) and otherwise
+        // leaves the session global rather than scoping it to a throwaway
+        // directory name. When this transcript is materialized through session
+        // discovery, the db-aware resolver refines it further (namespace, or
+        // namespace inferred from the tree).
         project: cwd
             .as_deref()
-            .and_then(|c| crate::application::git_remote::detect_remote(std::path::Path::new(c))),
+            .and_then(|c| crate::connector::api::repo_resolver::resolve_memory_project(None, c)),
         messages,
     })
 }

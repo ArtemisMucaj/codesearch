@@ -355,7 +355,7 @@ async fn main() -> Result<()> {
             let default_project = if let Some(cwd) = cwd {
                 let cwd_str = cwd.to_string_lossy().to_string();
                 tokio::task::spawn_blocking(move || {
-                    codesearch::resolve_memory_project(&db_path, &cwd_str)
+                    codesearch::resolve_memory_project(Some(&db_path), &cwd_str)
                 })
                 .await
                 .ok()

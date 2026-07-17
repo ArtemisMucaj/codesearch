@@ -254,23 +254,24 @@ impl SummarizeMemoryUseCase {
         for (project, project_items) in by_project {
             let uri = project_digest_uri(project);
             let previous = self.memory_repo.find_node(&uri).await?;
+            // A sorted concatenation of item IDs + timestamps: it changes on any
+            // content edit, deletion, move, or addition, and is stored as the
+            // node's content so the next run can detect a change. Computed once
+            // and reused for both the staleness check and the written node.
+            let manifest: String = {
+                let mut pairs: Vec<String> = project_items
+                    .iter()
+                    .map(|i| format!("{}:{}", i.id(), i.updated_at()))
+                    .collect();
+                pairs.sort_unstable();
+                pairs.join(";")
+            };
             // Skip projects whose items haven't changed. Compare both the newest
-            // updated_at (catches item content edits) and a sorted concatenation
-            // of item IDs + timestamps (catches deletions/moves/additions).
+            // updated_at (catches item content edits) and the manifest (catches
+            // deletions/moves/additions).
             if let Some(ref prev) = previous {
                 let newest = project_items.iter().map(|i| i.updated_at()).max();
-                let current_manifest: String = {
-                    let mut pairs: Vec<String> = project_items
-                        .iter()
-                        .map(|i| format!("{}:{}", i.id(), i.updated_at()))
-                        .collect();
-                    pairs.sort_unstable();
-                    pairs.join(";")
-                };
-                let stored_manifest = prev.content();
-                if newest.is_some_and(|t| t < prev.updated_at())
-                    && stored_manifest == current_manifest
-                {
+                if newest.is_some_and(|t| t < prev.updated_at()) && prev.content() == manifest {
                     continue;
                 }
             }
@@ -292,14 +293,6 @@ impl SummarizeMemoryUseCase {
 
             let now = unix_now();
             let created_at = previous.map(|p| p.created_at()).unwrap_or(now);
-            let manifest: String = {
-                let mut pairs: Vec<String> = project_items
-                    .iter()
-                    .map(|i| format!("{}:{}", i.id(), i.updated_at()))
-                    .collect();
-                pairs.sort_unstable();
-                pairs.join(";")
-            };
             let node = MemoryNode::new(
                 uri,
                 NodeKind::Project,

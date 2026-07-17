@@ -208,11 +208,18 @@ fn query_repo(conn: &Connection, sql: &str, key: &str) -> Option<(String, String
 ///    indexed, so an un-inferable location contributes global memories rather
 ///    than a throwaway project.
 ///
+/// `db_path` is the metadata database, when one is available. It is optional
+/// because some callers (e.g. parsing a transcript file directly) have no
+/// database to match against; those simply skip the database-backed steps (1
+/// and 3) and rely on the git remote alone. Routing every caller through this
+/// one function keeps the fallback chain — and the "global when nothing is
+/// stable" decision — defined in a single place.
+///
 /// All resolution failures (missing database, lock timeouts) degrade to a later
 /// step and, ultimately, to `None`.
-pub fn resolve_memory_project(db_path: &Path, cwd: &str) -> Option<String> {
+pub fn resolve_memory_project(db_path: Option<&Path>, cwd: &str) -> Option<String> {
     // 1. Direct match → the namespace the repo was indexed under.
-    if let Some(ctx) = resolve(db_path, Path::new(cwd)) {
+    if let Some(ctx) = db_path.and_then(|db| resolve(db, Path::new(cwd))) {
         if ctx.namespace != crate::cli::DEFAULT_NAMESPACE {
             debug!(
                 "memory project for '{}' resolved to namespace '{}' (matched by {})",
@@ -222,7 +229,7 @@ pub fn resolve_memory_project(db_path: &Path, cwd: &str) -> Option<String> {
         }
     }
     // 2. Git remote — stable across indexing, so a repo's memories keep the same
-    //    project whether or not it has been indexed yet.
+    //    project whether or not it has been indexed yet. Needs no database.
     if let Some(remote) = detect_remote(Path::new(cwd)) {
         debug!(
             "memory project for '{}' resolved to remote '{}'",
@@ -232,7 +239,7 @@ pub fn resolve_memory_project(db_path: &Path, cwd: &str) -> Option<String> {
     }
     // 3. Infer the namespace from indexed repos along this path (ancestor or
     //    descendant), when they agree on one namespace.
-    if let Some(namespace) = infer_namespace_from_tree(db_path, cwd) {
+    if let Some(namespace) = db_path.and_then(|db| infer_namespace_from_tree(db, cwd)) {
         debug!(
             "memory project for '{}' inferred namespace '{}' from the directory tree",
             cwd, namespace
