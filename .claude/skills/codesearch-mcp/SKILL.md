@@ -125,19 +125,17 @@ tools report where it's used and where a change lands, from the call graph:
 Symbol arguments match by substring by default; supply an anchored regex when
 you need precision (see each tool's schema for the flag).
 
-## Phase 5 — Change, then re-index
+## Phase 5 — Keep results current after a change
 
-The call graph and architecture tools read what was captured at index time.
-After you change code, re-index so those tools stay accurate. Indexing and
-memory import are CLI operations, not MCP tools:
+The call graph and architecture tools reflect the index as of the last time the
+repository was indexed. After a substantial change, the newest code may not be
+reflected yet, so cross-check anything critical against the file you just edited.
 
-- Re-index: `codesearch index <path>` (incremental — only changed files
-  re-parse).
-- Record the session for next time: `codesearch memory import <transcript>`.
-
-If the server was started with `codesearch serve`, indexing and memory import
-also run over its management API and on a background schedule — but the two
-commands above always work.
+The server keeps the index fresh for you: when it was launched to also run the
+management API, it re-indexes and consolidates memory in the background on a
+schedule, so the tools converge on the current code without any action from you.
+If you need the very latest state immediately and the tools look stale, ask the
+user to re-index, then re-run the tool.
 
 ---
 
@@ -156,17 +154,37 @@ Parameters for each tool live on its schema — discover them at call time rathe
 than assuming. Prefer omitting optional filters (repository, language, limits)
 unless they're needed.
 
-## CLI-only (no MCP tool)
+## Composing tools
 
-Some capabilities are CLI-only. When the user wants one of these, reach for the
-CLI (or the [`codesearch` CLI skill](../codesearch/SKILL.md)), not an MCP tool:
+Most questions are answered by combining a few tool calls rather than one.
 
-- `explain` — LLM narrative of a symbol's call flow and business purpose.
-- `overview` — the one-page combined Markdown dossier.
-- `visualize` — HTML / SVG / Obsidian-canvas graph rendering.
-- `tui` — the interactive terminal UI.
-- `index`, `create`, `delete`, `memory import` / `add` / `dream` — indexing and
-  memory-writing operations.
+- Repository dossier — for "give me an overview of this repo", combine the map
+  tools yourself: `list_repositories` for scope and languages, `list_features`
+  for the critical behaviours, `list_clusters` for the modules, `channels` for
+  cross-service edges, and `couplings` for the fragile seams. Summarize the
+  results into the picture the user asked for.
+- Explain a symbol — the call graph gives you the material to explain a symbol
+  in your own words: `get_symbol_context` for its neighbourhood, then
+  `search_code` on the symbol name to pull its source, then narrate the purpose
+  and flow from what you read. Widen with `query_graph` (`callers_of` /
+  `callees_of`) hop by hop when the chain is deep.
+- Assess a change — before proposing an edit, `analyze_impact` for the blast
+  radius and `get_impacted_features` for the user-visible behaviours affected;
+  report both so the user sees the risk.
+- Locate then understand — `search_code` to find an unknown symbol, then the
+  Phase 4 tools on the symbol name it returns. Skip the search when you already
+  know the name.
+
+## Getting good results
+
+- Start every task at Phase 1: call `read_memory` (no arguments) for the digest,
+  then `list_memories` for preferences, before acting.
+- Prefer omitting optional filters (repository, language, limits) unless they're
+  needed; add them only to disambiguate or narrow a noisy result set.
+- Read tool output before relying on it — treat rankings and matches as leads,
+  and open the referenced files/lines to confirm.
+- Discover each tool's parameters from its schema at call time; don't assume
+  argument names or invent filters that may not exist.
 
 ## Keywords
 

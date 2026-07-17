@@ -43,7 +43,7 @@ extraction.
 
 ```bash
 # Downloads the latest release binary for your OS/arch into ~/.local/bin
-INSTALL_DIR="$HOME/.local/bin" sh .claude/skills/codesearch/install.sh
+INSTALL_DIR="$HOME/.local/bin" sh .claude/skills/codesearch-cli/install.sh
 codesearch --version
 ```
 
@@ -289,6 +289,36 @@ verbatim at `GET /api/openapi.json`). Overview:
   (`ide/zed/`).
 
 See [docs/features/editor-integrations.md](docs/features/editor-integrations.md).
+
+### Agent skills
+
+Two [agent skills](https://skills.md) ship in `.claude/skills/`, teaching an AI
+assistant how to drive codesearch as a runbook (recall memory → map the
+architecture → search by intent → trace call graph):
+
+| Skill | Use it when | Surface |
+|---|---|---|
+| `codesearch-cli` | The assistant runs shell commands | The `codesearch` CLI |
+| `codesearch-mcp` | The codesearch MCP server is connected | The MCP tools |
+
+Install with the [`skills`](https://www.npmjs.com/package/skills) CLI. Because
+the repo ships two skills, pick which with `--skill`:
+
+```bash
+# Install just one
+npx skills add ArtemisMucaj/codesearch --skill codesearch-cli
+npx skills add ArtemisMucaj/codesearch --skill codesearch-mcp
+
+# Or both, globally (user-level), without prompts
+npx skills add ArtemisMucaj/codesearch --skill codesearch-cli codesearch-mcp -g -y
+
+# Preview what's available first
+npx skills add ArtemisMucaj/codesearch --list
+```
+
+Omit `-g` to install into the current project (`.claude/skills/`). The two are
+independent — `codesearch-cli` bundles the binary `install.sh`; `codesearch-mcp`
+assumes the MCP server is already connected.
 
 ### Interactive TUI
 

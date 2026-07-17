@@ -1,6 +1,6 @@
 ---
-name: codesearch
-description: Semantic code search, code-understanding, and long-term memory over a codebase, via a CLI. At the START of a session, recall the user's preferences and this project's overview from memory and get the architecture overview; then find code by what it does (hybrid ML-embedding + keyword search), and trace relationships (context / impact / explain). Use whenever the user asks to find code by behaviour, understand how symbols relate, explore structure, or recall what past sessions learned.
+name: codesearch-cli
+description: Semantic code search, code-understanding, and long-term memory over a codebase, via the codesearch CLI. At the START of a session, recall the user's preferences and this project's overview from memory and get the architecture overview; then find code by what it does (hybrid ML-embedding + keyword search), and trace relationships (context / impact / explain). Use whenever the user asks to find code by behaviour, understand how symbols relate, explore structure, or recall what past sessions learned.
 metadata:
   author: ArtemisMucaj
   version: "1.7.0"
@@ -162,7 +162,7 @@ codesearch memory import <transcript.jsonl> # distill this session for next time
 ```shell
 # Install the binary if it's missing (also installs scip-php / scip-typescript
 # for precise PHP / JS / TS call graphs)
-INSTALL_DIR="$HOME/.local/bin" sh .claude/skills/codesearch/install.sh
+INSTALL_DIR="$HOME/.local/bin" sh .claude/skills/codesearch-cli/install.sh
 codesearch --version   # ensure ~/.local/bin is on PATH
 
 # Index the repository (run once; incremental afterward)
