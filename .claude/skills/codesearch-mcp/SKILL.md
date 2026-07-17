@@ -20,10 +20,10 @@ Four capabilities over one index:
 - Recall — long-term memory from past sessions: preferences, project overview,
   experiences, facts. Load it first, every session (`read_memory`,
   `search_memory`, `list_memories`).
-- Map — architecture at a glance: entry-point features, file/symbol
-  communities, coupling hotspots, cross-service channels
-  (`list_features`, `list_clusters`, `list_symbol_clusters`, `couplings`,
-  `channels`, `file_uses`).
+- Map — architecture at a glance: a one-shot dossier (`overview`), entry-point
+  features, file/symbol communities, coupling hotspots, cross-service channels
+  (`overview`, `list_features`, `list_clusters`, `list_symbol_clusters`,
+  `couplings`, `channels`, `file_uses`).
 - Search — hybrid retrieval by meaning and exact token (`search_code`).
 - Understand — call-graph relationships for a symbol (`get_symbol_context`,
   `analyze_impact`, `query_graph`).
@@ -64,11 +64,19 @@ directory URI (e.g. `memory://sessions`) to list its children's one-line
 abstracts, then a leaf URI (e.g. `memory://sessions/<id>`) for a node's full
 detail such as a past session transcript.
 
+When a task turns up a durable reference worth keeping — a design doc, a spec, a
+guide URL — store it with `add_memory_resource` (a file path or URL) so a later
+session can recall it. It's summarised and saved under `memory://resources`.
+
 ## Phase 2 — Get the architecture overview
 
 Orient in the codebase before diving in. Start broad, then zoom in only if the
 task needs it.
 
+- `overview` — the fastest way to orient: one call returns the whole dossier —
+  index stats, architectural modules, symbol communities, coupling hotspots,
+  critical features, and cross-service channels. Read this first; each section
+  is `null` if it couldn't be computed (with a reason under `skipped`).
 - `list_repositories` — what's indexed, with sizes and language breakdown (also
   serves as index stats).
 - `list_features` — entry-point execution flows ranked by criticality: the most
@@ -145,8 +153,8 @@ user to re-index, then re-run the tool.
 
 | Phase | Tools |
 |---|---|
-| Recall | `read_memory`, `search_memory`, `list_memories` |
-| Map | `list_repositories`, `list_features` / `get_feature`, `list_clusters` / `get_file_cluster`, `list_symbol_clusters` / `get_symbol_cluster`, `couplings`, `channels`, `file_uses` |
+| Recall | `read_memory`, `search_memory`, `list_memories`; `add_memory_resource` to store a file/URL for later recall |
+| Map | `overview`, `list_repositories`, `list_features` / `get_feature`, `list_clusters` / `get_file_cluster`, `list_symbol_clusters` / `get_symbol_cluster`, `couplings`, `channels`, `file_uses` |
 | Search | `search_code` |
 | Understand | `get_symbol_context`, `analyze_impact`, `query_graph`, `get_impacted_features` |
 
@@ -158,11 +166,10 @@ unless they're needed.
 
 Most questions are answered by combining a few tool calls rather than one.
 
-- Repository dossier — for "give me an overview of this repo", combine the map
-  tools yourself: `list_repositories` for scope and languages, `list_features`
-  for the critical behaviours, `list_clusters` for the modules, `channels` for
-  cross-service edges, and `couplings` for the fragile seams. Summarize the
-  results into the picture the user asked for.
+- Repository dossier — for "give me an overview of this repo", call `overview`
+  once; it returns modules, communities, couplings, critical features, and
+  channels together. Drill into a section with its specific tool (`list_clusters`,
+  `couplings`, …) only when the user wants more than the dossier's ranked rows.
 - Explain a symbol — the call graph gives you the material to explain a symbol
   in your own words: `get_symbol_context` for its neighbourhood, then
   `search_code` on the symbol name to pull its source, then narrate the purpose
@@ -192,6 +199,8 @@ mcp, model context protocol, codesearch mcp, semantic code search, hybrid
 search, find code, code understanding, call graph, symbol context, callers,
 callees, impact analysis, blast radius, query graph, execution features,
 clusters, symbol clusters, communities, coupling, cross-service channels, uses,
-long-term memory, read_memory, search_memory, list_memories, recall preferences,
-project overview, session start memory, remember decisions, user preferences,
-project facts, search_code, get_symbol_context, analyze_impact
+repository overview, dossier, overview tool, long-term memory, read_memory,
+search_memory, list_memories, add_memory_resource, store resource, remember a
+doc, recall preferences, project overview, session start memory, remember
+decisions, user preferences, project facts, search_code, get_symbol_context,
+analyze_impact

@@ -257,13 +257,14 @@ codesearch mcp --http 8080           # HTTP; endpoint at /mcp
 codesearch mcp --http 8080 --public  # bind 0.0.0.0
 ```
 
-Exposes 18 tools: `search_code`, `analyze_impact`, `get_symbol_context`,
-`query_graph`, `list_repositories`, `list_features`, `get_feature`,
+Exposes 20 tools: `search_code`, `analyze_impact`, `get_symbol_context`,
+`query_graph`, `overview`, `list_repositories`, `list_features`, `get_feature`,
 `get_impacted_features`, `file_uses`, `list_clusters`, `get_file_cluster`,
 `list_symbol_clusters`, `get_symbol_cluster`, `couplings`, `channels`,
-`search_memory`, `list_memories`, and `read_memory`. `query_graph` supports
-eight intention-named patterns (`callers_of`, `callees_of`, `imports_of`,
-`importers_of`, `inheritors_of`, `children_of`, `tests_for`, `file_summary`).
+`search_memory`, `list_memories`, `read_memory`, and `add_memory_resource`.
+`query_graph` supports eight intention-named patterns (`callers_of`,
+`callees_of`, `imports_of`, `importers_of`, `inheritors_of`, `children_of`,
+`tests_for`, `file_summary`).
 
 ### `serve` — MCP + management API
 

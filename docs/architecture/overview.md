@@ -135,7 +135,7 @@ methods, a `reconstitute()` factory for adapters):
   OpenAI-compatible and GitHub Copilot backends) behind the `ChatClient` port,
   plus `copilot_auth.rs` for the Copilot OAuth device flow.
 - **MCP server** (`adapter/mcp/`) — the Model Context Protocol server (stdio +
-  HTTP) exposing 18 tools.
+  HTTP) exposing 20 tools.
 - **Management API** (`adapter/management/`) — the REST/JSON + SSE server and
   the background memory-dream scheduler started by `serve`.
 - **InMemoryVectorRepository** / **MockEmbedding** — deterministic test doubles.

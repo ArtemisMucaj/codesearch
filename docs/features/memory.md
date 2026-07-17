@@ -221,14 +221,15 @@ store was created without embeddings, search degrades to the keyword leg.
 
 ## MCP tools
 
-When running as an MCP server (`codesearch mcp`), memory recall is exposed to
-AI tools alongside code search:
+When running as an MCP server (`codesearch mcp`), memory is exposed to AI tools
+alongside code search — recall plus adding resources:
 
 | Tool | Description |
 |------|-------------|
 | `search_memory` | Hybrid recall over the memory store. Accepts `query`, optional `kind`, `project` (defaults to the workspace's project in stdio mode; `"*"` searches all projects), and `limit`. Returns full item content with fused scores. |
 | `list_memories` | List stored memories, newest first. Accepts optional `kind` — e.g. `kind="preference"` at session start to load every known user preference. |
 | `read_memory` | Read the virtual filesystem level by level. Call with no args (or `uri="memory://memory"`) first for the whole-memory digest, then drill into a directory (`memory://sessions`) or a leaf (`memory://sessions/<id>`). Returns the node's L0/L1/L2 plus its children's abstracts. |
+| `add_memory_resource` | Store a file or URL as a durable resource under `memory://resources`. Accepts `source` (path or URL) and optional `name`. Fetches + summarizes with the configured LLM (same as `memory add`), so later sessions can recall it. |
 
 This gives agents the recall half of the loop: import sessions with the CLI
 (e.g. from a session-end hook), then at task start let the agent call

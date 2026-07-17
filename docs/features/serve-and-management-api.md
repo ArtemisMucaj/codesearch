@@ -36,7 +36,7 @@ codesearch serve --public
 | Protocol | Model Context Protocol (JSON-RPC) | REST/JSON + Server-Sent Events |
 | Audience | AI agents / MCP clients | Scripts, dashboards, native apps |
 | Endpoint | `/mcp` (on `--mcp-port`) | `/api/...` (on `--mgmt-port`) |
-| Tools/routes | 18 tools ([Editor Integrations](./editor-integrations.md#exposed-mcp-tools)) | ~25 REST routes + 2 streaming routes |
+| Tools/routes | 20 tools ([Editor Integrations](./editor-integrations.md#exposed-mcp-tools)) | ~25 REST routes + 2 streaming routes |
 
 To run **only** the MCP server (no management API), use `codesearch mcp` (stdio)
 or `codesearch mcp --http <port>`.

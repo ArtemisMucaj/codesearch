@@ -116,7 +116,8 @@ codesearch clusters get src/api/auth.rs my-repo
 
 For a Markdown module table combined with every other analysis (symbol
 communities, couplings, execution features, channels), use the repository-wide
-`codesearch overview` command.
+`codesearch overview` command — also exposed as the MCP tool `overview`, which
+returns the same combined report as JSON (without the LLM executive summary).
 
 ### Options
 
