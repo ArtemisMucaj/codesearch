@@ -1,6 +1,6 @@
 ---
 name: codesearch-cli
-description: Semantic code search, code-understanding, and long-term memory over a codebase, via the codesearch CLI. At the START of a session, recall the user's preferences and this project's overview from memory and get the architecture overview; then find code by what it does (hybrid ML-embedding + keyword search), and trace relationships (context / impact / explain). Use whenever the user asks to find code by behaviour, understand how symbols relate, explore structure, or recall what past sessions learned.
+description: Use before implementing a feature, refactoring, fixing a bug, or changing any code, and whenever you need to understand how code relates — where something is handled, what calls a function, what a change would break, how modules depend. Load it first to find the right code and the blast radius before you edit. Traces relationships and recalls project memory that reading files alone misses.
 metadata:
   author: ArtemisMucaj
   version: "1.7.0"
