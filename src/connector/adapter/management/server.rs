@@ -45,6 +45,9 @@ pub struct AppState {
     /// available (an LLM backend could be built). `None` disables the
     /// `/api/memory/dream` endpoints.
     pub dream: Option<Arc<super::DreamService>>,
+    /// Session discovery + background import state (serve mode). `None`
+    /// disables the `/api/sessions/*` endpoints.
+    pub sessions: Option<Arc<super::SessionImportService>>,
 }
 
 impl AppState {
@@ -53,12 +56,19 @@ impl AppState {
         Self {
             container,
             dream: None,
+            sessions: None,
         }
     }
 
     /// Attach the dream scheduler state (serve mode).
     pub fn with_dream(mut self, dream: Option<Arc<super::DreamService>>) -> Self {
         self.dream = dream;
+        self
+    }
+
+    /// Attach the session-import service (serve mode).
+    pub fn with_sessions(mut self, sessions: Option<Arc<super::SessionImportService>>) -> Self {
+        self.sessions = sessions;
         self
     }
 }
@@ -116,7 +126,22 @@ pub fn routes(state: AppState) -> Router {
             "/api/memory/dream",
             get(handlers::memory::dream_status).post(handlers::memory::dream_trigger),
         )
+        // Update the dream scheduler's settings (applied live + persisted).
+        .route(
+            "/api/memory/dream/config",
+            axum::routing::put(handlers::memory::dream_config),
+        )
         .route("/api/memory/{id}", get(handlers::memory::get))
+        // Session discovery + background import (what the import TUI does).
+        .route("/api/sessions", get(handlers::sessions::discover))
+        .route(
+            "/api/sessions/transcript",
+            get(handlers::sessions::transcript),
+        )
+        .route(
+            "/api/sessions/import",
+            get(handlers::sessions::import_status).post(handlers::sessions::import),
+        )
         // LLM backend introspection + runtime configuration.
         .route("/api/llm/models", get(handlers::llm::models))
         .route("/api/llm/endpoints", get(handlers::llm::list_endpoints))
@@ -178,7 +203,12 @@ async fn index(State(_state): State<AppState>) -> Json<Value> {
             { "method": "GET", "path": "/api/memory/tree", "description": "browse the memory filesystem (?uri=)" },
             { "method": "GET", "path": "/api/memory/dream", "description": "dream scheduler status + last run" },
             { "method": "POST", "path": "/api/memory/dream", "description": "trigger a dream cycle" },
+            { "method": "PUT", "path": "/api/memory/dream/config", "description": "update dream scheduler settings (applied live + persisted)" },
             { "method": "GET", "path": "/api/memory/{id}", "description": "one memory item or node" },
+            { "method": "GET", "path": "/api/sessions", "description": "discover importable sessions (claude/opencode/zed)" },
+            { "method": "GET", "path": "/api/sessions/transcript", "description": "one discovered session's transcript (?source=&id=)" },
+            { "method": "POST", "path": "/api/sessions/import", "description": "queue a background import ({source,id,force?})" },
+            { "method": "GET", "path": "/api/sessions/import", "description": "per-session import status map" },
             { "method": "GET", "path": "/api/openapi.json", "description": "OpenAPI 3.1 description of this API" },
             { "method": "GET/POST", "path": "/api/stream/explain/{symbol}", "description": "SSE: stream an LLM call-flow explanation for a symbol" },
             { "method": "POST", "path": "/api/stream/index", "description": "SSE: stream indexing progress for a repository path" },
@@ -217,7 +247,12 @@ pub async fn run_management_server(
 
     tracing::info!("Starting codesearch management API on {}", addr);
 
-    let state = AppState::new(container).with_dream(dream);
+    // Session discovery + background import is always available in serve mode
+    // (it builds its LLM client lazily, per import, so it never fails at boot).
+    let sessions = super::SessionImportService::build(Arc::clone(&container));
+    let state = AppState::new(container)
+        .with_dream(dream)
+        .with_sessions(Some(sessions));
     let app = routes(state);
 
     let listener = tokio::net::TcpListener::bind(addr)

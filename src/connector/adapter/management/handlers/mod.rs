@@ -17,6 +17,7 @@ pub mod llm;
 pub mod memory;
 pub mod repositories;
 pub mod search;
+pub mod sessions;
 
 use crate::domain::Repository;
 
