@@ -1554,6 +1554,44 @@
           }
         }
       }
+    },
+    "/api/llm/copilot/login": {
+      "post": {
+        "summary": "Start GitHub Copilot device-flow login",
+        "description": "Start (or restart) the GitHub OAuth device flow. Returns immediately with a user_code and verification_uri to show the user; the token is polled and persisted in the background. Poll GET to observe the outcome.",
+        "operationId": "copilotLoginStart",
+        "responses": {
+          "200": {
+            "description": "Login status (pending on success, failed if the device-code request failed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "GitHub Copilot login status",
+        "description": "The current login status: idle, pending (with user_code + verification_uri), authorized, or failed (with error).",
+        "operationId": "copilotLoginStatus",
+        "responses": {
+          "200": {
+            "description": "Login status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {

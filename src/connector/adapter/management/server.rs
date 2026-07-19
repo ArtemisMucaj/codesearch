@@ -48,15 +48,20 @@ pub struct AppState {
     /// Session discovery + background import state (serve mode). `None`
     /// disables the `/api/sessions/*` endpoints.
     pub sessions: Option<Arc<super::SessionImportService>>,
+    /// GitHub Copilot device-flow login state, so a GUI can authenticate
+    /// Copilot without running the terminal `copilot login` command.
+    pub copilot_login: Arc<super::CopilotLoginService>,
 }
 
 impl AppState {
     /// Build the shared state from an already-constructed container.
     pub fn new(container: Arc<Container>) -> Self {
+        let copilot_login = super::CopilotLoginService::new(container.data_dir().to_string());
         Self {
             container,
             dream: None,
             sessions: None,
+            copilot_login,
         }
     }
 
@@ -150,6 +155,12 @@ pub fn routes(state: AppState) -> Router {
             axum::routing::put(handlers::llm::upsert_endpoint),
         )
         .route("/api/llm/active", post(handlers::llm::set_active_endpoint))
+        // GitHub Copilot device-flow login (start + poll status), so a GUI can
+        // authenticate without the terminal `copilot login` command.
+        .route(
+            "/api/llm/copilot/login",
+            get(handlers::llm::copilot_login_status).post(handlers::llm::copilot_login_start),
+        )
         // ── Streaming (SSE) endpoints ────────────────────────────────────────
         // Live under the `/api/stream/...` prefix so they never clash with the
         // `/api/...` REST routes above.

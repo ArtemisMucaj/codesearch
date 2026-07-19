@@ -18,6 +18,7 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
+use serde_json::{json, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::LlmTarget;
@@ -122,6 +123,26 @@ pub async fn models(
         target: target.as_str().to_string(),
         models,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// GitHub Copilot device-flow login
+// ---------------------------------------------------------------------------
+
+/// `POST /api/llm/copilot/login` — start (or restart) the GitHub device flow.
+///
+/// Returns immediately with the `user_code` + `verification_uri` to show the
+/// user (status `pending`); the token is polled + persisted in the background.
+/// Poll `GET /api/llm/copilot/login` for the outcome.
+pub async fn copilot_login_start(State(state): State<AppState>) -> Json<Value> {
+    let status = state.copilot_login.start().await;
+    Json(json!(status))
+}
+
+/// `GET /api/llm/copilot/login` — the current login status
+/// (`idle` / `pending` / `authorized` / `failed`).
+pub async fn copilot_login_status(State(state): State<AppState>) -> Json<Value> {
+    Json(json!(state.copilot_login.status().await))
 }
 
 // ---------------------------------------------------------------------------
