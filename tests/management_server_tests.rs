@@ -165,6 +165,7 @@ async fn index_endpoint_describes_the_api() {
         "/api/search",
         "/api/impact",
         "/api/clusters",
+        "/api/graph",
         "/api/couplings",
         "/api/channels",
         "/api/memory",
@@ -213,6 +214,84 @@ async fn couplings_endpoint_returns_a_report() {
     .await
     .expect("bad-level request failed");
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn graph_endpoint_returns_a_graph_view() {
+    let (container, _dir) = test_container().await;
+    index_fixture(&container).await;
+    let (base_url, server) = spawn_management_server_with_container(container).await;
+
+    // Default level (file) — a well-formed GraphView with the edge adjacency
+    // the /api/clusters endpoints omit.
+    let resp = reqwest::get(format!("{base_url}/api/graph?repository=fixture-repo"))
+        .await
+        .expect("request to /api/graph failed");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("response body was not JSON");
+    assert_eq!(body["level"], "file");
+    assert!(body["nodes"].is_array());
+    assert!(body["edges"].is_array());
+    assert!(body["communities"].is_array());
+
+    // Explicit symbol level is accepted and reflected in the view.
+    let resp = reqwest::get(format!(
+        "{base_url}/api/graph?repository=fixture-repo&level=symbol"
+    ))
+    .await
+    .expect("symbol-level request failed");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("symbol body was not JSON");
+    assert_eq!(body["level"], "symbol");
+
+    // An unknown level is a 400.
+    let resp = reqwest::get(format!(
+        "{base_url}/api/graph?repository=fixture-repo&level=bogus"
+    ))
+    .await
+    .expect("bad-level request failed");
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_endpoint_accepts_comma_separated_repository_filter() {
+    let (container, _dir) = test_container().await;
+    index_fixture(&container).await;
+    let (base_url, server) = spawn_management_server_with_container(container).await;
+
+    // The `repository` filter is a comma-separated string (a Vec can't be
+    // deserialized from a query key). A single repo and a comma list must both
+    // bind — before this fix the param failed to deserialize and the filter was
+    // silently dropped, leaking every namespace's channels.
+    // Single repo, and a comma list (repeated to exercise splitting without
+    // needing a second fixture). Both must bind and return the report shape.
+    for query in [
+        "repository=fixture-repo",
+        "repository=fixture-repo,fixture-repo",
+    ] {
+        let resp = reqwest::get(format!("{base_url}/api/channels?{query}"))
+            .await
+            .expect("request to /api/channels failed");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::OK,
+            "channels should accept `{query}`"
+        );
+        let body: serde_json::Value = resp.json().await.expect("channels body was not JSON");
+        assert!(body["edges"].is_array());
+        assert!(body["unmatched_producers"].is_array());
+        assert!(body["unmatched_consumers"].is_array());
+    }
+
+    // No filter is still valid (scopes to the cwd namespace).
+    let resp = reqwest::get(format!("{base_url}/api/channels"))
+        .await
+        .expect("unfiltered channels request failed");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
 
     server.abort();
 }
