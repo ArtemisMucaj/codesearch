@@ -18,6 +18,7 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
+use serde_json::{json, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::cli::LlmTarget;
@@ -86,6 +87,26 @@ pub async fn models(
                 .collect()
         }
         LlmTarget::Copilot => {
+            // Without a stored OAuth token every Copilot request 401s, which
+            // would surface as an opaque 500. Detect it up front and return a
+            // clear, actionable 400 instead. The config read is blocking file
+            // I/O, so run it off the async runtime.
+            let data_dir = state.container.data_dir().to_string();
+            let copilot = tokio::task::spawn_blocking(move || {
+                CodesearchConfig::load_copilot(&data_dir)
+            })
+            .await
+            .map_err(|e| {
+                ApiError::new(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("copilot config read task panicked: {e}"),
+                )
+            })??;
+            if copilot.github_token.as_deref().unwrap_or("").is_empty() {
+                return Err(ApiError::bad_request(
+                    "GitHub Copilot is not authenticated — run `codesearch copilot login`",
+                ));
+            }
             let client = CopilotChatClient::from_data_dir(state.container.data_dir())?;
             client
                 .list_models()
@@ -113,6 +134,26 @@ pub async fn models(
         target: target.as_str().to_string(),
         models,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// GitHub Copilot device-flow login
+// ---------------------------------------------------------------------------
+
+/// `POST /api/llm/copilot/login` — start (or restart) the GitHub device flow.
+///
+/// Returns immediately with the `user_code` + `verification_uri` to show the
+/// user (status `pending`); the token is polled + persisted in the background.
+/// Poll `GET /api/llm/copilot/login` for the outcome.
+pub async fn copilot_login_start(State(state): State<AppState>) -> Json<Value> {
+    let status = state.copilot_login.start().await;
+    Json(json!(status))
+}
+
+/// `GET /api/llm/copilot/login` — the current login status
+/// (`idle` / `pending` / `authorized` / `failed`).
+pub async fn copilot_login_status(State(state): State<AppState>) -> Json<Value> {
+    Json(json!(state.copilot_login.status().await))
 }
 
 // ---------------------------------------------------------------------------

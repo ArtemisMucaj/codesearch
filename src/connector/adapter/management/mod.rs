@@ -10,6 +10,7 @@
 //! handlers (explain / index) mounted under `/api/stream/...`, plus the
 //! `/api/openapi.json` document, all wired in [`server::routes`].
 
+mod copilot_login;
 mod dream;
 mod error;
 mod handlers;
@@ -17,6 +18,7 @@ mod server;
 mod session_import;
 mod streaming;
 
+pub use copilot_login::CopilotLoginService;
 pub use dream::{DreamService, MemoryConfigPatch};
 pub use server::{routes, run_management_server, AppState};
 pub use session_import::SessionImportService;
