@@ -14,12 +14,15 @@
 //! On success the `ghu_…` token is persisted into `config.json` exactly as the
 //! CLI does, so every other Copilot path (models, chat) picks it up.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde::Serialize;
 use tokio::sync::Mutex;
+use tracing::warn;
 
 use crate::connector::adapter::{copilot_auth, CodesearchConfig};
+use crate::domain::DomainError;
 
 /// The current state of a Copilot login attempt, serialized `snake_case`.
 #[derive(Debug, Clone, Serialize)]
@@ -38,11 +41,15 @@ pub enum LoginStatus {
     Failed { error: String },
 }
 
-/// Shared Copilot-login state for serve mode. One attempt runs at a time; the
-/// background poll updates `status`, which the GET endpoint reads.
+/// Shared Copilot-login state for serve mode. One attempt is tracked at a time;
+/// the background poll updates `status`, which the GET endpoint reads.
 pub struct CopilotLoginService {
     data_dir: String,
     status: Arc<Mutex<LoginStatus>>,
+    /// Monotonic id of the current attempt. `start` bumps it; a background poll
+    /// only writes `status` if its id still matches — so a superseded attempt
+    /// (the user restarted) can never clobber the newer one's result.
+    generation: Arc<AtomicU64>,
 }
 
 impl CopilotLoginService {
@@ -50,6 +57,7 @@ impl CopilotLoginService {
         Arc::new(Self {
             data_dir,
             status: Arc::new(Mutex::new(LoginStatus::Idle)),
+            generation: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -63,19 +71,22 @@ impl CopilotLoginService {
     /// task that polls for the token and persists it. Returns the `Pending`
     /// status (or `Failed` if the device-code request itself failed).
     ///
-    /// A restart while a previous attempt is still pending simply supersedes it:
-    /// the new device code becomes the tracked one (the old poll task's result
-    /// is ignored because it writes the same shared status, which the new task
-    /// overwrites — harmless, and the user only ever sees the latest code).
+    /// Restarting supersedes any in-flight attempt: `start` bumps a generation
+    /// id, and a background poll only writes its result if the id still matches,
+    /// so a stale attempt can never overwrite the newer one's status.
     pub async fn start(self: &Arc<Self>) -> LoginStatus {
+        // Claim this attempt; any older poll task's writes are now ignored.
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+
         let http = reqwest::Client::new();
         let device = match copilot_auth::request_device_code(&http).await {
             Ok(d) => d,
             Err(e) => {
+                warn!("copilot login: device-code request failed: {e}");
                 let failed = LoginStatus::Failed {
                     error: format!("failed to start GitHub device-flow login: {e}"),
                 };
-                *self.status.lock().await = failed.clone();
+                self.set_status(generation, failed.clone()).await;
                 return failed;
             }
         };
@@ -84,35 +95,55 @@ impl CopilotLoginService {
             user_code: device.user_code().to_string(),
             verification_uri: device.verification_uri().to_string(),
         };
-        *self.status.lock().await = pending.clone();
+        self.set_status(generation, pending.clone()).await;
 
         // Poll + persist in the background so the request returns immediately.
         let service = Arc::clone(self);
         tokio::spawn(async move {
-            let result = copilot_auth::poll_for_token(&http, &device).await;
-            let next = match result {
-                Ok(token) => match service.persist_token(token) {
+            let next = match copilot_auth::poll_for_token(&http, &device).await {
+                Ok(token) => match service.persist_token(token).await {
                     Ok(()) => LoginStatus::Authorized,
-                    Err(e) => LoginStatus::Failed {
-                        error: format!("login succeeded but saving the token failed: {e}"),
-                    },
+                    Err(e) => {
+                        warn!("copilot login: token saved-but-failed: {e}");
+                        LoginStatus::Failed {
+                            error: format!("login succeeded but saving the token failed: {e}"),
+                        }
+                    }
                 },
-                Err(e) => LoginStatus::Failed {
-                    error: format!("GitHub device-flow login failed: {e}"),
-                },
+                Err(e) => {
+                    warn!("copilot login: device-flow poll failed: {e}");
+                    LoginStatus::Failed {
+                        error: format!("GitHub device-flow login failed: {e}"),
+                    }
+                }
             };
-            *service.status.lock().await = next;
+            service.set_status(generation, next).await;
         });
 
         pending
     }
 
+    /// Write `status` only if `generation` is still the current attempt — so a
+    /// superseded poll task's terminal result is dropped instead of clobbering
+    /// a newer attempt the user has since started.
+    async fn set_status(&self, generation: u64, status: LoginStatus) {
+        if self.generation.load(Ordering::SeqCst) == generation {
+            *self.status.lock().await = status;
+        }
+    }
+
     /// Persist the `ghu_…` token into `config.json`'s copilot section, exactly
-    /// as `codesearch copilot login` does.
-    fn persist_token(&self, token: String) -> Result<(), crate::domain::DomainError> {
-        let mut cfg = CodesearchConfig::load(&self.data_dir)?;
-        cfg.copilot_mut().github_token = Some(token);
-        cfg.save(&self.data_dir)
+    /// as `codesearch copilot login` does. The config read/write is blocking
+    /// filesystem I/O, so it runs on `spawn_blocking`.
+    async fn persist_token(&self, token: String) -> Result<(), DomainError> {
+        let data_dir = self.data_dir.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), DomainError> {
+            let mut cfg = CodesearchConfig::load(&data_dir)?;
+            cfg.copilot_mut().github_token = Some(token);
+            cfg.save(&data_dir)
+        })
+        .await
+        .map_err(|e| DomainError::internal(format!("token persist task panicked: {e}")))?
     }
 }
 

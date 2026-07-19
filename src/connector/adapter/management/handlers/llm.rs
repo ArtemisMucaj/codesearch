@@ -89,8 +89,19 @@ pub async fn models(
         LlmTarget::Copilot => {
             // Without a stored OAuth token every Copilot request 401s, which
             // would surface as an opaque 500. Detect it up front and return a
-            // clear, actionable 400 instead.
-            let copilot = CodesearchConfig::load_copilot(state.container.data_dir())?;
+            // clear, actionable 400 instead. The config read is blocking file
+            // I/O, so run it off the async runtime.
+            let data_dir = state.container.data_dir().to_string();
+            let copilot = tokio::task::spawn_blocking(move || {
+                CodesearchConfig::load_copilot(&data_dir)
+            })
+            .await
+            .map_err(|e| {
+                ApiError::new(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("copilot config read task panicked: {e}"),
+                )
+            })??;
             if copilot.github_token.as_deref().unwrap_or("").is_empty() {
                 return Err(ApiError::bad_request(
                     "GitHub Copilot is not authenticated — run `codesearch copilot login`",
