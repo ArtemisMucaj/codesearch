@@ -302,7 +302,11 @@ impl SummarizeMemoryUseCase {
                 manifest,
                 created_at,
                 now,
-            );
+            )
+            // Carry the original project string (git remote / namespace) as the
+            // display label — the URI slugifies it lossily, so this is what a
+            // client should show instead of `github_com_org_repo-<hash>`.
+            .with_label(project);
             let vector = self.embed_node(&node).await;
             self.memory_repo
                 .upsert_node(&node, vector.as_deref())

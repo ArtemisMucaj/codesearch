@@ -288,6 +288,12 @@ pub struct MemoryNode {
     kind: NodeKind,
     /// URI of the parent directory, or `None` for a filesystem root.
     parent_uri: Option<String>,
+    /// Human-readable display name, when the URI slug isn't presentable. For a
+    /// project digest this is the original project string (e.g. the git remote
+    /// `github.com/org/repo`), which the URI slugifies lossily. `None` for nodes
+    /// whose URI's last component is already a fine label (sessions, resources).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
     /// L0 — one-line summary; what recall returns and ranks on.
     abstract_: String,
     /// L1 — a paragraph or outline orienting the reader before L2.
@@ -314,6 +320,7 @@ impl MemoryNode {
             uri,
             kind,
             parent_uri,
+            label: None,
             abstract_,
             overview,
             content,
@@ -322,8 +329,21 @@ impl MemoryNode {
         }
     }
 
+    /// Set the display label (builder-style), for nodes whose URI slug isn't a
+    /// good human name (project digests carry their original project string).
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        let label = label.into();
+        self.label = if label.is_empty() { None } else { Some(label) };
+        self
+    }
+
     pub fn uri(&self) -> &str {
         &self.uri
+    }
+
+    /// The display label if set, else `None` (callers fall back to the URI).
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
     }
 
     pub fn kind(&self) -> NodeKind {

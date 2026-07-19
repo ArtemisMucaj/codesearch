@@ -1303,12 +1303,16 @@ async fn project_digests_track_projects_and_remove_stale_ones() {
         .expect("alpha digest should exist");
     assert_eq!(alpha.kind(), NodeKind::Project);
     assert!(!alpha.abstract_().is_empty());
+    // The digest carries the original project string as its label (the URI
+    // slugifies it), and it round-trips through DuckDB.
+    assert_eq!(alpha.label(), Some("alpha"));
 
     // Beta had a single item: written via the deterministic fallback.
     let beta = project_digest("beta")
         .await
         .expect("beta digest should exist");
     assert!(beta.overview().contains("beta_db"));
+    assert_eq!(beta.label(), Some("beta"));
 
     // Nothing changed since: a second pass regenerates nothing.
     assert_eq!(summary.regenerate_project_digests().await.unwrap(), 0);

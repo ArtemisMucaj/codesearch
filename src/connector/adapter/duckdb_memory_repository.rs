@@ -93,6 +93,7 @@ impl DuckdbMemoryRepository {
                 uri TEXT PRIMARY KEY,
                 kind TEXT NOT NULL,
                 parent_uri TEXT,
+                label TEXT,
                 abstract TEXT NOT NULL,
                 overview TEXT NOT NULL,
                 content TEXT NOT NULL,
@@ -116,6 +117,18 @@ impl DuckdbMemoryRepository {
             "#
         ))
         .map_err(|e| DomainError::storage(format!("Failed to initialize memory schema: {e}")))?;
+
+        // Migrate databases created before `memory_nodes.label` existed. DuckDB
+        // has no `ADD COLUMN IF NOT EXISTS`, so add it and swallow the
+        // already-exists error (idempotent across restarts).
+        if let Err(e) = conn.execute_batch("ALTER TABLE memory_nodes ADD COLUMN label TEXT;") {
+            let msg = e.to_string().to_lowercase();
+            if !msg.contains("already exists") && !msg.contains("duplicate") {
+                return Err(DomainError::storage(format!(
+                    "Failed to add memory_nodes.label column: {e}"
+                )));
+            }
+        }
 
         Self::check_meta(&conn, "dimensions", &dimensions.to_string())?;
         Self::check_meta(&conn, "embedding_model", embedding_model)?;
@@ -219,16 +232,21 @@ impl DuckdbMemoryRepository {
     fn node_from_row(row: &Row<'_>) -> Result<MemoryNode, duckdb::Error> {
         let kind_str: String = row.get(1)?;
         let kind = NodeKind::parse(&kind_str).unwrap_or(NodeKind::Resource);
-        Ok(MemoryNode::new(
+        let label: Option<String> = row.get::<_, Option<String>>(3)?;
+        let mut node = MemoryNode::new(
             row.get(0)?,
             kind,
             row.get::<_, Option<String>>(2)?,
-            row.get(3)?,
-            row.get(4)?,
-            row.get(5)?,
-            row.get(6)?,
-            row.get(7)?,
-        ))
+            row.get(4)?, // abstract
+            row.get(5)?, // overview
+            row.get(6)?, // content
+            row.get(7)?, // created_at
+            row.get(8)?, // updated_at
+        );
+        if let Some(label) = label.filter(|l| !l.is_empty()) {
+            node = node.with_label(label);
+        }
+        Ok(node)
     }
 }
 
@@ -236,7 +254,7 @@ const ITEM_COLUMNS: &str =
     "id, kind, name, content, source_session_id, project, created_at, updated_at, update_count";
 
 const NODE_COLUMNS: &str =
-    "uri, kind, parent_uri, abstract, overview, content, created_at, updated_at";
+    "uri, kind, parent_uri, label, abstract, overview, content, created_at, updated_at";
 
 #[async_trait]
 impl MemoryRepository for DuckdbMemoryRepository {
@@ -633,12 +651,13 @@ impl MemoryRepository for DuckdbMemoryRepository {
         conn.execute(
             &format!(
                 "INSERT INTO memory_nodes ({NODE_COLUMNS}) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
             ),
             params![
                 node.uri(),
                 node.kind().as_str(),
                 node.parent_uri(),
+                node.label(),
                 node.abstract_(),
                 node.overview(),
                 node.content(),
@@ -768,7 +787,8 @@ impl MemoryRepository for DuckdbMemoryRepository {
         let rows = stmt
             .query_map([], |row| {
                 let node = Self::node_from_row(row)?;
-                let score: f32 = row.get(8)?;
+                // Score is the column after NODE_COLUMNS (now 9 columns, 0-8).
+                let score: f32 = row.get(9)?;
                 Ok((node, score))
             })
             .map_err(|e| DomainError::storage(format!("Node semantic search failed: {e}")))?;
@@ -828,7 +848,8 @@ impl MemoryRepository for DuckdbMemoryRepository {
         let rows = stmt
             .query_map([], |row| {
                 let node = Self::node_from_row(row)?;
-                let score: f64 = row.get(8)?;
+                // Score is the column after NODE_COLUMNS (now 9 columns, 0-8).
+                let score: f64 = row.get(9)?;
                 Ok((node, score as f32))
             })
             .map_err(|e| DomainError::storage(format!("Node keyword search failed: {e}")))?;
