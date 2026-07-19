@@ -1165,6 +1165,68 @@
         }
       }
     },
+    "/api/memory/dream/config": {
+      "put": {
+        "summary": "Update dream scheduler settings",
+        "description": "Update the dream scheduler's settings. Accepts a partial body; omitted fields are unchanged. Persisted to config.json and applied to the running scheduler live (no restart). Returns the merged effective config.",
+        "operationId": "updateDreamConfig",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "dream_enabled": {
+                    "type": "boolean"
+                  },
+                  "dream_interval_hours": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "session_idle_minutes": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "auto_import": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Merged effective dream config",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "dream_enabled": {
+                      "type": "boolean"
+                    },
+                    "dream_interval_hours": {
+                      "type": "integer"
+                    },
+                    "session_idle_minutes": {
+                      "type": "integer"
+                    },
+                    "auto_import": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Dreaming unavailable (no LLM backend at startup)"
+          }
+        }
+      }
+    },
     "/api/memory/{id}": {
       "parameters": [
         {
@@ -1227,6 +1289,170 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/sessions": {
+      "get": {
+        "summary": "Discover importable sessions",
+        "description": "Finished assistant sessions (Claude Code / OpenCode / Zed) found on this machine, newest first. Each entry carries display fields; the import-status map (GET /api/sessions/import) says which are already imported.",
+        "operationId": "discoverSessions",
+        "responses": {
+          "200": {
+            "description": "Discovered sessions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "count": {
+                      "type": "integer"
+                    },
+                    "sessions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Session import unavailable"
+          }
+        }
+      }
+    },
+    "/api/sessions/transcript": {
+      "get": {
+        "summary": "One discovered session's transcript",
+        "description": "Full per-turn transcript of a discovered session, for a preview before importing.",
+        "operationId": "sessionTranscript",
+        "parameters": [
+          {
+            "name": "source",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "claude",
+                "opencode",
+                "zed"
+              ]
+            }
+          },
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transcript",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such discoverable session"
+          },
+          "503": {
+            "description": "Session import unavailable"
+          }
+        }
+      }
+    },
+    "/api/sessions/import": {
+      "get": {
+        "summary": "Per-session import status",
+        "description": "Import status of every tracked session, keyed by (source, id): already_imported, queued, importing, done, or failed.",
+        "operationId": "sessionImportStatus",
+        "responses": {
+          "200": {
+            "description": "Status map",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "count": {
+                      "type": "integer"
+                    },
+                    "statuses": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Session import unavailable"
+          }
+        }
+      },
+      "post": {
+        "summary": "Queue a background import",
+        "description": "Queue a background import of one discovered session. Returns 202 immediately; the import runs on a detached task and progress is polled via GET /api/sessions/import.",
+        "operationId": "importSession",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "source",
+                  "id"
+                ],
+                "properties": {
+                  "source": {
+                    "type": "string",
+                    "enum": [
+                      "claude",
+                      "opencode",
+                      "zed"
+                    ]
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "force": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Import queued"
+          },
+          "404": {
+            "description": "No such discoverable session"
+          },
+          "503": {
+            "description": "Session import unavailable"
           }
         }
       }

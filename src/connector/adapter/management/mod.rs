@@ -14,7 +14,9 @@ mod dream;
 mod error;
 mod handlers;
 mod server;
+mod session_import;
 mod streaming;
 
-pub use dream::DreamService;
+pub use dream::{DreamService, MemoryConfigPatch};
 pub use server::{routes, run_management_server, AppState};
+pub use session_import::SessionImportService;

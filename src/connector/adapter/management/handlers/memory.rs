@@ -175,6 +175,33 @@ pub async fn dream_status(State(state): State<AppState>) -> ApiResult<Json<Value
     })))
 }
 
+/// `PUT /api/memory/dream/config` — update the dream scheduler's settings.
+///
+/// Accepts a partial body (`dream_enabled`, `dream_interval_hours`,
+/// `session_idle_minutes`, `auto_import`); omitted fields are left unchanged.
+/// The change is persisted to `config.json` and applied to the running
+/// scheduler live (it reads a fresh snapshot each tick), so no restart is
+/// needed. Returns the merged, effective config — the same shape as
+/// `GET /api/memory/dream`'s configuration fields.
+pub async fn dream_config(
+    State(state): State<AppState>,
+    Json(patch): Json<super::super::MemoryConfigPatch>,
+) -> ApiResult<Json<Value>> {
+    let Some(dream) = state.dream.as_ref() else {
+        return Err(ApiError::new(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "dreaming is not available on this server (no LLM backend configured at startup)",
+        ));
+    };
+    let config = dream.update_config(patch)?;
+    Ok(Json(json!({
+        "dream_enabled": config.dream_enabled(),
+        "dream_interval_hours": config.dream_interval_hours(),
+        "session_idle_minutes": config.session_idle_minutes(),
+        "auto_import": config.auto_import(),
+    })))
+}
+
 /// `POST /api/memory/dream` — start a dream cycle in the background. Returns
 /// `202` immediately; progress lands in the server log and the run record is
 /// readable via `GET /api/memory/dream` once finished.
