@@ -22,6 +22,15 @@
 * unit tests for `InMemoryVectorRepository` hybrid paths: cosine vs RRF score ranges, dual-leg ranking, post-fusion `min_score` filtering, no early pruning, empty-term fallback, and limit enforcement
 * integration tests for end-to-end hybrid search: results returned with positive scores, keyword-matched chunk surfaces, special SQL characters (`%`, `_`, `!`) do not cause errors, and semantic-only baseline confirms the flag gates the BM25 leg
 
+## [1.8.0](https://github.com/ArtemisMucaj/codesearch/compare/v1.7.0...v1.8.0) (2026-07-19)
+
+
+### Features
+
+* codesearch-cli/mcp skills, overview & add-resource MCP tools, and a full docs rebuild ([#193](https://github.com/ArtemisMucaj/codesearch/issues/193)) ([9d9f9fa](https://github.com/ArtemisMucaj/codesearch/commit/9d9f9fa1a37990550c2b597de48f0e0b1a500fae))
+* **serve:** session discovery/import + writable dream config API ([#197](https://github.com/ArtemisMucaj/codesearch/issues/197)) ([9c07190](https://github.com/ArtemisMucaj/codesearch/commit/9c07190d45fc30b2788050ad56f1c7e2ee3b628a))
+* **skills:** reword codesearch skill descriptions to trigger on dev intent ([#196](https://github.com/ArtemisMucaj/codesearch/issues/196)) ([b6ba9cd](https://github.com/ArtemisMucaj/codesearch/commit/b6ba9cd92c6198e4ab47260a4ea19ecfc44e05bf))
+
 ## [1.7.0](https://github.com/ArtemisMucaj/codesearch/compare/v1.6.0...v1.7.0) (2026-07-17)
 
 
