@@ -75,32 +75,52 @@ impl DreamService {
     }
 
     /// A snapshot of the current scheduling config. Cloned so callers never hold
-    /// the lock (and never hold a guard across `.await`).
+    /// the lock (and never hold a guard across `.await`). A poisoned lock is
+    /// logged (not silently swallowed) before falling back to the default.
     pub fn config(&self) -> MemoryConfig {
-        self.config
-            .read()
-            .map(|c| c.clone())
-            .unwrap_or_default()
+        self.config.read().map(|c| c.clone()).unwrap_or_else(|e| {
+            tracing::warn!("dream scheduler config lock poisoned, using default: {e}");
+            MemoryConfig::default()
+        })
     }
 
     /// Apply new dream settings: persist them into `config.json`'s `memory`
     /// section (preserving every other section) and swap the in-memory config so
     /// the scheduler picks them up on its next tick. Returns the merged config.
-    pub fn update_config(&self, patch: MemoryConfigPatch) -> Result<MemoryConfig, DomainError> {
+    ///
+    /// Async because the persistence step does blocking filesystem I/O
+    /// (`load` + `save`), which is pushed off the runtime via `spawn_blocking`
+    /// so it never stalls the async request thread.
+    pub async fn update_config(
+        &self,
+        patch: MemoryConfigPatch,
+    ) -> Result<MemoryConfig, DomainError> {
+        // Reject nonsensical values up front (durations must be positive), so a
+        // `0` is a clear 400 rather than a silently-ignored write — the accessors
+        // treat `0` as "use the default", which would mislead the caller.
+        patch.validate()?;
+
         // Merge onto the current in-memory config so an omitted field is left
         // unchanged rather than reset to its default.
         let mut merged = self.config();
         patch.apply(&mut merged);
 
-        // Persist: load the whole doc so other sections (openai/copilot) survive
-        // the write, replace the memory section, save.
-        let mut doc = CodesearchConfig::load(&self.data_dir)?;
-        doc.memory = Some(merged.clone());
-        doc.save(&self.data_dir)?;
+        // Persist off the async thread: load the whole doc so other sections
+        // (openai/copilot) survive the write, replace the memory section, save.
+        let data_dir = self.data_dir.clone();
+        let to_write = merged.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), DomainError> {
+            let mut doc = CodesearchConfig::load(&data_dir)?;
+            doc.memory = Some(to_write);
+            doc.save(&data_dir)
+        })
+        .await
+        .map_err(|e| DomainError::internal(format!("config write task panicked: {e}")))??;
 
         // Swap the live config so the scheduler reads the new values next tick.
-        if let Ok(mut guard) = self.config.write() {
-            *guard = merged.clone();
+        match self.config.write() {
+            Ok(mut guard) => *guard = merged.clone(),
+            Err(e) => tracing::warn!("failed to swap live dream config (lock poisoned): {e}"),
         }
         Ok(merged)
     }
@@ -218,8 +238,9 @@ impl DreamService {
 
 /// A partial update to the dream scheduling config. Every field is optional so
 /// a client can change one setting without resending the rest; an omitted field
-/// leaves the current value untouched. `0` for a duration is rejected upstream
-/// (the accessors already treat `0` as "use the default").
+/// leaves the current value untouched. A `0` duration is rejected by
+/// [`validate`](Self::validate) — the accessors treat `0` as "use the default",
+/// so accepting it would silently ignore the client's value.
 #[derive(Debug, Default, Clone, serde::Deserialize)]
 pub struct MemoryConfigPatch {
     pub dream_enabled: Option<bool>,
@@ -229,6 +250,24 @@ pub struct MemoryConfigPatch {
 }
 
 impl MemoryConfigPatch {
+    /// Reject values the scheduler cannot honor. Durations must be positive:
+    /// `0` would be treated as "use the default" by the accessors, so accepting
+    /// it would silently ignore the client's intent — return a clear error
+    /// instead (surfaced as a 400 by the handler).
+    fn validate(&self) -> Result<(), DomainError> {
+        if self.dream_interval_hours == Some(0) {
+            return Err(DomainError::invalid_input(
+                "dream_interval_hours must be at least 1",
+            ));
+        }
+        if self.session_idle_minutes == Some(0) {
+            return Err(DomainError::invalid_input(
+                "session_idle_minutes must be at least 1",
+            ));
+        }
+        Ok(())
+    }
+
     /// Merge this patch onto `config`, overwriting only the fields it sets.
     fn apply(&self, config: &mut MemoryConfig) {
         if let Some(v) = self.dream_enabled {
@@ -302,5 +341,45 @@ mod tests {
         assert_eq!(patch.auto_import, Some(false));
         assert_eq!(patch.dream_enabled, None);
         assert_eq!(patch.dream_interval_hours, None);
+    }
+
+    /// Durations of `0` are rejected (they'd otherwise be silently treated as
+    /// "use the default"); a positive or omitted duration validates.
+    #[test]
+    fn validate_rejects_zero_durations() {
+        assert!(MemoryConfigPatch {
+            dream_interval_hours: Some(0),
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+        assert!(MemoryConfigPatch {
+            session_idle_minutes: Some(0),
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
+        // Positive durations and an all-toggles patch validate fine.
+        assert!(MemoryConfigPatch {
+            dream_interval_hours: Some(1),
+            session_idle_minutes: Some(1),
+            ..Default::default()
+        }
+        .validate()
+        .is_ok());
+        assert!(MemoryConfigPatch {
+            auto_import: Some(false),
+            ..Default::default()
+        }
+        .validate()
+        .is_ok());
+        // The rejection is an InvalidInput (→ 400), not an internal error.
+        let err = MemoryConfigPatch {
+            dream_interval_hours: Some(0),
+            ..Default::default()
+        }
+        .validate()
+        .unwrap_err();
+        assert!(err.is_invalid_input());
     }
 }

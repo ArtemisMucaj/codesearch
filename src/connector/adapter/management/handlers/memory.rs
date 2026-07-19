@@ -193,7 +193,7 @@ pub async fn dream_config(
             "dreaming is not available on this server (no LLM backend configured at startup)",
         ));
     };
-    let config = dream.update_config(patch)?;
+    let config = dream.update_config(patch).await?;
     Ok(Json(json!({
         "dream_enabled": config.dream_enabled(),
         "dream_interval_hours": config.dream_interval_hours(),

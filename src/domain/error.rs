@@ -60,6 +60,10 @@ impl DomainError {
         matches!(self, Self::NotFound(_))
     }
 
+    pub fn is_invalid_input(&self) -> bool {
+        matches!(self, Self::InvalidInput(_))
+    }
+
     pub fn is_already_exists(&self) -> bool {
         matches!(self, Self::AlreadyExists(_))
     }

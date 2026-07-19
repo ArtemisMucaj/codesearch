@@ -70,13 +70,13 @@ impl ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
-        // Map a NotFound domain error (possibly nested in the anyhow chain) to a
-        // 404; anything else is an internal error.
-        let status = err
-            .downcast_ref::<DomainError>()
-            .filter(|e| e.is_not_found())
-            .map(|_| StatusCode::NOT_FOUND)
-            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        // Map a domain error (possibly nested in the anyhow chain) to its status:
+        // NotFound → 404, InvalidInput → 400; anything else is an internal error.
+        let status = match err.downcast_ref::<DomainError>() {
+            Some(e) if e.is_not_found() => StatusCode::NOT_FOUND,
+            Some(e) if e.is_invalid_input() => StatusCode::BAD_REQUEST,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
         Self::from_status(status, err)
     }
 }
@@ -85,6 +85,10 @@ impl From<DomainError> for ApiError {
     fn from(err: DomainError) -> Self {
         let status = if err.is_not_found() {
             StatusCode::NOT_FOUND
+        } else if err.is_invalid_input() {
+            // Bad client input (e.g. a `0` duration) — a 400, and the message is
+            // safe to surface since it names the offending field/constraint.
+            StatusCode::BAD_REQUEST
         } else {
             StatusCode::INTERNAL_SERVER_ERROR
         };

@@ -27,7 +27,7 @@ use tokio::sync::Mutex;
 use crate::application::{ImportOutcome, SessionDiscovery};
 use crate::connector::adapter::LocalSessionDiscovery;
 use crate::connector::api::Container;
-use crate::domain::{DiscoveredSession, SessionLocator};
+use crate::domain::{DiscoveredSession, SessionLocator, SessionSource};
 
 /// Stable identity of a discovered session: `(source, id)`. Used as the status
 /// map key so a session's import status follows it across re-discovery.
@@ -93,19 +93,23 @@ impl SessionImportService {
     pub async fn discover(&self) -> Result<Vec<DiscoveredSession>> {
         let sessions = self.discovery.discover().await?;
         // Cross-reference the memory store's imported-session records so the
-        // client can render ✓ without a second round-trip.
+        // client can render ✓ without a second round-trip. Key the set by a
+        // normalized `(source, id)` so two sources reusing the same session id
+        // can't mark the wrong one as already-imported (the stored `source` is
+        // heterogeneous — a `"zed:…"` tag, an `"opencode:…"` tag, or a Claude
+        // file path — so it's normalized back to the source tag).
         let repo = self.container.memory_repository()?;
-        let imported: std::collections::HashSet<String> = repo
+        let imported: std::collections::HashSet<SessionKey> = repo
             .list_sessions()
             .await?
             .into_iter()
-            .map(|s| s.id)
+            .map(|s| (normalize_source_tag(&s.source), s.id))
             .collect();
 
         let mut map = self.status.lock().await;
         for s in &sessions {
-            if imported.contains(&s.id) {
-                let key = session_key(s);
+            let key = session_key(s);
+            if imported.contains(&key) {
                 // Don't clobber an in-flight/finished import status.
                 map.entry(key).or_insert_with(|| StatusEntry {
                     source: s.source.as_str().to_string(),
@@ -243,6 +247,28 @@ fn session_key(s: &DiscoveredSession) -> SessionKey {
     (s.source.as_str().to_string(), s.id.clone())
 }
 
+/// Normalize an [`ImportedSession::source`] string back to the bare source tag
+/// (`claude` / `opencode` / `zed`) that [`session_key`] uses.
+///
+/// The stored source is heterogeneous by source: OpenCode/Zed record a
+/// `"<tag>:<…>"` prefix, while Claude records the transcript file path. We match
+/// the known tags (as a `"<tag>:"` prefix or an exact tag) and otherwise fall
+/// back to `"claude"`, since a path is only ever a Claude transcript. Returning
+/// the raw string when unknown would silently never match, dropping the ✓.
+fn normalize_source_tag(stored: &str) -> String {
+    for tag in [
+        SessionSource::Claude.as_str(),
+        SessionSource::OpenCode.as_str(),
+        SessionSource::Zed.as_str(),
+    ] {
+        if stored == tag || stored.starts_with(&format!("{tag}:")) {
+            return tag.to_string();
+        }
+    }
+    // A bare path (no recognized tag prefix) is a Claude transcript.
+    SessionSource::Claude.as_str().to_string()
+}
+
 /// Build a status-map entry for a session.
 fn entry(s: &DiscoveredSession, status: ImportStatus, detail: Option<String>) -> StatusEntry {
     StatusEntry {
@@ -323,6 +349,32 @@ mod tests {
         let b = session_key(&session(SessionSource::OpenCode, "same"));
         assert_ne!(a, b);
         assert_eq!(a, ("claude".to_string(), "same".to_string()));
+    }
+
+    /// The stored `ImportedSession.source` is normalized back to the bare source
+    /// tag so it matches `session_key`: OpenCode/Zed prefix it with `"<tag>:"`,
+    /// Claude stores a file path (which falls back to the `claude` tag).
+    #[test]
+    fn normalize_source_tag_maps_stored_sources() {
+        assert_eq!(normalize_source_tag("zed:abc"), "zed");
+        assert_eq!(normalize_source_tag("opencode:xyz"), "opencode");
+        assert_eq!(normalize_source_tag("claude"), "claude");
+        // A bare Claude transcript path → claude (never a silent non-match).
+        assert_eq!(
+            normalize_source_tag("/Users/me/.claude/projects/p/ses.jsonl"),
+            "claude"
+        );
+        // The normalized tag equals the discovered session's key source, so an
+        // imported OpenCode session with the same bare id as an un-imported Zed
+        // one stays distinct.
+        assert_eq!(
+            (normalize_source_tag("opencode:dup"), "dup".to_string()),
+            session_key(&session(SessionSource::OpenCode, "dup"))
+        );
+        assert_ne!(
+            (normalize_source_tag("opencode:dup"), "dup".to_string()),
+            session_key(&session(SessionSource::Zed, "dup"))
+        );
     }
 
     /// The status enum serializes to the snake_case strings the client decodes.

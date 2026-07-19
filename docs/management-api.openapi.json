@@ -1221,6 +1221,9 @@
               }
             }
           },
+          "400": {
+            "description": "Invalid value (e.g. a zero duration)"
+          },
           "503": {
             "description": "Dreaming unavailable (no LLM backend at startup)"
           }
