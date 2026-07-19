@@ -4,6 +4,11 @@ on:
   push:
     branches:
       - main
+  # Manual re-trigger: GitHub occasionally skips the push-triggered run for a
+  # merge (e.g. right after a bot-merged release PR), which leaves release-please
+  # without a chance to open the next Release PR. Dispatching this workflow
+  # re-scans main and opens it. release-please is idempotent, so it's safe.
+  workflow_dispatch:
 
 permissions:
   contents: write
