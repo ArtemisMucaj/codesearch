@@ -86,6 +86,15 @@ pub async fn models(
                 .collect()
         }
         LlmTarget::Copilot => {
+            // Without a stored OAuth token every Copilot request 401s, which
+            // would surface as an opaque 500. Detect it up front and return a
+            // clear, actionable 400 instead.
+            let copilot = CodesearchConfig::load_copilot(state.container.data_dir())?;
+            if copilot.github_token.as_deref().unwrap_or("").is_empty() {
+                return Err(ApiError::bad_request(
+                    "GitHub Copilot is not authenticated — run `codesearch copilot login`",
+                ));
+            }
             let client = CopilotChatClient::from_data_dir(state.container.data_dir())?;
             client
                 .list_models()
