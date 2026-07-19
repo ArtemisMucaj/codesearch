@@ -258,6 +258,45 @@ async fn graph_endpoint_returns_a_graph_view() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn channels_endpoint_accepts_comma_separated_repository_filter() {
+    let (container, _dir) = test_container().await;
+    index_fixture(&container).await;
+    let (base_url, server) = spawn_management_server_with_container(container).await;
+
+    // The `repository` filter is a comma-separated string (a Vec can't be
+    // deserialized from a query key). A single repo and a comma list must both
+    // bind — before this fix the param failed to deserialize and the filter was
+    // silently dropped, leaking every namespace's channels.
+    // Single repo, and a comma list (repeated to exercise splitting without
+    // needing a second fixture). Both must bind and return the report shape.
+    for query in [
+        "repository=fixture-repo",
+        "repository=fixture-repo,fixture-repo",
+    ] {
+        let resp = reqwest::get(format!("{base_url}/api/channels?{query}"))
+            .await
+            .expect("request to /api/channels failed");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::OK,
+            "channels should accept `{query}`"
+        );
+        let body: serde_json::Value = resp.json().await.expect("channels body was not JSON");
+        assert!(body["edges"].is_array());
+        assert!(body["unmatched_producers"].is_array());
+        assert!(body["unmatched_consumers"].is_array());
+    }
+
+    // No filter is still valid (scopes to the cwd namespace).
+    let resp = reqwest::get(format!("{base_url}/api/channels"))
+        .await
+        .expect("unfiltered channels request failed");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn repositories_endpoint_lists_indexed_repos() {
     let (container, _dir) = test_container().await;
     index_fixture(&container).await;
