@@ -90,8 +90,9 @@ and `500` for any other use-case failure.
 | Method & path | Purpose |
 |---|---|
 | `GET /api/features` | Entry-point execution features by criticality |
-| `GET /api/clusters` | File-level Leiden clusters (architectural modules) |
+| `GET /api/clusters` | File-level Leiden clusters (architectural modules); `?global=true` runs one namespace-wide detection across every repository (members become `repo:path`) |
 | `GET /api/symbol-clusters` | Symbol-level Leiden communities |
+| `GET /api/graph` | Render-ready community graph with edges (`level=file\|symbol`, `aggregate=`, `global=` for the namespace-wide file graph) |
 | `GET /api/couplings` | Coupling elements (`repository`, `level=file\|symbol`) |
 | `GET /api/channels` | Cross-service channel links |
 
