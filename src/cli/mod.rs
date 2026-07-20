@@ -135,6 +135,12 @@ pub enum ClustersSubcommand {
         #[arg(short, long)]
         repository: Option<String>,
 
+        /// Detect clusters across every repository in the namespace instead of
+        /// a single one: one Leiden run over the combined file graph,
+        /// cross-repository edges included. Members are shown as `repo:path`.
+        #[arg(short, long, conflicts_with = "repository")]
+        global: bool,
+
         /// Output format: text or json.
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormatTextJson,
@@ -731,6 +737,12 @@ pub enum Commands {
         /// Repository ID or name. Omit to auto-detect from the current directory.
         #[arg(short, long)]
         repository: Option<String>,
+
+        /// Render the namespace-wide graph instead of a single repository's:
+        /// every indexed repository, cross-repository edges included, coloured
+        /// by the global Leiden clusters. File level only.
+        #[arg(short, long, conflicts_with = "repository")]
+        global: bool,
 
         /// Which graph to render: the file-dependency graph or the symbol call graph.
         #[arg(short, long, value_enum, default_value = "file")]

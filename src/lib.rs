@@ -59,7 +59,7 @@ pub use domain::{
     Language, MemoryItem, MemoryKind, MemoryNode, MemoryOperation, NodeKind, NodeType, Protocol,
     ReferenceKind, Repository, SearchQuery, SearchResult, SessionLocator, SessionMessage,
     SessionSource, SessionTranscript, SymbolCommunity, SymbolCommunityGraph, SymbolReference,
-    VectorStore,
+    VectorStore, NAMESPACE_SCOPE_ID,
 };
 
 pub use domain::{CommunityMeta, GraphEdge, GraphLevel, GraphNode, GraphView};

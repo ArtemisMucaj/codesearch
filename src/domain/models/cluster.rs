@@ -1,6 +1,16 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Scope id under which namespace-wide (cross-repository) analyses are stored.
+///
+/// The analysis cache is keyed by `repository_id`; a namespace-wide Leiden run
+/// spans every repository in the namespace, so it is cached under this sentinel
+/// instead of any single repository's id. Repository ids are UUIDs, so the
+/// sentinel can never collide with a real one. Any re-index or repository
+/// deletion invalidates the sentinel entry alongside the repository's own,
+/// since the global graph derives from every repository's call graph.
+pub const NAMESPACE_SCOPE_ID: &str = "__namespace__";
+
 /// Derive a stable, content-addressed community id from its members.
 ///
 /// The id is a short hex digest of the (already sorted) member list, so the

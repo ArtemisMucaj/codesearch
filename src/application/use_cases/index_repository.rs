@@ -18,7 +18,7 @@ use crate::application::{
 };
 use crate::domain::{
     compute_file_hash, ChannelEndpoint, DomainError, Embedding, EndpointSource, FileHash, Language,
-    LanguageStats, Repository, SymbolReference, VectorStore,
+    LanguageStats, Repository, SymbolReference, VectorStore, NAMESPACE_SCOPE_ID,
 };
 
 /// Default number of concurrent `parse_only` calls during the parse phase.
@@ -154,6 +154,11 @@ impl IndexRepositoryUseCase {
         if let Some(analysis_repo) = &self.analysis_repo {
             if let Err(e) = analysis_repo.delete_by_repository(repository_id).await {
                 warn!("Failed to invalidate stored analyses for {repository_id}: {e}");
+            }
+            // The namespace-wide analysis derives from every repository's call
+            // graph, so changing any one of them stales it too.
+            if let Err(e) = analysis_repo.delete_by_repository(NAMESPACE_SCOPE_ID).await {
+                warn!("Failed to invalidate stored namespace-wide analyses: {e}");
             }
         }
     }

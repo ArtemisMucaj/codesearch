@@ -15,23 +15,34 @@ impl<'a> ClustersController<'a> {
         Self { container }
     }
 
-    /// List all clusters for the given repository.
+    /// List all clusters for the given repository — or, with `global`, the
+    /// namespace-wide clusters across every indexed repository.
     pub async fn list(
         &self,
         repository: Option<String>,
+        global: bool,
         format: OutputFormatTextJson,
         llm: LlmTarget,
         no_llm: bool,
     ) -> Result<String> {
-        let repository_id = self
-            .container
-            .resolve_repository_id(repository.as_deref())
-            .await;
         let use_case = self.container.cluster_detection_use_case();
-        let mut cg = use_case
-            .create_clusters(&repository_id)
-            .await
-            .context("detecting clusters for repository")?;
+        let (scope, mut cg) = if global {
+            let cg = use_case
+                .create_namespace_clusters()
+                .await
+                .context("detecting namespace-wide clusters")?;
+            ("namespace (all repositories)".to_string(), cg)
+        } else {
+            let repository_id = self
+                .container
+                .resolve_repository_id(repository.as_deref())
+                .await;
+            let cg = use_case
+                .create_clusters(&repository_id)
+                .await
+                .context("detecting clusters for repository")?;
+            (repository_id, cg)
+        };
 
         // LLM naming runs by default (best-effort, cached by cluster id). It
         // probes the endpoint with one call and skips to id fallback if that
@@ -62,15 +73,15 @@ impl<'a> ClustersController<'a> {
             OutputFormat::Text => {
                 if cg.clusters.is_empty() {
                     return Ok(format!(
-                        "No clusters detected for repository `{}` \
+                        "No clusters detected for `{}` \
                          (graph may be too small or have no edges).",
-                        repository_id
+                        scope
                     ));
                 }
                 let mut out = format!(
                     "Clusters for `{}` — {} clusters, {} files, {} edges\n\
                      ────────────────────────────────────────────────────\n",
-                    repository_id,
+                    scope,
                     cg.clusters.len(),
                     cg.total_files,
                     cg.total_edges,
