@@ -101,6 +101,16 @@ impl From<StreamLlmTarget> for LlmTarget {
     }
 }
 
+impl From<LlmTarget> for StreamLlmTarget {
+    fn from(value: LlmTarget) -> Self {
+        match value {
+            LlmTarget::Anthropic => StreamLlmTarget::Anthropic,
+            LlmTarget::OpenAi => StreamLlmTarget::OpenAi,
+            LlmTarget::Copilot => StreamLlmTarget::Copilot,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SSE helpers
 // ---------------------------------------------------------------------------
@@ -150,6 +160,12 @@ pub async fn explain_stream(
     body: Option<Json<ExplainStreamRequest>>,
 ) -> impl IntoResponse {
     let mut req = body.map(|Json(b)| b).unwrap_or_default();
+    // Default the backend to the server's active target when the request omits
+    // one, so switching to Copilot via /api/llm/target actually reaches explain
+    // — rather than always falling back to the OpenAI default downstream.
+    if req.llm.is_none() {
+        req.llm = Some(state.container.llm_target().into());
+    }
     // The call-graph query filters on the repository UUID, so a repository
     // NAME must be resolved first — passing it through unresolved silently
     // matches nothing and the explanation aborts with "no callers or callees".
