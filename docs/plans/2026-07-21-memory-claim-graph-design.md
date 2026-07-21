@@ -221,6 +221,18 @@ Design rules:
 - Reliable structured output is make-or-break; strong native schema adherence
   means far less downstream normalization.
 
+**Re-import is the one sanctioned hard delete.** First import of a session is
+append-only. A *re-import* of the same session (`--force`) instead **hard-deletes
+that session's existing claims** — every claim whose `source` is that
+`session_id` — and re-ingests from scratch, rather than layering `retracts`
+tombstones over the previous run. Re-running the extractor on an unchanged
+transcript is a do-over, not a new observation; keeping the old claims (or their
+tombstones) would just be noise. Idempotence keys on the session marker exactly
+as it does today (`find_session(id)`; skip unless `--force`), so a normal
+re-harvest is still a no-op — the delete path only fires on an explicit forced
+re-import. This is a deliberate, narrowly-scoped exception to the append-only
+rule, justified while the feature is experimental (see §8.3).
+
 **Model for this stage:** small, fast, non-thinking. On an 8 GB card, Granite
 4.1 8B or Qwen3.5-9B at Q4 works. Extraction throughput matters more than depth
 here.
@@ -298,9 +310,13 @@ synthesizing higher-level observations from lower-level ones — is the same ide
 
 ### 8.3 Guardrails (so dreaming doesn't corrupt memory)
 
-- **The immutable claim layer is sacrosanct.** Consolidation only *adds* derived
-  claims and edges, updates lifecycle status, and rebuilds the projection. It
-  never rewrites or deletes a primary claim.
+- **The immutable claim layer is sacrosanct — for *consolidation*.**
+  Consolidation only *adds* derived claims and edges, updates lifecycle status,
+  and rebuilds the projection. It never rewrites or deletes a primary claim. The
+  single sanctioned hard delete lives on the *ingestion* side — a forced
+  re-import wipes and re-ingests one session's claims (§6) — never in the
+  dreaming pass. (An experimental-stage carve-out; a mature system might replace
+  it with retract-and-reingest.)
 - **Derived ≠ ground truth.** Every derived claim is provenance-linked and
   re-derivable, carries lower confidence, and is clearly flagged so it can never
   masquerade as a primary observation.
