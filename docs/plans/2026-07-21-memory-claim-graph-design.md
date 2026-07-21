@@ -1,16 +1,42 @@
-# Memory System Design: A Bi-Temporal Claim Graph with Consolidation
+# Memory System Design: An Append-Only Claim Graph with Consolidation
 
 **Date:** 2026-07-21
-**Status:** Proposed
+**Status:** Proposed (revised after a codebase de-risking pass)
 
 > **Relationship to the current implementation.** Today's memory system
 > ([`docs/features/memory.md`](../features/memory.md)) uses *rewrite-merge*
 > semantics: an update re-emits an item's full content under the same
 > `(kind, name)` and bumps its `update_count`, mutating the row in place. This
-> document proposes a different foundation — an append-only, bi-temporal claim
-> log with a typed relationship graph and a materialized read model — and treats
-> the existing dream cycle as the consolidation pass over that log. It is a
+> document proposes a different foundation — an append-only claim log with a
+> typed relationship graph and a materialized read model — and treats the
+> existing dream cycle as the consolidation pass over that log. It is a
 > forward-looking design, not a description of what ships today.
+>
+> **What this revision cut, and why.** A pass over the actual codebase
+> (transcript parser, extraction/dream use cases, the `ChatClient` backends,
+> the DuckDB memory schema) showed three pieces of the original design rest on
+> signals the pipeline does not have. They are excluded rather than faked:
+>
+> - **World-valid-time bi-temporality.** Transcripts carry only a per-message
+>   *recording* timestamp — there is no independent signal for "when this became
+>   true in the world." The two-timeline model collapsed to one in practice, so
+>   the design now keeps a **single event timeline** (`recorded_at`) plus a
+>   validity interval closed on supersession (`valid_to`). "What was true in the
+>   world on date D" is demoted to a best-effort special case (only when an
+>   explicit date is extracted from text), not a core query.
+> - **`TextSpan` provenance.** The transcript is normalized and reassembled
+>   (tool calls summarized, thinking/results dropped), so there is no stable
+>   character offset back to a source. Provenance is now a coarse
+>   **`(session_id, message_index)`** reference.
+> - **`source_trust × confidence` arbitration.** Neither factor exists today —
+>   `source` is a bare session id and extraction emits no confidence. Arbitration
+>   is restated in terms of signals we can actually produce (see §7).
+>
+> The two assumptions that a code read *cannot* settle — whether atomic claims
+> embed well enough for recall (§12), and whether entity resolution is good
+> enough to anchor retrieval (§10.4) — are left in and explicitly marked as
+> **spike-gated**: they must be validated on real data before the retrieval
+> rewrite is committed.
 
 ---
 
@@ -43,8 +69,10 @@ Why this matters:
   when did I come to believe it?" That question is impossible once you mutate.
 - **Reversibility** — a bad extraction or a wrong supersession can be undone
   because the original is still there.
-- **Temporal reasoning** — "where did they live in 2023?" is answerable, not
-  just "where do they live now?"
+- **Supersession history** — "what did I record earlier about X, and when did
+  the current version take over?" is answerable from the log, not just "what's
+  current now?" (This is recording-order history, not independent world-time —
+  see the revision note.)
 
 This is the same reason event-sourced systems keep the event log instead of only
 the current row: the log is truth, the current state is a derived view.
@@ -89,16 +117,19 @@ Claim {
   predicate:       string           # small controlled-ish vocabulary
   object:          EntityRef | Literal
   statement:       string           # human-readable form, for retrieval/embedding
+  project:         string | null    # project/namespace scope, or null = global
 
-  # Bi-temporal
-  valid_from:      timestamp        # when this became true in the world
-  valid_to:        timestamp | null # when it stopped being true (null = still true)
-  recorded_at:     timestamp        # when the system learned it (transaction time)
+  # Temporal (single event timeline)
+  recorded_at:     timestamp        # when the system recorded this claim
+  valid_to:        timestamp | null # closed when a supersedes edge fires;
+                                    #   null = still current
+  valid_from:      timestamp        # defaults to recorded_at; only distinct when
+                                    #   an explicit date is extracted from text
 
   # Trust
-  source:          SourceRef        # doc/conversation/turn it came from
-  confidence:      float            # extractor or resolver confidence
-  provenance:      TextSpan         # exact span it was extracted from
+  source:          SourceRef        # (session_id, message_index) it came from
+  source_kind:     enum { user_stated, assistant_inferred, derived }
+  confidence:      float            # best-effort; model-emitted or heuristic
 
   # Lifecycle
   status:          enum { active, superseded, retracted, needs_resolution }
@@ -107,9 +138,19 @@ Claim {
 }
 ```
 
-The pair `(valid_time, recorded_at)` is what makes this **bi-temporal**: you can
-ask both "what was true on date D?" and "what did we *believe* was true, as of
-when we knew it on date D?" These are different questions and both are useful.
+There is one timeline: `recorded_at` is when the claim entered the log, and
+`valid_to` is set to the recording time of the claim that supersedes it. That is
+enough to answer "what did I record about X, and when did each version take
+over" — the history question worth keeping. It is **not** a second, independent
+world-valid timeline: the transcript has no signal for when a fact became true
+in the world, so `valid_from` defaults to `recorded_at` and only differs when the
+extractor lifts an explicit date out of the text. Treat world-time queries as a
+best-effort extra, not a guarantee.
+
+`project` mirrors the current `MemoryItem.project`: it is resolved at ingestion
+by the existing shared resolver (git-remote-first, namespace-aware) so a claim
+never surfaces as advice in an unrelated project. Entities (§4.2) stay global,
+keyed by canonical name; the project scope lives on the claim.
 
 ### 4.2 Entity (resolved, canonical)
 
@@ -193,11 +234,21 @@ here.
 - **Deferred:** everything ambiguous drops into the `needs_resolution` queue and
   is settled during consolidation, where you can afford a bigger model and full
   graph context.
-- **Arbitration policy:**
+- **Arbitration policy** (restated in terms of signals the pipeline actually
+  produces — see the revision note at the top):
   - `supersedes` → recency wins.
-  - `contradicts` → highest (source_trust × confidence) wins; if within a
-    margin, keep both and surface the conflict rather than guessing.
-  - Never let recency alone override a high-confidence established fact.
+  - `contradicts` → **`source_kind` precedence is the primary arbiter**
+    (`user_stated` > `assistant_inferred` > `derived`); `confidence` is only a
+    tiebreak within the same source kind. If the two are the same kind and
+    within a confidence margin, keep both and surface the conflict rather than
+    guessing.
+  - Never let recency alone override a `user_stated` claim with a low-confidence
+    inference.
+
+  `confidence` is a soft, best-effort number (model-emitted when the backend is
+  reliable enough, otherwise a heuristic from corroboration count and recency),
+  so the policy leans on the discrete `source_kind` ordering first and treats
+  `confidence` as advisory.
 
 ---
 
@@ -283,7 +334,7 @@ Retention windows govern the transitions.
 ## 10. Retrieval
 
 Retrieval is where the design's central tension surfaces: the store is highly
-**structured** (typed edges, validity windows, resolved entities) but queries
+**structured** (typed edges, supersession chains, resolved entities) but queries
 arrive **fuzzy** (natural language, vague reference). The resolution is not to
 pick a paradigm but to split the work: semantics and structure do different jobs.
 
@@ -296,7 +347,8 @@ pick a paradigm but to split the work: semantics and structure do different jobs
   projection is already conflict-collapsed and active-only, so reads don't redo
   conflict resolution or validity filtering. This is the read side of the CQRS
   split — you read a resolved claim rather than re-deriving it per query. Only
-  temporal / as-of / audit queries fall through to the full claim log.
+  history / audit queries (what superseded what, and when it was recorded) fall
+  through to the full claim log.
 
 ### 10.2 Pipeline
 
@@ -311,8 +363,9 @@ pick a paradigm but to split the work: semantics and structure do different jobs
    `supersedes` / `contradicts` edges to *understand* status, not to surface the
    superseded claims themselves.
 3. **Filter by status + validity.** Drop `superseded` / `retracted` unless the
-   query is temporal; apply the as-of window when present. This is where
-   bi-temporality is spent.
+   query is a history query; when the query carries an explicit date, apply the
+   `recorded_at` / `valid_to` window. This is where the single-timeline validity
+   model is spent.
 4. **Rank.** Blend semantic similarity, recency, confidence, and the **salience
    score the consolidation pass already computed** — reuse it, don't recompute
    importance at query time. A cross-encoder rerank on the shortlist is worth it.
@@ -325,8 +378,11 @@ pick a paradigm but to split the work: semantics and structure do different jobs
 Not every query wants the full pipeline. Cheaply classify and route:
 
 - **Semantic recall** ("what do I know about...") -> full pipeline above.
-- **Precise / temporal lookup** ("where did E live in 2023?") -> structured query
-  against the log with a validity filter; skip vector search.
+- **Precise lookup** ("what's the current value of setting X") -> structured
+  query against the projection; skip vector search.
+- **History / audit** ("what did I previously believe about X, and when was it
+  replaced") -> structured query against the log over `recorded_at` / `valid_to`
+  and the `supersedes` chain; skip vector search.
 - **Multi-hop relational** ("E's project's owner's timezone") -> entity anchor +
   deeper bounded traversal.
 - **Aggregation / synthesis** -> retrieve broadly, then reflect.
@@ -335,11 +391,20 @@ Not every query wants the full pipeline. Cheaply classify and route:
 
 Prefer **graph-anchored** retrieval over vector-first GraphRAG. Vector-first
 tends to return semantically-similar-but-stale-or-contradicted claims — exactly
-what the temporal model exists to avoid. Given strong entity resolution, use
-fuzzy search only to find entry nodes and let structure decide the rest. It
-plays to what the graph gives you instead of fighting it. Mature temporal-memory
-systems converge on the same shape: one store carrying vector, lexical (BM25),
-and graph indexes together, rather than a vector DB bolted beside a graph DB.
+what the supersession model exists to avoid. Use fuzzy search only to find entry
+nodes and let structure decide the rest. It plays to what the graph gives you
+instead of fighting it. Mature temporal-memory systems converge on the same
+shape: one store carrying vector, lexical (BM25), and graph indexes together,
+rather than a vector DB bolted beside a graph DB.
+
+> **Spike-gated.** This stance *assumes* entity resolution is good enough to
+> anchor on, and that atomic claims embed well enough for the hybrid entry-point
+> leg to find them. Neither can be settled by reading the codebase — there is no
+> entity-resolution infrastructure today, and atomic claims are known to embed
+> noisily (§12). Both must be validated on real data before this retrieval path
+> is built; if resolution is mushy or claim recall is poor, graph-anchored loses
+> to the simple hybrid item search that already ships, and the stance should be
+> revisited.
 
 ---
 
@@ -354,10 +419,42 @@ and graph indexes together, rather than a vector DB bolted beside a graph DB.
 Two-tier only because the workloads genuinely differ — not for its own sake. A
 single mid-size model can do all three if you'd rather keep it simple.
 
+> **Structured-output caveat (from the codebase).** The online extraction path
+> gets real schema enforcement only on the OpenAI-compatible backend, which
+> sends `response_format: json_schema` (strict) and degrades to free-form when
+> the server can't grammar-constrain. The Anthropic backend — the natural home
+> for the deferred arbitration / dreaming tier — implements no structured output
+> at all and relies entirely on the tolerant free-form parser. So: keep the
+> claim-extraction schema **flat** (deep nesting raises the fallback rate even on
+> OpenAI), and either accept free-form parsing for the dreaming tier or add
+> tool-use-based structured output to the Anthropic client as net-new work.
+
 ---
 
 ## 12. Open questions & honest tradeoffs
 
+The two **spike-gated** items below (claim embedding, entity resolution) are the
+ones that decide whether this whole approach beats the simple hybrid item search
+that already ships. They are empirical — a code read can't settle them — so they
+must be validated on real data *before* the retrieval rewrite is committed.
+Everything the de-risking pass could settle from the codebase has already been
+folded into the body of the design (see the revision note at the top): the
+temporal model, provenance shape, arbitration signals, project scoping, delete
+semantics, and write atomicity.
+
+- **[SPIKE] Atomic claims embed poorly.** Short structured statements have thin
+  "aboutness" and embed noisily, so pure vector recall over claims
+  underperforms. Options to prototype: embed the statement plus light
+  entity/parent context (e.g. a claim together with its `refines` parent), or
+  embed at the entity/topic-cluster level and treat claims as the fine-grained
+  payload hydrated after anchoring. Chunk granularity is a genuine open problem.
+  Measure recall on real sessions before building the entry-point leg.
+- **[SPIKE] Entity resolution is the linchpin and is greenfield.** There is no
+  entity-resolution infrastructure in the codebase today. Graph-anchored
+  retrieval is only as good as resolution; if "Alice" / "my coworker Alice"
+  don't collapse reliably (embedding + alias table over the existing
+  `EmbeddingService`), the anchoring stance fails. Validate resolution quality
+  on the entities real sessions produce before committing §10.
 - **How much to trust derived claims** at retrieval time vs. always deferring to
   primaries. Start conservative: primaries win, derived claims only fill gaps.
 - **Consolidation cadence** — too frequent wastes compute and risks drift; too
@@ -382,7 +479,8 @@ single mid-size model can do all three if you'd rather keep it simple.
 
 ---
 
-*Design summary: a bi-temporal, append-only claim graph with typed
-relationships, a materialized current-truth read model, deferred conflict
+*Design summary: an append-only claim graph on a single event timeline, with
+typed relationships, a materialized current-truth read model, deferred conflict
 resolution, and an offline consolidation pass that abstracts, merges, prunes, and
-rebuilds — memory as an event log, with sleep.*
+rebuilds — memory as an event log, with sleep. Two assumptions (claim embedding
+and entity resolution) remain spike-gated before the retrieval path is built.*
