@@ -6,8 +6,23 @@ use codesearch::{
     DuckdbAnalysisRepository, DuckdbCallGraphRepository, DuckdbChannelEndpointRepository,
     DuckdbMetadataRepository, ExecutionFeaturesUseCase, FileRelationshipUseCase,
     InMemoryVectorRepository, MetadataRepository, OverviewOptions, Repository,
-    RepositoryOverviewUseCase, SymbolClusterDetectionUseCase,
+    RepositoryOverviewUseCase, SymbolClusterDetectionUseCase, VectorStore,
 };
+
+/// Namespace the overview fixture is wired for; repositories under test must be
+/// seeded into it so the (namespace-scoped) file-graph builder can see them.
+const TEST_NAMESPACE: &str = "overview-ns";
+
+/// A repository seeded into [`TEST_NAMESPACE`].
+fn ns_repo(name: &str, path: &str) -> Repository {
+    Repository::new_with_storage(
+        name.to_string(),
+        path.to_string(),
+        VectorStore::default(),
+        Some(TEST_NAMESPACE.to_string()),
+        None,
+    )
+}
 
 /// Wire a [`RepositoryOverviewUseCase`] entirely from in-memory storage.
 async fn setup_overview_use_case() -> (Arc<DuckdbMetadataRepository>, RepositoryOverviewUseCase) {
@@ -36,6 +51,7 @@ async fn setup_overview_use_case() -> (Arc<DuckdbMetadataRepository>, Repository
         Arc::clone(&call_graph),
         vector_repo,
         metadata.clone() as Arc<dyn MetadataRepository>,
+        TEST_NAMESPACE.to_string(),
     ));
     let clusters = Arc::new(
         ClusterDetectionUseCase::new(Arc::clone(&file_graph))
@@ -70,7 +86,7 @@ async fn setup_overview_use_case() -> (Arc<DuckdbMetadataRepository>, Repository
 async fn test_overview_for_indexed_repository_populates_all_sections() {
     let (metadata, use_case) = setup_overview_use_case().await;
 
-    let repo = Repository::new("test-repo".to_string(), "/tmp/test-repo".to_string());
+    let repo = ns_repo("test-repo", "/tmp/test-repo");
     metadata.save(&repo).await.expect("Failed to save repo");
 
     let report = use_case
@@ -132,7 +148,7 @@ async fn test_overview_for_unknown_repository_skips_stats_instead_of_failing() {
 async fn test_overview_options_disable_sections() {
     let (metadata, use_case) = setup_overview_use_case().await;
 
-    let repo = Repository::new("opts-repo".to_string(), "/tmp/opts-repo".to_string());
+    let repo = ns_repo("opts-repo", "/tmp/opts-repo");
     metadata.save(&repo).await.expect("Failed to save repo");
 
     let options = OverviewOptions {

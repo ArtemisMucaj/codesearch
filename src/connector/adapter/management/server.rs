@@ -157,6 +157,19 @@ pub fn routes(state: AppState) -> Router {
             axum::routing::put(handlers::llm::upsert_endpoint),
         )
         .route("/api/llm/active", post(handlers::llm::set_active_endpoint))
+        // Active LLM backend: report/switch which provider (openai/anthropic/
+        // copilot) answers explain, dream, and model discovery — persisted and
+        // applied live, so a GUI can change backends without a restart.
+        .route(
+            "/api/llm/target",
+            get(handlers::llm::get_target).post(handlers::llm::set_target),
+        )
+        // Pin the Copilot model (the Copilot analog of an OpenAI endpoint's
+        // model), persisted to config.json.
+        .route(
+            "/api/llm/copilot/model",
+            axum::routing::put(handlers::llm::set_copilot_model),
+        )
         // GitHub Copilot device-flow login (start + poll status), so a GUI can
         // authenticate without the terminal `copilot login` command.
         .route(
@@ -223,6 +236,9 @@ async fn index(State(_state): State<AppState>) -> Json<Value> {
             { "method": "GET", "path": "/api/sessions/transcript", "description": "one discovered session's transcript (?source=&id=)" },
             { "method": "POST", "path": "/api/sessions/import", "description": "queue a background import ({source,id,force?})" },
             { "method": "GET", "path": "/api/sessions/import", "description": "per-session import status map" },
+            { "method": "GET", "path": "/api/llm/target", "description": "the active LLM backend + pinned copilot model" },
+            { "method": "POST", "path": "/api/llm/target", "description": "switch the active LLM backend ({target}); applied live + persisted" },
+            { "method": "PUT", "path": "/api/llm/copilot/model", "description": "pin the copilot model ({model}); empty clears it" },
             { "method": "GET", "path": "/api/openapi.json", "description": "OpenAPI 3.1 description of this API" },
             { "method": "GET/POST", "path": "/api/stream/explain/{symbol}", "description": "SSE: stream an LLM call-flow explanation for a symbol" },
             { "method": "POST", "path": "/api/stream/index", "description": "SSE: stream indexing progress for a repository path" },

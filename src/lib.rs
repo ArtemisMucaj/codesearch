@@ -52,14 +52,14 @@ pub use connector::{
 };
 
 pub use domain::{
-    compute_file_hash, stable_community_id, ChannelEdge, ChannelEndpoint, ChannelRole, Cluster,
-    ClusterGraph, CodeChunk, CommunityCoupling, CouplingElement, CouplingElementKind,
-    CouplingReport, DiscoveredSession, DomainError, DreamRun, Embedding, EmbeddingConfig,
-    EndpointSource, ExecutionFeature, FeatureNode, FileHash, ImportedSession, IndexingStatus,
-    Language, MemoryItem, MemoryKind, MemoryNode, MemoryOperation, NodeKind, NodeType, Protocol,
-    ReferenceKind, Repository, SearchQuery, SearchResult, SessionLocator, SessionMessage,
-    SessionSource, SessionTranscript, SymbolCommunity, SymbolCommunityGraph, SymbolReference,
-    VectorStore, NAMESPACE_SCOPE_ID,
+    compute_file_hash, namespace_scope_id, stable_community_id, ChannelEdge, ChannelEndpoint,
+    ChannelRole, Cluster, ClusterGraph, CodeChunk, CommunityCoupling, CouplingElement,
+    CouplingElementKind, CouplingReport, DiscoveredSession, DomainError, DreamRun, Embedding,
+    EmbeddingConfig, EndpointSource, ExecutionFeature, FeatureNode, FileHash, ImportedSession,
+    IndexingStatus, Language, MemoryItem, MemoryKind, MemoryNode, MemoryOperation, NodeKind,
+    NodeType, Protocol, ReferenceKind, Repository, SearchQuery, SearchResult, SessionLocator,
+    SessionMessage, SessionSource, SessionTranscript, SymbolCommunity, SymbolCommunityGraph,
+    SymbolReference, VectorStore, NAMESPACE_SCOPE_ID,
 };
 
 pub use domain::{CommunityMeta, GraphEdge, GraphLevel, GraphNode, GraphView};

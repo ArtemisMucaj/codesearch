@@ -181,6 +181,13 @@ pub enum SymbolClustersSubcommand {
         #[arg(short, long)]
         repository: Option<String>,
 
+        /// Detect communities across every repository in the namespace instead
+        /// of a single one: one Leiden run over the combined, cross-repository
+        /// call graph. Symbol FQNs are globally unique, so a symbol called from
+        /// one repository and defined in another joins the two.
+        #[arg(short, long, conflicts_with = "repository")]
+        global: bool,
+
         /// Output format: text or json.
         #[arg(short = 'F', long, value_enum, default_value = "text")]
         format: OutputFormatTextJson,
@@ -723,6 +730,12 @@ pub enum Commands {
         #[arg(short, long)]
         repository: Option<String>,
 
+        /// Analyse couplings across every repository in the namespace instead of
+        /// a single one. A coupler that splits a namespace-wide community is the
+        /// shared file/symbol welding two repositories together.
+        #[arg(short, long, conflicts_with = "repository")]
+        global: bool,
+
         /// Which graph to analyse: the file-dependency graph or the symbol call graph.
         #[arg(short, long, value_enum, default_value = "file")]
         level: VizLevel,
@@ -740,7 +753,8 @@ pub enum Commands {
 
         /// Render the namespace-wide graph instead of a single repository's:
         /// every indexed repository, cross-repository edges included, coloured
-        /// by the global Leiden clusters. File level only.
+        /// by the global Leiden communities. Works at both the file and symbol
+        /// levels.
         #[arg(short, long, conflicts_with = "repository")]
         global: bool,
 

@@ -41,8 +41,8 @@ use tracing::{debug, warn};
 
 use crate::application::{AnalysisRepository, FileRelationshipUseCase};
 use crate::domain::{
-    community_label, stable_community_id, Cluster, ClusterGraph, CommunityMeta, DomainError,
-    FileEdge, FileGraph, GraphEdge, GraphLevel, GraphNode, GraphView, Language, NAMESPACE_SCOPE_ID,
+    community_label, namespace_scope_id, stable_community_id, Cluster, ClusterGraph, CommunityMeta,
+    DomainError, FileEdge, FileGraph, GraphEdge, GraphLevel, GraphNode, GraphView, Language,
 };
 
 // ── Edge-weight constants by reference kind ───────────────────────────────
@@ -1293,7 +1293,9 @@ fn repo_labels(graph: &FileGraph) -> HashMap<String, String> {
 /// prefix doubles as the member's display form in namespace-wide clusters.
 /// The node set is rebuilt from the qualified edges, mirroring how
 /// [`FileRelationshipUseCase::build_graph`] derives it.
-fn qualify_namespace_graph(mut graph: FileGraph) -> FileGraph {
+///
+/// `pub(crate)` so namespace-wide coupling detection can qualify the same graph.
+pub(crate) fn qualify_namespace_graph(mut graph: FileGraph) -> FileGraph {
     let labels = repo_labels(&graph);
     let qualify = |repo_id: &str, path: &str| -> String {
         let label = labels.get(repo_id).map(String::as_str).unwrap_or(repo_id);
@@ -1652,27 +1654,36 @@ impl ClusterDetectionUseCase {
 
     /// Build the qualified namespace-wide file graph: every indexed repository,
     /// cross-repository edges included, nodes prefixed with their repository
-    /// label (see [`qualify_namespace_graph`]).
-    async fn namespace_graph(&self) -> Result<FileGraph, DomainError> {
-        let graph = self.file_graph.build_graph(None, 1, true).await?;
+    /// label (see [`qualify_namespace_graph`]). `namespace` overrides the default
+    /// scope for per-request use.
+    async fn namespace_graph(&self, namespace: Option<&str>) -> Result<FileGraph, DomainError> {
+        let graph = self
+            .file_graph
+            .build_graph_in(None, 1, true, namespace)
+            .await?;
         Ok(qualify_namespace_graph(graph))
     }
 
     /// Detect clusters across **every repository in the namespace** with one
     /// Leiden run over the combined, cross-repository file graph.
     ///
-    /// The result is cached under [`NAMESPACE_SCOPE_ID`] (repository ids are
-    /// UUIDs, so the sentinel cannot collide) and invalidated whenever any
+    /// The result is cached under [`namespace_scope_id`] for this namespace
+    /// (repository ids are UUIDs, so the sentinel cannot collide) and
+    /// invalidated whenever any
     /// repository in the namespace is re-indexed or deleted, since the global
     /// graph derives from all of them. Members are repository-qualified
     /// (`repo:path`), which keeps same-named files from different repositories
     /// distinct and gives the stable community ids a namespace-wide identity.
-    pub async fn create_namespace_clusters(&self) -> Result<ClusterGraph, DomainError> {
-        let mut cg = match self.load_stored(NAMESPACE_SCOPE_ID).await {
+    pub async fn create_namespace_clusters(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<ClusterGraph, DomainError> {
+        let scope = self.namespace_scope_key(namespace);
+        let mut cg = match self.load_stored(&scope).await {
             Some(stored) => stored,
             None => {
-                let graph = self.namespace_graph().await?;
-                let cg = self.compute_clusters(NAMESPACE_SCOPE_ID, &graph);
+                let graph = self.namespace_graph(namespace).await?;
+                let cg = self.compute_clusters(&scope, &graph);
                 self.store(&cg).await;
                 cg
             }
@@ -1681,25 +1692,37 @@ impl ClusterDetectionUseCase {
         Ok(cg)
     }
 
+    /// The cache scope id for a namespace's global run. The analysis cache has no
+    /// namespace column, so the sentinel must carry the namespace or two
+    /// namespaces' global partitions would collide under one bare key. `None`
+    /// uses the use case's default namespace.
+    fn namespace_scope_key(&self, namespace: Option<&str>) -> String {
+        namespace_scope_id(namespace.unwrap_or_else(|| self.file_graph.namespace()))
+    }
+
     /// Render-ready [`GraphView`] of the namespace-wide file graph, with each
     /// (repository-qualified) file coloured by its global Leiden cluster.
     ///
-    /// The partition is served from the [`NAMESPACE_SCOPE_ID`] cache when
+    /// The partition is served from the [`namespace_scope_id`] cache when
     /// available, exactly like [`Self::create_namespace_clusters`]; the raw
     /// graph is always rebuilt for edge-level detail, mirroring
     /// [`Self::clusters_and_graph`].
-    pub async fn namespace_graph_view(&self) -> Result<GraphView, DomainError> {
-        let graph = self.namespace_graph().await?;
-        let mut cg = match self.load_stored(NAMESPACE_SCOPE_ID).await {
+    pub async fn namespace_graph_view(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<GraphView, DomainError> {
+        let scope = self.namespace_scope_key(namespace);
+        let graph = self.namespace_graph(namespace).await?;
+        let mut cg = match self.load_stored(&scope).await {
             Some(stored) => stored,
             None => {
-                let cg = self.compute_clusters(NAMESPACE_SCOPE_ID, &graph);
+                let cg = self.compute_clusters(&scope, &graph);
                 self.store(&cg).await;
                 cg
             }
         };
         self.apply_cached_names(&mut cg.clusters).await;
-        Ok(build_file_graph_view(&cg, &graph, NAMESPACE_SCOPE_ID))
+        Ok(build_file_graph_view(&cg, &graph, &scope))
     }
 
     /// Return the cluster a given file belongs to.
@@ -1746,6 +1769,8 @@ fn build_file_graph_view(cg: &ClusterGraph, graph: &FileGraph, repository_id: &s
                 community: idx,
                 degree: 0,
                 language: Language::from_path(Path::new(member)).as_str().to_string(),
+                // File nodes encode the repo in the id (`repo:path`) already.
+                repository: None,
             });
         }
     }

@@ -837,7 +837,7 @@ async fn dream_consolidates_duplicate_cluster() {
     ]));
     let dream = harness.dream_use_case(Arc::clone(&chat), StubDiscovery::empty());
 
-    let report = dream.execute(3_600).await.unwrap();
+    let report = dream.execute(3_600, true).await.unwrap();
 
     assert_eq!(report.clusters_found, 1);
     assert_eq!(report.applied.len(), 2, "one merge upsert + one delete");
@@ -890,12 +890,12 @@ async fn dream_always_runs_a_full_cycle() {
     let chat = Arc::new(ScriptedChatClient::new(vec![no_op, no_op]));
     let dream = harness.dream_use_case(Arc::clone(&chat), StubDiscovery::empty());
 
-    let first = dream.execute(3_600).await.unwrap();
+    let first = dream.execute(3_600, true).await.unwrap();
     assert_eq!(first.clusters_found, 1);
 
     // A second cycle with nothing new still consolidates — a requested dream
     // never short-circuits.
-    let second = dream.execute(3_600).await.unwrap();
+    let second = dream.execute(3_600, true).await.unwrap();
     assert_eq!(second.clusters_found, 1);
     assert_eq!(chat.recorded_calls().await.len(), 2);
 
@@ -944,7 +944,7 @@ async fn dream_rejects_deletes_outside_the_cluster() {
                        {"kind": "fact", "name": "innocent_bystander"}]}"#,
     ]));
     let dream = harness.dream_use_case(chat, StubDiscovery::empty());
-    let report = dream.execute(3_600).await.unwrap();
+    let report = dream.execute(3_600, true).await.unwrap();
 
     // In-cluster delete applied; out-of-cluster delete refused.
     assert!(harness
@@ -989,7 +989,7 @@ async fn dream_harvests_only_idle_unimported_sessions() {
         "Races in test setup cause flakiness",
     ))]));
     let dream = harness.dream_use_case(chat, discovery);
-    let report = dream.execute(3_600).await.unwrap();
+    let report = dream.execute(3_600, true).await.unwrap();
 
     assert_eq!(report.sessions_eligible, 1, "fresh session is not eligible");
     assert_eq!(report.sessions_imported, 1);
@@ -1011,6 +1011,47 @@ async fn dream_harvests_only_idle_unimported_sessions() {
         .await
         .unwrap()
         .is_some());
+}
+
+#[tokio::test]
+async fn dream_skips_harvest_when_auto_import_off() {
+    // With auto-import off, a dream cycle must import no sessions — it only
+    // consolidates/reflects over the existing store. This is what makes the
+    // `auto_import: false` toggle mean "never import automatically", even while
+    // dreaming is enabled.
+    let harness = Harness::new();
+    let now = now_secs();
+
+    let mut discovery = StubDiscovery::empty();
+    discovery.sessions = vec![discovered("old-session", now - 7_200)];
+    discovery.transcripts.insert(
+        "old-session".to_string(),
+        transcript(
+            "old-session",
+            &[
+                ("user", "please fix the flaky test"),
+                ("assistant", "done, the race was in setup"),
+            ],
+        ),
+    );
+
+    // No LLM calls are expected: harvest is skipped, and an empty store has
+    // nothing to consolidate or reflect on. An empty script asserts that.
+    let chat = Arc::new(ScriptedChatClient::new(vec![]));
+    let dream = harness.dream_use_case(chat, discovery);
+    let report = dream.execute(3_600, false).await.unwrap();
+
+    assert_eq!(report.sessions_eligible, 0, "harvest phase was skipped");
+    assert_eq!(report.sessions_imported, 0);
+    assert!(
+        harness
+            .memory_repo
+            .find_session("old-session")
+            .await
+            .unwrap()
+            .is_none(),
+        "no session should be imported with auto-import off"
+    );
 }
 
 #[tokio::test]
@@ -1039,7 +1080,7 @@ async fn dream_reflection_writes_but_never_deletes() {
             "delete": [{"kind": "experience", "name": "exp_one"}]}"#,
     ]));
     let dream = harness.dream_use_case(chat, StubDiscovery::empty());
-    let report = dream.execute(3_600).await.unwrap();
+    let report = dream.execute(3_600, true).await.unwrap();
 
     assert!(harness
         .memory_repo
@@ -1094,7 +1135,7 @@ async fn dream_synthesizes_skills_from_recurring_experiences() {
         ], "delete": [{"kind": "experience", "name": "debug_flaky_one"}]}"#,
     ]));
     let dream = harness.dream_use_case(chat, StubDiscovery::empty());
-    let report = dream.execute(3_600).await.unwrap();
+    let report = dream.execute(3_600, true).await.unwrap();
 
     // The skill was written.
     assert!(

@@ -8,6 +8,8 @@
 //!
 //! 1. **Harvest** — discover finished sessions (idle for at least an hour)
 //!    that were never imported, and run them through the import pipeline.
+//!    Skipped when auto-import is off, so `auto_import: false` imports no
+//!    sessions even while dreaming stays enabled.
 //! 2. **Consolidate** — cluster near-duplicate items by embedding similarity,
 //!    then let the model merge each cluster. Contradictions are the priority:
 //!    conflicting memories are rewritten into one item carrying the boundary
@@ -196,9 +198,16 @@ impl MemoryDreamUseCase {
     }
 
     /// Run one full dream cycle. `session_idle_secs` is how long a session
-    /// must have been inactive to count as finished.
+    /// must have been inactive to count as finished. `auto_import` gates the
+    /// harvest phase: when `false`, the cycle consolidates and reflects over the
+    /// existing store but imports no new sessions — so `auto_import: false`
+    /// means "never import sessions automatically", dreaming included.
     #[tracing::instrument(skip_all)]
-    pub async fn execute(&self, session_idle_secs: i64) -> Result<DreamReport, DomainError> {
+    pub async fn execute(
+        &self,
+        session_idle_secs: i64,
+        auto_import: bool,
+    ) -> Result<DreamReport, DomainError> {
         let _guard = self.begin_cycle()?;
         let started_at = unix_now();
         let mut report = DreamReport::default();
@@ -207,7 +216,10 @@ impl MemoryDreamUseCase {
         // the cycle body separately and record the run either way — a failed
         // cycle that already harvested or consolidated must still leave a trace
         // in history with the counts it managed to apply.
-        match self.run_cycle(session_idle_secs, &mut report).await {
+        match self
+            .run_cycle(session_idle_secs, auto_import, &mut report)
+            .await
+        {
             Ok(()) => {
                 self.record_run(&report, started_at, "completed").await;
                 info!(
@@ -237,12 +249,17 @@ impl MemoryDreamUseCase {
     async fn run_cycle(
         &self,
         session_idle_secs: i64,
+        auto_import: bool,
         report: &mut DreamReport,
     ) -> Result<(), DomainError> {
-        // Phase 1 — harvest.
-        let harvest = self.harvest_inner(session_idle_secs).await?;
-        report.sessions_eligible = harvest.sessions_eligible;
-        report.sessions_imported = harvest.sessions_imported;
+        // Phase 1 — harvest. Skipped when auto-import is off: dreaming then only
+        // consolidates and reflects over already-imported memories, and no new
+        // session is pulled in behind the user's back.
+        if auto_import {
+            let harvest = self.harvest_inner(session_idle_secs).await?;
+            report.sessions_eligible = harvest.sessions_eligible;
+            report.sessions_imported = harvest.sessions_imported;
+        }
 
         let items = self.memory_repo.list_items(None).await?;
 

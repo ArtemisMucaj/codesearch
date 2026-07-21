@@ -7,7 +7,7 @@ use crate::application::{
     AnalysisRepository, CallGraphUseCase, ChannelEndpointRepository, FileHashRepository,
     MetadataRepository, VectorRepository,
 };
-use crate::domain::{DomainError, NAMESPACE_SCOPE_ID};
+use crate::domain::{namespace_scope_id, DomainError};
 
 pub struct DeleteRepositoryUseCase {
     repository_repo: Arc<dyn MetadataRepository>,
@@ -70,11 +70,14 @@ impl DeleteRepositoryUseCase {
         }
         if let Some(analysis_repo) = &self.analysis_repo {
             analysis_repo.delete_by_repository(id).await?;
-            // The namespace-wide analysis spans every repository, so removing
-            // one invalidates it as well.
-            analysis_repo
-                .delete_by_repository(NAMESPACE_SCOPE_ID)
-                .await?;
+            // The namespace-wide analysis spans every repository in the
+            // namespace, so removing one invalidates that namespace's entry
+            // (cached per namespace, see `namespace_scope_id`).
+            if let Some(ns) = repo.namespace() {
+                analysis_repo
+                    .delete_by_repository(&namespace_scope_id(ns))
+                    .await?;
+            }
         }
         self.repository_repo.delete(id).await?;
 

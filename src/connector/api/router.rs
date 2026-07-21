@@ -197,12 +197,13 @@ impl<'a> Router<'a> {
             Commands::SymbolClusters { subcommand } => match subcommand {
                 SymbolClustersSubcommand::List {
                     repository,
+                    global,
                     format,
                     llm,
                     no_llm,
                 } => {
                     self.symbol_clusters_controller
-                        .list(repository, format, llm, no_llm)
+                        .list(repository, global, format, llm, no_llm)
                         .await
                 }
                 SymbolClustersSubcommand::Get {
@@ -217,11 +218,12 @@ impl<'a> Router<'a> {
             },
             Commands::Couplings {
                 repository,
+                global,
                 level,
                 format,
             } => {
                 self.couplings_controller
-                    .couplings(repository, level, format)
+                    .couplings(repository, global, level, format)
                     .await
             }
             Commands::Visualize {

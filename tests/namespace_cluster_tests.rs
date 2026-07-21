@@ -11,11 +11,17 @@
 use std::sync::Arc;
 
 use codesearch::{
-    AnalysisRepository, CallGraphRepository, CallGraphUseCase, ClusterDetectionUseCase, CodeChunk,
-    DuckdbAnalysisRepository, DuckdbCallGraphRepository, DuckdbMetadataRepository,
-    FileRelationshipUseCase, InMemoryVectorRepository, Language, MetadataRepository, NodeType,
-    ReferenceKind, Repository, SymbolReference, VectorRepository, NAMESPACE_SCOPE_ID,
+    namespace_scope_id, AnalysisRepository, CallGraphRepository, CallGraphUseCase,
+    ClusterDetectionUseCase, CodeChunk, DuckdbAnalysisRepository, DuckdbCallGraphRepository,
+    DuckdbMetadataRepository, FileRelationshipUseCase, InMemoryVectorRepository, Language,
+    MetadataRepository, NodeType, ReferenceKind, Repository, SymbolReference, VectorRepository,
+    VectorStore,
 };
+
+/// Namespace both seeded repositories live in. The graph builder confines its
+/// working set to a single namespace, so a `--global` run over this fixture
+/// must be constructed for the same namespace its repos were indexed under.
+const TEST_NAMESPACE: &str = "svc-ns";
 
 /// A call reference whose callee definition site is already resolved
 /// (SCIP-style): `reference_file_path` points at the callee's file.
@@ -90,14 +96,49 @@ async fn seeded_fixture() -> Fixture {
             .expect("Failed to create analysis repo"),
     );
 
-    let repo_a = Repository::new("svc-a".to_string(), "/work/svc-a".to_string());
-    let repo_b = Repository::new("lib".to_string(), "/work/lib".to_string());
+    let repo_a = Repository::new_with_storage(
+        "svc-a".to_string(),
+        "/work/svc-a".to_string(),
+        VectorStore::default(),
+        Some(TEST_NAMESPACE.to_string()),
+        None,
+    );
+    let repo_b = Repository::new_with_storage(
+        "lib".to_string(),
+        "/work/lib".to_string(),
+        VectorStore::default(),
+        Some(TEST_NAMESPACE.to_string()),
+        None,
+    );
     metadata_repo.save(&repo_a).await.expect("save repo_a");
     metadata_repo.save(&repo_b).await.expect("save repo_b");
 
+    // A third repository in a *different* namespace, seeded into the same shared
+    // metadata store (as it would be in production). The namespace-wide run is
+    // confined to `TEST_NAMESPACE`, so this repo and its files must never appear
+    // in the global partition — the `total_files == 12` and all-members-qualified
+    // assertions in the tests below double as the regression guard for that.
+    let repo_other = Repository::new_with_storage(
+        "other-svc".to_string(),
+        "/work/other-svc".to_string(),
+        VectorStore::default(),
+        Some("other-ns".to_string()),
+        None,
+    );
+    metadata_repo
+        .save(&repo_other)
+        .await
+        .expect("save repo_other");
+
     // Intra-repo cliques: every file of a repo calls every other file of it.
+    // `other-svc` gets its own dense clique too, so a leaked namespace filter
+    // would visibly inflate the global graph rather than pass silently.
     let mut refs = Vec::new();
-    for (repo, prefix) in [(repo_a.id(), "a"), (repo_b.id(), "b")] {
+    for (repo, prefix) in [
+        (repo_a.id(), "a"),
+        (repo_b.id(), "b"),
+        (repo_other.id(), "z"),
+    ] {
         for i in 0..6 {
             for j in 0..6 {
                 if i == j {
@@ -126,6 +167,7 @@ async fn seeded_fixture() -> Fixture {
         call_graph,
         vector_repo,
         metadata_repo,
+        TEST_NAMESPACE.to_string(),
     ));
     let use_case =
         ClusterDetectionUseCase::new(file_graph).with_storage(Arc::clone(&analysis_repo));
@@ -142,21 +184,28 @@ async fn namespace_clusters_span_both_repositories() {
     let fx = seeded_fixture().await;
     let cg = fx
         .use_case
-        .create_namespace_clusters()
+        .create_namespace_clusters(None)
         .await
         .expect("namespace detection failed");
 
-    assert_eq!(cg.repository_id, NAMESPACE_SCOPE_ID);
+    assert_eq!(cg.repository_id, namespace_scope_id(TEST_NAMESPACE));
     // 6 + 6 qualified file nodes; the cross-repo edge adds no new node.
     assert_eq!(cg.total_files, 12);
 
-    // Every member is repository-qualified.
+    // Every member is repository-qualified — and only from the two repositories
+    // in this namespace. The fixture also seeds `other-svc` in a different
+    // namespace; if the graph builder were database-wide instead of
+    // namespace-wide, `other-svc:` members would appear here.
     let members: Vec<&String> = cg.clusters.iter().flat_map(|c| &c.members).collect();
     assert!(members
         .iter()
         .all(|m| m.starts_with("svc-a:") || m.starts_with("lib:")));
     assert!(members.iter().any(|m| m.starts_with("svc-a:")));
     assert!(members.iter().any(|m| m.starts_with("lib:")));
+    assert!(
+        !members.iter().any(|m| m.starts_with("other-svc:")),
+        "namespace-wide run leaked a repository from another namespace: {members:?}"
+    );
 
     // Two dense cliques joined by one weak bridge: the partition must keep the
     // repositories in separate clusters.
@@ -175,19 +224,20 @@ async fn namespace_clusters_span_both_repositories() {
 #[tokio::test(flavor = "multi_thread")]
 async fn namespace_clusters_are_cached_under_the_sentinel() {
     let fx = seeded_fixture().await;
-    let first = fx.use_case.create_namespace_clusters().await.unwrap();
+    let scope = namespace_scope_id(TEST_NAMESPACE);
+    let first = fx.use_case.create_namespace_clusters(None).await.unwrap();
 
-    // The run is persisted under the sentinel scope id…
+    // The run is persisted under the namespace's sentinel scope id…
     let stored = fx
         .analysis_repo
-        .load_cluster_graph(NAMESPACE_SCOPE_ID)
+        .load_cluster_graph(&scope)
         .await
         .expect("load stored")
         .expect("a namespace run must be stored");
-    assert_eq!(stored.repository_id, NAMESPACE_SCOPE_ID);
+    assert_eq!(stored.repository_id, scope);
 
     // …a second detection round-trips through the cache to the same partition…
-    let second = fx.use_case.create_namespace_clusters().await.unwrap();
+    let second = fx.use_case.create_namespace_clusters(None).await.unwrap();
     let ids = |cg: &codesearch::ClusterGraph| {
         cg.clusters.iter().map(|c| c.id.clone()).collect::<Vec<_>>()
     };
@@ -195,12 +245,12 @@ async fn namespace_clusters_are_cached_under_the_sentinel() {
 
     // …and invalidating the sentinel (what any re-index/delete does) clears it.
     fx.analysis_repo
-        .delete_by_repository(NAMESPACE_SCOPE_ID)
+        .delete_by_repository(&scope)
         .await
         .expect("invalidate");
     assert!(fx
         .analysis_repo
-        .load_cluster_graph(NAMESPACE_SCOPE_ID)
+        .load_cluster_graph(&scope)
         .await
         .expect("load after invalidation")
         .is_none());
@@ -211,7 +261,7 @@ async fn per_repository_clusters_stay_unqualified() {
     let fx = seeded_fixture().await;
     // The global run must not leak qualification or cache entries into the
     // per-repository path.
-    fx.use_case.create_namespace_clusters().await.unwrap();
+    fx.use_case.create_namespace_clusters(None).await.unwrap();
 
     let cg = fx.use_case.create_clusters(fx.repo_a.id()).await.unwrap();
     assert_eq!(cg.repository_id, fx.repo_a.id());
@@ -230,11 +280,11 @@ async fn namespace_graph_view_colours_nodes_by_global_cluster() {
     let fx = seeded_fixture().await;
     let view = fx
         .use_case
-        .namespace_graph_view()
+        .namespace_graph_view(None)
         .await
         .expect("namespace graph view failed");
 
-    assert_eq!(view.repository_id, NAMESPACE_SCOPE_ID);
+    assert_eq!(view.repository_id, namespace_scope_id(TEST_NAMESPACE));
     assert_eq!(view.nodes.len(), 12);
     assert!(view.edge_count() >= 2, "clique edges plus the bridge");
     assert!(!view.communities.is_empty());

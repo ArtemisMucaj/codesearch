@@ -28,7 +28,7 @@ impl<'a> ClustersController<'a> {
         let use_case = self.container.cluster_detection_use_case();
         let (scope, mut cg) = if global {
             let cg = use_case
-                .create_namespace_clusters()
+                .create_namespace_clusters(None)
                 .await
                 .context("detecting namespace-wide clusters")?;
             ("namespace (all repositories)".to_string(), cg)

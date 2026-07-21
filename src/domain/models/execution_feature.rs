@@ -13,6 +13,24 @@ pub struct FeatureNode {
     pub depth: usize,
     /// Repository that contains this symbol.
     pub repository_id: String,
+    /// The symbol whose call discovered this node — its BFS parent. `None` for
+    /// the entry point. Lets clients fold the flat path into a call tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller: Option<String>,
+    /// Total execution callees of this symbol in the call graph. May exceed the
+    /// node's child count in the folded tree: the BFS visits each symbol once,
+    /// under its FIRST discoverer, so callees first reached elsewhere don't
+    /// reappear here. Lets clients tell a true leaf from a deduplicated one.
+    #[serde(default)]
+    pub callee_count: usize,
+    /// Display name of the repository this SYMBOL lives in, set only when it
+    /// differs from the feature's own repository — i.e. the flow crossed into
+    /// a namespace sibling. `None` for same-repo nodes and for leaves, whose
+    /// owning repo can't be inferred (a symbol's home is read off its outgoing
+    /// call edges; a leaf has none). `file_path`/`line` remain the CALL SITE,
+    /// which lives in the caller's repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_name: Option<String>,
 }
 
 /// An execution feature: a named forward call chain starting from an entry-point

@@ -127,11 +127,24 @@ pub struct Container {
     call_graph_use_case: Arc<CallGraphUseCase>,
     channel_endpoint_repo: Arc<dyn ChannelEndpointRepository>,
     analysis_repo: Arc<dyn AnalysisRepository>,
+    /// The concrete DuckDB vector store, kept alongside the erased
+    /// `vector_repo` so cross-namespace read views can be built (`None` for
+    /// in-memory storage).
+    duckdb_vector: Option<Arc<DuckdbVectorRepository>>,
     /// Lazily opened memory store, shared across calls. Caching matters for
     /// the long-running MCP server: DuckDB allows only one writer per file,
     /// so concurrent tool calls must reuse a single connection instead of
     /// each opening `memory.duckdb`.
     memory_repo: std::sync::Mutex<Option<Arc<dyn MemoryRepository>>>,
+    /// The live active LLM backend. Seeded at boot from the persisted config
+    /// (`config.json`'s `llm_target`, falling back to the `--llm-target` flag)
+    /// and switchable at runtime via the management API, so a native app can
+    /// change backends without a restart. Request-time paths (explain, dream,
+    /// model discovery) read this through [`Container::llm_target`], so a swap
+    /// takes effect on the next call. The boot-time query expander is the one
+    /// exception — it pins its client at construction and won't follow a swap
+    /// until restart (query expansion is optional and degrades gracefully).
+    active_llm_target: std::sync::Mutex<LlmTarget>,
     config: ContainerConfig,
 }
 
@@ -366,6 +379,7 @@ impl Container {
 
         // Create vector repository, metadata adapter, file hash repository,
         // call graph repository, channel endpoint repository, and analysis repository
+        let mut duckdb_vector: Option<Arc<DuckdbVectorRepository>> = None;
         let (
             vector_repo,
             repo_adapter,
@@ -423,8 +437,10 @@ impl Container {
                     let analysis_repo = Arc::new(
                         DuckdbAnalysisRepository::with_read_only_write_back(shared_conn, &db_path),
                     );
+                    let duckdb = Arc::new(duckdb);
+                    duckdb_vector = Some(Arc::clone(&duckdb));
                     (
-                        Arc::new(duckdb),
+                        duckdb,
                         repo_adapter,
                         file_hash_repo,
                         call_graph_repo,
@@ -499,8 +515,10 @@ impl Container {
                     );
                     let analysis_repo =
                         Arc::new(DuckdbAnalysisRepository::with_connection(shared_conn).await?);
+                    let duckdb = Arc::new(duckdb);
+                    duckdb_vector = Some(Arc::clone(&duckdb));
                     (
-                        Arc::new(duckdb),
+                        duckdb,
                         repo_adapter,
                         file_hash_repo,
                         call_graph_repo,
@@ -589,7 +607,17 @@ impl Container {
             call_graph_use_case,
             channel_endpoint_repo,
             analysis_repo,
+            duckdb_vector,
             memory_repo: std::sync::Mutex::new(None),
+            // A backend chosen through the app (persisted in config.json) wins
+            // over the flag's default, so the choice survives restarts. The flag
+            // is the fallback when nothing was persisted.
+            active_llm_target: std::sync::Mutex::new(
+                crate::connector::adapter::CodesearchConfig::load(&config.data_dir)
+                    .ok()
+                    .and_then(|c| c.active_llm_target())
+                    .unwrap_or(config.llm_target),
+            ),
             config,
         })
     }
@@ -737,10 +765,54 @@ impl Container {
         SnippetLookupUseCase::new(self.vector_repo.clone())
     }
 
+    /// Snippet lookup bound to the namespace `repository_id` is indexed under.
+    /// The boot vector repo only sees ITS namespace's `chunks` schema, so
+    /// explaining a repository from another namespace found no source at all —
+    /// the LLM then hallucinated behavior from bare symbol names. Falls back
+    /// to the boot repo when the namespace can't be resolved (unknown repo,
+    /// in-memory storage, same namespace).
+    pub async fn snippet_lookup_for_repository(
+        &self,
+        repository_id: Option<&str>,
+    ) -> SnippetLookupUseCase {
+        if let (Some(repo_id), Some(duckdb)) = (repository_id, &self.duckdb_vector) {
+            let namespace = match self.metadata_repository().list().await {
+                Ok(repos) => repos
+                    .iter()
+                    .find(|r| r.id() == repo_id)
+                    .and_then(|r| r.namespace().map(str::to_string)),
+                Err(_) => None,
+            };
+            if let Some(ns) = namespace {
+                if ns != self.config.namespace {
+                    match duckdb.namespace_view(&ns).await {
+                        Ok(view) => return SnippetLookupUseCase::new(Arc::new(view)),
+                        Err(e) => tracing::warn!(
+                            "Falling back to boot-namespace snippets for '{repo_id}': {e}"
+                        ),
+                    }
+                }
+            }
+        }
+        self.snippet_lookup_use_case()
+    }
+
     pub fn explain_use_case(&self) -> ExplainUseCase {
         ExplainUseCase::new(
             Arc::new(self.context_use_case()),
             self.snippet_lookup_use_case(),
+        )
+    }
+
+    /// [`Self::explain_use_case`] with snippets scoped to the repository's own
+    /// namespace (see [`Self::snippet_lookup_for_repository`]).
+    pub async fn explain_use_case_for_repository(
+        &self,
+        repository_id: Option<&str>,
+    ) -> ExplainUseCase {
+        ExplainUseCase::new(
+            Arc::new(self.context_use_case()),
+            self.snippet_lookup_for_repository(repository_id).await,
         )
     }
 
@@ -749,12 +821,14 @@ impl Container {
             self.call_graph_use_case.clone(),
             self.vector_repo.clone(),
             self.metadata_repository(),
+            self.config.namespace.clone(),
         )
     }
 
     pub fn execution_features_use_case(&self) -> ExecutionFeaturesUseCase {
         ExecutionFeaturesUseCase::new(self.call_graph_use_case.clone())
             .with_storage(self.analysis_repo.clone())
+            .with_repositories(self.metadata_repository())
     }
 
     pub fn cluster_detection_use_case(&self) -> ClusterDetectionUseCase {
@@ -765,6 +839,7 @@ impl Container {
     pub fn symbol_cluster_detection_use_case(&self) -> SymbolClusterDetectionUseCase {
         SymbolClusterDetectionUseCase::new(self.call_graph_use_case.clone())
             .with_storage(self.analysis_repo.clone())
+            .with_namespace_scope(self.config.namespace.clone(), self.metadata_repository())
     }
 
     pub fn coupling_detection_use_case(&self) -> CouplingDetectionUseCase {
@@ -901,10 +976,27 @@ impl Container {
         PathBuf::from(&self.config.data_dir).join("codesearch.duckdb")
     }
 
-    /// The LLM backend this container was configured with (`--llm-target`).
-    /// Serve-mode handlers use it as the default when a request omits its own.
+    /// The live active LLM backend. Seeded from persisted config / the
+    /// `--llm-target` flag at boot and updated by [`Container::set_llm_target`].
+    /// Serve-mode handlers use it as the default when a request omits its own,
+    /// so switching the backend through the management API takes effect on the
+    /// next request without a restart. A poisoned lock falls back to the boot
+    /// flag rather than panicking.
     pub fn llm_target(&self) -> LlmTarget {
-        self.config.llm_target
+        self.active_llm_target
+            .lock()
+            .map(|t| *t)
+            .unwrap_or(self.config.llm_target)
+    }
+
+    /// Switch the live active LLM backend. Persistence to `config.json` is the
+    /// caller's responsibility (the management handler does it) so this stays a
+    /// cheap, non-blocking in-memory swap.
+    pub fn set_llm_target(&self, target: LlmTarget) {
+        match self.active_llm_target.lock() {
+            Ok(mut guard) => *guard = target,
+            Err(e) => tracing::warn!("failed to set active LLM target (lock poisoned): {e}"),
+        }
     }
 
     pub fn namespace(&self) -> &str {

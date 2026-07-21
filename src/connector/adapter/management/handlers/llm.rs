@@ -6,7 +6,11 @@
 //! - `GET /api/llm/endpoints` — list the configured OpenAI-compatible endpoints
 //!   and which is active (keys masked).
 //! - `PUT /api/llm/endpoints/{name}` — add or update an endpoint.
-//! - `POST /api/llm/active` — set the active endpoint.
+//! - `POST /api/llm/active` — set the active OpenAI endpoint.
+//! - `GET /api/llm/target` — the active backend + pinned Copilot model.
+//! - `POST /api/llm/target` — switch the active backend (openai/anthropic/
+//!   copilot), applied live and persisted.
+//! - `PUT /api/llm/copilot/model` — pin the Copilot model.
 //!
 //! Together these let a running server (and a native app talking to it)
 //! configure LLM backends at runtime, not just via the CLI. Endpoint changes
@@ -18,8 +22,8 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use serde_json::{json, Value};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use crate::cli::LlmTarget;
 use crate::connector::adapter::{
@@ -92,16 +96,15 @@ pub async fn models(
             // clear, actionable 400 instead. The config read is blocking file
             // I/O, so run it off the async runtime.
             let data_dir = state.container.data_dir().to_string();
-            let copilot = tokio::task::spawn_blocking(move || {
-                CodesearchConfig::load_copilot(&data_dir)
-            })
-            .await
-            .map_err(|e| {
-                ApiError::new(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("copilot config read task panicked: {e}"),
-                )
-            })??;
+            let copilot =
+                tokio::task::spawn_blocking(move || CodesearchConfig::load_copilot(&data_dir))
+                    .await
+                    .map_err(|e| {
+                        ApiError::new(
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("copilot config read task panicked: {e}"),
+                        )
+                    })??;
             if copilot.github_token.as_deref().unwrap_or("").is_empty() {
                 return Err(ApiError::bad_request(
                     "GitHub Copilot is not authenticated — run `codesearch copilot login`",
@@ -271,4 +274,80 @@ pub async fn set_active_endpoint(
     cfg.save_async(&data_dir).await?;
 
     list_endpoints(State(state)).await
+}
+
+/// Response body for `GET /api/llm/target`.
+#[derive(Debug, Serialize)]
+pub struct TargetResponse {
+    /// The live active backend (`openai` | `anthropic` | `copilot`).
+    pub target: String,
+    /// The pinned Copilot model, if one was selected (so the UI can show which
+    /// Copilot model is active). `null` means the Copilot API's own default.
+    pub copilot_model: Option<String>,
+}
+
+/// `GET /api/llm/target` — report the live active LLM backend and the pinned
+/// Copilot model, so a client can render which backend/model is selected.
+pub async fn get_target(State(state): State<AppState>) -> ApiResult<Json<TargetResponse>> {
+    let data_dir = state.container.data_dir().to_string();
+    let cfg = CodesearchConfig::load_async(&data_dir).await?;
+    Ok(Json(TargetResponse {
+        target: state.container.llm_target().as_str().to_string(),
+        copilot_model: cfg.copilot.and_then(|c| c.model),
+    }))
+}
+
+/// Request body for `POST /api/llm/target`.
+#[derive(Debug, Deserialize)]
+pub struct SetTargetRequest {
+    /// `openai` | `open-ai` | `anthropic` | `copilot`.
+    pub target: String,
+}
+
+/// `POST /api/llm/target` — switch the active LLM backend. The choice is
+/// persisted to `config.json` (so it survives restarts) and applied live to the
+/// running container, so the next explain/dream/model-discovery call uses it.
+pub async fn set_target(
+    State(state): State<AppState>,
+    Json(body): Json<SetTargetRequest>,
+) -> ApiResult<Json<TargetResponse>> {
+    let target: LlmTarget = body.target.parse().map_err(ApiError::bad_request)?;
+
+    let data_dir = state.container.data_dir().to_string();
+    let mut cfg = CodesearchConfig::load_async(&data_dir).await?;
+    cfg.set_llm_target(target);
+    cfg.save_async(&data_dir).await?;
+
+    // Apply to the running container so the swap takes effect without a restart.
+    state.container.set_llm_target(target);
+
+    get_target(State(state)).await
+}
+
+/// Request body for `PUT /api/llm/copilot/model`.
+#[derive(Debug, Deserialize)]
+pub struct SetCopilotModelRequest {
+    /// The Copilot model id to pin (e.g. `claude-opus-4.8`). An empty string
+    /// clears the pin, reverting to the Copilot API's default model.
+    pub model: String,
+}
+
+/// `PUT /api/llm/copilot/model` — pin the Copilot model, persisted to
+/// `config.json`. The next Copilot request (built per-call from the data dir)
+/// reads it, so no restart is needed.
+pub async fn set_copilot_model(
+    State(state): State<AppState>,
+    Json(body): Json<SetCopilotModelRequest>,
+) -> ApiResult<Json<TargetResponse>> {
+    let data_dir = state.container.data_dir().to_string();
+    let mut cfg = CodesearchConfig::load_async(&data_dir).await?;
+    let model = body.model.trim();
+    cfg.copilot_mut().model = if model.is_empty() {
+        None
+    } else {
+        Some(model.to_string())
+    };
+    cfg.save_async(&data_dir).await?;
+
+    get_target(State(state)).await
 }

@@ -158,7 +158,11 @@ impl DreamService {
     }
 
     async fn run_cycle(&self) {
-        match self.use_case.execute(self.idle_secs()).await {
+        match self
+            .use_case
+            .execute(self.idle_secs(), self.config().auto_import())
+            .await
+        {
             Ok(report) => tracing::info!(
                 "dream cycle finished ({} sessions imported, {} ops applied, {} skipped)",
                 report.sessions_imported,
@@ -336,8 +340,7 @@ mod tests {
     /// The patch deserializes from a partial JSON body (missing keys → None).
     #[test]
     fn patch_deserializes_partial_body() {
-        let patch: MemoryConfigPatch =
-            serde_json::from_str(r#"{"auto_import": false}"#).unwrap();
+        let patch: MemoryConfigPatch = serde_json::from_str(r#"{"auto_import": false}"#).unwrap();
         assert_eq!(patch.auto_import, Some(false));
         assert_eq!(patch.dream_enabled, None);
         assert_eq!(patch.dream_interval_hours, None);
