@@ -48,7 +48,8 @@ pub async fn clusters(
     params.reject_global_with_repository()?;
     let use_case = state.container.cluster_detection_use_case();
     let graph = if params.global {
-        use_case.create_namespace_clusters().await?
+        // This endpoint has no namespace param, so it uses the server's default.
+        use_case.create_namespace_clusters(None).await?
     } else {
         let repository_id = state
             .container

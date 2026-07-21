@@ -34,13 +34,15 @@ impl<'a> VisualizeController<'a> {
                 VizLevel::File => self
                     .container
                     .cluster_detection_use_case()
-                    .namespace_graph_view()
+                    .namespace_graph_view(None)
                     .await
-                    .context("building namespace-wide graph view")?,
-                VizLevel::Symbol => anyhow::bail!(
-                    "--global supports --level file only \
-                     (symbol communities are detected per repository)"
-                ),
+                    .context("building namespace-wide file graph view")?,
+                VizLevel::Symbol => self
+                    .container
+                    .symbol_cluster_detection_use_case()
+                    .namespace_graph_view(None)
+                    .await
+                    .context("building namespace-wide symbol graph view")?,
             };
             ("namespace (all repositories)".to_string(), view)
         } else {

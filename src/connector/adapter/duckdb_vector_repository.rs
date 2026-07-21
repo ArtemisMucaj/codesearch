@@ -198,6 +198,39 @@ impl DuckdbVectorRepository {
         Arc::clone(&self.conn)
     }
 
+    /// A read-view of a SIBLING namespace over the same shared connection, for
+    /// cross-namespace chunk lookups (e.g. explain snippets when the server
+    /// booted on a different namespace than the repository being explained —
+    /// opening a second connection would hit the file lock this one holds).
+    /// Resolves the sibling's schema token directly and skips embedding-config
+    /// validation: the view serves text queries (chunks), never vectors, so a
+    /// different embedding model over there is irrelevant.
+    pub async fn namespace_view(&self, namespace: &str) -> Result<Self, DomainError> {
+        let (schema, dimensions) = {
+            let conn = self.conn.lock().await;
+            conn.query_row(
+                "SELECT schema_token, dimensions FROM namespace_config WHERE namespace = ?",
+                params![namespace],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize)),
+            )
+            .map_err(|e| {
+                DomainError::storage(format!(
+                    "Namespace '{namespace}' has no stored config (never indexed?): {e}"
+                ))
+            })?
+        };
+        Ok(Self {
+            conn: Arc::clone(&self.conn),
+            namespace: namespace.to_string(),
+            schema,
+            dimensions,
+            // A view never (re)builds indexes — it is read-only by design.
+            fts_dirty: AtomicBool::new(false),
+            read_only: true,
+            has_vectors: AtomicBool::new(false),
+        })
+    }
+
     /// Returns the vector dimensionality configured for this namespace.
     pub fn dimensions(&self) -> usize {
         self.dimensions

@@ -17,8 +17,8 @@ use crate::application::{
     ParserService, ResolveChannelsUseCase, VectorRepository,
 };
 use crate::domain::{
-    compute_file_hash, ChannelEndpoint, DomainError, Embedding, EndpointSource, FileHash, Language,
-    LanguageStats, Repository, SymbolReference, VectorStore, NAMESPACE_SCOPE_ID,
+    compute_file_hash, namespace_scope_id, ChannelEndpoint, DomainError, Embedding, EndpointSource,
+    FileHash, Language, LanguageStats, Repository, SymbolReference, VectorStore,
 };
 
 /// Default number of concurrent `parse_only` calls during the parse phase.
@@ -150,15 +150,22 @@ impl IndexRepositoryUseCase {
     /// operation (which has, by this point, already rewritten the vector,
     /// file-hash, and call-graph data). A stale cache is corrected on the next
     /// run; a hard error here would leave the repository record dangling.
-    async fn invalidate_analyses(&self, repository_id: &str) {
+    async fn invalidate_analyses(&self, repository_id: &str, namespace: Option<&str>) {
         if let Some(analysis_repo) = &self.analysis_repo {
             if let Err(e) = analysis_repo.delete_by_repository(repository_id).await {
                 warn!("Failed to invalidate stored analyses for {repository_id}: {e}");
             }
-            // The namespace-wide analysis derives from every repository's call
-            // graph, so changing any one of them stales it too.
-            if let Err(e) = analysis_repo.delete_by_repository(NAMESPACE_SCOPE_ID).await {
-                warn!("Failed to invalidate stored namespace-wide analyses: {e}");
+            // The namespace-wide analyses (both the file-cluster and the
+            // symbol-community global runs) derive from every repository's call
+            // graph, so changing any one of them stales them too. Both are cached
+            // under the same per-namespace scope id (see `namespace_scope_id`);
+            // `delete_by_repository` is kind-agnostic, so dropping that id clears
+            // both in one call.
+            if let Some(ns) = namespace {
+                let scope = namespace_scope_id(ns);
+                if let Err(e) = analysis_repo.delete_by_repository(&scope).await {
+                    warn!("Failed to invalidate stored namespace-wide analyses for {ns}: {e}");
+                }
             }
         }
     }
@@ -245,7 +252,8 @@ impl IndexRepositoryUseCase {
                 if let Some(channel_repo) = &self.channel_endpoint_repo {
                     channel_repo.delete_by_repository(existing.id()).await?;
                 }
-                self.invalidate_analyses(existing.id()).await;
+                self.invalidate_analyses(existing.id(), existing.namespace())
+                    .await;
                 self.repository_repo.delete(existing.id()).await?;
             }
             return self
@@ -925,7 +933,8 @@ impl IndexRepositoryUseCase {
             .await?;
 
         if call_graph_changed {
-            self.invalidate_analyses(repository.id()).await;
+            self.invalidate_analyses(repository.id(), repository.namespace())
+                .await;
         }
 
         let duration = start_time.elapsed();

@@ -1,10 +1,12 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use tracing::{debug, warn};
 
 use super::execution_features_naming::short_name;
-use crate::application::{AnalysisRepository, CallGraphQuery, CallGraphUseCase};
+use crate::application::{
+    AnalysisRepository, CallGraphQuery, CallGraphUseCase, MetadataRepository,
+};
 use crate::domain::{DomainError, ExecutionFeature, FeatureNode, ReferenceKind, SymbolReference};
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -56,6 +58,11 @@ pub struct ExecutionFeaturesUseCase {
     /// feature set of a repository is cached in the database and served from
     /// there until the call graph is re-indexed.
     storage: Option<Arc<dyn AnalysisRepository>>,
+    /// Optional repository metadata, used to widen the BFS to the entry
+    /// point's whole NAMESPACE: a flow that calls into a sibling repo (the
+    /// shared library case) keeps being traced instead of stopping at the
+    /// repository boundary. Without it, traversal stays single-repo.
+    repositories: Option<Arc<dyn MetadataRepository>>,
 }
 
 impl ExecutionFeaturesUseCase {
@@ -63,6 +70,7 @@ impl ExecutionFeaturesUseCase {
         Self {
             call_graph,
             storage: None,
+            repositories: None,
         }
     }
 
@@ -71,6 +79,45 @@ impl ExecutionFeaturesUseCase {
     pub fn with_storage(mut self, storage: Arc<dyn AnalysisRepository>) -> Self {
         self.storage = Some(storage);
         self
+    }
+
+    /// Attach repository metadata so the forward BFS can follow calls into the
+    /// entry point's namespace siblings (cross-repository flows).
+    pub fn with_repositories(mut self, repositories: Arc<dyn MetadataRepository>) -> Self {
+        self.repositories = Some(repositories);
+        self
+    }
+
+    /// The repositories the forward BFS may traverse for a feature rooted in
+    /// `repository_id`, as an id → display-name map: the repo's whole
+    /// namespace when metadata is available (calls into shared sibling repos
+    /// stay traceable), else just the repo itself. Scoping to the namespace —
+    /// not the whole store — keeps an accidental FQN collision in an unrelated
+    /// namespace from bridging flows. The names label cross-repo nodes.
+    async fn traversal_scope(&self, repository_id: &str) -> HashMap<String, String> {
+        let single = || HashMap::from([(repository_id.to_string(), String::new())]);
+        let Some(repositories) = &self.repositories else {
+            return single();
+        };
+        let repos = match repositories.list().await {
+            Ok(repos) => repos,
+            Err(e) => {
+                warn!("Failed to list repositories for feature traversal scope: {e}");
+                return single();
+            }
+        };
+        let Some(namespace) = repos
+            .iter()
+            .find(|r| r.id() == repository_id)
+            .and_then(|r| r.namespace().map(str::to_string))
+        else {
+            return single();
+        };
+        repos
+            .iter()
+            .filter(|r| r.namespace() == Some(namespace.as_str()))
+            .map(|r| (r.id().to_string(), r.name().to_string()))
+            .collect()
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -207,15 +254,22 @@ impl ExecutionFeaturesUseCase {
         };
 
         // Verify the resolved symbol is actually an entry point: no *named*
-        // symbol within the same repository calls it. Structural references
-        // (imports, type references) and NULL-caller top-level invocations do
-        // not disqualify it — the latter are what mark an entry point.
-        let repo_query = CallGraphQuery::new().with_repository(&effective_repo);
-        let callers_in_repo = self.call_graph.find_callers(&fqn, &repo_query).await?;
-        if callers_in_repo
-            .iter()
-            .any(|r| is_execution_edge(r) && r.caller_symbol().is_some())
-        {
+        // symbol anywhere in the NAMESPACE calls it (caller edges live under
+        // the caller's repo, so a sibling service calling this shared-library
+        // symbol disqualifies it — mirroring `find_entry_points`). Structural
+        // references (imports, type references) and NULL-caller top-level
+        // invocations do not disqualify it — the latter are what mark an
+        // entry point.
+        let scope = self.traversal_scope(&effective_repo).await;
+        let callers = self
+            .call_graph
+            .find_callers(&fqn, &CallGraphQuery::new())
+            .await?;
+        if callers.iter().any(|r| {
+            scope.contains_key(r.repository_id())
+                && is_execution_edge(r)
+                && r.caller_symbol().is_some()
+        }) {
             return Ok(None);
         }
 
@@ -293,7 +347,15 @@ impl ExecutionFeaturesUseCase {
     /// references) that must not be mistaken for calls, or every getter and
     /// type-referenced symbol surfaces as a spurious "entry point".
     async fn find_entry_points(&self, repository_id: &str) -> Result<Vec<String>, DomainError> {
-        let all_refs = self.call_graph.find_by_repository(repository_id).await?;
+        // Detection is NAMESPACE-wide: a shared-library method called only
+        // from a sibling service repo is not an entry point of the library —
+        // it's mid-flow in the sibling's feature (which now traverses into
+        // this repo). Candidate entry points still come from THIS repo's own
+        // edges, so every feature stays attributed to the repo its code roots
+        // in; only the "is it called by anything?" disqualifier widens.
+        let scope = self.traversal_scope(repository_id).await;
+        let scope_ids: Vec<String> = scope.keys().cloned().collect();
+        let all_refs = self.call_graph.find_by_repositories(&scope_ids).await?;
 
         let mut callee_symbols: HashSet<String> = HashSet::new();
         let mut caller_symbols: HashSet<String> = HashSet::new();
@@ -303,18 +365,22 @@ impl ExecutionFeaturesUseCase {
                 continue;
             }
             // Only a call from a *named* caller counts as "this symbol is called
-            // by something in the repo". Edges with a NULL caller are top-level /
+            // by something". Edges with a NULL caller are top-level /
             // module-scope invocations (e.g. `app.start()` in an entry file) that
             // SCIP could not attribute to an enclosing symbol — those are exactly
             // what marks a true entry point, so they must not disqualify one.
             if let Some(caller) = r.caller_symbol() {
-                caller_symbols.insert(caller.to_string());
+                // A symbol's outgoing edges live under its own repo, so this
+                // restricts candidates to symbols defined here.
+                if r.repository_id() == repository_id {
+                    caller_symbols.insert(caller.to_string());
+                }
                 callee_symbols.insert(r.callee_symbol().to_string());
             }
         }
 
-        // Entry point = calls something (has outgoing call edges) AND is never
-        // called by a named symbol within this repository.
+        // Entry point = calls something (has outgoing call edges in this repo)
+        // AND is never called by a named symbol anywhere in the namespace.
         let mut entry_points: Vec<String> = caller_symbols
             .into_iter()
             .filter(|sym| !callee_symbols.contains(sym))
@@ -335,11 +401,21 @@ impl ExecutionFeaturesUseCase {
         entry_point: &str,
         repository_id: &str,
     ) -> Result<ExecutionFeature, DomainError> {
-        let query = CallGraphQuery::new().with_repository(repository_id);
+        // Traverse the entry point's whole namespace, not just its repo: call
+        // edges are stored under the CALLER's repository, so a repo-filtered
+        // query shows the first hop into a shared sibling library but can
+        // never walk into it — cross-repo flows silently truncated one level
+        // deep. The query stays unfiltered and edges are scoped here instead.
+        let scope = self.traversal_scope(repository_id).await;
+        let in_scope =
+            |r: &SymbolReference| is_execution_edge(r) && scope.contains_key(r.repository_id());
+        let query = CallGraphQuery::new();
 
         // ── Forward BFS ────────────────────────────────────────────────────
         let mut visited: HashSet<String> = HashSet::new();
-        let mut queue: VecDeque<(String, usize, String, u32)> = VecDeque::new();
+        // (symbol, depth, file_path, line, caller) — the caller travels with the
+        // queue entry so each emitted node records its BFS parent.
+        let mut queue: VecDeque<(String, usize, String, u32, String)> = VecDeque::new();
         let mut path: Vec<FeatureNode> = Vec::new();
 
         visited.insert(entry_point.to_string());
@@ -353,7 +429,7 @@ impl ExecutionFeaturesUseCase {
             .find_callees(entry_point, &query)
             .await?
             .into_iter()
-            .filter(is_execution_edge)
+            .filter(in_scope)
             .collect();
         let entry_file_path = initial_callees
             .first()
@@ -366,6 +442,9 @@ impl ExecutionFeaturesUseCase {
             line: 0,
             depth: 0,
             repository_id: repository_id.to_string(),
+            caller: None,
+            callee_count: initial_callees.len(),
+            repository_name: None,
         });
 
         for reference in &initial_callees {
@@ -377,26 +456,45 @@ impl ExecutionFeaturesUseCase {
                     1,
                     reference.reference_file_path().to_string(),
                     reference.reference_line(),
+                    entry_point.to_string(),
                 ));
             }
         }
 
-        while let Some((current, depth, file_path, line)) = queue.pop_front() {
+        while let Some((current, depth, file_path, line, caller)) = queue.pop_front() {
+            // Fetch callees before emitting the node so it can carry its TOTAL
+            // callee count — the folded tree needs it to tell a true leaf from
+            // one whose callees were first discovered under another node.
+            let callees: Vec<SymbolReference> = self
+                .call_graph
+                .find_callees(&current, &query)
+                .await?
+                .into_iter()
+                .filter(in_scope)
+                .collect();
+
+            // A symbol's outgoing call edges are stored under ITS OWN repo (the
+            // calls occur in its defining file), so they reveal which repo the
+            // symbol lives in. Label the node only when the flow crossed out of
+            // the feature's repo; leaves (no outgoing edges) stay unlabeled.
+            let repository_name = callees
+                .first()
+                .map(|r| r.repository_id())
+                .filter(|owner| *owner != repository_id)
+                .and_then(|owner| scope.get(owner))
+                .filter(|name| !name.is_empty())
+                .cloned();
+
             path.push(FeatureNode {
                 symbol: current.clone(),
                 file_path,
                 line,
                 depth,
                 repository_id: repository_id.to_string(),
+                caller: Some(caller),
+                callee_count: callees.len(),
+                repository_name,
             });
-
-            let callees: Vec<SymbolReference> = self
-                .call_graph
-                .find_callees(&current, &query)
-                .await?
-                .into_iter()
-                .filter(is_execution_edge)
-                .collect();
             for reference in &callees {
                 let callee = reference.callee_symbol().to_string();
                 if visited.contains(&callee) {
@@ -408,6 +506,7 @@ impl ExecutionFeaturesUseCase {
                     depth + 1,
                     reference.reference_file_path().to_string(),
                     reference.reference_line(),
+                    current.clone(),
                 ));
             }
         }

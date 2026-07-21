@@ -56,6 +56,12 @@ pub struct GraphNode {
     pub degree: usize,
     /// Dominant language of this node, lowercased (e.g. "rust", "python").
     pub language: String,
+    /// Owning repository (its display name), for the namespace-wide **symbol**
+    /// graph, whose node ids are bare, globally-unique FQNs and so carry no
+    /// repository prefix (unlike the file graph's `repo:path` ids). `None` for
+    /// per-repository graphs and the file graph — omitted from JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
 }
 
 /// A single undirected edge between two [`GraphNode`]s, referenced by index

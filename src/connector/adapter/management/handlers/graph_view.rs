@@ -64,19 +64,21 @@ pub async fn graph(
                  spans every repository",
             ));
         }
+        // This endpoint has no namespace param, so it uses the server's default.
         match params.level {
             GraphViewLevel::File => {
                 state
                     .container
                     .cluster_detection_use_case()
-                    .namespace_graph_view()
+                    .namespace_graph_view(None)
                     .await?
             }
             GraphViewLevel::Symbol => {
-                return Err(ApiError::bad_request(
-                    "`global` supports level=file only: symbol communities are \
-                     detected per repository",
-                ))
+                state
+                    .container
+                    .symbol_cluster_detection_use_case()
+                    .namespace_graph_view(None)
+                    .await?
             }
         }
     } else {

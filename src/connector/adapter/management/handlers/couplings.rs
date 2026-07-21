@@ -18,12 +18,24 @@ use super::super::server::AppState;
 #[derive(Debug, Deserialize)]
 pub struct CouplingParams {
     /// Repository to analyse (name or UUID). Omit to auto-detect from the cwd.
+    /// Ignored when `global` is set.
     #[serde(default)]
     pub repository: Option<String>,
 
     /// Which graph to analyse: `file` (default) or `symbol`.
     #[serde(default)]
     pub level: Option<String>,
+
+    /// Namespace-wide couplings: run the pipeline over every repository in the
+    /// namespace (cross-repository edges included). A coupler that splits a
+    /// namespace-wide community is the shared element welding two repositories
+    /// together. Works at both levels.
+    #[serde(default)]
+    pub global: bool,
+
+    /// Namespace to analyse for a `global` run. Omit to use the server's default.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 /// `GET /api/couplings` — coupling elements in the repository's Leiden
@@ -38,14 +50,26 @@ pub async fn couplings(
             .map_err(|msg| ApiError::bad_request(format!("invalid level '{s}': {msg}")))?,
     };
 
-    let repository_id = state
-        .container
-        .resolve_repository_id(params.repository.as_deref())
-        .await;
-    let report = state
-        .container
-        .coupling_detection_use_case()
-        .detect(&repository_id, level)
-        .await?;
+    let report = if params.global {
+        let namespace = params
+            .namespace
+            .as_deref()
+            .unwrap_or_else(|| state.container.namespace());
+        state
+            .container
+            .coupling_detection_use_case()
+            .detect_namespace(namespace, level)
+            .await?
+    } else {
+        let repository_id = state
+            .container
+            .resolve_repository_id(params.repository.as_deref())
+            .await;
+        state
+            .container
+            .coupling_detection_use_case()
+            .detect(&repository_id, level)
+            .await?
+    };
     Ok(Json(report))
 }

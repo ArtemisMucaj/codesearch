@@ -108,6 +108,16 @@ impl CallGraphUseCase {
         self.repository.find_by_repository(repository_id).await
     }
 
+    /// Find all references across a set of repositories in one query, preserving
+    /// cross-repository edges (see
+    /// [`CallGraphRepository::find_by_repositories`]).
+    pub async fn find_by_repositories(
+        &self,
+        repository_ids: &[String],
+    ) -> Result<Vec<SymbolReference>, DomainError> {
+        self.repository.find_by_repositories(repository_ids).await
+    }
+
     /// Get statistics about the call graph for a repository.
     pub async fn get_stats(&self, repository_id: &str) -> Result<CallGraphStats, DomainError> {
         self.repository.get_stats(repository_id).await

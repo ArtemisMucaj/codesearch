@@ -84,6 +84,18 @@ pub trait CallGraphRepository: Send + Sync {
         repository_id: &str,
     ) -> Result<Vec<SymbolReference>, DomainError>;
 
+    /// Find all references across a set of repositories, in one query.
+    ///
+    /// Unlike calling [`Self::find_by_repository`] per id and concatenating,
+    /// this preserves cross-repository edges: a reference whose caller is in one
+    /// listed repository and whose callee is defined in another is loaded once
+    /// and appears in the combined result, so a namespace-wide symbol graph can
+    /// join the two. An empty slice yields no references.
+    async fn find_by_repositories(
+        &self,
+        repository_ids: &[String],
+    ) -> Result<Vec<SymbolReference>, DomainError>;
+
     /// Delete all references for a specific file within a repository.
     async fn delete_by_file_path(
         &self,

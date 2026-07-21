@@ -19,23 +19,31 @@ impl<'a> CouplingsController<'a> {
     pub async fn couplings(
         &self,
         repository: Option<String>,
+        global: bool,
         level: VizLevel,
         format: OutputFormatTextJson,
     ) -> Result<String> {
-        let repository_id = self
-            .container
-            .resolve_repository_id(repository.as_deref())
-            .await;
         let level = match level {
             VizLevel::File => GraphLevel::File,
             VizLevel::Symbol => GraphLevel::Symbol,
         };
-        let report = self
-            .container
-            .coupling_detection_use_case()
-            .detect(&repository_id, level)
-            .await
-            .context("detecting coupling elements")?;
+        let report = if global {
+            self.container
+                .coupling_detection_use_case()
+                .detect_namespace(self.container.namespace(), level)
+                .await
+                .context("detecting namespace-wide coupling elements")?
+        } else {
+            let repository_id = self
+                .container
+                .resolve_repository_id(repository.as_deref())
+                .await;
+            self.container
+                .coupling_detection_use_case()
+                .detect(&repository_id, level)
+                .await
+                .context("detecting coupling elements")?
+        };
 
         let format: OutputFormat = format.into();
         Ok(match format {

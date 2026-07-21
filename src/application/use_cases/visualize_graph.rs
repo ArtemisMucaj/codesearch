@@ -18,7 +18,22 @@ use std::fmt::Write as _;
 
 use serde_json::{json, Value};
 
-use crate::domain::{GraphEdge, GraphNode, GraphView};
+use crate::domain::{GraphEdge, GraphNode, GraphView, NAMESPACE_SCOPE_ID};
+
+/// Human-readable label for a view's scope id. The namespace-wide sentinel is an
+/// internal cache key (`__namespace__` / `__namespace__:<ns>`) and must never
+/// surface to the user: a bare sentinel renders as `namespace`, and a
+/// namespace-qualified one as `namespace <ns>`. Any real repository id is shown
+/// verbatim.
+fn scope_label(repository_id: &str) -> String {
+    if repository_id == NAMESPACE_SCOPE_ID {
+        "namespace".to_string()
+    } else if let Some(ns) = repository_id.strip_prefix(&format!("{NAMESPACE_SCOPE_ID}:")) {
+        format!("namespace {ns}")
+    } else {
+        repository_id.to_string()
+    }
+}
 
 /// Tableau-10 palette, cycled per community index. Matches graphify so exported
 /// HTML/SVG/canvas share a colour scheme.
@@ -96,6 +111,8 @@ pub fn aggregate(view: &GraphView) -> GraphView {
             // Size meta-nodes by member count rather than meta-edge degree.
             degree: c.size,
             language: String::new(),
+            // A community meta-node spans its members (possibly many repos).
+            repository: None,
         })
         .collect();
 
@@ -352,7 +369,7 @@ fn render_html(view: &GraphView) -> String {
 
     let mut s = String::new();
     s.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"UTF-8\">\n<title>codesearch — ");
-    s.push_str(&escape_xml(&view.repository_id));
+    s.push_str(&escape_xml(&scope_label(&view.repository_id)));
     s.push_str("</title>\n");
     s.push_str(HTML_SCRIPT_TAG);
     s.push_str(HTML_STYLES);
@@ -674,6 +691,7 @@ mod tests {
                 community: if i < 3 { 0 } else { 1 },
                 degree: 0,
                 language: "rust".to_string(),
+                repository: None,
             })
             .collect();
         let mut edges = vec![

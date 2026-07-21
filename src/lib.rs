@@ -41,7 +41,7 @@ pub use connector::{
 };
 
 pub use domain::{
-    compute_file_hash, stable_community_id, ChannelEdge, ChannelEndpoint, ChannelRole, Cluster,
+    compute_file_hash, namespace_scope_id, stable_community_id, ChannelEdge, ChannelEndpoint, ChannelRole, Cluster,
     ClusterGraph, CodeChunk, CommunityCoupling, CouplingElement, CouplingElementKind,
     CouplingReport, DomainError, Embedding, EmbeddingConfig, EndpointSource, ExecutionFeature,
     FeatureNode, FileHash, IndexingStatus, Language, NodeType, Protocol, ReferenceKind, Repository,

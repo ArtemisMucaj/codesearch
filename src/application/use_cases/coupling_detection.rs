@@ -19,13 +19,15 @@
 
 use std::sync::Arc;
 
+// Leiden itself moved out to the `leiden` / `leiden_coupling` crates on this
+// branch, so only the graph builders still come from the file-level module.
 use leiden_coupling::{analyze, CommunityCoupling as CrateCoupling, Coupler, CouplerKind};
 
-use super::cluster_detection::build_file_leiden_graph;
+use super::cluster_detection::{build_file_leiden_graph, qualify_namespace_graph};
 use super::{FileRelationshipUseCase, SymbolClusterDetectionUseCase};
 use crate::domain::{
-    stable_community_id, CommunityCoupling, CouplingElement, CouplingElementKind, CouplingReport,
-    DomainError, GraphLevel,
+    namespace_scope_id, stable_community_id, CommunityCoupling, CouplingElement,
+    CouplingElementKind, CouplingReport, DomainError, GraphLevel,
 };
 
 // ── Use case ──────────────────────────────────────────────────────────────
@@ -85,6 +87,60 @@ impl CouplingDetectionUseCase {
 
         Ok(CouplingReport {
             repository_id: repository_id.to_string(),
+            level,
+            total_communities: analysis.total_communities,
+            fragile_communities: analysis.fragile_communities,
+            communities,
+        })
+    }
+
+    /// Run the coupling pipeline over the **namespace-wide** graph — every
+    /// repository in `namespace`, cross-repository edges included — at `level`.
+    ///
+    /// This is where global couplings earn their keep: a coupler that splits a
+    /// namespace-wide community is the shared file/symbol welding two
+    /// repositories together (a leaky service boundary). File-level couplers are
+    /// reported as `repo:path` (the qualified node labels), so it's clear which
+    /// repository's element is the glue; symbol-level couplers are FQNs, which
+    /// are already globally unique.
+    ///
+    /// The report is keyed under the per-namespace sentinel scope id, matching
+    /// the namespace cluster / symbol-community runs.
+    pub async fn detect_namespace(
+        &self,
+        namespace: &str,
+        level: GraphLevel,
+    ) -> Result<CouplingReport, DomainError> {
+        let (names, graph, id_prefix) = match level {
+            GraphLevel::File => {
+                // Every repo, cross-repo edges included, nodes qualified `repo:path`
+                // exactly as the namespace file-cluster / graph-view paths do.
+                let fg = qualify_namespace_graph(self.file_graph.build_graph(None, 1, true).await?);
+                let (files, g) = build_file_leiden_graph(&fg);
+                (files, g, "c")
+            }
+            GraphLevel::Symbol => {
+                let sg = self
+                    .symbol_clusters
+                    .build_namespace_symbol_graph(Some(namespace))
+                    .await?;
+                (sg.symbols, sg.graph, "s")
+            }
+        };
+
+        // Same two-step as the per-repository path above: the crate analyses the
+        // graph, then `map_community` attaches the stable id. (Pre-extraction
+        // this was one `analyze_graph(.., id_prefix)` call; the id derivation is
+        // codesearch's, so it stayed here when Leiden moved out.)
+        let analysis = analyze(&graph, &names);
+        let communities = analysis
+            .communities
+            .into_iter()
+            .map(|c| map_community(c, id_prefix))
+            .collect();
+
+        Ok(CouplingReport {
+            repository_id: namespace_scope_id(namespace),
             level,
             total_communities: analysis.total_communities,
             fragile_communities: analysis.fragile_communities,

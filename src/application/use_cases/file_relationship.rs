@@ -16,6 +16,11 @@ pub struct FileRelationshipUseCase {
     call_graph: Arc<CallGraphUseCase>,
     vector_repo: Arc<dyn VectorRepository>,
     metadata_repo: Arc<dyn MetadataRepository>,
+    /// Active namespace. The metadata store is shared across every namespace,
+    /// so its `list()` returns repositories DB-wide; the graph must be confined
+    /// to this namespace, otherwise a `--global` run would weld together
+    /// unrelated repositories from other namespaces.
+    namespace: String,
 }
 
 impl FileRelationshipUseCase {
@@ -23,45 +28,97 @@ impl FileRelationshipUseCase {
         call_graph: Arc<CallGraphUseCase>,
         vector_repo: Arc<dyn VectorRepository>,
         metadata_repo: Arc<dyn MetadataRepository>,
+        namespace: String,
     ) -> Self {
         Self {
             call_graph,
             vector_repo,
             metadata_repo,
+            namespace,
         }
     }
 
-    /// Build the file dependency graph.
-    ///
-    /// * `repository_ids` — when `Some`, restricts the graph to the listed
-    ///   repositories; `None` means "all indexed repositories".
-    /// * `min_weight` — minimum number of distinct symbol references required
-    ///   before an edge is included in the result.
-    /// * `include_cross_repo` — when `true`, edges whose endpoints belong to
-    ///   different repositories are also included.
+    /// The namespace this use case is scoped to. Callers building a
+    /// namespace-wide cache key (the sentinel scope id) read it from here so the
+    /// key matches the repositories the graph is actually confined to.
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    /// Build the file dependency graph, scoped to the use case's default
+    /// namespace. See [`Self::build_graph_in`] for the per-request variant.
     pub async fn build_graph(
         &self,
         repository_ids: Option<&[String]>,
         min_weight: usize,
         include_cross_repo: bool,
     ) -> Result<FileGraph, DomainError> {
+        self.build_graph_in(repository_ids, min_weight, include_cross_repo, None)
+            .await
+    }
+
+    /// Build the file dependency graph.
+    ///
+    /// * `repository_ids` — when `Some`, restricts the graph to the listed
+    ///   repositories; `None` means "every repository in the namespace".
+    /// * `min_weight` — minimum number of distinct symbol references required
+    ///   before an edge is included in the result.
+    /// * `include_cross_repo` — when `true`, edges whose endpoints belong to
+    ///   different repositories are also included.
+    /// * `namespace_override` — the namespace to confine the working set to;
+    ///   `None` uses the use case's default. Lets one serve answer for any
+    ///   namespace via a per-request `?namespace=` without a restart.
+    pub async fn build_graph_in(
+        &self,
+        repository_ids: Option<&[String]>,
+        min_weight: usize,
+        include_cross_repo: bool,
+        namespace_override: Option<&str>,
+    ) -> Result<FileGraph, DomainError> {
+        let namespace = namespace_override.unwrap_or(self.namespace.as_str());
         // ── 1. Resolve which repositories to analyse ───────────────────────
-        let all_repos = self
+        // The metadata store is shared across every namespace, so `list()`
+        // returns repositories DB-wide.
+        let db_repos = self
             .metadata_repo
             .list()
             .await
             .map_err(|e| DomainError::storage(format!("Failed to list repositories: {e}")))?;
 
+        // The namespace filter applies ONLY to the "all repositories" (`--global`,
+        // `repository_ids == None`) case — that's what makes a global run
+        // *namespace*-wide rather than *database*-wide. When explicit ids are
+        // given the caller has already chosen exactly which repositories it wants
+        // (e.g. a per-repository graph for a repo that may live in a *different*
+        // namespace than the server's default); filtering those by namespace here
+        // would silently drop them and yield an empty graph.
         let target_repos: Vec<_> = if let Some(ids) = repository_ids {
             let id_set: HashSet<&str> = ids.iter().map(String::as_str).collect();
-            all_repos
+            db_repos
                 .iter()
                 .filter(|r| id_set.contains(r.id()))
                 .cloned()
                 .collect()
         } else {
-            all_repos.clone()
+            db_repos
+                .iter()
+                .filter(|r| r.namespace() == Some(namespace))
+                .cloned()
+                .collect()
         };
+
+        // The symbol-resolution / ambiguity map (step 2) is built over the same
+        // scope as the targets: for a global run that's the namespace; for an
+        // explicit-id query it's the namespaces the target repos actually live in
+        // (so a per-repo query still sees its own repo's symbols, and a cross-repo
+        // `uses A B` still gets the namespace-wide ambiguity check via `all_repos`
+        // below).
+        let target_namespaces: HashSet<Option<&str>> =
+            target_repos.iter().map(|r| r.namespace()).collect();
+        let all_repos: Vec<_> = db_repos
+            .into_iter()
+            .filter(|r| target_namespaces.contains(&r.namespace()))
+            .collect();
 
         if target_repos.is_empty() {
             return Ok(FileGraph {
@@ -91,8 +148,9 @@ impl FileRelationshipUseCase {
         // more than one file is likewise ambiguous, so we drop it rather than
         // guess — `ambiguous` records those names.
         //
-        // The map is built over EVERY repo in the namespace, not just the
-        // `target_repos` for this query. A `uses A B` call passes only {A, B},
+        // The map is built over every repo in the namespace (`all_repos` is
+        // already namespace-scoped, see step 1), not just the `target_repos`
+        // for this query. A `uses A B` call passes only {A, B},
         // but a class name unique within {A, B} can still be ambiguous
         // namespace-wide (e.g. `App\Models\Billing\Invoice` exists in both B and
         // a third repo C). Restricting the map to the query targets would hide

@@ -149,11 +149,22 @@ pub async fn explain_stream(
     Path(symbol): Path<String>,
     body: Option<Json<ExplainStreamRequest>>,
 ) -> impl IntoResponse {
-    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let mut req = body.map(|Json(b)| b).unwrap_or_default();
+    // The call-graph query filters on the repository UUID, so a repository
+    // NAME must be resolved first — passing it through unresolved silently
+    // matches nothing and the explanation aborts with "no callers or callees".
+    if let Some(repo) = req.repository.take() {
+        req.repository = Some(state.container.resolve_repository_id(Some(&repo)).await);
+    }
     // Build the use case up front so the spawned task owns only what it needs;
     // the `Arc<Container>` can then drop when this handler returns rather than
-    // staying alive for the whole (potentially long) SSE stream.
-    let use_case = state.container.explain_use_case();
+    // staying alive for the whole (potentially long) SSE stream. Snippets are
+    // scoped to the repository's own namespace — the boot namespace's chunk
+    // schema knows nothing about repos indexed elsewhere.
+    let use_case = state
+        .container
+        .explain_use_case_for_repository(req.repository.as_deref())
+        .await;
     // Copilot reads its token/model from `<data_dir>/config.json`; capture the
     // path now so the spawned task doesn't need to hold the container alive.
     let data_dir = state.container.data_dir().to_string();

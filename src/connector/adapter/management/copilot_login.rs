@@ -131,3 +131,40 @@ impl gh_copilot_rs::DeviceFlow for UnavailableFlow {
         Err(gh_copilot_rs::CopilotError::configuration(self.0.clone()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The status serializes with a `status` discriminator + snake_case values,
+    /// which is the shape the client decodes.
+    #[test]
+    fn login_status_serializes_with_tag() {
+        let idle = serde_json::to_value(LoginStatus::Idle).unwrap();
+        assert_eq!(idle["status"], "idle");
+
+        let pending = serde_json::to_value(LoginStatus::Pending {
+            user_code: "ABCD-1234".into(),
+            verification_uri: "https://github.com/login/device".into(),
+        })
+        .unwrap();
+        assert_eq!(pending["status"], "pending");
+        assert_eq!(pending["user_code"], "ABCD-1234");
+        assert_eq!(
+            pending["verification_uri"],
+            "https://github.com/login/device"
+        );
+
+        assert_eq!(
+            serde_json::to_value(LoginStatus::Authorized).unwrap()["status"],
+            "authorized"
+        );
+
+        let failed = serde_json::to_value(LoginStatus::Failed {
+            error: "denied".into(),
+        })
+        .unwrap();
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["error"], "denied");
+    }
+}
