@@ -188,9 +188,17 @@ codesearch memory list --kind fact                  # project facts & decisions
 codesearch memory search "deploy steps" --kind skill
 codesearch memory search "..." --project <name>     # another project (or --all-projects)
 codesearch memory tree                              # browse the memory:// virtual filesystem
+codesearch memory sessions                          # what past sessions have been imported
+codesearch memory tree memory://sessions            # recent sessions, one-line abstracts each
 codesearch memory show memory://sessions/<id>       # a past session's transcript
 codesearch memory show experience/<name>            # one item by kind/name
 ```
+
+Resuming work: to pick up where recent sessions left off, read the digest
+(`memory show memory://memory`), then list recent sessions
+(`memory tree memory://sessions`) and read the latest one or two
+(`memory show memory://sessions/<id>`) for their agent-loop context before
+touching code.
 
 `memory://memory` is the digest across all memory; `memory://projects/<project>`
 is one project's overview. `memory search` auto-scopes to the current project +

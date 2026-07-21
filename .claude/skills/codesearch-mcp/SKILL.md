@@ -64,6 +64,10 @@ directory URI (e.g. `memory://sessions`) to list its children's one-line
 abstracts, then a leaf URI (e.g. `memory://sessions/<id>`) for a node's full
 detail such as a past session transcript.
 
+Resuming work: to pick up where recent sessions left off, read the digest
+(`read_memory` with no args), then `read_memory("memory://sessions")` and drill
+into the latest one or two for their agent-loop context before touching code.
+
 When a task turns up a durable reference worth keeping — a design doc, a spec, a
 guide URL — store it with `add_memory_resource` (a file path or URL) so a later
 session can recall it. It's summarised and saved under `memory://resources`.
