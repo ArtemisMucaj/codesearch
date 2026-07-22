@@ -1,5 +1,7 @@
 mod call_graph;
 mod channel_link;
+mod claim_ingestion;
+mod claim_ingestion_prompt;
 mod cluster_detection;
 mod community_naming;
 mod coupling_detection;
@@ -33,6 +35,7 @@ mod visualize_graph;
 
 pub use call_graph::*;
 pub use channel_link::*;
+pub use claim_ingestion::*;
 pub use cluster_detection::*;
 pub use community_naming::*;
 pub use coupling_detection::*;

@@ -432,6 +432,18 @@ impl ClaimRepository for DuckdbClaimRepository {
         Ok(deleted)
     }
 
+    async fn count_claims_for_session(&self, session_id: &str) -> Result<usize, DomainError> {
+        let conn = self.conn.lock().await;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM claims WHERE source_session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| DomainError::storage(format!("Failed to count session claims: {e}")))?;
+        Ok(count as usize)
+    }
+
     async fn add_edge(&self, edge: &ClaimEdge) -> Result<(), DomainError> {
         let conn = self.conn.lock().await;
         conn.execute(

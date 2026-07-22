@@ -60,6 +60,11 @@ pub trait ClaimRepository: Send + Sync {
     /// claims removed.
     async fn delete_claims_for_session(&self, session_id: &str) -> Result<usize, DomainError>;
 
+    /// How many claims currently carry `session_id` as their provenance. Used
+    /// as the ingestion idempotence marker: a non-forced re-ingest of a session
+    /// that already produced claims is skipped.
+    async fn count_claims_for_session(&self, session_id: &str) -> Result<usize, DomainError>;
+
     // ── Typed edges ──────────────────────────────────────────────────────
 
     /// Insert (or replace) a typed edge between two claims, keyed by

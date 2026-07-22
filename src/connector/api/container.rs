@@ -7,9 +7,10 @@ use tracing::{debug, warn};
 
 use crate::application::{
     AnalysisRepository, CallGraphRepository, CallGraphUseCase, ChannelEndpointRepository,
-    ChannelLinkUseCase, ChatClient, ClaimRepository, FileHashRepository, ImportSessionUseCase,
-    MemoryBrowseUseCase, MemoryDreamUseCase, MemoryExtractionUseCase, MemoryRepository,
-    MemorySearchUseCase, MetadataRepository, QueryExpander, SummarizeMemoryUseCase,
+    ChannelLinkUseCase, ChatClient, ClaimIngestionUseCase, ClaimRepository, FileHashRepository,
+    ImportSessionUseCase, MemoryBrowseUseCase, MemoryDreamUseCase, MemoryExtractionUseCase,
+    MemoryRepository, MemorySearchUseCase, MetadataRepository, QueryExpander,
+    SummarizeMemoryUseCase,
 };
 use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::scip::ScipRunner;
@@ -846,6 +847,19 @@ impl Container {
         )?);
         *cache = Some(Arc::clone(&repo));
         Ok(repo)
+    }
+
+    /// Experimental claim-graph ingestion driven by the given chat model —
+    /// extracts claims from a transcript into `memory-claims.duckdb`.
+    pub fn claim_ingestion_use_case(
+        &self,
+        chat_client: Arc<dyn ChatClient>,
+    ) -> Result<ClaimIngestionUseCase> {
+        Ok(ClaimIngestionUseCase::new(
+            chat_client,
+            self.claim_repository()?,
+            self.embedding_service.clone(),
+        ))
     }
 
     /// Session import + memory extraction + virtual-filesystem summarization,
