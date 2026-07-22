@@ -7,10 +7,10 @@ use tracing::{debug, warn};
 
 use crate::application::{
     AnalysisRepository, CallGraphRepository, CallGraphUseCase, ChannelEndpointRepository,
-    ChannelLinkUseCase, ChatClient, ClaimIngestionUseCase, ClaimRepository, FileHashRepository,
-    ImportSessionUseCase, MemoryBrowseUseCase, MemoryDreamUseCase, MemoryExtractionUseCase,
-    MemoryRepository, MemorySearchUseCase, MetadataRepository, QueryExpander,
-    SummarizeMemoryUseCase,
+    ChannelLinkUseCase, ChatClient, ClaimIngestionUseCase, ClaimRecallUseCase, ClaimRepository,
+    FileHashRepository, ImportSessionUseCase, MemoryBrowseUseCase, MemoryDreamUseCase,
+    MemoryExtractionUseCase, MemoryRepository, MemorySearchUseCase, MetadataRepository,
+    QueryExpander, SummarizeMemoryUseCase,
 };
 use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::scip::ScipRunner;
@@ -857,6 +857,15 @@ impl Container {
     ) -> Result<ClaimIngestionUseCase> {
         Ok(ClaimIngestionUseCase::new(
             chat_client,
+            self.claim_repository()?,
+            self.embedding_service.clone(),
+        ))
+    }
+
+    /// Experimental claim-graph recall — graph-anchored hybrid search over the
+    /// active-claim view.
+    pub fn claim_recall_use_case(&self) -> Result<ClaimRecallUseCase> {
+        Ok(ClaimRecallUseCase::new(
             self.claim_repository()?,
             self.embedding_service.clone(),
         ))
