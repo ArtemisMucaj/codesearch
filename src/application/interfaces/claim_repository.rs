@@ -126,6 +126,11 @@ pub trait ClaimRepository: Send + Sync {
         limit: usize,
     ) -> Result<Vec<(Claim, f32)>, DomainError>;
 
+    /// Stored embedding for every claim that has one, as `(claim_id, vector)`.
+    /// Claims without a vector are omitted. Used by consolidation to cluster
+    /// near-duplicate claims.
+    async fn list_claim_vectors(&self) -> Result<Vec<(String, Vec<f32>)>, DomainError>;
+
     /// Aggregate store statistics.
     async fn stats(&self) -> Result<crate::domain::ClaimStoreStats, DomainError>;
 }

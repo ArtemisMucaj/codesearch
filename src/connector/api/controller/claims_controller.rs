@@ -114,6 +114,20 @@ impl<'a> ClaimsController<'a> {
         }
     }
 
+    /// `claims dream` — run one consolidation cycle over the claim graph.
+    pub async fn dream(&self, llm: LlmTarget) -> Result<String> {
+        let chat = self.chat_client(llm)?;
+        let use_case = self.container.claim_dream_use_case(chat)?;
+        let report = use_case.execute().await?;
+        Ok(format!(
+            "Dream cycle: {} clusters examined, {} skipped (stable), {} derived claims, {} edges.",
+            report.clusters_examined,
+            report.clusters_skipped_stable,
+            report.derived_claims_added,
+            report.edges_added
+        ))
+    }
+
     /// `claims stats` — counts of claims (by status), entities, and edges.
     pub async fn stats(&self, format: OutputFormatTextJson) -> Result<String> {
         let repo = self.container.claim_repository()?;

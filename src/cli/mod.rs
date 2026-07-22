@@ -304,6 +304,15 @@ pub enum ClaimsSubcommand {
         format: OutputFormatTextJson,
     },
 
+    /// Consolidate the claim graph: abstract near-duplicate clusters into
+    /// higher-level derived claims (offline "dream" pass). Only adds derived
+    /// claims and edges — primary claims are never modified.
+    Dream {
+        /// LLM provider for abstraction: 'open-ai' (default), 'anthropic', or 'copilot'.
+        #[arg(long, value_enum, default_value = "open-ai")]
+        llm: LlmTarget,
+    },
+
     /// Claim-store statistics (counts by status, entities, edges).
     Stats {
         /// Output format: text or json.

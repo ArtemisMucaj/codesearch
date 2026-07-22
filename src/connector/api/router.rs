@@ -293,6 +293,7 @@ impl<'a> Router<'a> {
                         .recall(query, num, project, all_projects, format)
                         .await
                 }
+                ClaimsSubcommand::Dream { llm } => self.claims_controller.dream(llm).await,
                 ClaimsSubcommand::Stats { format } => self.claims_controller.stats(format).await,
             },
             Commands::Create { .. } => Err(anyhow::anyhow!(

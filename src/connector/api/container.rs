@@ -7,10 +7,10 @@ use tracing::{debug, warn};
 
 use crate::application::{
     AnalysisRepository, CallGraphRepository, CallGraphUseCase, ChannelEndpointRepository,
-    ChannelLinkUseCase, ChatClient, ClaimIngestionUseCase, ClaimRecallUseCase, ClaimRepository,
-    FileHashRepository, ImportSessionUseCase, MemoryBrowseUseCase, MemoryDreamUseCase,
-    MemoryExtractionUseCase, MemoryRepository, MemorySearchUseCase, MetadataRepository,
-    QueryExpander, SummarizeMemoryUseCase,
+    ChannelLinkUseCase, ChatClient, ClaimDreamUseCase, ClaimIngestionUseCase, ClaimRecallUseCase,
+    ClaimRepository, FileHashRepository, ImportSessionUseCase, MemoryBrowseUseCase,
+    MemoryDreamUseCase, MemoryExtractionUseCase, MemoryRepository, MemorySearchUseCase,
+    MetadataRepository, QueryExpander, SummarizeMemoryUseCase,
 };
 use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::scip::ScipRunner;
@@ -867,6 +867,19 @@ impl Container {
     pub fn claim_recall_use_case(&self) -> Result<ClaimRecallUseCase> {
         Ok(ClaimRecallUseCase::new(
             self.claim_repository()?,
+            self.embedding_service.clone(),
+        ))
+    }
+
+    /// Experimental claim-graph consolidation ("dream") driven by the given
+    /// chat model — abstracts near-duplicate clusters into derived claims.
+    pub fn claim_dream_use_case(
+        &self,
+        chat_client: Arc<dyn ChatClient>,
+    ) -> Result<ClaimDreamUseCase> {
+        Ok(ClaimDreamUseCase::new(
+            self.claim_repository()?,
+            chat_client,
             self.embedding_service.clone(),
         ))
     }

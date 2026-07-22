@@ -754,6 +754,34 @@ impl ClaimRepository for DuckdbClaimRepository {
             .map_err(|e| DomainError::storage(format!("Failed to read claim keyword row: {e}")))
     }
 
+    async fn list_claim_vectors(&self) -> Result<Vec<(String, Vec<f32>)>, DomainError> {
+        // FLOAT[n] values cannot be fetched as a native Rust type through
+        // duckdb-rs, so round-trip them through JSON text (as the memory
+        // adapter does).
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare("SELECT claim_id, to_json(vector)::VARCHAR FROM claim_vectors")
+            .map_err(|e| {
+                DomainError::storage(format!("Failed to prepare list_claim_vectors: {e}"))
+            })?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| DomainError::storage(format!("Failed to list claim vectors: {e}")))?;
+        let mut vectors = Vec::new();
+        for row in rows {
+            let (claim_id, json) = row.map_err(|e| {
+                DomainError::storage(format!("Failed to read claim vector row: {e}"))
+            })?;
+            let vector: Vec<f32> = serde_json::from_str(&json).map_err(|e| {
+                DomainError::storage(format!("Failed to parse vector for '{claim_id}': {e}"))
+            })?;
+            vectors.push((claim_id, vector));
+        }
+        Ok(vectors)
+    }
+
     async fn stats(&self) -> Result<ClaimStoreStats, DomainError> {
         let conn = self.conn.lock().await;
         let total_claims: i64 = conn
