@@ -7,15 +7,16 @@ use tracing::{debug, warn};
 
 use crate::application::{
     AnalysisRepository, CallGraphRepository, CallGraphUseCase, ChannelEndpointRepository,
-    ChannelLinkUseCase, ChatClient, FileHashRepository, ImportSessionUseCase, MemoryBrowseUseCase,
+    ChannelLinkUseCase, ChatClient, ClaimDreamUseCase, ClaimIngestionUseCase, ClaimRecallUseCase,
+    ClaimRepository, FileHashRepository, ImportSessionUseCase, MemoryBrowseUseCase,
     MemoryDreamUseCase, MemoryExtractionUseCase, MemoryRepository, MemorySearchUseCase,
     MetadataRepository, QueryExpander, SummarizeMemoryUseCase,
 };
 use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::scip::ScipRunner;
 use crate::connector::adapter::{
-    DuckdbAnalysisRepository, DuckdbMemoryRepository, NamespaceEmbeddingConfig, NoEmbedding,
-    MEMORY_DB_FILE, NO_EMBEDDINGS_MODEL,
+    DuckdbAnalysisRepository, DuckdbClaimRepository, DuckdbMemoryRepository,
+    NamespaceEmbeddingConfig, NoEmbedding, CLAIM_DB_FILE, MEMORY_DB_FILE, NO_EMBEDDINGS_MODEL,
 };
 use crate::{
     AnthropicClient, AnthropicReranking, ClusterDetectionUseCase, CommunityNamingUseCase,
@@ -132,6 +133,9 @@ pub struct Container {
     /// so concurrent tool calls must reuse a single connection instead of
     /// each opening `memory.duckdb`.
     memory_repo: std::sync::Mutex<Option<Arc<dyn MemoryRepository>>>,
+    /// Lazily opened experimental claim-graph store (`memory-claims.duckdb`),
+    /// cached for the same single-writer reason as `memory_repo`.
+    claim_repo: std::sync::Mutex<Option<Arc<dyn ClaimRepository>>>,
     config: ContainerConfig,
 }
 
@@ -590,6 +594,7 @@ impl Container {
             channel_endpoint_repo,
             analysis_repo,
             memory_repo: std::sync::Mutex::new(None),
+            claim_repo: std::sync::Mutex::new(None),
             config,
         })
     }
@@ -816,6 +821,67 @@ impl Container {
         )?);
         *cache = Some(Arc::clone(&repo));
         Ok(repo)
+    }
+
+    /// Open the experimental append-only claim-graph store — a dedicated DuckDB
+    /// file (`memory-claims.duckdb`), separate from both the code index and the
+    /// current `memory.duckdb`, created on first use.
+    ///
+    /// Keyed to the container's embedding setup exactly like
+    /// [`memory_repository`](Self::memory_repository), since stored claim/entity
+    /// vectors would be incomparable with new queries otherwise.
+    pub fn claim_repository(&self) -> Result<Arc<dyn ClaimRepository>> {
+        let mut cache = self
+            .claim_repo
+            .lock()
+            .map_err(|_| anyhow::anyhow!("claim repository cache lock poisoned"))?;
+        if let Some(repo) = cache.as_ref() {
+            return Ok(Arc::clone(repo));
+        }
+        let db_path = PathBuf::from(&self.config.data_dir).join(CLAIM_DB_FILE);
+        let embedding_cfg = self.embedding_service.config();
+        let repo: Arc<dyn ClaimRepository> = Arc::new(DuckdbClaimRepository::new(
+            &db_path,
+            embedding_cfg.dimensions(),
+            embedding_cfg.model_name(),
+        )?);
+        *cache = Some(Arc::clone(&repo));
+        Ok(repo)
+    }
+
+    /// Experimental claim-graph ingestion driven by the given chat model —
+    /// extracts claims from a transcript into `memory-claims.duckdb`.
+    pub fn claim_ingestion_use_case(
+        &self,
+        chat_client: Arc<dyn ChatClient>,
+    ) -> Result<ClaimIngestionUseCase> {
+        Ok(ClaimIngestionUseCase::new(
+            chat_client,
+            self.claim_repository()?,
+            self.embedding_service.clone(),
+        ))
+    }
+
+    /// Experimental claim-graph recall — graph-anchored hybrid search over the
+    /// active-claim view.
+    pub fn claim_recall_use_case(&self) -> Result<ClaimRecallUseCase> {
+        Ok(ClaimRecallUseCase::new(
+            self.claim_repository()?,
+            self.embedding_service.clone(),
+        ))
+    }
+
+    /// Experimental claim-graph consolidation ("dream") driven by the given
+    /// chat model — abstracts near-duplicate clusters into derived claims.
+    pub fn claim_dream_use_case(
+        &self,
+        chat_client: Arc<dyn ChatClient>,
+    ) -> Result<ClaimDreamUseCase> {
+        Ok(ClaimDreamUseCase::new(
+            self.claim_repository()?,
+            chat_client,
+            self.embedding_service.clone(),
+        ))
     }
 
     /// Session import + memory extraction + virtual-filesystem summarization,

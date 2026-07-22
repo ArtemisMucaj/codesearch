@@ -7,19 +7,21 @@ pub mod tui;
 pub use application::{
     AnalysisRepository, CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase,
     ChannelEndpointRepository, ChannelExtractor, ChannelLinkOptions, ChannelLinkReport,
-    ChannelLinkUseCase, ChannelOverview, ChannelResolver, ChatClient, ClusterDetectionUseCase,
-    CommunityNamingUseCase, ContextNode, CouplingDetectionUseCase, DeleteRepositoryUseCase,
-    DreamReport, EmbeddingService, ExecutionFeaturesUseCase, ExplainResult, ExplainUseCase,
-    ExtractionReport, FileHashRepository, FileRelationshipUseCase, GraphExpansionUseCase,
-    HarvestReport, ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode, ImportOutcome,
-    ImportSessionUseCase, IndexRepositoryUseCase, LanguageShare, ListRepositoriesUseCase,
-    MemoryBrowseUseCase, MemoryDreamUseCase, MemoryExtractionUseCase, MemoryLevel,
-    MemoryRepository, MemoryRow, MemorySearchUseCase, MetadataRepository, ModuleDependency,
-    ModuleOverview, OverviewOptions, OverviewReport, OverviewStats, ParserService, QueryExpander,
-    RepositoryOverviewUseCase, RerankingService, ResolveChannelsUseCase, ResolvedConfigValue,
-    RowTarget, Scip, SearchCodeUseCase, SessionDiscovery, SkippedSection, SnippetLookupUseCase,
-    SummarizeMemoryUseCase, SymbolClusterDetectionUseCase, SymbolContext, SymbolContextUseCase,
-    VectorRepository, MEMORY_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
+    ChannelLinkUseCase, ChannelOverview, ChannelResolver, ChatClient, ClaimDreamReport,
+    ClaimDreamUseCase, ClaimIngestionUseCase, ClaimRecallUseCase, ClaimRepository,
+    ClusterDetectionUseCase, CommunityNamingUseCase, ContextNode, CouplingDetectionUseCase,
+    DeleteRepositoryUseCase, DreamReport, EmbeddingService, ExecutionFeaturesUseCase,
+    ExplainResult, ExplainUseCase, ExtractionReport, FileHashRepository, FileRelationshipUseCase,
+    GraphExpansionUseCase, HarvestReport, ImpactAnalysis, ImpactAnalysisUseCase, ImpactNode,
+    ImportOutcome, ImportSessionUseCase, IndexRepositoryUseCase, IngestionOutcome, IngestionReport,
+    LanguageShare, ListRepositoriesUseCase, MemoryBrowseUseCase, MemoryDreamUseCase,
+    MemoryExtractionUseCase, MemoryLevel, MemoryRepository, MemoryRow, MemorySearchUseCase,
+    MetadataRepository, ModuleDependency, ModuleOverview, OverviewOptions, OverviewReport,
+    OverviewStats, ParserService, QueryExpander, RepositoryOverviewUseCase, RerankingService,
+    ResolveChannelsUseCase, ResolvedConfigValue, RowTarget, Scip, SearchCodeUseCase,
+    SessionDiscovery, SkippedSection, SnippetLookupUseCase, SummarizeMemoryUseCase,
+    SymbolClusterDetectionUseCase, SymbolContext, SymbolContextUseCase, VectorRepository,
+    MEMORY_ROOT_URI, RESOURCES_ROOT_URI, SESSIONS_ROOT_URI,
 };
 
 pub use application::resource_slug;
@@ -27,9 +29,9 @@ pub use application::resource_slug;
 pub use application::{aggregate, render, VizFormat, DEFAULT_NODE_LIMIT};
 
 pub use cli::{
-    ClustersSubcommand, Commands, CopilotSubcommand, EmbeddingTarget, FeaturesSubcommand,
-    LlmTarget, MemorySubcommand, OpenaiSubcommand, OutputFormat, RerankingTarget,
-    SymbolClustersSubcommand, TuiMode,
+    ClaimsSubcommand, ClustersSubcommand, Commands, CopilotSubcommand, EmbeddingTarget,
+    FeaturesSubcommand, LlmTarget, MemorySubcommand, OpenaiSubcommand, OutputFormat,
+    RerankingTarget, SymbolClustersSubcommand, TuiMode,
 };
 
 pub use connector::adapter::{
@@ -44,21 +46,23 @@ pub use connector::adapter::management::{
 pub use connector::{
     parse_transcript, parse_transcript_file, AnthropicClient, AnthropicReranking, CodesearchConfig,
     CopilotChatClient, DuckdbAnalysisRepository, DuckdbCallGraphRepository,
-    DuckdbChannelEndpointRepository, DuckdbFileHashRepository, DuckdbMemoryRepository,
-    DuckdbMetadataRepository, DuckdbVectorRepository, InMemoryVectorRepository, LlmQueryExpander,
-    MockEmbedding, MockReranking, NamespaceEmbeddingConfig, NoEmbedding, OpenAiChatClient,
-    OpenAiEmbedding, OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterChannelExtractor,
-    TreeSitterParser, DEFAULT_ONNX_EMBEDDING_MODEL, MEMORY_DB_FILE, NO_EMBEDDINGS_MODEL,
+    DuckdbChannelEndpointRepository, DuckdbClaimRepository, DuckdbFileHashRepository,
+    DuckdbMemoryRepository, DuckdbMetadataRepository, DuckdbVectorRepository,
+    InMemoryVectorRepository, LlmQueryExpander, MockEmbedding, MockReranking,
+    NamespaceEmbeddingConfig, NoEmbedding, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking,
+    OrtEmbedding, OrtReranking, TreeSitterChannelExtractor, TreeSitterParser, CLAIM_DB_FILE,
+    DEFAULT_ONNX_EMBEDDING_MODEL, MEMORY_DB_FILE, NO_EMBEDDINGS_MODEL,
 };
 
 pub use domain::{
-    compute_file_hash, stable_community_id, ChannelEdge, ChannelEndpoint, ChannelRole, Cluster,
-    ClusterGraph, CodeChunk, CommunityCoupling, CouplingElement, CouplingElementKind,
-    CouplingReport, DiscoveredSession, DomainError, DreamRun, Embedding, EmbeddingConfig,
-    EndpointSource, ExecutionFeature, FeatureNode, FileHash, ImportedSession, IndexingStatus,
-    Language, MemoryItem, MemoryKind, MemoryNode, MemoryOperation, NodeKind, NodeType, Protocol,
-    ReferenceKind, Repository, SearchQuery, SearchResult, SessionLocator, SessionMessage,
-    SessionSource, SessionTranscript, SymbolCommunity, SymbolCommunityGraph, SymbolReference,
+    compute_file_hash, stable_community_id, ChannelEdge, ChannelEndpoint, ChannelRole, Claim,
+    ClaimEdge, ClaimStatus, ClaimStoreStats, Cluster, ClusterGraph, CodeChunk, CommunityCoupling,
+    CouplingElement, CouplingElementKind, CouplingReport, DiscoveredSession, DomainError, DreamRun,
+    EdgeOrigin, EdgeType, Embedding, EmbeddingConfig, EndpointSource, Entity, EntityRef,
+    ExecutionFeature, FeatureNode, FileHash, ImportedSession, IndexingStatus, Language, MemoryItem,
+    MemoryKind, MemoryNode, MemoryOperation, NodeKind, NodeType, Protocol, ReferenceKind,
+    Repository, SearchQuery, SearchResult, SessionLocator, SessionMessage, SessionSource,
+    SessionTranscript, SourceKind, SymbolCommunity, SymbolCommunityGraph, SymbolReference,
     VectorStore,
 };
 

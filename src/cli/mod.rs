@@ -260,6 +260,67 @@ impl From<MemoryKindArg> for crate::domain::MemoryKind {
     }
 }
 
+/// Subcommands for the experimental `claims` command — the append-only claim
+/// graph (stored in `memory-claims.duckdb`, separate from both the code index
+/// and `memory.duckdb`).
+#[derive(Subcommand)]
+pub enum ClaimsSubcommand {
+    /// Ingest a session transcript into the claim graph (extract → resolve
+    /// entities → append claims + edges).
+    Ingest {
+        /// Path to a transcript file (JSONL): a Claude Code session log or a
+        /// generic `{"role": "...", "content": "..."}`-per-line chat log.
+        path: String,
+
+        /// LLM provider for extraction: 'open-ai' (default), 'anthropic', or 'copilot'.
+        #[arg(long, value_enum, default_value = "open-ai")]
+        llm: LlmTarget,
+
+        /// Re-ingest even if this session already produced claims (hard-deletes
+        /// the session's prior claims first).
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Recall claims — graph-anchored hybrid search over the active-claim view.
+    Recall {
+        query: String,
+
+        /// Maximum number of results.
+        #[arg(long, default_value = "10")]
+        num: usize,
+
+        /// Restrict to claims relevant in this project/namespace (its claims
+        /// plus globals). Defaults to the current directory's project.
+        #[arg(long, conflicts_with = "all_projects")]
+        project: Option<String>,
+
+        /// Search across every project instead of the current directory's.
+        #[arg(long)]
+        all_projects: bool,
+
+        /// Output format: text or json.
+        #[arg(short = 'F', long, value_enum, default_value = "text")]
+        format: OutputFormatTextJson,
+    },
+
+    /// Consolidate the claim graph: abstract near-duplicate clusters into
+    /// higher-level derived claims (offline "dream" pass). Only adds derived
+    /// claims and edges — primary claims are never modified.
+    Dream {
+        /// LLM provider for abstraction: 'open-ai' (default), 'anthropic', or 'copilot'.
+        #[arg(long, value_enum, default_value = "open-ai")]
+        llm: LlmTarget,
+    },
+
+    /// Claim-store statistics (counts by status, entities, edges).
+    Stats {
+        /// Output format: text or json.
+        #[arg(short = 'F', long, value_enum, default_value = "text")]
+        format: OutputFormatTextJson,
+    },
+}
+
 /// Subcommands for the `memory` command — long-term memory extracted from
 /// finished assistant sessions (stored in `memory.duckdb`, separate from the
 /// code index).
@@ -757,6 +818,12 @@ pub enum Commands {
     Memory {
         #[command(subcommand)]
         subcommand: MemorySubcommand,
+    },
+
+    /// Experimental append-only claim graph (memory-claims.duckdb)
+    Claims {
+        #[command(subcommand)]
+        subcommand: ClaimsSubcommand,
     },
 
     /// Start MCP (Model Context Protocol) server for integration with AI tools
