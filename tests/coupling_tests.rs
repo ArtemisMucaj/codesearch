@@ -30,6 +30,9 @@ async fn make_use_case() -> (Arc<CallGraphUseCase>, CouplingDetectionUseCase) {
         call_graph.clone(),
         Arc::new(InMemoryVectorRepository::new()),
         metadata_repository,
+        // Symbol-level coupling never builds the file graph, so the namespace
+        // here is only needed to satisfy the constructor.
+        String::new(),
     ));
     let symbol_clusters = Arc::new(SymbolClusterDetectionUseCase::new(call_graph.clone()));
     (

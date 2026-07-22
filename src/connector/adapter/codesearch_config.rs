@@ -24,6 +24,14 @@ const CONFIG_FILE: &str = "config.json";
 /// invalidates an existing file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CodesearchConfig {
+    /// The active LLM backend for `serve` mode, persisted so a chosen backend
+    /// (e.g. `"copilot"`) survives restarts and can be switched at runtime via
+    /// the management API. Absent means "use the boot default" (the
+    /// `--llm-target` flag, else the built-in default). Values match
+    /// [`LlmTarget`]'s string form: `"open-ai"`, `"anthropic"`, `"copilot"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_target: Option<String>,
+
     /// GitHub Copilot chat backend configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copilot: Option<CopilotConfig>,
@@ -224,6 +232,18 @@ impl CodesearchConfig {
         openai.endpoints.get(name).cloned()
     }
 
+    /// The persisted active LLM target, if any. An unparseable stored value is
+    /// treated as absent (rather than an error) so a hand-edited typo falls back
+    /// to the boot default instead of wedging the server.
+    pub fn active_llm_target(&self) -> Option<crate::cli::LlmTarget> {
+        self.llm_target.as_deref()?.parse().ok()
+    }
+
+    /// Set the persisted active LLM target.
+    pub fn set_llm_target(&mut self, target: crate::cli::LlmTarget) {
+        self.llm_target = Some(target.as_str().to_string());
+    }
+
     /// Async wrapper around [`Self::load`] that runs the (blocking) file read on
     /// a blocking thread — for use from async request handlers that must not
     /// stall the executor.
@@ -269,6 +289,34 @@ mod tests {
         let copilot = loaded.copilot.expect("copilot section present");
         assert_eq!(copilot.github_token.as_deref(), Some("ghu_example"));
         assert_eq!(copilot.model.as_deref(), Some("claude-sonnet-4.5"));
+    }
+
+    #[test]
+    fn llm_target_round_trips_and_parses() {
+        let dir = TempDir::new().unwrap();
+        let data_dir = dir.path().to_str().unwrap();
+
+        let mut cfg = CodesearchConfig::default();
+        assert_eq!(cfg.active_llm_target(), None, "absent by default");
+        cfg.set_llm_target(crate::cli::LlmTarget::Copilot);
+        cfg.save(data_dir).unwrap();
+
+        let loaded = CodesearchConfig::load(data_dir).unwrap();
+        assert_eq!(loaded.llm_target.as_deref(), Some("copilot"));
+        assert_eq!(
+            loaded.active_llm_target(),
+            Some(crate::cli::LlmTarget::Copilot)
+        );
+    }
+
+    #[test]
+    fn unparseable_llm_target_is_treated_as_absent() {
+        // A hand-edited typo must fall back to the boot default, not wedge boot.
+        let cfg = CodesearchConfig {
+            llm_target: Some("nonsense".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(cfg.active_llm_target(), None);
     }
 
     #[test]

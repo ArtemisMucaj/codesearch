@@ -64,6 +64,10 @@ pub struct CopilotModel {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CopilotModelCapabilities {
+    /// Model class: `"chat"`, `"embeddings"`, … Used to keep non-chat models
+    /// (embeddings) out of the chat model picker.
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
     #[serde(default)]
     pub limits: Option<CopilotModelLimits>,
 }
@@ -151,7 +155,21 @@ impl CopilotChatClient {
             let parsed: ModelsResponse = resp.json().await.map_err(|e| {
                 DomainError::internal(format!("failed to parse Copilot models response: {e}"))
             })?;
-            Ok(parsed.data)
+            // Drop non-chat models (embeddings) — they can't answer a chat/
+            // explain request, so they have no place in the model picker.
+            let chat_models = parsed
+                .data
+                .into_iter()
+                .filter(|m| {
+                    m.capabilities
+                        .as_ref()
+                        .and_then(|c| c.kind.as_deref())
+                        .map(|k| k == "chat")
+                        // Keep models that don't declare a type, to be safe.
+                        .unwrap_or(true)
+                })
+                .collect();
+            Ok(chat_models)
         };
 
         tokio::time::timeout(LIST_MODELS_TIMEOUT, fetch)

@@ -38,7 +38,9 @@ use tokio::sync::mpsc;
 
 use crate::application::ChatClient;
 use crate::cli::LlmTarget;
-use crate::connector::adapter::{AnthropicClient, CopilotChatClient, OpenAiChatClient};
+use crate::connector::adapter::{
+    AnthropicClient, CodesearchConfig, CopilotChatClient, OpenAiChatClient,
+};
 use crate::domain::VectorStore;
 
 use super::server::AppState;
@@ -66,6 +68,10 @@ pub struct ExplainStreamRequest {
     /// omitted, the configured `active` endpoint (then `OPENAI_*`) is used.
     #[serde(default)]
     pub endpoint: Option<String>,
+    /// Bypass the cache and recompute: ignore any stored explanation and
+    /// overwrite it with a fresh LLM run. What the app's Regenerate button sends.
+    #[serde(default)]
+    pub regenerate: bool,
 }
 
 /// JSON body for the index stream.
@@ -97,6 +103,16 @@ impl From<StreamLlmTarget> for LlmTarget {
             StreamLlmTarget::Anthropic => LlmTarget::Anthropic,
             StreamLlmTarget::OpenAi => LlmTarget::OpenAi,
             StreamLlmTarget::Copilot => LlmTarget::Copilot,
+        }
+    }
+}
+
+impl From<LlmTarget> for StreamLlmTarget {
+    fn from(value: LlmTarget) -> Self {
+        match value {
+            LlmTarget::Anthropic => StreamLlmTarget::Anthropic,
+            LlmTarget::OpenAi => StreamLlmTarget::OpenAi,
+            LlmTarget::Copilot => StreamLlmTarget::Copilot,
         }
     }
 }
@@ -149,23 +165,94 @@ pub async fn explain_stream(
     Path(symbol): Path<String>,
     body: Option<Json<ExplainStreamRequest>>,
 ) -> impl IntoResponse {
-    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let mut req = body.map(|Json(b)| b).unwrap_or_default();
+    // Default the backend to the server's active target when the request omits
+    // one, so switching to Copilot via /api/llm/target actually reaches explain
+    // — rather than always falling back to the OpenAI default downstream.
+    if req.llm.is_none() {
+        req.llm = Some(state.container.llm_target().into());
+    }
+    // The call-graph query filters on the repository UUID, so a repository
+    // NAME must be resolved first — passing it through unresolved silently
+    // matches nothing and the explanation aborts with "no callers or callees".
+    if let Some(repo) = req.repository.take() {
+        req.repository = Some(state.container.resolve_repository_id(Some(&repo)).await);
+    }
     // Build the use case up front so the spawned task owns only what it needs;
     // the `Arc<Container>` can then drop when this handler returns rather than
-    // staying alive for the whole (potentially long) SSE stream.
-    let use_case = state.container.explain_use_case();
+    // staying alive for the whole (potentially long) SSE stream. Snippets are
+    // scoped to the repository's own namespace — the boot namespace's chunk
+    // schema knows nothing about repos indexed elsewhere.
+    let use_case = state
+        .container
+        .explain_use_case_for_repository(req.repository.as_deref())
+        .await;
     // Copilot reads its token/model from `<data_dir>/config.json`; capture the
     // path now so the spawned task doesn't need to hold the container alive.
     let data_dir = state.container.data_dir().to_string();
+
+    // Cache is only used for a repository-scoped request (the key needs a single
+    // repository id) that isn't a regex match (the resolved symbol is stable).
+    // The key's model component identifies the effective backend+model so a
+    // different model recomputes rather than reusing another's output.
+    let cache = (!req.regex)
+        .then(|| req.repository.clone())
+        .flatten()
+        .map(|repo_id| ExplanationCacheKey {
+            repository_id: repo_id,
+            symbol: symbol.clone(),
+            model: explanation_model_key(&state, &req, &data_dir),
+        });
+    let analysis_repo = state.container.analysis_repository();
 
     // Channel of ready-to-send SSE events feeding the HTTP response.
     let (event_tx, event_rx) = mpsc::unbounded_channel::<Event>();
 
     tokio::spawn(async move {
-        run_explain_stream(use_case, symbol, req, data_dir, event_tx).await;
+        run_explain_stream(
+            use_case,
+            symbol,
+            req,
+            data_dir,
+            analysis_repo,
+            cache,
+            event_tx,
+        )
+        .await;
     });
 
     Sse::new(receiver_stream(event_rx)).keep_alive(KeepAlive::default())
+}
+
+/// The `(repository, symbol, model)` cache key for an explanation.
+struct ExplanationCacheKey {
+    repository_id: String,
+    symbol: String,
+    model: String,
+}
+
+/// A stable identifier of the backend+model that will answer this request, used
+/// as the cache key's model component. Combines the resolved target with the
+/// effective model (the request override, else the backend's configured model)
+/// so switching either produces a distinct cache entry.
+fn explanation_model_key(state: &AppState, req: &ExplainStreamRequest, data_dir: &str) -> String {
+    let target: LlmTarget = req
+        .llm
+        .map(Into::into)
+        .unwrap_or_else(|| state.container.llm_target());
+    let model = req.model.clone().unwrap_or_else(|| match target {
+        LlmTarget::Copilot => CodesearchConfig::load(data_dir)
+            .ok()
+            .and_then(|c| c.copilot.and_then(|cp| cp.model))
+            .unwrap_or_default(),
+        LlmTarget::OpenAi => CodesearchConfig::load(data_dir)
+            .ok()
+            .and_then(|c| c.resolve_openai_endpoint(req.endpoint.as_deref()))
+            .and_then(|e| e.model)
+            .unwrap_or_default(),
+        LlmTarget::Anthropic => String::new(),
+    });
+    format!("{}:{}", target.as_str(), model)
 }
 
 /// Drive the explain use case and forward its output as SSE events on `event_tx`.
@@ -174,8 +261,34 @@ async fn run_explain_stream(
     symbol: String,
     req: ExplainStreamRequest,
     data_dir: String,
+    analysis_repo: Arc<dyn crate::application::AnalysisRepository>,
+    cache: Option<ExplanationCacheKey>,
     event_tx: mpsc::UnboundedSender<Event>,
 ) {
+    // Cache hit: replay the stored explanation as token frames + a done event so
+    // the client renders it identically to a live run, without any LLM call.
+    // Skipped when regenerating (the user asked for a fresh answer).
+    if !req.regenerate {
+        if let Some(key) = &cache {
+            if let Ok(Some(cached)) = analysis_repo
+                .get_cached_explanation(&key.repository_id, &key.symbol, &key.model)
+                .await
+            {
+                let _ = event_tx.send(sse_event("token", json!({ "text": cached })));
+                let _ = event_tx.send(sse_event(
+                    "done",
+                    json!({
+                        "status": "ok",
+                        "root_symbol": symbol,
+                        "explanation": cached,
+                        "cached": true,
+                    }),
+                ));
+                return;
+            }
+        }
+    }
+
     let llm: LlmTarget = req.llm.map(Into::into).unwrap_or_default();
     let chat_client: Arc<dyn ChatClient> = match llm {
         LlmTarget::Anthropic => Arc::new(AnthropicClient::from_env()),
@@ -252,6 +365,25 @@ async fn run_explain_stream(
                 ));
                 return;
             }
+            // Store the fresh explanation so the next identical request is served
+            // from cache (0 LLM tokens). A Regenerate overwrites the prior entry.
+            // Best-effort: a cache write failure must not fail the response the
+            // user already received.
+            if !result.explanation.is_empty() {
+                if let Some(key) = &cache {
+                    if let Err(e) = analysis_repo
+                        .save_explanation(
+                            &key.repository_id,
+                            &key.symbol,
+                            &key.model,
+                            &result.explanation,
+                        )
+                        .await
+                    {
+                        tracing::warn!("failed to cache explanation for {}: {e}", key.symbol);
+                    }
+                }
+            }
             let referenced: Vec<serde_json::Value> = result
                 .symbol_sources
                 .iter()
@@ -273,6 +405,7 @@ async fn run_explain_stream(
                     "total_affected": result.total_affected,
                     "max_depth_reached": result.max_depth_reached,
                     "referenced": referenced,
+                    "cached": false,
                 }),
             ));
         }

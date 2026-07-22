@@ -179,12 +179,13 @@ impl<'a> Router<'a> {
             Commands::Clusters { subcommand } => match subcommand {
                 ClustersSubcommand::List {
                     repository,
+                    global,
                     format,
                     llm,
                     no_llm,
                 } => {
                     self.clusters_controller
-                        .list(repository, format, llm, no_llm)
+                        .list(repository, global, format, llm, no_llm)
                         .await
                 }
                 ClustersSubcommand::Get {
@@ -196,12 +197,13 @@ impl<'a> Router<'a> {
             Commands::SymbolClusters { subcommand } => match subcommand {
                 SymbolClustersSubcommand::List {
                     repository,
+                    global,
                     format,
                     llm,
                     no_llm,
                 } => {
                     self.symbol_clusters_controller
-                        .list(repository, format, llm, no_llm)
+                        .list(repository, global, format, llm, no_llm)
                         .await
                 }
                 SymbolClustersSubcommand::Get {
@@ -216,15 +218,17 @@ impl<'a> Router<'a> {
             },
             Commands::Couplings {
                 repository,
+                global,
                 level,
                 format,
             } => {
                 self.couplings_controller
-                    .couplings(repository, level, format)
+                    .couplings(repository, global, level, format)
                     .await
             }
             Commands::Visualize {
                 repository,
+                global,
                 level,
                 format,
                 output,
@@ -232,7 +236,9 @@ impl<'a> Router<'a> {
                 node_limit,
             } => {
                 self.visualize_controller
-                    .visualize(repository, level, format, output, aggregate, node_limit)
+                    .visualize(
+                        repository, global, level, format, output, aggregate, node_limit,
+                    )
                     .await
             }
             Commands::Memory { subcommand } => match subcommand {

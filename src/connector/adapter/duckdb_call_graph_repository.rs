@@ -409,6 +409,45 @@ impl CallGraphRepository for DuckdbCallGraphRepository {
         Ok(results)
     }
 
+    async fn find_by_repositories(
+        &self,
+        repository_ids: &[String],
+    ) -> Result<Vec<SymbolReference>, DomainError> {
+        if repository_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Build a `repository_id IN (?, ?, …)` clause with one placeholder per id.
+        let placeholders = vec!["?"; repository_ids.len()].join(", ");
+        let sql = format!(
+            r#"SELECT id, caller_symbol, callee_symbol, caller_file_path,
+                      reference_file_path, reference_line, reference_column,
+                      reference_kind, language, repository_id,
+                      caller_node_type, enclosing_scope, import_alias, callee_package
+               FROM symbol_references
+               WHERE repository_id IN ({placeholders})
+               ORDER BY reference_file_path, reference_line"#
+        );
+
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
+
+        let params = duckdb::params_from_iter(repository_ids.iter());
+        let rows = stmt
+            .query_map(params, Self::row_to_symbol_reference)
+            .map_err(|e| DomainError::storage(format!("Failed to query by repositories: {}", e)))?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results
+                .push(row.map_err(|e| DomainError::storage(format!("Failed to read row: {}", e)))?);
+        }
+
+        Ok(results)
+    }
+
     async fn delete_by_file_path(
         &self,
         repository_id: &str,

@@ -21,37 +21,57 @@ impl<'a> VisualizeController<'a> {
     pub async fn visualize(
         &self,
         repository: Option<String>,
+        global: bool,
         level: VizLevel,
         format: VizFormat,
         output: Option<String>,
         force_aggregate: bool,
         node_limit: usize,
     ) -> Result<String> {
-        let repository_id = self
-            .container
-            .resolve_repository_id(repository.as_deref())
-            .await;
-        // 1. Build the render-ready graph from the requested level.
-        let view: GraphView = match level {
-            VizLevel::File => self
+        // 1. Build the render-ready graph from the requested scope and level.
+        let (scope, view): (String, GraphView) = if global {
+            let view = match level {
+                VizLevel::File => self
+                    .container
+                    .cluster_detection_use_case()
+                    .namespace_graph_view(None)
+                    .await
+                    .context("building namespace-wide file graph view")?,
+                VizLevel::Symbol => self
+                    .container
+                    .symbol_cluster_detection_use_case()
+                    .namespace_graph_view(None)
+                    .await
+                    .context("building namespace-wide symbol graph view")?,
+            };
+            ("namespace (all repositories)".to_string(), view)
+        } else {
+            let repository_id = self
                 .container
-                .cluster_detection_use_case()
-                .graph_view(&repository_id)
-                .await
-                .context("building file-level graph view")?,
-            VizLevel::Symbol => self
-                .container
-                .symbol_cluster_detection_use_case()
-                .graph_view(&repository_id)
-                .await
-                .context("building symbol-level graph view")?,
+                .resolve_repository_id(repository.as_deref())
+                .await;
+            let view = match level {
+                VizLevel::File => self
+                    .container
+                    .cluster_detection_use_case()
+                    .graph_view(&repository_id)
+                    .await
+                    .context("building file-level graph view")?,
+                VizLevel::Symbol => self
+                    .container
+                    .symbol_cluster_detection_use_case()
+                    .graph_view(&repository_id)
+                    .await
+                    .context("building symbol-level graph view")?,
+            };
+            (repository_id, view)
         };
 
         if view.nodes.is_empty() {
             return Ok(format!(
-                "No graph to visualize for repository `{}` \
+                "No graph to visualize for `{}` \
                  (nothing indexed, or the call graph is empty).",
-                repository_id
+                scope
             ));
         }
 

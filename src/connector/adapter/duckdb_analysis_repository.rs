@@ -19,7 +19,13 @@ const KIND_FILE_CLUSTERS: &str = "file_clusters";
 /// `analysis_runs.kind` value for the symbol-level Leiden community graph.
 const KIND_SYMBOL_COMMUNITIES: &str = "symbol_communities";
 /// `analysis_runs.kind` value for the execution-feature set.
-const KIND_EXECUTION_FEATURES: &str = "execution_features";
+// The suffix versions the cache: v1 runs used a single-repository BFS
+// (cross-repo flows truncated at the first hop); v2 lacked per-node
+// repository labels; v3 detected entry points repo-locally, so shared-library
+// methods called only from sibling repos masqueraded as library entry points.
+// Older kinds simply miss and recompute; their rows are cleared by the
+// store's per-repository DELETE.
+const KIND_EXECUTION_FEATURES: &str = "execution_features_v4";
 
 /// `clusters.level` value for file-level clusters.
 const LEVEL_FILE: &str = "file";
@@ -249,8 +255,19 @@ impl DuckdbAnalysisRepository {
                 symbol TEXT NOT NULL,
                 file_path TEXT NOT NULL,
                 line INTEGER NOT NULL,
-                depth INTEGER NOT NULL
+                depth INTEGER NOT NULL,
+                caller TEXT,
+                callee_count INTEGER,
+                node_repository TEXT
             );
+
+            -- Migration for databases created before `caller`/`callee_count`/
+            -- `node_repository` existed. Old stored runs are versioned out by
+            -- the analysis KIND (see KIND_EXECUTION_FEATURES), so they
+            -- recompute rather than serve incomplete data.
+            ALTER TABLE execution_feature_nodes ADD COLUMN IF NOT EXISTS caller TEXT;
+            ALTER TABLE execution_feature_nodes ADD COLUMN IF NOT EXISTS callee_count INTEGER;
+            ALTER TABLE execution_feature_nodes ADD COLUMN IF NOT EXISTS node_repository TEXT;
 
             CREATE INDEX IF NOT EXISTS idx_execution_feature_nodes_repo
             ON execution_feature_nodes(repository_id);
@@ -266,6 +283,23 @@ impl DuckdbAnalysisRepository {
                 name TEXT NOT NULL,
                 generated_at TIMESTAMP NOT NULL DEFAULT current_timestamp
             );
+
+            -- Cache of LLM call-flow explanations, keyed by (repository, symbol,
+            -- model). Scoped to the repository and wiped by delete_by_repository
+            -- on re-index, so a cached explanation only ever describes the
+            -- current index. The model is part of the key so switching models
+            -- serves (or computes) the right one rather than a stale answer.
+            CREATE TABLE IF NOT EXISTS explanations (
+                repository_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                model TEXT NOT NULL,
+                explanation TEXT NOT NULL,
+                computed_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
+                PRIMARY KEY (repository_id, symbol, model)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_explanations_repo
+            ON explanations(repository_id);
             "#,
         )
         .map_err(|e| {
@@ -471,8 +505,8 @@ impl DuckdbAnalysisRepository {
             let mut node_stmt = tx
                 .prepare(
                     "INSERT INTO execution_feature_nodes \
-                     (feature_id, repository_id, seq, symbol, file_path, line, depth) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (feature_id, repository_id, seq, symbol, file_path, line, depth, caller, callee_count, node_repository) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )
                 .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
 
@@ -499,6 +533,9 @@ impl DuckdbAnalysisRepository {
                             node.file_path,
                             node.line as i32,
                             node.depth as i32,
+                            node.caller,
+                            node.callee_count as i32,
+                            node.repository_name,
                         ])
                         .map_err(|e| {
                             DomainError::storage(format!("Failed to save feature node: {}", e))
@@ -750,7 +787,7 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
 
         let mut node_stmt = conn
             .prepare(
-                "SELECT feature_id, symbol, file_path, line, depth \
+                "SELECT feature_id, symbol, file_path, line, depth, caller, callee_count, node_repository \
                  FROM execution_feature_nodes WHERE repository_id = ? ORDER BY feature_id, seq",
             )
             .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
@@ -762,13 +799,16 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
                     row.get::<_, String>(2)?,
                     row.get::<_, i32>(3)?,
                     row.get::<_, i32>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<i32>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             })
             .map_err(|e| DomainError::storage(format!("Failed to query feature nodes: {}", e)))?;
 
         let mut nodes_by_feature: HashMap<String, Vec<FeatureNode>> = HashMap::new();
         for row in node_rows {
-            let (feature_id, symbol, file_path, line, depth) =
+            let (feature_id, symbol, file_path, line, depth, caller, callee_count, repository_name) =
                 row.map_err(|e| DomainError::storage(format!("Failed to read row: {}", e)))?;
             nodes_by_feature
                 .entry(feature_id)
@@ -779,6 +819,9 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
                     line: line as u32,
                     depth: depth as usize,
                     repository_id: repository_id.to_string(),
+                    caller,
+                    callee_count: callee_count.unwrap_or(0) as usize,
+                    repository_name,
                 });
         }
 
@@ -821,6 +864,17 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
             });
         }
 
+        // A run stored before `caller` existed serves flat paths that can't
+        // fold into a call tree — report a cache miss so the caller recomputes
+        // (and re-stores) with parentage. New runs always set `caller` on every
+        // non-entry node, so all-None with a multi-node path means "legacy".
+        let legacy = features
+            .iter()
+            .any(|f| f.path.len() > 1 && f.path.iter().all(|n| n.caller.is_none()));
+        if legacy {
+            return Ok(None);
+        }
+
         Ok(Some(features))
     }
 
@@ -846,6 +900,9 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
                 "DELETE FROM execution_feature_nodes WHERE repository_id = ?",
                 "DELETE FROM execution_features WHERE repository_id = ?",
                 "DELETE FROM analysis_runs WHERE repository_id = ?",
+                // Cached explanations derive from the call graph too, so a
+                // re-index must drop them — this is the sole invalidation path.
+                "DELETE FROM explanations WHERE repository_id = ?",
             ] {
                 tx.execute(sql, params![repository_id]).map_err(|e| {
                     DomainError::storage(format!("Failed to delete stored analyses: {}", e))
@@ -920,6 +977,67 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
             }
             tx.commit()
                 .map_err(|e| DomainError::storage(format!("Failed to commit: {}", e)))?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn get_cached_explanation(
+        &self,
+        repository_id: &str,
+        symbol: &str,
+        model: &str,
+    ) -> Result<Option<String>, DomainError> {
+        let conn = self.conn.lock().await;
+        if !Self::schema_exists(&conn)? {
+            return Ok(None);
+        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT explanation FROM explanations \
+                 WHERE repository_id = ? AND symbol = ? AND model = ?",
+            )
+            .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
+        let mut rows = stmt
+            .query_map(params![repository_id, symbol, model], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| {
+                DomainError::storage(format!("Failed to query cached explanation: {}", e))
+            })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row.map_err(|e| {
+                DomainError::storage(format!("Failed to read explanation row: {}", e))
+            })?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn save_explanation(
+        &self,
+        repository_id: &str,
+        symbol: &str,
+        model: &str,
+        explanation: &str,
+    ) -> Result<(), DomainError> {
+        let (repository_id, symbol, model, explanation) = (
+            repository_id.to_string(),
+            symbol.to_string(),
+            model.to_string(),
+            explanation.to_string(),
+        );
+        self.with_write_conn(move |conn| {
+            // `computed_at` is left to its column DEFAULT on insert and untouched
+            // on conflict (same DuckDB caveat as community_names). A Regenerate
+            // overwrites the previous explanation for this exact key.
+            conn.execute(
+                "INSERT INTO explanations (repository_id, symbol, model, explanation) \
+                 VALUES (?, ?, ?, ?) \
+                 ON CONFLICT (repository_id, symbol, model) \
+                 DO UPDATE SET explanation = excluded.explanation",
+                params![repository_id, symbol, model, explanation],
+            )
+            .map_err(|e| DomainError::storage(format!("Failed to save explanation: {}", e)))?;
             Ok(())
         })
         .await

@@ -16,23 +16,34 @@ impl<'a> SymbolClustersController<'a> {
         Self { container }
     }
 
-    /// List all symbol communities for the given repository.
+    /// List all symbol communities for the given repository, or (with `global`)
+    /// across every repository in the namespace.
     pub async fn list(
         &self,
         repository: Option<String>,
+        global: bool,
         format: OutputFormatTextJson,
         llm: LlmTarget,
         no_llm: bool,
     ) -> Result<String> {
-        let repository_id = self
-            .container
-            .resolve_repository_id(repository.as_deref())
-            .await;
         let use_case = self.container.symbol_cluster_detection_use_case();
-        let mut graph = use_case
-            .detect_communities(&repository_id)
-            .await
-            .context("detecting symbol communities for repository")?;
+        let (scope, mut graph) = if global {
+            let graph = use_case
+                .create_namespace_symbol_communities(None)
+                .await
+                .context("detecting namespace-wide symbol communities")?;
+            ("namespace (all repositories)".to_string(), graph)
+        } else {
+            let repository_id = self
+                .container
+                .resolve_repository_id(repository.as_deref())
+                .await;
+            let graph = use_case
+                .detect_communities(&repository_id)
+                .await
+                .context("detecting symbol communities for repository")?;
+            (repository_id, graph)
+        };
 
         // LLM naming runs by default (best-effort, cached by community id); it
         // probes once and falls back to ids if the endpoint is down. `--no-llm`
@@ -60,15 +71,15 @@ impl<'a> SymbolClustersController<'a> {
             OutputFormat::Text => {
                 if graph.communities.is_empty() {
                     return Ok(format!(
-                        "No symbol communities detected for repository `{}` \
+                        "No symbol communities detected for `{}` \
                          (the call graph may be empty — index with SCIP first).",
-                        repository_id
+                        scope
                     ));
                 }
                 let mut out = format!(
                     "Symbol communities for `{}` — {} communities, {} symbols, {} edges\n\
                      ────────────────────────────────────────────────────────────\n",
-                    repository_id,
+                    scope,
                     graph.communities.len(),
                     graph.total_symbols,
                     graph.total_edges,

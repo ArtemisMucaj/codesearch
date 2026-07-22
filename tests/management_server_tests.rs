@@ -258,6 +258,74 @@ async fn graph_endpoint_returns_a_graph_view() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn clusters_and_graph_endpoints_support_global_scope() {
+    let (container, _dir) = test_container().await;
+    index_fixture(&container).await;
+    let (base_url, server) = spawn_management_server_with_container(container).await;
+
+    // Namespace-wide clusters: cached under the sentinel scope id.
+    let resp = reqwest::get(format!("{base_url}/api/clusters?global=true"))
+        .await
+        .expect("request to /api/clusters?global=true failed");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("response body was not JSON");
+    // The sentinel scope id is namespace-qualified so different namespaces' global
+    // partitions never collide in the (namespace-less) analysis cache.
+    assert_eq!(
+        body["repository_id"],
+        codesearch::namespace_scope_id("search")
+    );
+    assert!(body["clusters"].is_array());
+
+    // Namespace-wide graph view at the (default) file level.
+    let resp = reqwest::get(format!("{base_url}/api/graph?global=true"))
+        .await
+        .expect("request to /api/graph?global=true failed");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("graph body was not JSON");
+    assert_eq!(
+        body["repository_id"],
+        codesearch::namespace_scope_id("search")
+    );
+    assert_eq!(body["level"], "file");
+
+    // Namespace-wide graph at the symbol level: one Leiden run over every
+    // repository's symbols, cross-repo call edges included.
+    let resp = reqwest::get(format!("{base_url}/api/graph?global=true&level=symbol"))
+        .await
+        .expect("request to /api/graph?global=true&level=symbol failed");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("symbol graph body was not JSON");
+    assert_eq!(
+        body["repository_id"],
+        codesearch::namespace_scope_id("search")
+    );
+    assert_eq!(body["level"], "symbol");
+
+    // Conflicting scope selectors and unsupported combinations are 400s.
+    // (`/api/symbol-clusters` — the structured community list — has no global
+    // form; the render-ready `/api/graph` above is the symbol-global surface.)
+    for path in [
+        "/api/clusters?global=true&repository=fixture-repo",
+        "/api/graph?global=true&repository=fixture-repo",
+        "/api/symbol-clusters?global=true",
+    ] {
+        let resp = reqwest::get(format!("{base_url}{path}"))
+            .await
+            .expect("bad-combination request failed");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "expected 400 for {path}"
+        );
+        let body: serde_json::Value = resp.json().await.expect("error body was not JSON");
+        assert!(body["error"].is_string(), "error shape for {path}: {body}");
+    }
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn channels_endpoint_accepts_comma_separated_repository_filter() {
     let (container, _dir) = test_container().await;
     index_fixture(&container).await;

@@ -20,10 +20,10 @@ use tracing::{debug, warn};
 use super::cluster_detection::{
     facade_split_config, kind_weight, leiden, partition_with_facade_split, Graph,
 };
-use crate::application::{AnalysisRepository, CallGraphUseCase};
+use crate::application::{AnalysisRepository, CallGraphUseCase, MetadataRepository};
 use crate::domain::{
-    community_label, stable_community_id, CommunityMeta, DomainError, GraphEdge, GraphLevel,
-    GraphNode, GraphView, SymbolCommunity, SymbolCommunityGraph,
+    community_label, namespace_scope_id, stable_community_id, CommunityMeta, DomainError,
+    GraphEdge, GraphLevel, GraphNode, GraphView, SymbolCommunity, SymbolCommunityGraph,
 };
 
 /// Use case: detect communities of tightly-coupled symbols in a repository's
@@ -34,6 +34,10 @@ pub struct SymbolClusterDetectionUseCase {
     /// becomes a read-through cache: stored results are served directly and
     /// fresh results are written back after computing.
     storage: Option<Arc<dyn AnalysisRepository>>,
+    /// Optional namespace scope for the namespace-wide (global) symbol graph:
+    /// the active namespace plus a metadata repository to enumerate its
+    /// repositories. `None` for the per-repository paths, which never need it.
+    namespace_scope: Option<(String, Arc<dyn MetadataRepository>)>,
 }
 
 /// The intermediate symbol graph plus the bookkeeping needed to turn a Leiden
@@ -46,6 +50,11 @@ pub(crate) struct SymbolGraph {
     pub(crate) graph: Graph,
     /// Dominant language per symbol (first seen wins).
     language_of: HashMap<String, String>,
+    /// Owning repository id per symbol, for the namespace-wide graph (first
+    /// reference that mentions the symbol wins). Empty for the single-repo path,
+    /// where every symbol trivially belongs to the one repo. Resolved to a
+    /// display name at render time.
+    repo_of: HashMap<String, String>,
     /// Distinct undirected (lo, hi, weight) edges — used as the edge count, to
     /// compute per-community cohesion, and to drive the visualization view.
     edges: Vec<(usize, usize, f64)>,
@@ -56,6 +65,7 @@ impl SymbolClusterDetectionUseCase {
         Self {
             call_graph,
             storage: None,
+            namespace_scope: None,
         }
     }
 
@@ -64,6 +74,65 @@ impl SymbolClusterDetectionUseCase {
     pub fn with_storage(mut self, storage: Arc<dyn AnalysisRepository>) -> Self {
         self.storage = Some(storage);
         self
+    }
+
+    /// Attach the namespace scope needed by the namespace-wide symbol graph
+    /// (`create_namespace_symbol_communities` / `namespace_graph_view`). Without
+    /// it those methods error; the per-repository paths are unaffected.
+    pub fn with_namespace_scope(
+        mut self,
+        namespace: String,
+        metadata_repo: Arc<dyn MetadataRepository>,
+    ) -> Self {
+        self.namespace_scope = Some((namespace, metadata_repo));
+        self
+    }
+
+    /// Repository ids in a namespace, for the namespace-wide graph. `namespace`
+    /// overrides the use case's default scope, so one serve can answer for any
+    /// namespace via a per-request `?namespace=` without a restart; `None` uses
+    /// the default scope the use case was built with.
+    async fn namespace_repository_ids(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<(String, Vec<String>), DomainError> {
+        let (default_ns, metadata_repo) = self.namespace_scope.as_ref().ok_or_else(|| {
+            DomainError::storage(
+                "namespace-wide symbol detection requires a namespace scope".to_string(),
+            )
+        })?;
+        let namespace = namespace.unwrap_or(default_ns.as_str());
+        let ids = metadata_repo
+            .list()
+            .await
+            .map_err(|e| DomainError::storage(format!("Failed to list repositories: {e}")))?
+            .into_iter()
+            .filter(|r| r.namespace() == Some(namespace))
+            .map(|r| r.id().to_string())
+            .collect();
+        Ok((namespace.to_string(), ids))
+    }
+
+    /// Repository id → display name for every repository in `namespace`. Used to
+    /// label symbol nodes with a human, git-project name instead of a UUID.
+    async fn namespace_repo_names(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<HashMap<String, String>, DomainError> {
+        let (default_ns, metadata_repo) = self.namespace_scope.as_ref().ok_or_else(|| {
+            DomainError::storage(
+                "namespace-wide symbol detection requires a namespace scope".to_string(),
+            )
+        })?;
+        let namespace = namespace.unwrap_or(default_ns.as_str());
+        Ok(metadata_repo
+            .list()
+            .await
+            .map_err(|e| DomainError::storage(format!("Failed to list repositories: {e}")))?
+            .into_iter()
+            .filter(|r| r.namespace() == Some(namespace))
+            .map(|r| (r.id().to_string(), r.name().to_string()))
+            .collect())
     }
 
     /// Detect all symbol communities in `repository_id`, serving stored results
@@ -249,7 +318,81 @@ impl SymbolClusterDetectionUseCase {
             }
         };
         self.apply_cached_names(&mut scg.communities).await;
+        // Per-repository: every symbol trivially belongs to the one repo, so no
+        // per-node repository field (empty name map → all `None`).
+        Ok(Self::render_symbol_view(
+            repository_id,
+            &sg,
+            &scg,
+            &HashMap::new(),
+        ))
+    }
 
+    /// Namespace-wide symbol community detection: one Leiden run over the union
+    /// of every repository's call graph in the namespace, cross-repository edges
+    /// included. Symbol FQNs are globally unique so nodes join across repos with
+    /// no qualification (unlike the file graph). Cached per namespace under the
+    /// sentinel scope id, exactly like the file-level namespace run.
+    pub async fn create_namespace_symbol_communities(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<SymbolCommunityGraph, DomainError> {
+        let scope = self.namespace_scope_key(namespace).await?;
+        let mut scg = match self.load_stored(&scope).await {
+            Some(stored) => stored,
+            None => {
+                let sg = self.build_namespace_symbol_graph(namespace).await?;
+                let scg = self.compute_communities(&scope, &sg);
+                self.store(&scg).await;
+                scg
+            }
+        };
+        self.apply_cached_names(&mut scg.communities).await;
+        Ok(scg)
+    }
+
+    /// Render-ready [`GraphView`] of the namespace-wide symbol call graph,
+    /// coloured by its global Leiden communities. The counterpart of
+    /// [`Self::graph_view`] for the namespace scope. `namespace` overrides the
+    /// default scope for per-request use.
+    pub async fn namespace_graph_view(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<GraphView, DomainError> {
+        let scope = self.namespace_scope_key(namespace).await?;
+        let sg = self.build_namespace_symbol_graph(namespace).await?;
+        let mut scg = match self.load_stored(&scope).await {
+            Some(stored) => stored,
+            None => {
+                let scg = self.compute_communities(&scope, &sg);
+                self.store(&scg).await;
+                scg
+            }
+        };
+        self.apply_cached_names(&mut scg.communities).await;
+        // Label each symbol node with its owning repository's display name so the
+        // client's repo picker/coloring show git projects, not slices of FQNs.
+        let repo_names = self.namespace_repo_names(namespace).await?;
+        Ok(Self::render_symbol_view(&scope, &sg, &scg, &repo_names))
+    }
+
+    /// The cache scope id for a namespace's symbol run — the same sentinel the
+    /// file-level namespace run uses, so a namespace's file and symbol global
+    /// analyses share the per-namespace key space (kinds keep them distinct).
+    async fn namespace_scope_key(&self, namespace: Option<&str>) -> Result<String, DomainError> {
+        let (namespace, _) = self.namespace_repository_ids(namespace).await?;
+        Ok(namespace_scope_id(&namespace))
+    }
+
+    /// Assemble a [`GraphView`] from a symbol graph and its community partition:
+    /// colour each node by the community it belongs to, size by degree. Shared
+    /// by the per-repository and namespace-wide view paths.
+    fn render_symbol_view(
+        scope: &str,
+        sg: &SymbolGraph,
+        scg: &SymbolCommunityGraph,
+        repo_names: &HashMap<String, String>,
+    ) -> GraphView {
         // Symbol FQN → community index (position in the size-sorted list).
         let mut symbol_community: HashMap<&str, usize> = HashMap::new();
         let mut communities: Vec<CommunityMeta> = Vec::with_capacity(scg.communities.len());
@@ -278,6 +421,14 @@ impl SymbolClusterDetectionUseCase {
                     .get(fqn)
                     .cloned()
                     .unwrap_or_else(|| "unknown".to_string()),
+                // Resolve the symbol's owning repository id to its display name.
+                // Empty `repo_names` (the per-repository path) leaves this `None`,
+                // so only the namespace-wide graph carries the repository field.
+                repository: sg
+                    .repo_of
+                    .get(fqn)
+                    .and_then(|id| repo_names.get(id))
+                    .cloned(),
             })
             .collect();
 
@@ -293,13 +444,13 @@ impl SymbolClusterDetectionUseCase {
             });
         }
 
-        Ok(GraphView {
-            repository_id: repository_id.to_string(),
+        GraphView {
+            repository_id: scope.to_string(),
             level: GraphLevel::Symbol,
             nodes,
             edges,
             communities,
-        })
+        }
     }
 
     /// Build the undirected, weighted symbol graph from the repository's call
@@ -311,13 +462,41 @@ impl SymbolClusterDetectionUseCase {
         repository_id: &str,
     ) -> Result<SymbolGraph, DomainError> {
         let references = self.call_graph.find_by_repository(repository_id).await?;
+        Ok(Self::symbol_graph_from_references(&references))
+    }
 
+    /// Build the **namespace-wide** symbol graph: the call graphs of every
+    /// repository in the namespace, unioned into one graph.
+    ///
+    /// Symbols are keyed by their fully-qualified name, which is globally unique
+    /// (unlike file paths, which collide across repos and must be qualified for
+    /// the file graph). So a caller in one repository referencing a callee
+    /// defined in another lands on the *same* node in both call graphs, and the
+    /// union naturally welds the two — no qualification needed. The cross-repo
+    /// edges are real: they come from `find_by_repositories` loading every
+    /// repository's references together.
+    pub(crate) async fn build_namespace_symbol_graph(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<SymbolGraph, DomainError> {
+        let (_, repo_ids) = self.namespace_repository_ids(namespace).await?;
+        let references = self.call_graph.find_by_repositories(&repo_ids).await?;
+        Ok(Self::symbol_graph_from_references(&references))
+    }
+
+    /// Fold a set of symbol references into the undirected, weighted symbol
+    /// graph. Shared by the per-repository and namespace-wide builders so both
+    /// aggregate edges, drop self/anonymous references, and order nodes/edges
+    /// identically. The references may span multiple repositories; edges form
+    /// wherever a caller and callee FQN both appear, including across repos.
+    fn symbol_graph_from_references(references: &[crate::domain::SymbolReference]) -> SymbolGraph {
         // Aggregate parallel edges; collect the node set from edge endpoints.
         let mut edge_weights: HashMap<(String, String), f64> = HashMap::new();
         let mut language_of: HashMap<String, String> = HashMap::new();
+        let mut repo_of: HashMap<String, String> = HashMap::new();
         let mut node_set: BTreeSet<String> = BTreeSet::new();
 
-        for reference in &references {
+        for reference in references {
             let Some(caller) = reference.caller_symbol() else {
                 continue; // anonymous / top-level caller — no symbol to attribute
             };
@@ -332,6 +511,15 @@ impl SymbolClusterDetectionUseCase {
                 .entry(caller.to_string())
                 .or_insert_with(|| lang.clone());
             language_of.entry(callee.to_string()).or_insert(lang);
+
+            // Attribute each symbol to a repository. The *caller* is defined in
+            // the reference's repository, so that's authoritative — always record
+            // it. The callee's own definition site is unknown here (it may live in
+            // another repo); take the reference's repo only as a first-seen guess,
+            // which a later reference where the callee is itself a caller corrects.
+            let repo = reference.repository_id().to_string();
+            repo_of.insert(caller.to_string(), repo.clone());
+            repo_of.entry(callee.to_string()).or_insert(repo);
 
             node_set.insert(caller.to_string());
             node_set.insert(callee.to_string());
@@ -370,12 +558,13 @@ impl SymbolClusterDetectionUseCase {
             edges.push((lo, hi, w));
         }
 
-        Ok(SymbolGraph {
+        SymbolGraph {
             symbols,
             graph,
             language_of,
+            repo_of,
             edges,
-        })
+        }
     }
 }
 

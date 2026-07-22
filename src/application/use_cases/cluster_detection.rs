@@ -41,8 +41,8 @@ use tracing::{debug, warn};
 
 use crate::application::{AnalysisRepository, FileRelationshipUseCase};
 use crate::domain::{
-    community_label, stable_community_id, Cluster, ClusterGraph, CommunityMeta, DomainError,
-    FileEdge, GraphEdge, GraphLevel, GraphNode, GraphView, Language,
+    community_label, namespace_scope_id, stable_community_id, Cluster, ClusterGraph, CommunityMeta,
+    DomainError, FileEdge, FileGraph, GraphEdge, GraphLevel, GraphNode, GraphView, Language,
 };
 
 // ── Edge-weight constants by reference kind ───────────────────────────────
@@ -1248,6 +1248,71 @@ pub(crate) fn build_file_leiden_graph(graph: &crate::domain::FileGraph) -> (Vec<
     (files, g)
 }
 
+// ── Namespace-wide graph qualification ────────────────────────────────────
+
+/// Separator between a repository label and the file path in a qualified
+/// namespace-graph node id (`svc-a:src/Utils.php`). A colon cannot appear in a
+/// repository name (names come from directory basenames) and keeps the repo
+/// boundary unambiguous regardless of the path's own separators.
+const NAMESPACE_NODE_SEPARATOR: char = ':';
+
+/// Length of the repository-id prefix appended to a repository label when two
+/// repositories in the namespace share a name.
+const REPO_LABEL_DISAMBIGUATION_LEN: usize = 8;
+
+/// A display label per repository id: the repository name when it is unique
+/// within the graph, otherwise `name-<id prefix>` so two same-named
+/// repositories never collapse into one node prefix.
+fn repo_labels(graph: &FileGraph) -> HashMap<String, String> {
+    let mut name_count: HashMap<&str, usize> = HashMap::new();
+    for repo in graph.repositories.values() {
+        *name_count.entry(repo.name.as_str()).or_insert(0) += 1;
+    }
+    graph
+        .repositories
+        .values()
+        .map(|repo| {
+            let label = if name_count[repo.name.as_str()] > 1 {
+                let prefix = &repo.id[..repo.id.len().min(REPO_LABEL_DISAMBIGUATION_LEN)];
+                format!("{}-{}", repo.name, prefix)
+            } else {
+                repo.name.clone()
+            };
+            (repo.id.clone(), label)
+        })
+        .collect()
+}
+
+/// Rewrite every node of a multi-repository [`FileGraph`] as
+/// `<repo label>:<path>`.
+///
+/// A raw multi-repo graph keys nodes by bare file path, so two repositories
+/// that share a relative path (every service has its own `src/main.rs`) would
+/// merge into a single node and weld their communities together. Qualifying
+/// each endpoint with its repository's label keeps the nodes distinct, and the
+/// prefix doubles as the member's display form in namespace-wide clusters.
+/// The node set is rebuilt from the qualified edges, mirroring how
+/// [`FileRelationshipUseCase::build_graph`] derives it.
+///
+/// `pub(crate)` so namespace-wide coupling detection can qualify the same graph.
+pub(crate) fn qualify_namespace_graph(mut graph: FileGraph) -> FileGraph {
+    let labels = repo_labels(&graph);
+    let qualify = |repo_id: &str, path: &str| -> String {
+        let label = labels.get(repo_id).map(String::as_str).unwrap_or(repo_id);
+        format!("{label}{NAMESPACE_NODE_SEPARATOR}{path}")
+    };
+    for edge in &mut graph.edges {
+        edge.from_file = qualify(&edge.from_repo_id, &edge.from_file);
+        edge.to_file = qualify(&edge.to_repo_id, &edge.to_file);
+    }
+    graph.files = graph
+        .edges
+        .iter()
+        .flat_map(|e| [e.from_file.clone(), e.to_file.clone()])
+        .collect();
+    graph
+}
+
 // ── ClusterDetectionUseCase ───────────────────────────────────────────────
 
 /// Minimum number of file nodes required for clustering to be meaningful.
@@ -1582,74 +1647,82 @@ impl ClusterDetectionUseCase {
     /// size-sorted [`ClusterGraph::clusters`] list.
     pub async fn graph_view(&self, repository_id: &str) -> Result<GraphView, DomainError> {
         let (cg, graph) = self.clusters_and_graph(repository_id).await?;
+        Ok(build_file_graph_view(&cg, &graph, repository_id))
+    }
 
-        // Nodes: every cluster member, in (cluster, member) order so the layout
-        // is deterministic. Community index = position in the size-sorted list.
-        let mut node_index: HashMap<&str, usize> = HashMap::new();
-        let mut nodes: Vec<GraphNode> = Vec::with_capacity(cg.total_files);
-        let mut communities: Vec<CommunityMeta> = Vec::with_capacity(cg.clusters.len());
-        for (idx, cluster) in cg.clusters.iter().enumerate() {
-            communities.push(CommunityMeta {
-                index: idx,
-                name: community_label(&cluster.display_name, &cluster.id).to_string(),
-                size: cluster.size,
-                cohesion: cluster.cohesion,
-            });
-            for member in &cluster.members {
-                if node_index.contains_key(member.as_str()) {
-                    continue;
-                }
-                node_index.insert(member.as_str(), nodes.len());
-                nodes.push(GraphNode {
-                    id: member.clone(),
-                    label: basename(member),
-                    community: idx,
-                    degree: 0,
-                    language: Language::from_path(Path::new(member)).as_str().to_string(),
-                });
+    // ── Namespace-wide detection ──────────────────────────────────────────
+
+    /// Build the qualified namespace-wide file graph: every indexed repository,
+    /// cross-repository edges included, nodes prefixed with their repository
+    /// label (see [`qualify_namespace_graph`]). `namespace` overrides the default
+    /// scope for per-request use.
+    async fn namespace_graph(&self, namespace: Option<&str>) -> Result<FileGraph, DomainError> {
+        let graph = self
+            .file_graph
+            .build_graph_in(None, 1, true, namespace)
+            .await?;
+        Ok(qualify_namespace_graph(graph))
+    }
+
+    /// Detect clusters across **every repository in the namespace** with one
+    /// Leiden run over the combined, cross-repository file graph.
+    ///
+    /// The result is cached under [`namespace_scope_id`] for this namespace
+    /// (repository ids are UUIDs, so the sentinel cannot collide) and
+    /// invalidated whenever any
+    /// repository in the namespace is re-indexed or deleted, since the global
+    /// graph derives from all of them. Members are repository-qualified
+    /// (`repo:path`), which keeps same-named files from different repositories
+    /// distinct and gives the stable community ids a namespace-wide identity.
+    pub async fn create_namespace_clusters(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<ClusterGraph, DomainError> {
+        let scope = self.namespace_scope_key(namespace);
+        let mut cg = match self.load_stored(&scope).await {
+            Some(stored) => stored,
+            None => {
+                let graph = self.namespace_graph(namespace).await?;
+                let cg = self.compute_clusters(&scope, &graph);
+                self.store(&cg).await;
+                cg
             }
-        }
+        };
+        self.apply_cached_names(&mut cg.clusters).await;
+        Ok(cg)
+    }
 
-        // Edges: collapse parallel/directional file edges into undirected pairs,
-        // summing the composite weight and keeping the first reference kind seen.
-        let mut pair_weight: BTreeMap<(usize, usize), (f64, Option<String>)> = BTreeMap::new();
-        for edge in &graph.edges {
-            let (Some(&u), Some(&v)) = (
-                node_index.get(edge.from_file.as_str()),
-                node_index.get(edge.to_file.as_str()),
-            ) else {
-                continue;
-            };
-            if u == v {
-                continue;
+    /// The cache scope id for a namespace's global run. The analysis cache has no
+    /// namespace column, so the sentinel must carry the namespace or two
+    /// namespaces' global partitions would collide under one bare key. `None`
+    /// uses the use case's default namespace.
+    fn namespace_scope_key(&self, namespace: Option<&str>) -> String {
+        namespace_scope_id(namespace.unwrap_or_else(|| self.file_graph.namespace()))
+    }
+
+    /// Render-ready [`GraphView`] of the namespace-wide file graph, with each
+    /// (repository-qualified) file coloured by its global Leiden cluster.
+    ///
+    /// The partition is served from the [`namespace_scope_id`] cache when
+    /// available, exactly like [`Self::create_namespace_clusters`]; the raw
+    /// graph is always rebuilt for edge-level detail, mirroring
+    /// [`Self::clusters_and_graph`].
+    pub async fn namespace_graph_view(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<GraphView, DomainError> {
+        let scope = self.namespace_scope_key(namespace);
+        let graph = self.namespace_graph(namespace).await?;
+        let mut cg = match self.load_stored(&scope).await {
+            Some(stored) => stored,
+            None => {
+                let cg = self.compute_clusters(&scope, &graph);
+                self.store(&cg).await;
+                cg
             }
-            let key = if u < v { (u, v) } else { (v, u) };
-            let entry = pair_weight.entry(key).or_insert((0.0, None));
-            entry.0 += composite_weight(edge);
-            if entry.1.is_none() {
-                entry.1 = edge.reference_kinds.first().map(|k| k.to_lowercase());
-            }
-        }
-
-        let mut edges: Vec<GraphEdge> = Vec::with_capacity(pair_weight.len());
-        for ((u, v), (weight, kind)) in pair_weight {
-            nodes[u].degree += 1;
-            nodes[v].degree += 1;
-            edges.push(GraphEdge {
-                source: u,
-                target: v,
-                weight,
-                kind,
-            });
-        }
-
-        Ok(GraphView {
-            repository_id: repository_id.to_string(),
-            level: GraphLevel::File,
-            nodes,
-            edges,
-            communities,
-        })
+        };
+        self.apply_cached_names(&mut cg.clusters).await;
+        Ok(build_file_graph_view(&cg, &graph, &scope))
     }
 
     /// Return the cluster a given file belongs to.
@@ -1667,7 +1740,84 @@ impl ClusterDetectionUseCase {
             .find_map(|(i, c)| c.members.iter().any(|m| m == file_path).then_some(i));
         Ok(cluster_idx.map(|i| cg.clusters.swap_remove(i)))
     }
+}
 
+/// Shape a cluster graph plus its raw file-dependency graph into a
+/// render-ready [`GraphView`]. Shared by the per-repository and namespace-wide
+/// view paths so both colour nodes and collapse edges identically.
+fn build_file_graph_view(cg: &ClusterGraph, graph: &FileGraph, repository_id: &str) -> GraphView {
+    // Nodes: every cluster member, in (cluster, member) order so the layout
+    // is deterministic. Community index = position in the size-sorted list.
+    let mut node_index: HashMap<&str, usize> = HashMap::new();
+    let mut nodes: Vec<GraphNode> = Vec::with_capacity(cg.total_files);
+    let mut communities: Vec<CommunityMeta> = Vec::with_capacity(cg.clusters.len());
+    for (idx, cluster) in cg.clusters.iter().enumerate() {
+        communities.push(CommunityMeta {
+            index: idx,
+            name: community_label(&cluster.display_name, &cluster.id).to_string(),
+            size: cluster.size,
+            cohesion: cluster.cohesion,
+        });
+        for member in &cluster.members {
+            if node_index.contains_key(member.as_str()) {
+                continue;
+            }
+            node_index.insert(member.as_str(), nodes.len());
+            nodes.push(GraphNode {
+                id: member.clone(),
+                label: basename(member),
+                community: idx,
+                degree: 0,
+                language: Language::from_path(Path::new(member)).as_str().to_string(),
+                // File nodes encode the repo in the id (`repo:path`) already.
+                repository: None,
+            });
+        }
+    }
+
+    // Edges: collapse parallel/directional file edges into undirected pairs,
+    // summing the composite weight and keeping the first reference kind seen.
+    let mut pair_weight: BTreeMap<(usize, usize), (f64, Option<String>)> = BTreeMap::new();
+    for edge in &graph.edges {
+        let (Some(&u), Some(&v)) = (
+            node_index.get(edge.from_file.as_str()),
+            node_index.get(edge.to_file.as_str()),
+        ) else {
+            continue;
+        };
+        if u == v {
+            continue;
+        }
+        let key = if u < v { (u, v) } else { (v, u) };
+        let entry = pair_weight.entry(key).or_insert((0.0, None));
+        entry.0 += composite_weight(edge);
+        if entry.1.is_none() {
+            entry.1 = edge.reference_kinds.first().map(|k| k.to_lowercase());
+        }
+    }
+
+    let mut edges: Vec<GraphEdge> = Vec::with_capacity(pair_weight.len());
+    for ((u, v), (weight, kind)) in pair_weight {
+        nodes[u].degree += 1;
+        nodes[v].degree += 1;
+        edges.push(GraphEdge {
+            source: u,
+            target: v,
+            weight,
+            kind,
+        });
+    }
+
+    GraphView {
+        repository_id: repository_id.to_string(),
+        level: GraphLevel::File,
+        nodes,
+        edges,
+        communities,
+    }
+}
+
+impl ClusterDetectionUseCase {
     /// Return the cluster graph together with the aggregated inter-cluster
     /// dependencies — the structured form of [`Self::architecture_overview`],
     /// for callers (e.g. the repository-wide `overview` command) that render
@@ -2145,5 +2295,90 @@ mod tests {
         renumber(&mut plain);
         let facade = partition_with_facade_split(&names, &g.edge_list(), 99.0);
         assert_eq!(plain, facade);
+    }
+
+    // ── Namespace-wide graph qualification ────────────────────────────────
+
+    fn ns_edge(from_file: &str, from_repo: &str, to_file: &str, to_repo: &str) -> FileEdge {
+        FileEdge {
+            from_file: from_file.to_string(),
+            from_repo_id: from_repo.to_string(),
+            to_file: to_file.to_string(),
+            to_repo_id: to_repo.to_string(),
+            weight: 1,
+            reference_kinds: vec!["Call".to_string()],
+            symbols: Vec::new(),
+        }
+    }
+
+    fn ns_graph(repos: &[(&str, &str)], edges: Vec<FileEdge>) -> FileGraph {
+        let repositories = repos
+            .iter()
+            .map(|(id, name)| {
+                (
+                    id.to_string(),
+                    crate::domain::FileGraphRepo {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        path: format!("/work/{name}"),
+                    },
+                )
+            })
+            .collect();
+        let files = edges
+            .iter()
+            .flat_map(|e| [e.from_file.clone(), e.to_file.clone()])
+            .collect();
+        FileGraph {
+            repositories,
+            files,
+            edges,
+        }
+    }
+
+    #[test]
+    fn test_qualify_keeps_shared_relative_paths_distinct() {
+        // Both repos ship the same relative paths; the raw node set collapses
+        // them, the qualified one must not.
+        let graph = ns_graph(
+            &[("id-a", "svc-a"), ("id-b", "svc-b")],
+            vec![
+                ns_edge("src/main.rs", "id-a", "src/util.rs", "id-a"),
+                ns_edge("src/main.rs", "id-b", "src/util.rs", "id-b"),
+            ],
+        );
+        assert_eq!(graph.files.len(), 2, "raw paths collide by design");
+
+        let qualified = qualify_namespace_graph(graph);
+        assert_eq!(qualified.files.len(), 4);
+        assert!(qualified.files.contains("svc-a:src/main.rs"));
+        assert!(qualified.files.contains("svc-b:src/main.rs"));
+        assert_eq!(qualified.edges[0].from_file, "svc-a:src/main.rs");
+        assert_eq!(qualified.edges[1].to_file, "svc-b:src/util.rs");
+    }
+
+    #[test]
+    fn test_qualify_cross_repo_edge_spans_both_labels() {
+        let graph = ns_graph(
+            &[("id-a", "svc-a"), ("id-b", "lib")],
+            vec![ns_edge("src/Handler.php", "id-a", "src/Utils.php", "id-b")],
+        );
+        let qualified = qualify_namespace_graph(graph);
+        assert_eq!(qualified.edges[0].from_file, "svc-a:src/Handler.php");
+        assert_eq!(qualified.edges[0].to_file, "lib:src/Utils.php");
+        assert!(qualified.edges[0].is_cross_repo());
+    }
+
+    #[test]
+    fn test_repo_labels_disambiguate_shared_names() {
+        // Two repos named identically (e.g. two checkouts of `svc`) must get
+        // distinct labels, keyed by an id prefix.
+        let graph = ns_graph(
+            &[("aaaa1111-2222", "svc"), ("bbbb3333-4444", "svc")],
+            vec![ns_edge("a.rs", "aaaa1111-2222", "b.rs", "bbbb3333-4444")],
+        );
+        let labels = repo_labels(&graph);
+        assert_eq!(labels["aaaa1111-2222"], "svc-aaaa1111");
+        assert_eq!(labels["bbbb3333-4444"], "svc-bbbb3333");
     }
 }

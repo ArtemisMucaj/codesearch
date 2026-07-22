@@ -411,7 +411,10 @@ impl<'a> MemoryController<'a> {
         // Clamp instead of wrapping: an absurd --idle-minutes must not become
         // a negative threshold that makes still-active sessions eligible.
         let idle_secs = i64::try_from(idle_minutes.saturating_mul(60)).unwrap_or(i64::MAX);
-        let report = use_case.execute(idle_secs).await?;
+        // `codesearch dream` is an explicit, manual run, so it always harvests —
+        // the serve scheduler's `auto_import` toggle only governs the automatic
+        // background cycle, not a command the user typed themselves.
+        let report = use_case.execute(idle_secs, true).await?;
         Ok(render_dream_report(&report))
     }
 

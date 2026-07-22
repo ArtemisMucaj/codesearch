@@ -112,6 +112,83 @@ struct StreamDelta {
     content: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Responses API (`/responses`) types.
+//
+// Some models are reachable only via the newer OpenAI Responses API and reject
+// `/chat/completions` (GitHub Copilot's GPT-5.x family), while others are the
+// reverse. LM Studio serves both. The request/response shapes differ from chat,
+// so we model the subset we need and translate to/from the same
+// `system`/`user` → text contract the chat path uses.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct ResponsesRequest {
+    model: String,
+    /// Structured input turns (role + content). The Responses API also accepts a
+    /// bare string, but the turn form lets us carry the system prompt cleanly.
+    input: Vec<ResponsesInputItem>,
+    stream: bool,
+}
+
+#[derive(Serialize)]
+struct ResponsesInputItem {
+    role: String,
+    content: String,
+}
+
+/// Non-streaming Responses body: `output` is a list of items; assistant text
+/// lives in `message`-type items' `content[]` as `output_text` parts.
+#[derive(Deserialize)]
+struct ResponsesResponse {
+    #[serde(default)]
+    output: Vec<ResponsesOutputItem>,
+}
+
+#[derive(Deserialize)]
+struct ResponsesOutputItem {
+    /// `message`, `reasoning`, … — only `message` carries user-facing text.
+    #[serde(default, rename = "type")]
+    kind: String,
+    #[serde(default)]
+    content: Vec<ResponsesContentPart>,
+}
+
+#[derive(Deserialize)]
+struct ResponsesContentPart {
+    #[serde(default, rename = "type")]
+    kind: String,
+    #[serde(default)]
+    text: String,
+}
+
+impl ResponsesResponse {
+    /// Concatenate the `output_text` parts of every `message` item — the
+    /// assistant's answer, skipping reasoning/tool items.
+    fn into_text(self) -> Option<String> {
+        let text: String = self
+            .output
+            .into_iter()
+            .filter(|item| item.kind == "message" || item.kind.is_empty())
+            .flat_map(|item| item.content)
+            .filter(|part| part.kind == "output_text")
+            .map(|part| part.text)
+            .collect();
+        (!text.trim().is_empty()).then_some(text)
+    }
+}
+
+/// One SSE event from a streaming Responses call. We only care about the
+/// incremental text deltas (`response.output_text.delta`); other event types
+/// (created, reasoning, completed, …) are ignored.
+#[derive(Deserialize)]
+struct ResponsesStreamEvent {
+    #[serde(default, rename = "type")]
+    kind: String,
+    #[serde(default)]
+    delta: Option<String>,
+}
+
 /// [`ChatClient`] implementation targeting the OpenAI-compatible
 /// `/v1/chat/completions` endpoint (e.g. LM Studio running locally).
 ///
@@ -275,7 +352,110 @@ fn mask_key(key: &str) -> String {
     format!("{}{}{}", prefix, "*".repeat(chars.len() - 8), suffix)
 }
 
+/// Most attempts against Copilot's intermittently-gated `/responses` endpoint
+/// (it returns 403 ~half the time regardless of headers — a GitHub-side rollout
+/// gate, not an auth problem).
+const RESPONSES_403_RETRIES: usize = 4;
+
+/// Backoff between `/responses` 403 retries.
+const RESPONSES_403_BACKOFF: Duration = Duration::from_millis(400);
+
 impl OpenAiChatClient {
+    /// The `/responses` URL for this client, derived from the chat URL by
+    /// swapping the `chat/completions` suffix for `responses`. Works for both
+    /// path conventions: LM Studio's `/v1/chat/completions` → `/v1/responses`
+    /// and Copilot's `/chat/completions` → `/responses`.
+    fn responses_url(&self) -> String {
+        self.url.replace("chat/completions", "responses")
+    }
+
+    /// Whether an error body signals the model is on the *other* API — GitHub
+    /// Copilot returns `code: "unsupported_api_for_model"` from both endpoints
+    /// (chat rejects Responses-only models and vice-versa), so this is the
+    /// switch-endpoints signal.
+    fn is_wrong_endpoint(body: &str) -> bool {
+        serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| {
+                v.get("error")
+                    .and_then(|e| e.get("code"))
+                    .and_then(|c| c.as_str())
+                    .map(|c| c == "unsupported_api_for_model")
+            })
+            .unwrap_or(false)
+    }
+
+    /// Non-streaming completion via the Responses API. Retries the intermittent
+    /// Copilot 403 a few times. A 4xx carrying `unsupported_api_for_model` means
+    /// the model wants chat instead — surfaced as [`CompletionError::WrongEndpoint`].
+    async fn complete_via_responses(
+        &self,
+        system: &str,
+        user: &str,
+    ) -> Result<String, CompletionError> {
+        let body = ResponsesRequest {
+            model: self.model.clone(),
+            input: vec![
+                ResponsesInputItem {
+                    role: "system".to_string(),
+                    content: system.to_string(),
+                },
+                ResponsesInputItem {
+                    role: "user".to_string(),
+                    content: user.to_string(),
+                },
+            ],
+            stream: false,
+        };
+        let url = self.responses_url();
+
+        for attempt in 0..=RESPONSES_403_RETRIES {
+            let resp = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| {
+                    CompletionError::Fatal(DomainError::internal(format!(
+                        "Responses API request failed: {e}"
+                    )))
+                })?;
+
+            let status = resp.status();
+            if status.is_success() {
+                let parsed: ResponsesResponse = resp.json().await.map_err(|e| {
+                    CompletionError::Fatal(DomainError::internal(format!(
+                        "Failed to parse Responses API response: {e}"
+                    )))
+                })?;
+                return parsed.into_text().ok_or_else(|| {
+                    CompletionError::Fatal(DomainError::internal(
+                        "Responses API returned empty content",
+                    ))
+                });
+            }
+
+            // The endpoint is gated intermittently; a 403 is worth retrying.
+            if status == reqwest::StatusCode::FORBIDDEN && attempt < RESPONSES_403_RETRIES {
+                debug!("Responses API 403 (attempt {}), retrying", attempt + 1);
+                tokio::time::sleep(RESPONSES_403_BACKOFF).await;
+                continue;
+            }
+
+            let text = resp.text().await.unwrap_or_default();
+            if Self::is_wrong_endpoint(&text) {
+                return Err(CompletionError::WrongEndpoint);
+            }
+            return Err(CompletionError::Fatal(DomainError::internal(format!(
+                "Responses API returned {status}: {text}"
+            ))));
+        }
+        Err(CompletionError::Fatal(DomainError::internal(
+            "Responses API kept returning 403 after retries",
+        )))
+    }
+
     /// Shared non-streaming completion: POST the request (optionally with a
     /// `response_format` constraint) and return the assistant's text.
     ///
@@ -328,6 +508,10 @@ impl OpenAiChatClient {
                     format!("<failed to read body: {e}>")
                 }
             };
+            // The model is Responses-only; signal a retry on that endpoint.
+            if Self::is_wrong_endpoint(&body) {
+                return Err(CompletionError::WrongEndpoint);
+            }
             // A 4xx on a constrained request means the backend/model could not
             // honor the schema; signal a retry without it rather than failing.
             if constrained && status.is_client_error() {
@@ -363,6 +547,8 @@ impl OpenAiChatClient {
 enum CompletionError {
     /// The backend rejected the `response_format`; retry unconstrained.
     FormatUnsupported,
+    /// The model is served by the *other* API (chat ↔ responses); retry there.
+    WrongEndpoint,
     /// Any other error — propagate.
     Fatal(DomainError),
 }
@@ -377,6 +563,9 @@ impl CompletionError {
             CompletionError::FormatUnsupported => {
                 DomainError::internal("unexpected response_format rejection on unconstrained call")
             }
+            CompletionError::WrongEndpoint => {
+                DomainError::internal("model is on the other API and no fallback was attempted")
+            }
         }
     }
 }
@@ -385,9 +574,15 @@ impl CompletionError {
 impl ChatClient for OpenAiChatClient {
     async fn complete(&self, system: &str, user: &str) -> Result<String, DomainError> {
         // No response_format ⇒ FormatUnsupported is impossible here.
-        self.complete_with_format(system, user, None)
-            .await
-            .map_err(CompletionError::into_fatal)
+        match self.complete_with_format(system, user, None).await {
+            Ok(text) => Ok(text),
+            // The model is Responses-only — retry there.
+            Err(CompletionError::WrongEndpoint) => self
+                .complete_via_responses(system, user)
+                .await
+                .map_err(CompletionError::into_fatal),
+            Err(other) => Err(other.into_fatal()),
+        }
     }
 
     async fn complete_json(
@@ -418,10 +613,23 @@ impl ChatClient for OpenAiChatClient {
                     "OpenAiChatClient: backend rejected response_format for '{schema_name}'; \
                      retrying without structured output"
                 );
-                self.complete_with_format(system, user, None)
-                    .await
-                    .map_err(CompletionError::into_fatal)
+                match self.complete_with_format(system, user, None).await {
+                    Ok(text) => Ok(text),
+                    // Even unconstrained, chat rejects a Responses-only model.
+                    Err(CompletionError::WrongEndpoint) => self
+                        .complete_via_responses(system, user)
+                        .await
+                        .map_err(CompletionError::into_fatal),
+                    Err(e) => Err(e.into_fatal()),
+                }
             }
+            // The model is Responses-only. The Responses API has no portable
+            // schema-constraint, so we send it unconstrained and rely on the
+            // caller's tolerant parser — same as the FormatUnsupported path.
+            Err(CompletionError::WrongEndpoint) => self
+                .complete_via_responses(system, user)
+                .await
+                .map_err(CompletionError::into_fatal),
             Err(e) => Err(e.into_fatal()),
         }
     }
@@ -432,6 +640,29 @@ impl ChatClient for OpenAiChatClient {
         user: &str,
         token_tx: UnboundedSender<String>,
     ) -> Result<String, DomainError> {
+        match self.chat_stream(system, user, &token_tx).await {
+            Ok(text) => Ok(text),
+            // The model is Responses-only — stream from that endpoint instead.
+            // Safe to retry because a WrongEndpoint is only returned before any
+            // token was emitted (it's detected on the initial response status).
+            Err(CompletionError::WrongEndpoint) => {
+                self.responses_stream(system, user, &token_tx).await
+            }
+            Err(other) => Err(other.into_fatal()),
+        }
+    }
+}
+
+impl OpenAiChatClient {
+    /// Stream a completion from `/chat/completions`. Returns
+    /// [`CompletionError::WrongEndpoint`] (before emitting any token) when the
+    /// model is Responses-only, so [`Self::complete_stream`] can fall back.
+    async fn chat_stream(
+        &self,
+        system: &str,
+        user: &str,
+        token_tx: &UnboundedSender<String>,
+    ) -> Result<String, CompletionError> {
         let body = ChatRequest {
             model: self.model.clone(),
             messages: vec![
@@ -456,18 +687,23 @@ impl ChatClient for OpenAiChatClient {
             .send()
             .await
             .map_err(|e| {
-                DomainError::internal(format!("OpenAI chat stream request failed: {e}"))
+                CompletionError::Fatal(DomainError::internal(format!(
+                    "OpenAI chat stream request failed: {e}"
+                )))
             })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = match resp.text().await {
-                Ok(t) => t,
-                Err(e) => format!("<failed to read body: {e}>"),
-            };
-            return Err(DomainError::internal(format!(
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<failed to read body: {e}>"));
+            if Self::is_wrong_endpoint(&body) {
+                return Err(CompletionError::WrongEndpoint);
+            }
+            return Err(CompletionError::Fatal(DomainError::internal(format!(
                 "OpenAI chat API returned {status}: {body}"
-            )));
+            ))));
         }
 
         let mut byte_stream = resp.bytes_stream();
@@ -476,8 +712,11 @@ impl ChatClient for OpenAiChatClient {
         let mut buffer = String::new();
 
         'outer: while let Some(chunk) = byte_stream.next().await {
-            let bytes = chunk
-                .map_err(|e| DomainError::internal(format!("OpenAI stream read error: {e}")))?;
+            let bytes = chunk.map_err(|e| {
+                CompletionError::Fatal(DomainError::internal(format!(
+                    "OpenAI stream read error: {e}"
+                )))
+            })?;
             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
             // Process all complete lines in the buffer.
@@ -507,5 +746,160 @@ impl ChatClient for OpenAiChatClient {
         }
 
         Ok(full_text)
+    }
+
+    /// Stream a completion from the `/responses` endpoint, forwarding
+    /// `output_text.delta` events as tokens. Retries the intermittent Copilot
+    /// 403 before it commits to reading the stream.
+    async fn responses_stream(
+        &self,
+        system: &str,
+        user: &str,
+        token_tx: &UnboundedSender<String>,
+    ) -> Result<String, DomainError> {
+        let body = ResponsesRequest {
+            model: self.model.clone(),
+            input: vec![
+                ResponsesInputItem {
+                    role: "system".to_string(),
+                    content: system.to_string(),
+                },
+                ResponsesInputItem {
+                    role: "user".to_string(),
+                    content: user.to_string(),
+                },
+            ],
+            stream: true,
+        };
+        let url = self.responses_url();
+
+        let mut attempt = 0;
+        let resp = loop {
+            let r = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| {
+                    DomainError::internal(format!("Responses API stream request failed: {e}"))
+                })?;
+            if r.status().is_success() {
+                break r;
+            }
+            if r.status() == reqwest::StatusCode::FORBIDDEN && attempt < RESPONSES_403_RETRIES {
+                attempt += 1;
+                debug!("Responses API stream 403 (attempt {attempt}), retrying");
+                tokio::time::sleep(RESPONSES_403_BACKOFF).await;
+                continue;
+            }
+            let status = r.status();
+            let text = r.text().await.unwrap_or_default();
+            return Err(DomainError::internal(format!(
+                "Responses API returned {status}: {text}"
+            )));
+        };
+
+        let mut byte_stream = resp.bytes_stream();
+        let mut full_text = String::new();
+        let mut buffer = String::new();
+
+        while let Some(chunk) = byte_stream.next().await {
+            let bytes = chunk
+                .map_err(|e| DomainError::internal(format!("Responses stream read error: {e}")))?;
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+            while let Some(newline) = buffer.find('\n') {
+                let line = buffer[..newline].trim_end_matches('\r').to_string();
+                buffer = buffer[newline + 1..].to_string();
+
+                // The Responses SSE stream carries the payload on `data:` lines;
+                // the `event:` line duplicates the `type` inside that JSON, so we
+                // key off the JSON's own `type` field and forward text deltas.
+                let Some(data) = line
+                    .strip_prefix("data: ")
+                    .or_else(|| line.strip_prefix("data:"))
+                else {
+                    continue;
+                };
+                let Ok(event) = serde_json::from_str::<ResponsesStreamEvent>(data.trim()) else {
+                    continue;
+                };
+                if event.kind == "response.output_text.delta" {
+                    if let Some(text) = event.delta {
+                        full_text.push_str(&text);
+                        let _ = token_tx.send(text);
+                    }
+                }
+            }
+        }
+
+        Ok(full_text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_wrong_endpoint_error() {
+        let chat_err = r#"{"error":{"message":"model \"gpt-5.6-luna\" is not accessible via the /chat/completions endpoint","code":"unsupported_api_for_model"}}"#;
+        let responses_err = r#"{"error":{"message":"model claude-opus-4.8 does not support Responses API.","code":"unsupported_api_for_model"}}"#;
+        assert!(OpenAiChatClient::is_wrong_endpoint(chat_err));
+        assert!(OpenAiChatClient::is_wrong_endpoint(responses_err));
+        // A different failure (bad request, auth, malformed) must NOT trigger a
+        // pointless endpoint switch.
+        assert!(!OpenAiChatClient::is_wrong_endpoint(
+            r#"{"error":{"code":"invalid_request_error"}}"#
+        ));
+        assert!(!OpenAiChatClient::is_wrong_endpoint("not json at all"));
+    }
+
+    #[test]
+    fn derives_responses_url_for_both_conventions() {
+        // Copilot: no /v1 prefix.
+        let copilot = OpenAiChatClient::with_parts(
+            reqwest::Client::new(),
+            "https://api.githubcopilot.com/chat/completions".to_string(),
+            "gpt-5.6-luna".to_string(),
+        );
+        assert_eq!(
+            copilot.responses_url(),
+            "https://api.githubcopilot.com/responses"
+        );
+        // LM Studio / OpenAI: /v1 prefix.
+        let lmstudio = OpenAiChatClient::with_parts(
+            reqwest::Client::new(),
+            "http://localhost:1234/v1/chat/completions".to_string(),
+            "m".to_string(),
+        );
+        assert_eq!(
+            lmstudio.responses_url(),
+            "http://localhost:1234/v1/responses"
+        );
+    }
+
+    #[test]
+    fn parses_responses_output_text() {
+        // Only `message` items' `output_text` parts contribute; reasoning items
+        // and non-text parts are skipped.
+        let json = r#"{
+            "output": [
+                {"type":"reasoning","content":[{"type":"reasoning_text","text":"thinking..."}]},
+                {"type":"message","content":[
+                    {"type":"output_text","text":"Hello"},
+                    {"type":"output_text","text":", world"}
+                ]}
+            ]
+        }"#;
+        let parsed: ResponsesResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.into_text().as_deref(), Some("Hello, world"));
+    }
+
+    #[test]
+    fn empty_responses_output_is_none() {
+        let parsed: ResponsesResponse = serde_json::from_str(r#"{"output":[]}"#).unwrap();
+        assert_eq!(parsed.into_text(), None);
     }
 }

@@ -1355,14 +1355,13 @@ impl CodesearchMcpServer {
         })?;
 
         // An explicit name wins, else derive the slug from the fetched title.
-        let slug = crate::application::resource_slug(
-            input.name.as_deref().unwrap_or(&fetched.title),
-        );
+        let slug =
+            crate::application::resource_slug(input.name.as_deref().unwrap_or(&fetched.title));
 
-        let chat_client =
-            build_chat_client(self.container.llm_target(), self.container.data_dir()).map_err(
-                |e| McpError::internal_error(format!("Failed to init LLM backend: {}", e), None),
-            )?;
+        let chat_client = build_chat_client(self.container.llm_target(), self.container.data_dir())
+            .map_err(|e| {
+                McpError::internal_error(format!("Failed to init LLM backend: {}", e), None)
+            })?;
         let summary = self
             .container
             .memory_summary_use_case(chat_client)
