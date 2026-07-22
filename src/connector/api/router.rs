@@ -1,15 +1,17 @@
 use anyhow::Result;
 
-use crate::cli::{ClustersSubcommand, MemorySubcommand, SymbolClustersSubcommand};
+use crate::cli::{
+    ClaimsSubcommand, ClustersSubcommand, MemorySubcommand, SymbolClustersSubcommand,
+};
 use crate::{Commands, FeaturesSubcommand};
 
 use super::container::Container;
 use super::controller::{
-    ChannelsController, ClustersController, CouplingsController, DeleteController,
-    ExecutionFeaturesController, ExplainController, ImpactController, IndexController,
-    ListRepositoriesController, MemoryController, OverviewController, SearchController,
-    StatsController, SymbolClustersController, SymbolContextController, UsesController,
-    VisualizeController,
+    ChannelsController, ClaimsController, ClustersController, CouplingsController,
+    DeleteController, ExecutionFeaturesController, ExplainController, ImpactController,
+    IndexController, ListRepositoriesController, MemoryController, OverviewController,
+    SearchController, StatsController, SymbolClustersController, SymbolContextController,
+    UsesController, VisualizeController,
 };
 
 pub struct Router<'a> {
@@ -22,6 +24,7 @@ pub struct Router<'a> {
     index_controller: IndexController<'a>,
     list_repositories_controller: ListRepositoriesController<'a>,
     memory_controller: MemoryController<'a>,
+    claims_controller: ClaimsController<'a>,
     delete_controller: DeleteController<'a>,
     uses_controller: UsesController<'a>,
     execution_features_controller: ExecutionFeaturesController<'a>,
@@ -44,6 +47,7 @@ impl<'a> Router<'a> {
             index_controller: IndexController::new(container),
             list_repositories_controller: ListRepositoriesController::new(container),
             memory_controller: MemoryController::new(container),
+            claims_controller: ClaimsController::new(container),
             delete_controller: DeleteController::new(container),
             uses_controller: UsesController::new(container),
             execution_features_controller: ExecutionFeaturesController::new(container),
@@ -273,6 +277,23 @@ impl<'a> Router<'a> {
                 MemorySubcommand::Dream { llm, idle_minutes } => {
                     self.memory_controller.dream(llm, idle_minutes).await
                 }
+            },
+            Commands::Claims { subcommand } => match subcommand {
+                ClaimsSubcommand::Ingest { path, llm, force } => {
+                    self.claims_controller.ingest(path, llm, force).await
+                }
+                ClaimsSubcommand::Recall {
+                    query,
+                    num,
+                    project,
+                    all_projects,
+                    format,
+                } => {
+                    self.claims_controller
+                        .recall(query, num, project, all_projects, format)
+                        .await
+                }
+                ClaimsSubcommand::Stats { format } => self.claims_controller.stats(format).await,
             },
             Commands::Create { .. } => Err(anyhow::anyhow!(
                 "create command is handled separately in main"

@@ -28,9 +28,9 @@ pub use application::resource_slug;
 pub use application::{aggregate, render, VizFormat, DEFAULT_NODE_LIMIT};
 
 pub use cli::{
-    ClustersSubcommand, Commands, CopilotSubcommand, EmbeddingTarget, FeaturesSubcommand,
-    LlmTarget, MemorySubcommand, OpenaiSubcommand, OutputFormat, RerankingTarget,
-    SymbolClustersSubcommand, TuiMode,
+    ClaimsSubcommand, ClustersSubcommand, Commands, CopilotSubcommand, EmbeddingTarget,
+    FeaturesSubcommand, LlmTarget, MemorySubcommand, OpenaiSubcommand, OutputFormat,
+    RerankingTarget, SymbolClustersSubcommand, TuiMode,
 };
 
 pub use connector::adapter::{

@@ -27,6 +27,7 @@ pub(crate) fn build_chat_client(llm: LlmTarget, data_dir: &str) -> Result<Arc<dy
 }
 
 pub mod channels_controller;
+pub mod claims_controller;
 pub mod clusters_controller;
 pub mod couplings_controller;
 pub mod delete_controller;
@@ -45,6 +46,7 @@ pub mod uses_controller;
 pub mod visualize_controller;
 
 pub use channels_controller::ChannelsController;
+pub use claims_controller::ClaimsController;
 pub use clusters_controller::ClustersController;
 pub use couplings_controller::CouplingsController;
 pub use delete_controller::DeleteController;
