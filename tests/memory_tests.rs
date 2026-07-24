@@ -14,8 +14,8 @@ use codesearch::{
     parse_transcript, ChatClient, DomainError, DuckdbMemoryRepository, EmbeddingService,
     ImportOutcome, ImportSessionUseCase, MemoryBrowseUseCase, MemoryExtractionUseCase, MemoryKind,
     MemoryLevel, MemoryRepository, MemorySearchUseCase, MockEmbedding, NoEmbedding, NodeKind,
-    RowTarget, SessionMessage, SessionTranscript, SummarizeMemoryUseCase, MEMORY_ROOT_URI,
-    SESSIONS_ROOT_URI,
+    RowTarget, SessionMessage, SessionStatus, SessionTranscript, SummarizeMemoryUseCase,
+    MEMORY_ROOT_URI, SESSIONS_ROOT_URI,
 };
 
 /// A canned `{abstract, overview}` reply for the summarization calls the
@@ -88,6 +88,14 @@ fn transcript(id: &str, messages: &[(&str, &str)]) -> SessionTranscript {
             })
             .collect(),
     }
+}
+
+/// A project-specific fact, so the extracted item carries the session's project.
+fn project_fact_json(name: &str, content: &str) -> String {
+    format!(
+        r#"{{"facts": [{{"name": "{name}", "content": "{content}", "project_specific": true}}],
+            "preferences": [], "experiences": [], "skills": [], "delete": []}}"#
+    )
 }
 
 fn extraction_json(preference: (&str, &str)) -> String {
@@ -210,12 +218,102 @@ async fn import_is_idempotent_unless_forced() {
     assert!(matches!(third, ImportOutcome::Imported { .. }));
     let item = harness
         .memory_repo
-        .find_item(MemoryKind::Preference, "tabs_vs_spaces")
+        .find_item(MemoryKind::Preference, "tabs_vs_spaces", None)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(item.content(), "Prefers tabs, strongly");
     assert_eq!(item.update_count(), 1);
+}
+
+#[tokio::test]
+async fn same_name_in_two_projects_stays_two_memories() {
+    // Regression: item identity used to be `(kind, name)` alone, so a session in
+    // project B that extracted a name project A already held overwrote A's
+    // content *and* relabelled the row with B's project — leaving the store
+    // asserting A's knowledge about B. The two must stay separate memories.
+    let harness = Harness::new();
+    let chat = Arc::new(ScriptedChatClient::new(vec![
+        &project_fact_json("xml_rendering_fix", "alpha's rendering pipeline"),
+        &project_fact_json("xml_rendering_fix", "beta's rendering pipeline"),
+    ]));
+    let use_case = harness.import_use_case(chat);
+
+    for (session, project) in [("session-a", "alpha"), ("session-b", "beta")] {
+        let mut t = transcript(session, &[("user", "fix it"), ("assistant", "done")]);
+        t.project = Some(project.to_string());
+        use_case.execute(&t, false).await.unwrap();
+    }
+
+    let alpha = harness
+        .memory_repo
+        .find_item(MemoryKind::Fact, "xml_rendering_fix", Some("alpha"))
+        .await
+        .unwrap()
+        .expect("alpha keeps its own memory");
+    let beta = harness
+        .memory_repo
+        .find_item(MemoryKind::Fact, "xml_rendering_fix", Some("beta"))
+        .await
+        .unwrap()
+        .expect("beta gets a separate memory");
+
+    assert_eq!(alpha.content(), "alpha's rendering pipeline");
+    assert_eq!(beta.content(), "beta's rendering pipeline");
+    assert_ne!(alpha.id(), beta.id());
+    // Neither was treated as an update of the other.
+    assert_eq!(alpha.update_count(), 0);
+    assert_eq!(beta.update_count(), 0);
+    assert_eq!(
+        harness
+            .memory_repo
+            .find_items_named(MemoryKind::Fact, "xml_rendering_fix")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn a_global_memory_is_distinct_from_a_project_one() {
+    // `project` is stored as '' for globals precisely so the unique key binds
+    // them too: two globals of one name collapse to a single row, while a
+    // project-scoped item of the same name lives alongside it.
+    let harness = Harness::new();
+    for (id, content, project) in [
+        ("g1", "global v1", None),
+        ("g2", "global v2", None),
+        ("p1", "scoped", Some("alpha")),
+    ] {
+        let item = MemoryItem::new(
+            format!("id-{id}"),
+            MemoryKind::Fact,
+            "shared_name".to_string(),
+            content.to_string(),
+            None,
+            project.map(str::to_string),
+            100,
+            100,
+            0,
+        );
+        harness.memory_repo.upsert_item(&item, None).await.unwrap();
+    }
+
+    let all = harness
+        .memory_repo
+        .find_items_named(MemoryKind::Fact, "shared_name")
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2, "the second global replaced the first");
+    let global = harness
+        .memory_repo
+        .find_item(MemoryKind::Fact, "shared_name", None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(global.content(), "global v2");
+    assert_eq!(global.project(), None);
 }
 
 #[tokio::test]
@@ -258,7 +356,7 @@ async fn delete_operation_removes_existing_item() {
     use_case.execute(&first, false).await.unwrap();
     assert!(harness
         .memory_repo
-        .find_item(MemoryKind::Preference, "old_fact")
+        .find_item(MemoryKind::Preference, "old_fact", None)
         .await
         .unwrap()
         .is_some());
@@ -270,13 +368,13 @@ async fn delete_operation_removes_existing_item() {
     use_case.execute(&second, false).await.unwrap();
     assert!(harness
         .memory_repo
-        .find_item(MemoryKind::Preference, "old_fact")
+        .find_item(MemoryKind::Preference, "old_fact", None)
         .await
         .unwrap()
         .is_none());
     assert!(harness
         .memory_repo
-        .find_item(MemoryKind::Fact, "storage_engine")
+        .find_item(MemoryKind::Fact, "storage_engine", None)
         .await
         .unwrap()
         .is_some());
@@ -303,7 +401,7 @@ async fn find_item_by_id_round_trips() {
 
     let stored = harness
         .memory_repo
-        .find_item(MemoryKind::Preference, "tabs_over_spaces")
+        .find_item(MemoryKind::Preference, "tabs_over_spaces", None)
         .await
         .unwrap()
         .unwrap();
@@ -843,14 +941,14 @@ async fn dream_consolidates_duplicate_cluster() {
     assert_eq!(report.applied.len(), 2, "one merge upsert + one delete");
     let merged = harness
         .memory_repo
-        .find_item(MemoryKind::Experience, "db_lock_fix")
+        .find_item(MemoryKind::Experience, "db_lock_fix", None)
         .await
         .unwrap()
         .expect("canonical item kept");
     assert!(merged.content().contains("retry with backoff"));
     assert!(harness
         .memory_repo
-        .find_item(MemoryKind::Experience, "db_lock_retry")
+        .find_item(MemoryKind::Experience, "db_lock_retry", None)
         .await
         .unwrap()
         .is_none());
@@ -949,7 +1047,7 @@ async fn dream_rejects_deletes_outside_the_cluster() {
     // In-cluster delete applied; out-of-cluster delete refused.
     assert!(harness
         .memory_repo
-        .find_item(MemoryKind::Fact, "innocent_bystander")
+        .find_item(MemoryKind::Fact, "innocent_bystander", None)
         .await
         .unwrap()
         .is_some());
@@ -1007,10 +1105,60 @@ async fn dream_harvests_only_idle_unimported_sessions() {
         .is_none());
     assert!(harness
         .memory_repo
-        .find_item(MemoryKind::Preference, "flaky_test_fix")
+        .find_item(MemoryKind::Preference, "flaky_test_fix", None)
         .await
         .unwrap()
         .is_some());
+}
+
+#[tokio::test]
+async fn a_session_that_fails_to_import_is_marked_and_not_retried() {
+    // Regression: a failed harvest used to leave no marker, so every scheduled
+    // dream cycle retried the same session forever — one wasted LLM call per
+    // cycle, indefinitely, for a session that can never succeed (unreadable
+    // transcript, or a small model that never returns valid JSON). The failure
+    // is recorded instead, ending the loop while leaving a manual retry open.
+    let harness = Harness::new();
+    let now = now_secs();
+
+    let mut discovery = StubDiscovery::empty();
+    discovery.sessions = vec![discovered("poison-session", now - 7_200)];
+    discovery.transcripts.insert(
+        "poison-session".to_string(),
+        transcript("poison-session", &[("user", "hi"), ("assistant", "hello")]),
+    );
+
+    // The model returns prose twice, so extraction gives up and the import
+    // fails — exactly what a small local model does on a bad day.
+    let chat = Arc::new(ScriptedChatClient::new(vec![
+        "not json at all",
+        "still not json",
+    ]));
+    let dream = harness.dream_use_case(Arc::clone(&chat), discovery);
+    let first = dream.execute(3_600, true).await.unwrap();
+
+    assert_eq!(first.sessions_imported, 0);
+    assert_eq!(first.sessions_failed, 1, "the failure was counted");
+    let marked = harness
+        .memory_repo
+        .find_session("poison-session")
+        .await
+        .unwrap()
+        .expect("a failed session is still recorded");
+    assert_eq!(marked.status, SessionStatus::Failed);
+    assert!(marked.last_error.is_some(), "the reason is kept");
+
+    // A second cycle must not touch it again: no further LLM calls are made,
+    // and it is no longer even eligible.
+    let calls_after_first = chat.recorded_calls().await.len();
+    let second = dream.execute(3_600, true).await.unwrap();
+    assert_eq!(second.sessions_eligible, 0, "no longer eligible");
+    assert_eq!(second.sessions_failed, 0);
+    assert_eq!(
+        chat.recorded_calls().await.len(),
+        calls_after_first,
+        "the poison session must not be retried"
+    );
 }
 
 #[tokio::test]
@@ -1084,14 +1232,14 @@ async fn dream_reflection_writes_but_never_deletes() {
 
     assert!(harness
         .memory_repo
-        .find_item(MemoryKind::Skill, "migration_checklist")
+        .find_item(MemoryKind::Skill, "migration_checklist", None)
         .await
         .unwrap()
         .is_some());
     assert!(
         harness
             .memory_repo
-            .find_item(MemoryKind::Experience, "exp_one")
+            .find_item(MemoryKind::Experience, "exp_one", None)
             .await
             .unwrap()
             .is_some(),
@@ -1141,7 +1289,7 @@ async fn dream_synthesizes_skills_from_recurring_experiences() {
     assert!(
         harness
             .memory_repo
-            .find_item(MemoryKind::Skill, "fix_flaky_test")
+            .find_item(MemoryKind::Skill, "fix_flaky_test", None)
             .await
             .unwrap()
             .is_some(),
@@ -1150,7 +1298,7 @@ async fn dream_synthesizes_skills_from_recurring_experiences() {
     // The non-skill item proposed by synthesis was dropped, not written.
     assert!(harness
         .memory_repo
-        .find_item(MemoryKind::Fact, "not_a_skill")
+        .find_item(MemoryKind::Fact, "not_a_skill", None)
         .await
         .unwrap()
         .is_none());
@@ -1158,7 +1306,7 @@ async fn dream_synthesizes_skills_from_recurring_experiences() {
     assert!(
         harness
             .memory_repo
-            .find_item(MemoryKind::Experience, "debug_flaky_one")
+            .find_item(MemoryKind::Experience, "debug_flaky_one", None)
             .await
             .unwrap()
             .is_some(),
@@ -1361,7 +1509,7 @@ async fn project_digests_track_projects_and_remove_stale_ones() {
     // Remove beta's only item: its digest disappears, alpha's stays.
     harness
         .memory_repo
-        .delete_item(MemoryKind::Fact, "beta_db")
+        .delete_item(MemoryKind::Fact, "beta_db", Some("beta"))
         .await
         .unwrap();
     summary.regenerate_project_digests().await.unwrap();

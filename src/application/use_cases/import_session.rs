@@ -10,7 +10,7 @@ use tracing::{info, warn};
 use crate::application::interfaces::MemoryRepository;
 use crate::application::use_cases::memory_extraction::{ExtractionReport, MemoryExtractionUseCase};
 use crate::application::use_cases::memory_summary::SummarizeMemoryUseCase;
-use crate::domain::{DomainError, ImportedSession, SessionTranscript};
+use crate::domain::{DomainError, ImportedSession, SessionStatus, SessionTranscript};
 
 /// Minimum number of non-empty messages a transcript must contain for
 /// extraction to be worthwhile.
@@ -116,6 +116,8 @@ impl ImportSessionUseCase {
                 .unwrap_or(0),
             message_count: transcript.messages.len(),
             items_written: report.items_written(),
+            status: SessionStatus::Imported,
+            last_error: None,
         };
         self.memory_repo.record_session(&session).await?;
 

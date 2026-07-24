@@ -246,11 +246,15 @@ pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> ApiRe
     // to the ID lookup (which would give a misleading "no item with ID" error).
     if let Some((kind_str, name)) = id.split_once('/') {
         if let Some(kind) = MemoryKind::parse(kind_str) {
-            return match repo.find_item(kind, name).await? {
-                Some(item) => Ok(Json(json!({ "item": item }))),
-                None => Err(ApiError::not_found(format!(
+            // A name can exist in several projects, so return the full match
+            // set and let the client choose by ID rather than picking one.
+            let items = repo.find_items_named(kind, name).await?;
+            return match items.as_slice() {
+                [item] => Ok(Json(json!({ "item": item }))),
+                [] => Err(ApiError::not_found(format!(
                     "no memory item '{name}' of kind '{kind_str}'"
                 ))),
+                many => Ok(Json(json!({ "items": many, "ambiguous": true }))),
             };
         }
     }

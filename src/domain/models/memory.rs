@@ -210,6 +210,44 @@ pub struct ImportedSession {
     pub message_count: usize,
     /// Number of memory items written (created or updated) by the extraction.
     pub items_written: usize,
+    /// Why this session was recorded. A failed attempt is recorded too, so the
+    /// dream harvest stops retrying it every cycle; see [`SessionStatus`].
+    pub status: SessionStatus,
+    /// Error that made the attempt fail, for `SessionStatus::Failed`.
+    pub last_error: Option<String>,
+}
+
+/// Outcome of an attempt to import a session.
+///
+/// Both outcomes act as "do not harvest this again" markers. Without a marker
+/// for failures, a session that can never import — an unreadable transcript, or
+/// one a small model always fails to produce valid JSON for — is retried by
+/// every scheduled dream cycle forever, burning an LLM call each time.
+/// Recording the failure ends that loop while leaving the session available for
+/// a deliberate manual retry (`codesearch memory import <path> --force`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionStatus {
+    Imported,
+    Failed,
+}
+
+impl SessionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SessionStatus::Imported => "imported",
+            SessionStatus::Failed => "failed",
+        }
+    }
+
+    /// Unknown values read back from an older database default to `Imported`,
+    /// matching how those rows were written before the column existed.
+    pub fn parse(s: &str) -> SessionStatus {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "failed" => SessionStatus::Failed,
+            _ => SessionStatus::Imported,
+        }
+    }
 }
 
 /// Kind of a node in the memory virtual filesystem.

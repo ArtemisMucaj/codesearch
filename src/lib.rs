@@ -58,8 +58,8 @@ pub use domain::{
     EmbeddingConfig, EndpointSource, ExecutionFeature, FeatureNode, FileHash, ImportedSession,
     IndexingStatus, Language, MemoryItem, MemoryKind, MemoryNode, MemoryOperation, NodeKind,
     NodeType, Protocol, ReferenceKind, Repository, SearchQuery, SearchResult, SessionLocator,
-    SessionMessage, SessionSource, SessionTranscript, SymbolCommunity, SymbolCommunityGraph,
-    SymbolReference, VectorStore, NAMESPACE_SCOPE_ID,
+    SessionMessage, SessionSource, SessionStatus, SessionTranscript, SymbolCommunity,
+    SymbolCommunityGraph, SymbolReference, VectorStore, NAMESPACE_SCOPE_ID,
 };
 
 pub use domain::{CommunityMeta, GraphEdge, GraphLevel, GraphNode, GraphView};

@@ -41,11 +41,26 @@ pub struct ExtractionReport {
 }
 
 impl ExtractionReport {
+    /// How many distinct items the run actually wrote.
+    ///
+    /// Counts unique `(kind, name, project)` identities rather than upsert
+    /// operations: a model that emits the same item several times in one
+    /// response overwrites its own earlier write, leaving a single row, and
+    /// reporting "3 items written" for one stored memory is a lie.
     pub fn items_written(&self) -> usize {
         self.applied
             .iter()
-            .filter(|op| matches!(op, MemoryOperation::Upsert { .. }))
-            .count()
+            .filter_map(|op| match op {
+                MemoryOperation::Upsert {
+                    kind,
+                    name,
+                    project,
+                    ..
+                } => Some((*kind, name.as_str(), project.as_deref())),
+                MemoryOperation::Delete { .. } => None,
+            })
+            .collect::<std::collections::HashSet<_>>()
+            .len()
     }
 }
 
@@ -248,10 +263,21 @@ impl MemoryExtractionUseCase {
                     report.applied.push(op);
                 }
                 MemoryOperation::Delete { kind, ref name } => {
-                    if self.memory_repo.delete_item(kind, name).await? {
-                        report.applied.push(op);
-                    } else {
-                        report.skipped.push((op, "item not found".to_string()));
+                    // The model can only be referring to something it saw in
+                    // its prefetch context: this session's project, or a
+                    // global. Resolve within that scope so a delete never
+                    // reaches a same-named memory owned by another project.
+                    let candidates = self.memory_repo.find_items_named(kind, name).await?;
+                    let target = candidates
+                        .iter()
+                        .find(|item| item.project() == transcript.project.as_deref())
+                        .or_else(|| candidates.iter().find(|item| item.project().is_none()));
+                    match target {
+                        Some(item) => {
+                            self.memory_repo.delete_item_by_id(item.id()).await?;
+                            report.applied.push(op);
+                        }
+                        None => report.skipped.push((op, "item not found".to_string())),
                     }
                 }
             }

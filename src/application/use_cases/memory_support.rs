@@ -54,7 +54,11 @@ pub(crate) async fn upsert_preserving_identity(
     source_override: Option<&str>,
     now: i64,
 ) -> Result<(), DomainError> {
-    let existing = memory_repo.find_item(kind, name).await?;
+    // Scoped to `project`: a same-named memory belonging to another project is a
+    // different item and must not be found (let alone rewritten) here.
+    let existing = memory_repo
+        .find_item(kind, name, project.as_deref())
+        .await?;
     let item = match existing {
         Some(prev) => MemoryItem::new(
             prev.id().to_string(),

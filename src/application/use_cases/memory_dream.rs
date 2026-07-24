@@ -46,7 +46,8 @@ use crate::application::use_cases::memory_extraction::{
 use crate::application::use_cases::memory_summary::SummarizeMemoryUseCase;
 use crate::application::use_cases::memory_support::{unix_now, upsert_preserving_identity};
 use crate::domain::{
-    cosine_similarity, DomainError, DreamRun, MemoryItem, MemoryKind, MemoryOperation,
+    cosine_similarity, DomainError, DreamRun, ImportedSession, MemoryItem, MemoryKind,
+    MemoryOperation, SessionStatus,
 };
 
 /// Default idle time after which a discovered session counts as finished.
@@ -98,6 +99,8 @@ pub struct DreamReport {
     pub sessions_eligible: usize,
     /// Sessions actually imported this cycle.
     pub sessions_imported: usize,
+    /// Sessions whose import failed and were marked so they are not retried.
+    pub sessions_failed: usize,
     /// Similarity clusters examined by consolidation.
     pub clusters_found: usize,
     /// Operations applied, in order.
@@ -112,6 +115,8 @@ pub struct DreamReport {
 pub struct HarvestReport {
     pub sessions_eligible: usize,
     pub sessions_imported: usize,
+    /// Sessions whose import failed and were marked so they are not retried.
+    pub sessions_failed: usize,
 }
 
 /// JSON shape the consolidation/reflection model must return.
@@ -259,6 +264,7 @@ impl MemoryDreamUseCase {
             let harvest = self.harvest_inner(session_idle_secs).await?;
             report.sessions_eligible = harvest.sessions_eligible;
             report.sessions_imported = harvest.sessions_imported;
+            report.sessions_failed = harvest.sessions_failed;
         }
 
         let items = self.memory_repo.list_items(None).await?;
@@ -356,6 +362,32 @@ impl MemoryDreamUseCase {
         self.harvest_inner(session_idle_secs).await
     }
 
+    /// Mark a session that could not be imported, so later cycles skip it.
+    ///
+    /// Without this the session stays unmarked and every scheduled cycle tries
+    /// it again forever — an unreadable transcript, or one a small model never
+    /// returns valid JSON for, would burn an LLM call on each pass. The row
+    /// records why it failed; a deliberate `codesearch memory import <path>
+    /// --force` still retries it.
+    ///
+    /// A failure to *write* the marker is only logged: it must not abort the
+    /// harvest, and the worst case is the session being retried next cycle,
+    /// which is the old behaviour.
+    async fn record_failed_harvest(&self, id: &str, source: &str, error: &str) {
+        let session = ImportedSession {
+            id: id.to_string(),
+            source: source.to_string(),
+            imported_at: unix_now(),
+            message_count: 0,
+            items_written: 0,
+            status: SessionStatus::Failed,
+            last_error: Some(error.to_string()),
+        };
+        if let Err(e) = self.memory_repo.record_session(&session).await {
+            warn!("dream harvest: could not record failure for '{id}': {e}");
+        }
+    }
+
     async fn harvest_inner(&self, session_idle_secs: i64) -> Result<HarvestReport, DomainError> {
         let mut report = HarvestReport::default();
         let sessions = self.discovery.discover().await?;
@@ -367,6 +399,7 @@ impl MemoryDreamUseCase {
             .map(|s| s.id)
             .collect();
         let now = unix_now();
+        let mut attempted = 0usize;
 
         for session in sessions {
             if session.updated_at <= 0 || now - session.updated_at < session_idle_secs {
@@ -376,9 +409,13 @@ impl MemoryDreamUseCase {
                 continue;
             }
             report.sessions_eligible += 1;
-            if report.sessions_imported >= MAX_HARVEST_SESSIONS {
+            // Every *attempt* counts against the budget, not just the ones that
+            // succeed. Gating on successes alone let a batch of failing sessions
+            // run unbounded, since a failure never moved the counter.
+            if attempted >= MAX_HARVEST_SESSIONS {
                 continue;
             }
+            attempted += 1;
             let transcript = match self.discovery.load_transcript(&session).await {
                 Ok(t) => t,
                 Err(e) => {
@@ -386,6 +423,12 @@ impl MemoryDreamUseCase {
                         "dream harvest: could not load session '{}': {e}",
                         session.id
                     );
+                    // The transcript never loaded, so its own `source` string is
+                    // unavailable; rebuild the discovery form (`claude:<id>`).
+                    let source = format!("{}:{}", session.source.as_str(), session.id);
+                    self.record_failed_harvest(&session.id, &source, &e.to_string())
+                        .await;
+                    report.sessions_failed += 1;
                     continue;
                 }
             };
@@ -397,6 +440,9 @@ impl MemoryDreamUseCase {
                 Ok(ImportOutcome::AlreadyImported { .. }) => {}
                 Err(e) => {
                     warn!("dream harvest: import of '{}' failed: {e}", session.id);
+                    self.record_failed_harvest(&transcript.id, &transcript.source, &e.to_string())
+                        .await;
+                    report.sessions_failed += 1;
                 }
             }
         }
@@ -601,11 +647,23 @@ impl MemoryDreamUseCase {
                             .push((op, "delete budget for this cycle exhausted".to_string()));
                         continue;
                     }
-                    if self.memory_repo.delete_item(kind, name).await? {
-                        *deletes_used += 1;
-                        report.applied.push(op);
-                    } else {
-                        report.skipped.push((op, "item not found".to_string()));
+                    // `(kind, name)` no longer identifies a single item, so a
+                    // name living in several projects is ambiguous here — the
+                    // cluster key carries no project to choose by. Deleting all
+                    // of them would destroy other projects' memories, so an
+                    // ambiguous target is left alone.
+                    let candidates = self.memory_repo.find_items_named(kind, name).await?;
+                    match candidates.as_slice() {
+                        [item] => {
+                            self.memory_repo.delete_item_by_id(item.id()).await?;
+                            *deletes_used += 1;
+                            report.applied.push(op);
+                        }
+                        [] => report.skipped.push((op, "item not found".to_string())),
+                        _ => report.skipped.push((
+                            op,
+                            "name is ambiguous across projects; not deleting".to_string(),
+                        )),
                     }
                 }
             }

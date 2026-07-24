@@ -11,7 +11,7 @@ use crate::domain::{
 /// the memory database can be inspected, backed up, or wiped independently.
 #[async_trait]
 pub trait MemoryRepository: Send + Sync {
-    /// Insert or replace a memory item, keyed by `(kind, name)`.
+    /// Insert or replace a memory item, keyed by `(kind, name, project)`.
     ///
     /// `vector` is the embedding of the item content; `None` when embeddings
     /// are unavailable (the item remains keyword-searchable).
@@ -21,17 +21,37 @@ pub trait MemoryRepository: Send + Sync {
         vector: Option<&[f32]>,
     ) -> Result<(), DomainError>;
 
+    /// Find the item with exactly this identity. `project: None` addresses the
+    /// global item, which is a *different* item from a same-named one scoped to
+    /// a project — two projects that independently learn "flaky_test_fix" keep
+    /// separate memories rather than overwriting each other.
     async fn find_item(
         &self,
         kind: MemoryKind,
         name: &str,
+        project: Option<&str>,
     ) -> Result<Option<MemoryItem>, DomainError>;
+
+    /// Every item sharing `(kind, name)` across all project scopes, newest
+    /// first. For callers holding a `kind/name` reference with no project to
+    /// disambiguate it (CLI `show`/`delete`, model-issued deletes).
+    async fn find_items_named(
+        &self,
+        kind: MemoryKind,
+        name: &str,
+    ) -> Result<Vec<MemoryItem>, DomainError>;
 
     /// Find an item by its ID.
     async fn find_item_by_id(&self, id: &str) -> Result<Option<MemoryItem>, DomainError>;
 
-    /// Delete by `(kind, name)`. Returns `true` when an item was removed.
-    async fn delete_item(&self, kind: MemoryKind, name: &str) -> Result<bool, DomainError>;
+    /// Delete by the full `(kind, name, project)` identity. Returns `true` when
+    /// an item was removed.
+    async fn delete_item(
+        &self,
+        kind: MemoryKind,
+        name: &str,
+        project: Option<&str>,
+    ) -> Result<bool, DomainError>;
 
     /// Delete by item ID. Returns `true` when an item was removed.
     async fn delete_item_by_id(&self, id: &str) -> Result<bool, DomainError>;

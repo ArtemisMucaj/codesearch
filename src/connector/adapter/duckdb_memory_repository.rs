@@ -16,6 +16,7 @@ use tracing::debug;
 use crate::application::{MemoryRepository, MemoryStats};
 use crate::domain::{
     DomainError, DreamRun, ImportedSession, MemoryItem, MemoryKind, MemoryNode, NodeKind,
+    SessionStatus,
 };
 
 /// File name of the memory database inside the data directory.
@@ -72,11 +73,11 @@ impl DuckdbMemoryRepository {
                 name TEXT NOT NULL,
                 content TEXT NOT NULL,
                 source_session_id TEXT,
-                project TEXT,
+                project TEXT NOT NULL DEFAULT '',
                 created_at BIGINT NOT NULL,
                 updated_at BIGINT NOT NULL,
                 update_count BIGINT NOT NULL DEFAULT 0,
-                UNIQUE (kind, name)
+                UNIQUE (kind, name, project)
             );
             CREATE TABLE IF NOT EXISTS memory_vectors (
                 item_id TEXT PRIMARY KEY,
@@ -87,7 +88,9 @@ impl DuckdbMemoryRepository {
                 source TEXT NOT NULL,
                 imported_at BIGINT NOT NULL,
                 message_count BIGINT NOT NULL,
-                items_written BIGINT NOT NULL
+                items_written BIGINT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'imported',
+                last_error TEXT
             );
             CREATE TABLE IF NOT EXISTS memory_nodes (
                 uri TEXT PRIMARY KEY,
@@ -130,6 +133,30 @@ impl DuckdbMemoryRepository {
             }
         }
 
+        // Older databases predate the harvest failure marker. Same idempotent
+        // add-and-swallow pattern as `memory_nodes.label` — but DuckDB rejects
+        // `ADD COLUMN` carrying a constraint ("Adding columns with constraints
+        // not yet supported"), so the column is added bare and backfilled.
+        // Every pre-existing row is by definition a successful import.
+        for column in ["status", "last_error"] {
+            if let Err(e) = conn.execute_batch(&format!(
+                "ALTER TABLE memory_sessions ADD COLUMN {column} TEXT;"
+            )) {
+                let msg = e.to_string().to_lowercase();
+                if !msg.contains("already exists") && !msg.contains("duplicate") {
+                    return Err(DomainError::storage(format!(
+                        "Failed to add memory_sessions column '{column}': {e}"
+                    )));
+                }
+            }
+        }
+        conn.execute_batch("UPDATE memory_sessions SET status = 'imported' WHERE status IS NULL;")
+            .map_err(|e| {
+                DomainError::storage(format!("Failed to backfill memory_sessions.status: {e}"))
+            })?;
+
+        Self::migrate_item_identity(&conn)?;
+
         Self::check_meta(&conn, "dimensions", &dimensions.to_string())?;
         Self::check_meta(&conn, "embedding_model", embedding_model)?;
 
@@ -138,6 +165,73 @@ impl DuckdbMemoryRepository {
             conn: Arc::new(Mutex::new(conn)),
             dimensions,
         })
+    }
+
+    /// Widen item identity from `(kind, name)` to `(kind, name, project)` on
+    /// databases written by an earlier version.
+    ///
+    /// Under the old key a memory extracted in project B silently overwrote a
+    /// same-named memory from project A *and* relabelled it with B's project,
+    /// so the store ended up asserting A's content about B. Widening the key
+    /// keeps them apart. DuckDB cannot drop a constraint in place, so the table
+    /// is rebuilt; the old key is strictly narrower than the new one, so every
+    /// existing row already satisfies it and nothing is dropped. Rows already
+    /// merged by the old behaviour cannot be un-merged — their pre-collision
+    /// content is gone — so they carry over as-is.
+    ///
+    /// `project` also changes from nullable to `NOT NULL DEFAULT ''` (empty
+    /// means global), because SQL treats NULLs as distinct in a UNIQUE
+    /// constraint — with NULLs, two global items of the same name would both be
+    /// allowed and the constraint would not bind where it matters most.
+    fn migrate_item_identity(conn: &Connection) -> Result<(), DomainError> {
+        // `project` is nullable only on the pre-migration schema, so it is a
+        // reliable, cheap marker that avoids rebuilding on every open.
+        let nullable: Option<String> = conn
+            .query_row(
+                "SELECT is_nullable FROM information_schema.columns \
+                 WHERE table_name = 'memory_items' AND column_name = 'project'",
+                [],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                duckdb::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(DomainError::storage(format!(
+                    "Failed to inspect memory_items.project: {other}"
+                ))),
+            })?;
+        if !matches!(nullable.as_deref(), Some("YES")) {
+            return Ok(());
+        }
+
+        conn.execute_batch(
+            "BEGIN TRANSACTION;
+             CREATE TABLE memory_items_migrated (
+                 id TEXT PRIMARY KEY,
+                 kind TEXT NOT NULL,
+                 name TEXT NOT NULL,
+                 content TEXT NOT NULL,
+                 source_session_id TEXT,
+                 project TEXT NOT NULL DEFAULT '',
+                 created_at BIGINT NOT NULL,
+                 updated_at BIGINT NOT NULL,
+                 update_count BIGINT NOT NULL DEFAULT 0,
+                 UNIQUE (kind, name, project)
+             );
+             INSERT INTO memory_items_migrated
+                 SELECT id, kind, name, content, source_session_id,
+                        COALESCE(project, ''), created_at, updated_at, update_count
+                 FROM memory_items;
+             DROP TABLE memory_items;
+             ALTER TABLE memory_items_migrated RENAME TO memory_items;
+             COMMIT;",
+        )
+        .map_err(|e| {
+            DomainError::storage(format!("Failed to migrate memory item identity: {e}"))
+        })?;
+
+        debug!("migrated memory_items identity to (kind, name, project)");
+        Ok(())
     }
 
     /// Persist a meta value on first open; reject a mismatch on later opens.
@@ -222,7 +316,7 @@ impl DuckdbMemoryRepository {
             row.get(2)?,
             row.get(3)?,
             row.get::<_, Option<String>>(4)?,
-            row.get::<_, Option<String>>(5)?,
+            project_from_column(row.get::<_, String>(5)?),
             row.get(6)?,
             row.get(7)?,
             row.get::<_, i64>(8)? as u32,
@@ -253,6 +347,18 @@ impl DuckdbMemoryRepository {
 const ITEM_COLUMNS: &str =
     "id, kind, name, content, source_session_id, project, created_at, updated_at, update_count";
 
+/// `memory_items.project` is `NOT NULL` with `''` standing for "global", so the
+/// `(kind, name, project)` unique key also binds global items (SQL treats NULLs
+/// as distinct). The domain models "no project" as `None`; these two functions
+/// are the only places that translation happens.
+fn project_from_column(stored: String) -> Option<String> {
+    (!stored.is_empty()).then_some(stored)
+}
+
+fn project_to_column(project: Option<&str>) -> &str {
+    project.unwrap_or("")
+}
+
 const NODE_COLUMNS: &str =
     "uri, kind, parent_uri, label, abstract, overview, content, created_at, updated_at";
 
@@ -267,16 +373,21 @@ impl MemoryRepository for DuckdbMemoryRepository {
         let conn = self.conn.lock().await;
 
         // Replace any previous item with the same identity (by id or by the
-        // (kind, name) key) so both unique constraints stay conflict-free.
+        // (kind, name, project) key) so both unique constraints stay
+        // conflict-free. Matching on project too is what keeps a same-named
+        // memory from another project from being clobbered here.
+        let project = project_to_column(item.project());
         conn.execute(
             "DELETE FROM memory_vectors WHERE item_id IN \
-             (SELECT id FROM memory_items WHERE id = ?1 OR (kind = ?2 AND name = ?3))",
-            params![item.id(), item.kind().as_str(), item.name()],
+             (SELECT id FROM memory_items \
+              WHERE id = ?1 OR (kind = ?2 AND name = ?3 AND project = ?4))",
+            params![item.id(), item.kind().as_str(), item.name(), project],
         )
         .map_err(|e| DomainError::storage(format!("Failed to clear memory vector: {e}")))?;
         conn.execute(
-            "DELETE FROM memory_items WHERE id = ?1 OR (kind = ?2 AND name = ?3)",
-            params![item.id(), item.kind().as_str(), item.name()],
+            "DELETE FROM memory_items \
+             WHERE id = ?1 OR (kind = ?2 AND name = ?3 AND project = ?4)",
+            params![item.id(), item.kind().as_str(), item.name(), project],
         )
         .map_err(|e| DomainError::storage(format!("Failed to clear memory item: {e}")))?;
 
@@ -291,7 +402,7 @@ impl MemoryRepository for DuckdbMemoryRepository {
                 item.name(),
                 item.content(),
                 item.source_session_id(),
-                item.project(),
+                project,
                 item.created_at(),
                 item.updated_at(),
                 item.update_count() as i64,
@@ -313,20 +424,46 @@ impl MemoryRepository for DuckdbMemoryRepository {
         &self,
         kind: MemoryKind,
         name: &str,
+        project: Option<&str>,
     ) -> Result<Option<MemoryItem>, DomainError> {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(&format!(
-                "SELECT {ITEM_COLUMNS} FROM memory_items WHERE kind = ?1 AND name = ?2"
+                "SELECT {ITEM_COLUMNS} FROM memory_items \
+                 WHERE kind = ?1 AND name = ?2 AND project = ?3"
             ))
             .map_err(|e| DomainError::storage(format!("Failed to prepare find_item: {e}")))?;
-        match stmt.query_row(params![kind.as_str(), name], Self::item_from_row) {
+        match stmt.query_row(
+            params![kind.as_str(), name, project_to_column(project)],
+            Self::item_from_row,
+        ) {
             Ok(item) => Ok(Some(item)),
             Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(DomainError::storage(format!(
                 "Failed to query memory item: {e}"
             ))),
         }
+    }
+
+    async fn find_items_named(
+        &self,
+        kind: MemoryKind,
+        name: &str,
+    ) -> Result<Vec<MemoryItem>, DomainError> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {ITEM_COLUMNS} FROM memory_items \
+                 WHERE kind = ?1 AND name = ?2 ORDER BY updated_at DESC"
+            ))
+            .map_err(|e| {
+                DomainError::storage(format!("Failed to prepare find_items_named: {e}"))
+            })?;
+        let rows = stmt
+            .query_map(params![kind.as_str(), name], Self::item_from_row)
+            .map_err(|e| DomainError::storage(format!("Failed to query memory items: {e}")))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DomainError::storage(format!("Failed to read memory item row: {e}")))
     }
 
     async fn find_item_by_id(&self, id: &str) -> Result<Option<MemoryItem>, DomainError> {
@@ -345,18 +482,25 @@ impl MemoryRepository for DuckdbMemoryRepository {
         }
     }
 
-    async fn delete_item(&self, kind: MemoryKind, name: &str) -> Result<bool, DomainError> {
+    async fn delete_item(
+        &self,
+        kind: MemoryKind,
+        name: &str,
+        project: Option<&str>,
+    ) -> Result<bool, DomainError> {
         let conn = self.conn.lock().await;
+        let project = project_to_column(project);
         conn.execute(
             "DELETE FROM memory_vectors WHERE item_id IN \
-             (SELECT id FROM memory_items WHERE kind = ?1 AND name = ?2)",
-            params![kind.as_str(), name],
+             (SELECT id FROM memory_items \
+              WHERE kind = ?1 AND name = ?2 AND project = ?3)",
+            params![kind.as_str(), name, project],
         )
         .map_err(|e| DomainError::storage(format!("Failed to delete memory vector: {e}")))?;
         let deleted = conn
             .execute(
-                "DELETE FROM memory_items WHERE kind = ?1 AND name = ?2",
-                params![kind.as_str(), name],
+                "DELETE FROM memory_items WHERE kind = ?1 AND name = ?2 AND project = ?3",
+                params![kind.as_str(), name, project],
             )
             .map_err(|e| DomainError::storage(format!("Failed to delete memory item: {e}")))?;
         Ok(deleted > 0)
@@ -413,7 +557,7 @@ impl MemoryRepository for DuckdbMemoryRepository {
         }
         if let Some(p) = project {
             conditions.push(format!(
-                "(i.project IS NULL OR i.project = '{}')",
+                "(i.project = '' OR i.project = '{}')",
                 sql_quote(p)
             ));
         }
@@ -492,7 +636,7 @@ impl MemoryRepository for DuckdbMemoryRepository {
         };
         if let Some(p) = project {
             kind_clause.push_str(&format!(
-                " AND (project IS NULL OR project = '{}')",
+                " AND (project = '' OR project = '{}')",
                 sql_quote(p)
             ));
         }
@@ -576,19 +720,24 @@ impl MemoryRepository for DuckdbMemoryRepository {
     async fn record_session(&self, session: &ImportedSession) -> Result<(), DomainError> {
         let conn = self.conn.lock().await;
         conn.execute(
-            "INSERT INTO memory_sessions (id, source, imported_at, message_count, items_written) \
-             VALUES (?1, ?2, ?3, ?4, ?5) \
+            "INSERT INTO memory_sessions \
+                 (id, source, imported_at, message_count, items_written, status, last_error) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
              ON CONFLICT (id) DO UPDATE SET \
                  source = excluded.source, \
                  imported_at = excluded.imported_at, \
                  message_count = excluded.message_count, \
-                 items_written = excluded.items_written",
+                 items_written = excluded.items_written, \
+                 status = excluded.status, \
+                 last_error = excluded.last_error",
             params![
                 session.id,
                 session.source,
                 session.imported_at,
                 session.message_count as i64,
                 session.items_written as i64,
+                session.status.as_str(),
+                session.last_error,
             ],
         )
         .map_err(|e| DomainError::storage(format!("Failed to record session: {e}")))?;
@@ -599,7 +748,7 @@ impl MemoryRepository for DuckdbMemoryRepository {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
-                "SELECT id, source, imported_at, message_count, items_written \
+                "SELECT id, source, imported_at, message_count, items_written, status, last_error \
                  FROM memory_sessions WHERE id = ?1",
             )
             .map_err(|e| DomainError::storage(format!("Failed to prepare find_session: {e}")))?;
@@ -616,7 +765,7 @@ impl MemoryRepository for DuckdbMemoryRepository {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
-                "SELECT id, source, imported_at, message_count, items_written \
+                "SELECT id, source, imported_at, message_count, items_written, status, last_error \
                  FROM memory_sessions ORDER BY imported_at DESC",
             )
             .map_err(|e| DomainError::storage(format!("Failed to prepare list_sessions: {e}")))?;
@@ -976,5 +1125,12 @@ fn session_from_row(row: &Row<'_>) -> Result<ImportedSession, duckdb::Error> {
         imported_at: row.get(2)?,
         message_count: row.get::<_, i64>(3)? as usize,
         items_written: row.get::<_, i64>(4)? as usize,
+        // Nullable on databases migrated from before the column existed; the
+        // backfill covers those, and a stray NULL still reads as `Imported`.
+        status: row
+            .get::<_, Option<String>>(5)?
+            .map(|s| SessionStatus::parse(&s))
+            .unwrap_or(SessionStatus::Imported),
+        last_error: row.get::<_, Option<String>>(6)?,
     })
 }

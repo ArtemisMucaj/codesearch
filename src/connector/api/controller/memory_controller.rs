@@ -11,7 +11,9 @@ use crate::cli::{LlmTarget, MemoryKindArg, OutputFormatTextJson};
 use crate::connector::adapter::{
     fetch_resource, load_transcript as load_discovered_transcript, parse_transcript_file,
 };
-use crate::domain::{DiscoveredSession, MemoryItem, MemoryKind, MemoryNode, MemoryOperation};
+use crate::domain::{
+    DiscoveredSession, MemoryItem, MemoryKind, MemoryNode, MemoryOperation, SessionStatus,
+};
 use crate::tui::import_picker::{ImportEvent, ImportRequest};
 
 use super::super::Container;
@@ -324,11 +326,30 @@ impl<'a> MemoryController<'a> {
             };
         }
 
-        // Accept '<kind>/<name>' as an alternative to the item ID.
+        // Accept '<kind>/<name>' as an alternative to the item ID. The same name
+        // can now exist in several projects, so show them all rather than
+        // silently picking one.
         if let Some((kind_str, name)) = id.split_once('/') {
             if let Some(kind) = MemoryKind::parse(kind_str) {
-                if let Some(item) = repo.find_item(kind, name).await? {
-                    return Ok(render_item(&item));
+                let items = repo.find_items_named(kind, name).await?;
+                match items.as_slice() {
+                    [item] => return Ok(render_item(item)),
+                    [] => {}
+                    many => {
+                        let mut out = format!(
+                            "'{id}' matches {} memories in different projects:\n\n",
+                            many.len()
+                        );
+                        for item in many {
+                            out.push_str(&format!(
+                                "  {} @{}\n",
+                                item.id(),
+                                item.project().unwrap_or("(global)")
+                            ));
+                        }
+                        out.push_str("\nShow one with: codesearch memory show <id>\n");
+                        return Ok(out);
+                    }
                 }
             }
         }
@@ -388,11 +409,33 @@ impl<'a> MemoryController<'a> {
         let repo = self.container.memory_repository()?;
 
         // Accept '<kind>/<name>' as an alternative to the item ID, matching
-        // `show`, so `memory delete preference/tabs_vs_spaces` works.
+        // `show`, so `memory delete preference/tabs_vs_spaces` works. When the
+        // name exists in several projects it is refused rather than guessed —
+        // deleting the wrong project's memory is unrecoverable.
         if let Some((kind_str, name)) = id.split_once('/') {
             if let Some(kind) = MemoryKind::parse(kind_str) {
-                if repo.delete_item(kind, name).await? {
-                    return Ok(format!("Deleted memory item '{id}'."));
+                let items = repo.find_items_named(kind, name).await?;
+                match items.as_slice() {
+                    [item] => {
+                        repo.delete_item_by_id(item.id()).await?;
+                        return Ok(format!("Deleted memory item '{id}'."));
+                    }
+                    [] => {}
+                    many => {
+                        let mut out = format!(
+                            "'{id}' matches {} memories in different projects — \
+                             delete one by ID:\n\n",
+                            many.len()
+                        );
+                        for item in many {
+                            out.push_str(&format!(
+                                "  {} @{}\n",
+                                item.id(),
+                                item.project().unwrap_or("(global)")
+                            ));
+                        }
+                        return Ok(out);
+                    }
                 }
             }
         }
@@ -428,12 +471,25 @@ impl<'a> MemoryController<'a> {
                 if sessions.is_empty() {
                     return Ok("No sessions imported yet.".to_string());
                 }
-                let mut output = format!("{} imported sessions:\n\n", sessions.len());
+                let failed = sessions
+                    .iter()
+                    .filter(|s| s.status == SessionStatus::Failed)
+                    .count();
+                let mut output = format!("{} sessions ({failed} failed):\n\n", sessions.len());
                 for session in &sessions {
-                    output.push_str(&format!(
-                        "{}\n    source: {}\n    messages: {}, items written: {}\n\n",
-                        session.id, session.source, session.message_count, session.items_written
-                    ));
+                    output.push_str(&format!("{}\n    source: {}\n", session.id, session.source));
+                    match session.status {
+                        SessionStatus::Imported => output.push_str(&format!(
+                            "    messages: {}, items written: {}\n\n",
+                            session.message_count, session.items_written
+                        )),
+                        // Failed sessions are skipped by the dream harvest so
+                        // they cannot loop; show why, and how to retry.
+                        SessionStatus::Failed => output.push_str(&format!(
+                            "    FAILED: {}\n    retry with: codesearch memory import <path> --force\n\n",
+                            session.last_error.as_deref().unwrap_or("unknown error")
+                        )),
+                    }
                 }
                 Ok(output)
             }
@@ -607,6 +663,13 @@ fn render_dream_report(report: &DreamReport) -> String {
         "  sessions: {} finished and not yet imported, {} imported\n",
         report.sessions_eligible, report.sessions_imported
     ));
+    if report.sessions_failed > 0 {
+        out.push_str(&format!(
+            "  {} failed and marked (not retried automatically) — see: \
+             codesearch memory sessions\n",
+            report.sessions_failed
+        ));
+    }
     out.push_str(&format!(
         "  consolidation clusters examined: {}\n",
         report.clusters_found
