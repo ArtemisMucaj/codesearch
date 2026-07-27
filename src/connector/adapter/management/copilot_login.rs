@@ -11,130 +11,94 @@
 //! 2. `GET /api/llm/copilot/login` reports the current [`LoginStatus`] so the UI
 //!    can advance from *pending* to *authorized* / *failed*.
 //!
-//! On success the `ghu_…` token is persisted into `config.json` exactly as the
-//! CLI does, so every other Copilot path (models, chat) picks it up.
+//! The device flow and its status machine come from
+//! [`gh_copilot_rs::LoginSession`]; this wrapper adds the codesearch-specific
+//! step — persisting the `ghu_…` token into `config.json` on success, exactly as
+//! the CLI does, so every other Copilot path (models, chat) picks it up. The
+//! serialized [`LoginStatus`] shape is unchanged, so the HTTP contract the
+//! native app depends on is preserved.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use serde::Serialize;
-use tokio::sync::Mutex;
+use gh_copilot_rs::{GitHubDeviceFlow, LoginSession, LoginStatus};
 use tracing::warn;
 
-use crate::connector::adapter::{copilot_auth, CodesearchConfig};
+use crate::connector::adapter::CodesearchConfig;
 use crate::domain::DomainError;
 
-/// The current state of a Copilot login attempt, serialized `snake_case`.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum LoginStatus {
-    /// No login has been started this session.
-    Idle,
-    /// A device code was issued; waiting for the user to authorize in a browser.
-    Pending {
-        user_code: String,
-        verification_uri: String,
-    },
-    /// The user authorized and the token was stored.
-    Authorized,
-    /// The flow failed (denied, expired, or a network error); carries a reason.
-    Failed { error: String },
-}
-
-/// Shared Copilot-login state for serve mode. One attempt is tracked at a time;
-/// the background poll updates `status`, which the GET endpoint reads.
+/// Shared Copilot-login state for serve mode, wrapping a [`LoginSession`] and
+/// persisting the token to `config.json` once the session reports `authorized`.
 pub struct CopilotLoginService {
     data_dir: String,
-    status: Arc<Mutex<LoginStatus>>,
-    /// Monotonic id of the current attempt. `start` bumps it; a background poll
-    /// only writes `status` if its id still matches — so a superseded attempt
-    /// (the user restarted) can never clobber the newer one's result.
-    generation: Arc<AtomicU64>,
+    session: Arc<LoginSession>,
 }
 
 impl CopilotLoginService {
     pub fn new(data_dir: String) -> Arc<Self> {
+        // A failed device-flow client build leaves the session unusable; fall
+        // back to a session that will simply report `failed` on start rather
+        // than panicking at construction (serve must still boot).
+        let flow = GitHubDeviceFlow::new()
+            .map(|f| Arc::new(f) as Arc<dyn gh_copilot_rs::DeviceFlow>)
+            .unwrap_or_else(|e| {
+                warn!("copilot login: device-flow client unavailable: {e}");
+                Arc::new(UnavailableFlow(e.to_string()))
+            });
         Arc::new(Self {
             data_dir,
-            status: Arc::new(Mutex::new(LoginStatus::Idle)),
-            generation: Arc::new(AtomicU64::new(0)),
+            session: LoginSession::new(flow),
         })
     }
 
     /// The current status, for `GET /api/llm/copilot/login`.
     pub async fn status(&self) -> LoginStatus {
-        self.status.lock().await.clone()
+        self.session.status().await
     }
 
-    /// Start (or restart) the device flow. Requests a device code synchronously
-    /// so the caller gets the `user_code` immediately, then spawns a background
-    /// task that polls for the token and persists it. Returns the `Pending`
-    /// status (or `Failed` if the device-code request itself failed).
-    ///
-    /// Restarting supersedes any in-flight attempt: `start` bumps a generation
-    /// id, and a background poll only writes its result if the id still matches,
-    /// so a stale attempt can never overwrite the newer one's status.
+    /// Start (or restart) the device flow. Returns the initial status (`Pending`
+    /// with the code to display, or `Failed`) immediately; a background task
+    /// waits for the session to authorize and then persists the token.
     pub async fn start(self: &Arc<Self>) -> LoginStatus {
-        // Claim this attempt; any older poll task's writes are now ignored.
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let status = self.session.start().await;
 
-        let http = reqwest::Client::new();
-        let device = match copilot_auth::request_device_code(&http).await {
-            Ok(d) => d,
-            Err(e) => {
-                warn!("copilot login: device-code request failed: {e}");
-                let failed = LoginStatus::Failed {
-                    error: format!("failed to start GitHub device-flow login: {e}"),
-                };
-                self.set_status(generation, failed.clone()).await;
-                return failed;
-            }
-        };
+        // If the flow started, wait for it to finish in the background and
+        // persist the token the moment the session reports success. The session
+        // itself no longer writes to disk, so persistence lives here.
+        if matches!(status, LoginStatus::Pending { .. }) {
+            let service = Arc::clone(self);
+            tokio::spawn(async move {
+                service.persist_on_success().await;
+            });
+        }
 
-        let pending = LoginStatus::Pending {
-            user_code: device.user_code().to_string(),
-            verification_uri: device.verification_uri().to_string(),
-        };
-        self.set_status(generation, pending.clone()).await;
+        status
+    }
 
-        // Poll + persist in the background so the request returns immediately.
-        let service = Arc::clone(self);
-        tokio::spawn(async move {
-            let next = match copilot_auth::poll_for_token(&http, &device).await {
-                Ok(token) => match service.persist_token(token).await {
-                    Ok(()) => LoginStatus::Authorized,
-                    Err(e) => {
-                        warn!("copilot login: token saved-but-failed: {e}");
-                        LoginStatus::Failed {
-                            error: format!("login succeeded but saving the token failed: {e}"),
+    /// Poll the session until it leaves `pending`; on `authorized`, read the
+    /// token and write it to `config.json`.
+    async fn persist_on_success(&self) {
+        loop {
+            match self.session.status().await {
+                LoginStatus::Pending { .. } => {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                LoginStatus::Authorized => {
+                    if let Some(token) = self.session.token().await {
+                        if let Err(e) = self.persist_token(token.expose().to_string()).await {
+                            warn!("copilot login: token saved-but-failed: {e}");
                         }
                     }
-                },
-                Err(e) => {
-                    warn!("copilot login: device-flow poll failed: {e}");
-                    LoginStatus::Failed {
-                        error: format!("GitHub device-flow login failed: {e}"),
-                    }
+                    return;
                 }
-            };
-            service.set_status(generation, next).await;
-        });
-
-        pending
-    }
-
-    /// Write `status` only if `generation` is still the current attempt — so a
-    /// superseded poll task's terminal result is dropped instead of clobbering
-    /// a newer attempt the user has since started.
-    async fn set_status(&self, generation: u64, status: LoginStatus) {
-        if self.generation.load(Ordering::SeqCst) == generation {
-            *self.status.lock().await = status;
+                // Failed or Idle (superseded): nothing to persist.
+                _ => return,
+            }
         }
     }
 
-    /// Persist the `ghu_…` token into `config.json`'s copilot section, exactly
-    /// as `codesearch copilot login` does. The config read/write is blocking
-    /// filesystem I/O, so it runs on `spawn_blocking`.
+    /// Persist the `ghu_…` token into `config.json`'s copilot section. The
+    /// config read/write is blocking filesystem I/O, so it runs on
+    /// `spawn_blocking`.
     async fn persist_token(&self, token: String) -> Result<(), DomainError> {
         let data_dir = self.data_dir.clone();
         tokio::task::spawn_blocking(move || -> Result<(), DomainError> {
@@ -147,39 +111,23 @@ impl CopilotLoginService {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// A [`DeviceFlow`](gh_copilot_rs::DeviceFlow) that fails every call — used when
+/// the real client could not be built, so a login attempt reports `failed`
+/// instead of taking the whole server down at boot.
+struct UnavailableFlow(String);
 
-    /// The status serializes with a `status` discriminator + snake_case values,
-    /// which is the shape the client decodes.
-    #[test]
-    fn login_status_serializes_with_tag() {
-        let idle = serde_json::to_value(LoginStatus::Idle).unwrap();
-        assert_eq!(idle["status"], "idle");
+#[async_trait::async_trait]
+impl gh_copilot_rs::DeviceFlow for UnavailableFlow {
+    async fn request_device_code(
+        &self,
+    ) -> Result<gh_copilot_rs::DeviceAuthorization, gh_copilot_rs::CopilotError> {
+        Err(gh_copilot_rs::CopilotError::configuration(self.0.clone()))
+    }
 
-        let pending = serde_json::to_value(LoginStatus::Pending {
-            user_code: "ABCD-1234".into(),
-            verification_uri: "https://github.com/login/device".into(),
-        })
-        .unwrap();
-        assert_eq!(pending["status"], "pending");
-        assert_eq!(pending["user_code"], "ABCD-1234");
-        assert_eq!(
-            pending["verification_uri"],
-            "https://github.com/login/device"
-        );
-
-        assert_eq!(
-            serde_json::to_value(LoginStatus::Authorized).unwrap()["status"],
-            "authorized"
-        );
-
-        let failed = serde_json::to_value(LoginStatus::Failed {
-            error: "denied".into(),
-        })
-        .unwrap();
-        assert_eq!(failed["status"], "failed");
-        assert_eq!(failed["error"], "denied");
+    async fn poll_once(
+        &self,
+        _authorization: &gh_copilot_rs::DeviceAuthorization,
+    ) -> Result<gh_copilot_rs::PollOutcome, gh_copilot_rs::CopilotError> {
+        Err(gh_copilot_rs::CopilotError::configuration(self.0.clone()))
     }
 }

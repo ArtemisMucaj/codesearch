@@ -72,3 +72,18 @@ impl DomainError {
         matches!(self, Self::StorageError(_))
     }
 }
+
+/// Errors from the `openai-rs` chat/embedding/discovery crate cross the
+/// connector boundary as internal domain errors.
+impl From<openai_rs::OpenAiError> for DomainError {
+    fn from(error: openai_rs::OpenAiError) -> Self {
+        DomainError::internal(error.to_string())
+    }
+}
+
+/// Errors from the `gh-copilot-rs` crate cross the boundary the same way.
+impl From<gh_copilot_rs::CopilotError> for DomainError {
+    fn from(error: gh_copilot_rs::CopilotError) -> Self {
+        DomainError::internal(error.to_string())
+    }
+}
