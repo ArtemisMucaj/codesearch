@@ -8,18 +8,20 @@
 //! (a feature, a collaborating set of functions) that frequently cut across file
 //! and even directory boundaries, which the file-level view cannot show.
 //!
-//! The graph primitives and the algorithm are reused verbatim from
-//! `cluster_detection` (`Graph`, `leiden`, `kind_weight`) so the two levels stay
+//! The algorithm (`leiden::partition`) and the façade split
+//! (`leiden_coupling::partition_with_facade_split`) come from the same crates as
+//! the file level, and the edge-weight policy (`kind_weight`, the façade-split
+//! configuration) is shared with `cluster_detection`, so the two levels stay
 //! behaviourally identical and benefit from the same fixes.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+use leiden::Graph;
+use leiden_coupling::partition_with_facade_split;
 use tracing::{debug, warn};
 
-use super::cluster_detection::{
-    facade_split_config, kind_weight, leiden, partition_with_facade_split, Graph,
-};
+use super::cluster_detection::{facade_split_config, kind_weight};
 use crate::application::{AnalysisRepository, CallGraphUseCase};
 use crate::domain::{
     community_label, stable_community_id, CommunityMeta, DomainError, GraphEdge, GraphLevel,
@@ -151,7 +153,7 @@ impl SymbolClusterDetectionUseCase {
         // façades) when it is enabled.
         let partition = match facade_split_config() {
             Some(pct) => partition_with_facade_split(&sg.symbols, &sg.edges, pct),
-            None => leiden(&sg.graph),
+            None => leiden::partition(&sg.graph),
         };
         let num_communities = partition.iter().copied().max().map(|m| m + 1).unwrap_or(0);
 
