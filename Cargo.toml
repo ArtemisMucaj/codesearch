@@ -71,6 +71,11 @@ uuid = { version = "1.6", features = ["v4"] }
 leiden = { path = "../leiden-rs/leiden" }
 leiden-coupling = { path = "../leiden-rs/leiden-coupling" }
 
+# LLM chat, embeddings, and model discovery for OpenAI-compatible servers, plus
+# the GitHub Copilot backend, extracted into standalone crates.
+openai-rs = { path = "../openai-rs" }
+gh-copilot-rs = { path = "../gh-copilot-rs" }
+
 # Random number generation (for mock embeddings)
 rand = "0.8"
 
