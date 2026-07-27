@@ -18,8 +18,8 @@
 
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use serde_json::{json, Value};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use crate::cli::LlmTarget;
 use crate::connector::adapter::{
@@ -92,16 +92,15 @@ pub async fn models(
             // clear, actionable 400 instead. The config read is blocking file
             // I/O, so run it off the async runtime.
             let data_dir = state.container.data_dir().to_string();
-            let copilot = tokio::task::spawn_blocking(move || {
-                CodesearchConfig::load_copilot(&data_dir)
-            })
-            .await
-            .map_err(|e| {
-                ApiError::new(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("copilot config read task panicked: {e}"),
-                )
-            })??;
+            let copilot =
+                tokio::task::spawn_blocking(move || CodesearchConfig::load_copilot(&data_dir))
+                    .await
+                    .map_err(|e| {
+                        ApiError::new(
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("copilot config read task panicked: {e}"),
+                        )
+                    })??;
             if copilot.github_token.as_deref().unwrap_or("").is_empty() {
                 return Err(ApiError::bad_request(
                     "GitHub Copilot is not authenticated — run `codesearch copilot login`",

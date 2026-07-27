@@ -14,12 +14,11 @@ use codesearch::{
 };
 use tempfile::{tempdir, TempDir};
 
-/// Build an in-memory container suitable for tests: memory storage, mock
-/// embeddings, no reranking, no network.
+/// Build an in-memory container suitable for tests: in-memory vector storage,
+/// mock embeddings, no reranking, no network.
 ///
 /// Returns the `TempDir` guard alongside the container: the data directory
-/// backs the lazily-opened `memory.duckdb`, so it must outlive the server (the
-/// memory endpoints open it on first request).
+/// backs the DuckDB metadata store, so it must outlive the server.
 async fn test_container() -> (Arc<Container>, TempDir) {
     let dir = tempdir().expect("failed to create temp dir");
     let config = ContainerConfig {
@@ -167,7 +166,6 @@ async fn index_endpoint_describes_the_api() {
         "/api/clusters",
         "/api/couplings",
         "/api/channels",
-        "/api/memory",
     ] {
         assert!(
             paths.contains(&expected),
@@ -311,22 +309,6 @@ async fn repository_get_unknown_id_returns_404_json() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn memory_list_endpoint_returns_empty_shape() {
-    let (base_url, server, _dir) = spawn_management_server().await;
-
-    let resp = reqwest::get(format!("{base_url}/api/memory"))
-        .await
-        .expect("request to /api/memory failed");
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-
-    let body: serde_json::Value = resp.json().await.expect("response body was not JSON");
-    assert_eq!(body["count"], 0);
-    assert!(body["items"].is_array(), "items should be an array");
-
-    server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn openapi_endpoint_returns_valid_json() {
     let (base_url, server, _dir) = spawn_management_server().await;
 
@@ -426,30 +408,6 @@ async fn index_stream_emits_well_formed_sse_events() {
         parsed.is_object(),
         "SSE data payload should be a JSON object"
     );
-
-    server.abort();
-}
-
-/// Dream endpoints answer 503 when the server booted without a dream service
-/// (no LLM backend at startup) instead of panicking or 404ing.
-#[tokio::test(flavor = "multi_thread")]
-async fn memory_dream_endpoints_report_unavailable_without_service() {
-    let (base, server, _dir) = spawn_management_server().await;
-
-    let status = reqwest::get(format!("{base}/api/memory/dream"))
-        .await
-        .expect("GET /api/memory/dream failed")
-        .status();
-    assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
-
-    let client = reqwest::Client::new();
-    let status = client
-        .post(format!("{base}/api/memory/dream"))
-        .send()
-        .await
-        .expect("POST /api/memory/dream failed")
-        .status();
-    assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
     server.abort();
 }

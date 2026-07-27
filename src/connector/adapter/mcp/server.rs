@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::application::{CallGraphQuery, ChannelLinkOptions};
 use crate::connector::api::Container;
-use crate::domain::{FileEdge, GraphLevel, MemoryKind, Protocol, SearchQuery};
+use crate::domain::{FileEdge, GraphLevel, Protocol, SearchQuery};
 
 use super::tools::SearchResultOutput;
 
@@ -298,19 +298,6 @@ pub struct OverviewInput {
     pub top: usize,
 }
 
-/// Input parameters for the add_memory_resource tool
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct AddMemoryResourceInput {
-    /// A local file path or an http(s):// URL to store as a durable, recallable
-    /// resource. URLs and HTML are decluttered to Markdown; plain files are read
-    /// as-is.
-    pub source: String,
-
-    /// Name (slug) for the resource node under memory://resources. Derived from
-    /// the content's title when omitted. Reusing a name overwrites that resource.
-    pub name: Option<String>,
-}
-
 /// Input parameters for the list_symbol_clusters tool
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListSymbolClustersInput {
@@ -329,112 +316,12 @@ pub struct GetSymbolClusterInput {
     pub repository_id: String,
 }
 
-/// Input parameters for the search_memory tool
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct SearchMemoryInput {
-    /// Natural-language query describing what to recall
-    /// (e.g. "user's code style preferences", "how we fixed the flaky CI").
-    pub query: String,
-
-    /// Restrict to one memory kind: "preference", "experience", "skill", or
-    /// "fact". Omit to search across all kinds.
-    pub kind: Option<String>,
-
-    /// Restrict to memories relevant in one project/namespace (its items plus
-    /// globals). Omit to use the server's default project (the workspace it
-    /// serves); pass "*" to search across all projects.
-    pub project: Option<String>,
-
-    /// Maximum number of results to return (default: 10, server cap: 100)
-    #[serde(default = "default_limit")]
-    pub limit: usize,
-}
-
-/// Input parameters for the list_memories tool
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ListMemoriesInput {
-    /// Restrict to one memory kind: "preference", "experience", "skill", or
-    /// "fact". Omit to list all kinds.
-    pub kind: Option<String>,
-}
-
-/// Input parameters for the read_memory tool
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ReadMemoryInput {
-    /// A `memory://` node URI. Omit (or pass "memory://memory") to read the
-    /// whole-memory digest — the "read this first" summary of everything
-    /// stored. Use "memory://sessions" to see stored sessions, or a specific
-    /// "memory://sessions/<id>" to read one session's transcript.
-    pub uri: Option<String>,
-}
-
-/// A virtual-filesystem node returned by read_memory
-#[derive(Debug, Serialize)]
-pub struct MemoryNodeOutput {
-    /// The node's `memory://` URI
-    pub uri: String,
-    /// Node kind: memory, session, or resource
-    pub kind: String,
-    /// L0 — one-line abstract
-    pub r#abstract: String,
-    /// L1 — overview outline
-    pub overview: String,
-    /// L2 — full detail (e.g. a session transcript); empty for index nodes
-    pub content: String,
-    /// Child nodes (URI + abstract) when this node is a directory
-    pub children: Vec<MemoryNodeChild>,
-}
-
-/// A child entry listed under a directory node
-#[derive(Debug, Serialize)]
-pub struct MemoryNodeChild {
-    pub uri: String,
-    pub kind: String,
-    pub r#abstract: String,
-}
-
-/// A memory item returned by search_memory
-#[derive(Debug, Serialize)]
-pub struct MemorySearchResultOutput {
-    /// Item ID (stable across updates)
-    pub id: String,
-    /// Memory kind: preference, experience, skill, or fact
-    pub kind: String,
-    /// Snake_case topic identifier, unique per kind
-    pub name: String,
-    /// Full Markdown content of the memory
-    pub content: String,
-    /// Fused relevance score (higher is better)
-    pub score: f32,
-    /// Unix timestamp of the last update
-    pub updated_at: i64,
-}
-
-/// Parse an optional memory-kind filter, rejecting unknown values.
-fn parse_kind_filter(kind: &Option<String>) -> Result<Option<MemoryKind>, McpError> {
-    match kind {
-        None => Ok(None),
-        Some(k) => MemoryKind::parse(k).map(Some).ok_or_else(|| {
-            McpError::invalid_params(
-                format!(
-                    "Unknown memory kind '{k}' (expected preference, experience, skill, or fact)"
-                ),
-                None,
-            )
-        }),
-    }
-}
-
 // ── MCP Server ───────────────────────────────────────────────────────────────
 
 /// MCP Server that exposes codesearch functionality
 #[derive(Clone)]
 pub struct CodesearchMcpServer {
     container: Arc<Container>,
-    /// Memory project applied to `search_memory` when the caller does not pass
-    /// one. Set in stdio mode (where the process cwd is the workspace the
-    /// assistant is working in); `None` for shared HTTP servers.
-    default_memory_project: Option<String>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -443,16 +330,6 @@ impl CodesearchMcpServer {
     pub fn new(container: Arc<Container>) -> Self {
         Self {
             container,
-            default_memory_project: None,
-            tool_router: Self::tool_router(),
-        }
-    }
-
-    /// Like [`Self::new`], with a default memory project for `search_memory`.
-    pub fn with_default_memory_project(container: Arc<Container>, project: Option<String>) -> Self {
-        Self {
-            container,
-            default_memory_project: project,
             tool_router: Self::tool_router(),
         }
     }
@@ -1169,222 +1046,6 @@ impl CodesearchMcpServer {
 
         let json = serde_json::to_string_pretty(&report).map_err(|e| {
             McpError::internal_error(format!("Failed to serialize channel report: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
-    }
-
-    /// Recall long-term memories extracted from previous assistant sessions:
-    /// user preferences, reusable experiences, procedural skills, and project
-    /// facts. Hybrid semantic + keyword search over the memory store. Call this
-    /// at the start of a task to load relevant context — e.g. the user's code
-    /// style preferences before writing code, or past experiences before
-    /// debugging a familiar problem.
-    /// Memories are created with `codesearch memory import <session.jsonl>`.
-    #[tool(name = "search_memory")]
-    async fn search_memory(
-        &self,
-        params: Parameters<SearchMemoryInput>,
-    ) -> Result<CallToolResult, McpError> {
-        let input = params.0;
-        let kind = parse_kind_filter(&input.kind)?;
-        let limit = input.limit.min(MAX_LIMIT);
-        let project = match input.project.as_deref() {
-            Some("*") => None,
-            Some(s) => Some(s.to_string()),
-            None => self.default_memory_project.clone(),
-        };
-
-        let use_case = self.container.memory_search_use_case().map_err(|e| {
-            McpError::internal_error(format!("Failed to open memory store: {}", e), None)
-        })?;
-        let results = use_case
-            .execute(&input.query, kind, project.as_deref(), limit)
-            .await
-            .map_err(|e| McpError::internal_error(format!("Memory search failed: {}", e), None))?;
-
-        let outputs: Vec<MemorySearchResultOutput> = results
-            .into_iter()
-            .map(|(item, score)| MemorySearchResultOutput {
-                id: item.id().to_string(),
-                kind: item.kind().as_str().to_string(),
-                name: item.name().to_string(),
-                content: item.content().to_string(),
-                score,
-                updated_at: item.updated_at(),
-            })
-            .collect();
-
-        let json = serde_json::to_string_pretty(&outputs).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize memories: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
-    }
-
-    /// List stored long-term memories, newest first, optionally filtered by
-    /// kind. Use kind="preference" at session start to load every known user
-    /// preference at once; use search_memory instead when looking for something
-    /// specific.
-    #[tool(name = "list_memories")]
-    async fn list_memories(
-        &self,
-        params: Parameters<ListMemoriesInput>,
-    ) -> Result<CallToolResult, McpError> {
-        let input = params.0;
-        let kind = parse_kind_filter(&input.kind)?;
-
-        let repo = self.container.memory_repository().map_err(|e| {
-            McpError::internal_error(format!("Failed to open memory store: {}", e), None)
-        })?;
-        let items = repo
-            .list_items(kind)
-            .await
-            .map_err(|e| McpError::internal_error(format!("Memory listing failed: {}", e), None))?;
-
-        let json = serde_json::to_string_pretty(&items).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize memories: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
-    }
-
-    /// Read the memory virtual filesystem, level by level. Call this FIRST at
-    /// the start of a task with no arguments (or uri="memory://memory") to get
-    /// the whole-memory digest — a single abstract + overview of everything
-    /// known about the user and project — then drill in only where relevant.
-    /// A directory URI (e.g. "memory://sessions") returns its children with
-    /// one-line abstracts; a leaf URI (e.g. "memory://sessions/<id>") returns
-    /// the node's full detail, such as a session transcript.
-    #[tool(name = "read_memory")]
-    async fn read_memory(
-        &self,
-        params: Parameters<ReadMemoryInput>,
-    ) -> Result<CallToolResult, McpError> {
-        use crate::application::MEMORY_ROOT_URI;
-
-        let uri = params.0.uri.unwrap_or_else(|| MEMORY_ROOT_URI.to_string());
-
-        let repo = self.container.memory_repository().map_err(|e| {
-            McpError::internal_error(format!("Failed to open memory store: {}", e), None)
-        })?;
-
-        let node = repo
-            .find_node(&uri)
-            .await
-            .map_err(|e| McpError::internal_error(format!("Memory read failed: {}", e), None))?;
-
-        let children = repo
-            .list_child_nodes(&uri)
-            .await
-            .map_err(|e| McpError::internal_error(format!("Memory read failed: {}", e), None))?
-            .into_iter()
-            .map(|c| MemoryNodeChild {
-                uri: c.uri().to_string(),
-                kind: c.kind().as_str().to_string(),
-                r#abstract: c.abstract_().to_string(),
-            })
-            .collect::<Vec<_>>();
-
-        let output = match node {
-            Some(node) => {
-                // Mask internal manifest for Project digest nodes (index nodes
-                // have empty content by invariant; the manifest is bookkeeping).
-                let content = if node.kind() == crate::domain::NodeKind::Project {
-                    String::new()
-                } else {
-                    node.content().to_string()
-                };
-                MemoryNodeOutput {
-                    uri: node.uri().to_string(),
-                    kind: node.kind().as_str().to_string(),
-                    r#abstract: node.abstract_().to_string(),
-                    overview: node.overview().to_string(),
-                    content,
-                    children,
-                }
-            }
-            // A directory URI (e.g. memory://sessions) may have no node record
-            // of its own but still list children.
-            None if !children.is_empty() => MemoryNodeOutput {
-                uri: uri.clone(),
-                kind: "directory".to_string(),
-                r#abstract: String::new(),
-                overview: String::new(),
-                content: String::new(),
-                children,
-            },
-            None => {
-                return Ok(CallToolResult::success(vec![Content::text(format!(
-                    "No memory node found at '{uri}'."
-                ))]));
-            }
-        };
-
-        let json = serde_json::to_string_pretty(&output).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize memory node: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
-    }
-
-    /// Store a file or URL as a durable memory resource, recallable later with
-    /// `search_memory` / `read_memory`. The content is fetched (URLs and HTML are
-    /// decluttered to Markdown; plain files are read as-is), summarised into an
-    /// abstract + overview by the configured LLM, and saved under
-    /// `memory://resources/<name>` with the full text kept as its detail. Use
-    /// this to remember a design doc, spec, or reference page for future
-    /// sessions. Requires the LLM backend to be reachable, and the `defuddle`
-    /// CLI on PATH for URLs and HTML.
-    #[tool(name = "add_memory_resource")]
-    async fn add_memory_resource(
-        &self,
-        params: Parameters<AddMemoryResourceInput>,
-    ) -> Result<CallToolResult, McpError> {
-        use crate::connector::adapter::fetch_resource;
-        use crate::connector::api::controller::build_chat_client;
-
-        let input = params.0;
-
-        // Fetch first — a bad path/URL should fail before we spin up the LLM.
-        let fetched = fetch_resource(&input.source).await.map_err(|e| {
-            McpError::invalid_params(
-                format!("Failed to fetch resource '{}': {}", input.source, e),
-                None,
-            )
-        })?;
-
-        // An explicit name wins, else derive the slug from the fetched title.
-        let slug = crate::application::resource_slug(
-            input.name.as_deref().unwrap_or(&fetched.title),
-        );
-
-        let chat_client =
-            build_chat_client(self.container.llm_target(), self.container.data_dir()).map_err(
-                |e| McpError::internal_error(format!("Failed to init LLM backend: {}", e), None),
-            )?;
-        let summary = self
-            .container
-            .memory_summary_use_case(chat_client)
-            .map_err(|e| {
-                McpError::internal_error(format!("Failed to open memory store: {}", e), None)
-            })?;
-
-        let node = summary
-            .summarize_resource(&slug, &fetched.source, &fetched.text)
-            .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Failed to store resource: {}", e), None)
-            })?;
-
-        // Keep the whole-memory digest in sync — best-effort, the resource is
-        // already stored, so a digest hiccup must not fail the call.
-        if let Err(e) = summary.regenerate_digest().await {
-            tracing::warn!("failed to regenerate memory digest after add_memory_resource: {e}");
-        }
-
-        let json = serde_json::to_string_pretty(&node).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize resource node: {}", e), None)
         })?;
 
         Ok(CallToolResult::success(vec![Content::text(json)]))

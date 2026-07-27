@@ -165,7 +165,10 @@ mod tests {
         .unwrap();
         assert_eq!(pending["status"], "pending");
         assert_eq!(pending["user_code"], "ABCD-1234");
-        assert_eq!(pending["verification_uri"], "https://github.com/login/device");
+        assert_eq!(
+            pending["verification_uri"],
+            "https://github.com/login/device"
+        );
 
         assert_eq!(
             serde_json::to_value(LoginStatus::Authorized).unwrap()["status"],

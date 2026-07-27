@@ -10,7 +10,7 @@ use crate::connector::adapter::{AnthropicClient, CopilotChatClient, OpenAiChatCl
 /// its endpoint from the environment (`ANTHROPIC_*`); the OpenAI backend resolves
 /// a named endpoint from `<data_dir>/config.json` (the configured `active` one)
 /// and falls back to `OPENAI_*`; the Copilot backend reads its token and model
-/// from config. Shared by every controller that needs an LLM (explain, memory,
+/// from config. Shared by every controller that needs an LLM (explain,
 /// community naming) so provider dispatch lives in one place.
 pub(crate) fn build_chat_client(llm: LlmTarget, data_dir: &str) -> Result<Arc<dyn ChatClient>> {
     Ok(match llm {
@@ -35,7 +35,6 @@ pub mod explain_controller;
 pub mod impact_controller;
 pub mod index_controller;
 pub mod list_repositories_controller;
-pub mod memory_controller;
 pub mod overview_controller;
 pub mod search_controller;
 pub mod stats_controller;
@@ -53,7 +52,6 @@ pub use explain_controller::ExplainController;
 pub use impact_controller::ImpactController;
 pub use index_controller::IndexController;
 pub use list_repositories_controller::ListRepositoriesController;
-pub use memory_controller::{run_import_picker_ui, MemoryController};
 pub use overview_controller::OverviewController;
 pub use search_controller::SearchController;
 pub use stats_controller::StatsController;

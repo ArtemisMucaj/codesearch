@@ -150,16 +150,6 @@ async fn main() -> Result<()> {
     // file-based logging; the other openai subcommands are plain stdout but the
     // uniform branch is harmless.
     let is_openai = matches!(&cli.command, Commands::Openai { .. });
-    // `memory import` with no PATH opens an interactive picker (a full-screen
-    // TUI) before any container is built. It owns the terminal like the TUI, so
-    // it needs the same file-based logging and the same "open first, build the
-    // heavy container only afterwards" treatment.
-    let is_import_picker = matches!(
-        &cli.command,
-        Commands::Memory {
-            subcommand: codesearch::MemorySubcommand::Import { path: None, .. },
-        }
-    );
 
     // All logs are written as JSON to a file under the data directory (where the
     // config lives, default `~/.codesearch/codesearch.log`) regardless of the
@@ -200,7 +190,7 @@ async fn main() -> Result<()> {
     // may be written to the console there. For the plain CLI we additionally
     // surface ERROR-level logs to stderr in a human-readable text format — no
     // warn/info/debug, so routine output stays clean.
-    let owns_terminal = is_tui || is_import_picker || is_copilot || is_openai;
+    let owns_terminal = is_tui || is_copilot || is_openai;
     let is_mcp_stdio = is_mcp && http_port.is_none();
     let console_error_layer = if owns_terminal || is_mcp_stdio {
         None
@@ -337,9 +327,6 @@ async fn main() -> Result<()> {
                 | Commands::Couplings { .. }
                 | Commands::Visualize { .. }
                 | Commands::Tui { .. }
-                // Memory commands only touch memory.duckdb, never the code
-                // index, so the index database can stay read-only.
-                | Commands::Memory { .. }
         );
 
     let config = ContainerConfig {
@@ -367,24 +354,9 @@ async fn main() -> Result<()> {
             // HTTP mode
             run_http_server(container, port, public_bind).await?;
         } else {
-            // Stdio mode: the process cwd is the workspace this server was
-            // launched for, so memory searches default to its project.
+            // Stdio mode.
             tracing::info!("Starting codesearch MCP server (stdio)");
-            let db_path = container.metadata_db_path();
-            let cwd = std::env::current_dir().ok();
-            let default_project = if let Some(cwd) = cwd {
-                let cwd_str = cwd.to_string_lossy().to_string();
-                tokio::task::spawn_blocking(move || {
-                    codesearch::resolve_memory_project(Some(&db_path), &cwd_str)
-                })
-                .await
-                .ok()
-                .flatten()
-            } else {
-                None
-            };
-            let server =
-                CodesearchMcpServer::with_default_memory_project(container, default_project);
+            let server = CodesearchMcpServer::new(container);
             let service = server.serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
         }
@@ -402,24 +374,8 @@ async fn main() -> Result<()> {
 
         let container = Arc::new(Container::new(config).await?);
 
-        // Dream scheduler: harvests finished sessions and consolidates memory
-        // on the configured cadence (config.json `memory` section). Built
-        // best-effort — a server without a usable LLM backend still serves,
-        // it just cannot dream.
-        let dream = match codesearch::DreamService::build(&container) {
-            Ok(service) => {
-                tokio::spawn(Arc::clone(&service).run_scheduler());
-                Some(service)
-            }
-            Err(e) => {
-                tracing::warn!("dreaming disabled: {e:#}");
-                None
-            }
-        };
-
         let mcp = run_http_server(container.clone(), serve_mcp_port, serve_public);
-        let mgmt =
-            codesearch::run_management_server(container, serve_mgmt_port, serve_public, dream);
+        let mgmt = codesearch::run_management_server(container, serve_mgmt_port, serve_public);
 
         tracing::info!(
             "codesearch serve: MCP on port {}, management API on port {}",
@@ -432,61 +388,6 @@ async fn main() -> Result<()> {
             res = mgmt => res?,
         }
         return Ok(());
-    }
-
-    // Interactive `memory import`: open the picker BEFORE building the
-    // container so the TUI appears instantly instead of waiting for ONNX models
-    // to load. Discovery streams into the picker on background threads. Only if
-    // the user selects sessions do we build the (heavy) container and extract.
-    if is_import_picker {
-        if let Commands::Memory {
-            subcommand: codesearch::MemorySubcommand::Import { llm, .. },
-        } = cli.command
-        {
-            use codesearch::tui::import_picker::{ImportEvent, ImportRequest};
-
-            // Two channels bridge the (blocking) picker UI and the (async)
-            // import worker: requests flow UI → worker (a tokio channel so the
-            // worker `recv().await`s instead of pinning a runtime thread),
-            // progress flows back over a std channel the picker drains by poll.
-            let (req_tx, req_rx) = tokio::sync::mpsc::unbounded_channel::<ImportRequest>();
-            let (evt_tx, evt_rx) = std::sync::mpsc::channel::<ImportEvent>();
-
-            // Worker: build the container (loads models) in the background, then
-            // serve import requests until the picker closes the request channel.
-            // The picker is already interactive while this runs.
-            let worker = tokio::spawn(async move {
-                let container = match Container::new(config).await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        let _ = evt_tx.send(ImportEvent::ContainerFailed {
-                            error: e.to_string(),
-                        });
-                        return;
-                    }
-                };
-                let controller = codesearch::MemoryController::new(&container);
-                if let Err(e) = controller.serve_import_requests(req_rx, evt_tx, llm).await {
-                    tracing::error!("import worker failed: {e}");
-                }
-            });
-
-            // The picker owns the terminal; run it on a blocking thread so it
-            // never contends with the async runtime's reactor. Dropping req_tx
-            // when it returns signals the worker to finish.
-            let ui = tokio::task::spawn_blocking(move || {
-                codesearch::run_import_picker_ui(evt_rx, req_tx)
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("session picker task panicked: {e}"))?;
-            ui?;
-
-            // The picker closed; the request channel is dropped, so the worker
-            // loop ends. Wait for any in-flight import to finish cleanly.
-            let _ = worker.await;
-            return Ok(());
-        }
-        unreachable!("is_import_picker is only set for Memory::Import with no path")
     }
 
     let container = if is_tui {

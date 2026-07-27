@@ -1,7 +1,6 @@
 pub(crate) mod context;
 mod format;
 mod impact;
-mod memory;
 mod search;
 
 use ratatui::layout::{Constraint, Layout};
@@ -27,7 +26,6 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         ActiveMode::Search => search::render(frame, areas[1], state),
         ActiveMode::Impact => impact::render(frame, areas[1], state),
         ActiveMode::Context => context::render(frame, areas[1], state),
-        ActiveMode::Memory => memory::render(frame, areas[1], state),
     }
 
     render_status(frame, areas[2], state);
