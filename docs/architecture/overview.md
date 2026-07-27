@@ -83,22 +83,12 @@ Architecture analysis:
 - **FileRelationshipUseCase** — file- and cross-repo dependency graph (`uses`).
 - **RepositoryOverviewUseCase** — combines every analysis into one dossier.
 
-Long-term memory:
-
-- **memory_extraction** / **import_session** — parse a transcript, prefetch
-  related memories, extract upsert/delete operations via an LLM, apply them.
-- **memory_summary** — the L0/L1 virtual-filesystem layer and the whole-memory
-  digest.
-- **memory_search** — hybrid recall with RRF.
-- **memory_dream** — the global consolidation cycle (harvest → consolidate →
-  reflect → synthesize skills → refresh).
-
 ### Ports (`src/application/interfaces/`)
 
 Trait boundaries the use cases depend on, implemented by connector adapters:
 `VectorRepository`, `MetadataRepository`, `CallGraphRepository`,
 `FileHashRepository`, `EmbeddingService`, `RerankingService`, `ParserService`,
-`ChatClient`, and `MemoryRepository`. All are `#[async_trait]`.
+and `ChatClient`. All are `#[async_trait]`.
 
 ## Domain layer (`src/domain/`)
 
@@ -113,8 +103,6 @@ methods, a `reconstitute()` factory for adapters):
 - **SearchResult / SearchQuery** — search value objects with relevance and
   filter helpers.
 - **Language** — the supported-language enum (`primary_extension()`, …).
-- **Memory** — `MemoryKind`, `MemoryItem`, `SessionTranscript`, `MemoryNode`,
-  and the operation types.
 - **CodeSearchError** — the unified `thiserror` error enum.
 
 ## Connector layer (`src/connector/`)
@@ -122,8 +110,7 @@ methods, a `reconstitute()` factory for adapters):
 ### Adapters (`src/connector/adapter/`)
 
 - **DuckDB** (`adapter/duckdb/`, `duckdb_*.rs`) — metadata, vectors (HNSW /
-  cosine via the VSS extension), the call graph, and file hashes. Plus the
-  separate `duckdb_memory_repository.rs` for `memory.duckdb`.
+  cosine via the VSS extension), the call graph, and file hashes.
 - **ONNX Runtime** (`adapter/ort/`) — `OrtEmbedding` (sentence-transformers)
   and `OrtReranking` (cross-encoder).
 - **tree-sitter** (`adapter/tree_sitter*`) — multi-language AST parsing and

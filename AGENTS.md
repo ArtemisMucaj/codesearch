@@ -85,7 +85,6 @@ The codebase follows **Domain-Driven Design (DDD)** with a strict **Ports & Adap
 | File / cross-repo relationship graph (`uses`) | `src/application/use_cases/file_relationship.rs` |
 | Combined repository overview (`overview`) | `src/application/use_cases/repository_overview.rs` |
 | Source snippet lookup | `src/application/use_cases/snippet_lookup.rs` |
-| Memory dream (harvest finished sessions + consolidate the memory store) | `src/application/use_cases/memory_dream.rs` |
 | List / delete repositories | `src/application/use_cases/{list,delete}_repository.rs` |
 
 ### Dependency Injection
@@ -182,8 +181,11 @@ how release binaries locate ONNX Runtime and must not ship by default.
 ### LLM backends
 
 Three interchangeable [`ChatClient`](src/application/interfaces/chat_client.rs)
-backends power LLM features (query expansion, `explain`, community naming, memory
-extraction, memory dreaming). Select one with the global `--llm-target`:
+backends power LLM features (query expansion, `explain`, community naming).
+The OpenAI-compatible and Copilot backends are built on the standalone
+`openai-rs` / `gh-copilot-rs` crates; the codesearch adapters are thin wrappers
+that resolve credentials from config and map errors at the boundary. Select one
+with the global `--llm-target`:
 
 | `--llm-target` | Backend | Config |
 |---|---|---|
@@ -227,15 +229,17 @@ masked), `PUT /api/llm/endpoints/{name}` (write-only `api_key`), `POST
 
 The Copilot backend talks to the Copilot API (`https://api.githubcopilot.com`,
 OpenAI-compatible) **directly over HTTP** — no external CLI. `codesearch copilot
-login` runs the GitHub OAuth device flow itself (prints the code + verification
-URL, polls for the token; see `connector/adapter/copilot_auth.rs`), stores the
-`ghu_…` token in `config.json` (mode `0600`), then opens a model picker. The
-chat/streaming logic is shared with the OpenAI-compatible client
-(`OpenAiChatClient::with_parts`); only model discovery (`GET /models`, richer
-metadata) is Copilot-specific. `copilot models` / `copilot status` inspect the
-account. In `serve` mode, `GET /api/llm/models` lists the active backend's models
-(`?target=openai|copilot`) and the streaming endpoints accept a `model` override
-so a client can switch models on the fly.
+login` runs the GitHub OAuth device flow via `gh-copilot-rs`
+(`GitHubDeviceFlow` + `LoginUseCase`: prints the code + verification URL, polls
+for the token), stores the `ghu_…` token in `config.json` (mode `0600`), then
+opens a model picker. The chat/streaming logic is shared with the
+OpenAI-compatible client (the codesearch `CopilotChatClient` wires a
+Copilot-headed transport into `OpenAiChatClient::with_transport`); only model
+discovery (`GET /models`, richer metadata) is Copilot-specific and comes from
+`gh-copilot-rs`'s `CopilotModelCatalog`. `copilot models` / `copilot status`
+inspect the account. In `serve` mode, `GET /api/llm/models` lists the active
+backend's models (`?target=openai|copilot`) and the streaming endpoints accept a
+`model` override so a client can switch models on the fly.
 
 Model discovery is uniform for OpenAI (`GET /v1/models`) and Copilot (`GET
 /models`); the Anthropic Messages API has no portable discovery endpoint and is
