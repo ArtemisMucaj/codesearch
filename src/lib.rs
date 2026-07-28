@@ -46,6 +46,7 @@ pub use domain::{
     CouplingReport, DomainError, Embedding, EmbeddingConfig, EndpointSource, ExecutionFeature,
     FeatureNode, FileHash, IndexingStatus, Language, NodeType, Protocol, ReferenceKind, Repository,
     SearchQuery, SearchResult, SymbolCommunity, SymbolCommunityGraph, SymbolReference, VectorStore,
+    NAMESPACE_SCOPE_ID,
 };
 
 pub use domain::{CommunityMeta, GraphEdge, GraphLevel, GraphNode, GraphView};

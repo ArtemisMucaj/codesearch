@@ -176,12 +176,13 @@ impl<'a> Router<'a> {
             Commands::Clusters { subcommand } => match subcommand {
                 ClustersSubcommand::List {
                     repository,
+                    global,
                     format,
                     llm,
                     no_llm,
                 } => {
                     self.clusters_controller
-                        .list(repository, format, llm, no_llm)
+                        .list(repository, global, format, llm, no_llm)
                         .await
                 }
                 ClustersSubcommand::Get {
@@ -222,6 +223,7 @@ impl<'a> Router<'a> {
             }
             Commands::Visualize {
                 repository,
+                global,
                 level,
                 format,
                 output,
@@ -229,7 +231,9 @@ impl<'a> Router<'a> {
                 node_limit,
             } => {
                 self.visualize_controller
-                    .visualize(repository, level, format, output, aggregate, node_limit)
+                    .visualize(
+                        repository, global, level, format, output, aggregate, node_limit,
+                    )
                     .await
             }
             Commands::Create { .. } => Err(anyhow::anyhow!(

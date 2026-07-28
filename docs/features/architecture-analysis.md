@@ -112,6 +112,10 @@ codesearch clusters list my-repo --format json
 
 # Show which cluster a specific file belongs to (path as indexed, repo-relative)
 codesearch clusters get src/api/auth.rs my-repo
+
+# Namespace-wide clusters: one Leiden run over every indexed repository,
+# cross-repository edges included (members are shown as repo:path)
+codesearch clusters list --global
 ```
 
 For a Markdown module table combined with every other analysis (symbol
@@ -124,6 +128,7 @@ returns the same combined report as JSON (without the LLM executive summary).
 | Flag | Subcommand | Default | Description |
 |------|------------|---------|-------------|
 | `-F, --format` | `list`, `get` | `text` | Output format: `text` or `json` (vimgrep is not supported) |
+| `-g, --global` | `list` | off | Detect clusters across **every repository in the namespace** instead of a single one: one global Leiden run over the combined file graph with cross-repository edges included. Members are repository-qualified (`repo:path`), and two repositories that share a relative path stay distinct nodes. The result is cached like a per-repository run and invalidated whenever *any* repository in the namespace is re-indexed or deleted. Conflicts with a repository argument. |
 
 > The `overview` subcommand always emits a Markdown table and takes no `--format` flag.
 
@@ -316,6 +321,9 @@ codesearch visualize my-repo --format canvas --output graph.canvas
 
 # Collapse to a one-node-per-community meta-graph (auto-applied for huge graphs)
 codesearch visualize my-repo --aggregate --output overview.html
+
+# Namespace-wide picture: every repository, cross-repo edges, global clusters
+codesearch visualize --global --output namespace.html
 ```
 
 ### Options
@@ -323,6 +331,7 @@ codesearch visualize my-repo --aggregate --output overview.html
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-l, --level` | `file` | Which graph: `file` (modules) or `symbol` (behavioural communities) |
+| `-g, --global` | off | Render the namespace-wide graph (every repository, cross-repository edges, coloured by the global Leiden clusters). File level only; conflicts with a repository argument |
 | `-F, --format` | `html` | `html`, `svg`, or `canvas` |
 | `-o, --output` | `codesearch-graph.<ext>` | Path to write the artifact to |
 | `--aggregate` | `false` | Render the community meta-graph instead of every node |

@@ -12,7 +12,7 @@ use serde::Deserialize;
 use crate::application::{aggregate, DEFAULT_NODE_LIMIT};
 use crate::domain::GraphView;
 
-use super::super::error::ApiResult;
+use super::super::error::{ApiError, ApiResult};
 use super::super::server::AppState;
 
 /// The graph level to build: file-dependency graph or symbol call graph.
@@ -32,6 +32,11 @@ pub struct GraphParams {
     /// Repository to analyse (name or UUID). Omit to auto-detect from the cwd.
     #[serde(default)]
     pub repository: Option<String>,
+    /// Render the namespace-wide graph instead of one repository's: every
+    /// indexed repository, cross-repository edges included, coloured by the
+    /// global Leiden clusters. File level only.
+    #[serde(default)]
+    pub global: bool,
     /// Graph level: `file` (default) or `symbol`.
     #[serde(default)]
     pub level: GraphViewLevel,
@@ -42,34 +47,58 @@ pub struct GraphParams {
     pub aggregate: Option<bool>,
 }
 
-/// `GET /api/graph` — the render-ready [`GraphView`] for one repository at the
-/// requested level. Nodes carry community/degree/language; edges reference node
-/// indices with a weight and dominant kind; communities carry name/size/cohesion.
+/// `GET /api/graph` — the render-ready [`GraphView`] for one repository (or,
+/// with `?global=true`, the whole namespace) at the requested level. Nodes
+/// carry community/degree/language; edges reference node indices with a weight
+/// and dominant kind; communities carry name/size/cohesion.
 pub async fn graph(
     State(state): State<AppState>,
     Query(params): Query<GraphParams>,
 ) -> ApiResult<Json<GraphView>> {
-    let repository_id = state
-        .container
-        .resolve_repository_id(params.repository.as_deref())
-        .await;
-
-    // Build the render-ready graph from the requested level, reusing the same
-    // use-case builders the `visualize` CLI drives.
-    let view: GraphView = match params.level {
-        GraphViewLevel::File => {
-            state
-                .container
-                .cluster_detection_use_case()
-                .graph_view(&repository_id)
-                .await?
+    // Build the render-ready graph from the requested scope and level, reusing
+    // the same use-case builders the `visualize` CLI drives.
+    let view: GraphView = if params.global {
+        if params.repository.is_some() {
+            return Err(ApiError::bad_request(
+                "`repository` conflicts with `global`: the namespace-wide graph \
+                 spans every repository",
+            ));
         }
-        GraphViewLevel::Symbol => {
-            state
-                .container
-                .symbol_cluster_detection_use_case()
-                .graph_view(&repository_id)
-                .await?
+        match params.level {
+            GraphViewLevel::File => {
+                state
+                    .container
+                    .cluster_detection_use_case()
+                    .namespace_graph_view()
+                    .await?
+            }
+            GraphViewLevel::Symbol => {
+                return Err(ApiError::bad_request(
+                    "`global` supports level=file only: symbol communities are \
+                     detected per repository",
+                ))
+            }
+        }
+    } else {
+        let repository_id = state
+            .container
+            .resolve_repository_id(params.repository.as_deref())
+            .await;
+        match params.level {
+            GraphViewLevel::File => {
+                state
+                    .container
+                    .cluster_detection_use_case()
+                    .graph_view(&repository_id)
+                    .await?
+            }
+            GraphViewLevel::Symbol => {
+                state
+                    .container
+                    .symbol_cluster_detection_use_case()
+                    .graph_view(&repository_id)
+                    .await?
+            }
         }
     };
 
