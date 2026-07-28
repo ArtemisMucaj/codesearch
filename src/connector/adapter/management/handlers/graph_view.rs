@@ -34,9 +34,17 @@ pub struct GraphParams {
     pub repository: Option<String>,
     /// Render the namespace-wide graph instead of one repository's: every
     /// indexed repository, cross-repository edges included, coloured by the
-    /// global Leiden clusters. File level only.
+    /// global Leiden clusters. Works at either level.
     #[serde(default)]
     pub global: bool,
+    /// Namespace to scope a `global` run to. Defaults to the server's own
+    /// namespace. Without this the endpoint silently ignored a client's
+    /// requested namespace and built the graph over whichever one `serve` was
+    /// started in — so a namespace-wide graph could come back full of another
+    /// namespace's repositories while its couplings (which DID honour the
+    /// param) described a different set.
+    #[serde(default)]
+    pub namespace: Option<String>,
     /// Graph level: `file` (default) or `symbol`.
     #[serde(default)]
     pub level: GraphViewLevel,
@@ -64,20 +72,20 @@ pub async fn graph(
                  spans every repository",
             ));
         }
-        // This endpoint has no namespace param, so it uses the server's default.
+        let namespace = params.namespace.as_deref();
         match params.level {
             GraphViewLevel::File => {
                 state
                     .container
                     .cluster_detection_use_case()
-                    .namespace_graph_view(None)
+                    .namespace_graph_view(namespace)
                     .await?
             }
             GraphViewLevel::Symbol => {
                 state
                     .container
                     .symbol_cluster_detection_use_case()
-                    .namespace_graph_view(None)
+                    .namespace_graph_view(namespace)
                     .await?
             }
         }

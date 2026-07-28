@@ -300,13 +300,27 @@ async fn clusters_and_graph_endpoints_support_global_scope() {
     );
     assert_eq!(body["level"], "symbol");
 
-    // Conflicting scope selectors and unsupported combinations are 400s.
-    // (`/api/symbol-clusters` — the structured community list — has no global
-    // form; the render-ready `/api/graph` above is the symbol-global surface.)
+    // `/api/symbol-clusters` now has a global form too, scoped the same way as
+    // the file level, so the structured community list matches what
+    // `/api/graph?level=symbol&global=true` renders.
+    let resp = reqwest::get(format!("{base_url}/api/symbol-clusters?global=true&namespace=search"))
+        .await
+        .expect("global symbol-clusters request failed");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .expect("global symbol-clusters body was not JSON");
+    assert_eq!(
+        body["repository_id"],
+        codesearch::namespace_scope_id("search")
+    );
+
+    // Conflicting scope selectors are still 400s.
     for path in [
         "/api/clusters?global=true&repository=fixture-repo",
         "/api/graph?global=true&repository=fixture-repo",
-        "/api/symbol-clusters?global=true",
+        "/api/symbol-clusters?global=true&repository=fixture-repo",
     ] {
         let resp = reqwest::get(format!("{base_url}{path}"))
             .await
