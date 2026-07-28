@@ -39,6 +39,96 @@ pub struct CodesearchConfig {
     /// Named OpenAI-compatible endpoints (LM Studio, vLLM, hosted OpenAI, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai: Option<OpenAiConfig>,
+
+    /// Per-usage overrides, keyed by [`LlmUsage::as_str`].
+    ///
+    /// `llm_target` + `openai.active` answer "which backend", but the jobs here
+    /// differ in what they need: explaining a call flow wants a strong
+    /// reasoner, labelling a few hundred communities wants something cheap and
+    /// fast. A usage with no entry inherits the active backend, so this stays
+    /// empty until someone deliberately splits one out.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub usages: std::collections::BTreeMap<String, UsageBinding>,
+}
+
+/// The reserved endpoint name that selects the Copilot backend for one usage,
+/// independently of the active `llm_target`.
+pub const COPILOT_ENDPOINT: &str = "copilot";
+
+/// One usage's chosen backend + model. Either half may be absent: naming only
+/// the model keeps the active backend and swaps the model, which is the common
+/// case when one server hosts several.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageBinding {
+    /// A registered OpenAI endpoint name, or the reserved `"copilot"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// A distinct LLM job codesearch runs. Each can name its own endpoint + model;
+/// unset ones follow the active backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmUsage {
+    /// Streamed natural-language explanation of a symbol's call flow.
+    ExplainCode,
+    /// Display names for file and symbol communities.
+    LabelCommunities,
+    /// The closing executive summary on a repository overview.
+    SummarizeOverview,
+    /// Rewriting a search query into related terms before retrieval.
+    ExpandQueries,
+}
+
+impl LlmUsage {
+    pub const ALL: [LlmUsage; 4] = [
+        LlmUsage::ExplainCode,
+        LlmUsage::LabelCommunities,
+        LlmUsage::SummarizeOverview,
+        LlmUsage::ExpandQueries,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LlmUsage::ExplainCode => "explain_code",
+            LlmUsage::LabelCommunities => "label_communities",
+            LlmUsage::SummarizeOverview => "summarize_overview",
+            LlmUsage::ExpandQueries => "expand_queries",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|u| u.as_str() == s)
+    }
+
+    /// Human-readable label for a settings screen.
+    pub fn label(&self) -> &'static str {
+        match self {
+            LlmUsage::ExplainCode => "Explain code",
+            LlmUsage::LabelCommunities => "Label communities",
+            LlmUsage::SummarizeOverview => "Summarize overview",
+            LlmUsage::ExpandQueries => "Expand queries",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            LlmUsage::ExplainCode => {
+                "Stream a natural-language walkthrough of a symbol's call flow. Benefits from a strong reasoner."
+            }
+            LlmUsage::LabelCommunities => {
+                "Name detected file and symbol communities. Runs over hundreds of clusters, so favour something fast."
+            }
+            LlmUsage::SummarizeOverview => {
+                "Write the closing executive summary on a repository overview."
+            }
+            LlmUsage::ExpandQueries => {
+                "Rewrite a search query into related terms before retrieval. Resolved once at start-up."
+            }
+        }
+    }
 }
 
 /// A set of named OpenAI-compatible endpoints plus which one is active.

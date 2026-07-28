@@ -27,8 +27,7 @@ use serde_json::{json, Value};
 
 use crate::cli::LlmTarget;
 use crate::connector::adapter::{
-    CodesearchConfig, CopilotChatClient, OpenAiChatClient, OpenAiEndpoint,
-};
+    CodesearchConfig, CopilotChatClient, OpenAiChatClient, OpenAiEndpoint, LlmUsage, UsageBinding, COPILOT_ENDPOINT};
 
 use super::super::error::{ApiError, ApiResult};
 use super::super::server::AppState;
@@ -350,4 +349,130 @@ pub async fn set_copilot_model(
     cfg.save_async(&data_dir).await?;
 
     get_target(State(state)).await
+}
+
+// ── Per-usage model selection ────────────────────────────────────────────────
+
+/// Render one usage: what it is, and which backend + model actually answers it.
+///
+/// `inherited` distinguishes "follows the active backend" from a deliberate
+/// per-usage choice — without it a settings screen can't tell the user whether
+/// switching the backend will move this usage too.
+fn usage_json(cfg: &CodesearchConfig, usage: LlmUsage, active: LlmTarget) -> Value {
+    let binding = cfg.usages.get(usage.as_str());
+    let inherited = binding.is_none();
+
+    let (endpoint, model) = match binding {
+        Some(b) if b.endpoint.as_deref() == Some(COPILOT_ENDPOINT) => (
+            Some(COPILOT_ENDPOINT.to_string()),
+            b.model
+                .clone()
+                .or_else(|| cfg.copilot.as_ref().and_then(|c| c.model.clone())),
+        ),
+        _ => {
+            let name = binding
+                .and_then(|b| b.endpoint.clone())
+                .or_else(|| match active {
+                    LlmTarget::Copilot => Some(COPILOT_ENDPOINT.to_string()),
+                    _ => cfg.openai.as_ref().and_then(|o| o.active.clone()),
+                });
+            let model = binding.and_then(|b| b.model.clone()).or_else(|| {
+                match (active, name.as_deref()) {
+                    (LlmTarget::Copilot, _) | (_, Some(COPILOT_ENDPOINT)) => {
+                        cfg.copilot.as_ref().and_then(|c| c.model.clone())
+                    }
+                    _ => name
+                        .as_deref()
+                        .and_then(|n| cfg.openai.as_ref()?.endpoints.get(n))
+                        .and_then(|e| e.model.clone()),
+                }
+            });
+            (name, model)
+        }
+    };
+
+    json!({
+        "id": usage.as_str(),
+        "label": usage.label(),
+        "description": usage.description(),
+        "kind": "chat",
+        "endpoint": endpoint,
+        "model": model,
+        "inherited": inherited,
+        // Query expansion pins its client when `serve` boots, so a change only
+        // takes effect on restart. Say so rather than let it look broken.
+        "requires_restart": usage == LlmUsage::ExpandQueries,
+    })
+}
+
+/// `GET /api/llm/usages` — every LLM job this server runs and what answers it.
+pub async fn list_usages(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let cfg = CodesearchConfig::load(state.container.data_dir()).unwrap_or_default();
+    let active = state.container.llm_target();
+    let usages: Vec<Value> = LlmUsage::ALL
+        .iter()
+        .map(|u| usage_json(&cfg, *u, active))
+        .collect();
+    Ok(Json(json!({ "usages": usages })))
+}
+
+/// Body for `PUT /api/llm/usages/{id}`. Both fields absent clears the override.
+#[derive(Debug, Deserialize)]
+pub struct SetUsageBody {
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// `PUT /api/llm/usages/{id}` — bind one usage to a backend + model.
+pub async fn set_usage(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<SetUsageBody>,
+) -> ApiResult<Json<Value>> {
+    let usage = LlmUsage::parse(&id)
+        .ok_or_else(|| ApiError::bad_request(format!("unknown LLM usage '{id}'")))?;
+
+    let data_dir = state.container.data_dir().to_string();
+    let mut cfg = CodesearchConfig::load(&data_dir).unwrap_or_default();
+
+    // Refuse an endpoint that isn't registered: the resolver treats a dangling
+    // name as "unset" and silently falls back, which reads as the setting being
+    // ignored. `copilot` is reserved and never appears in `endpoints`.
+    if let Some(name) = body.endpoint.as_deref() {
+        let known = name == COPILOT_ENDPOINT
+            || cfg
+                .openai
+                .as_ref()
+                .is_some_and(|o| o.endpoints.contains_key(name));
+        if !known {
+            return Err(ApiError::not_found(format!(
+                "no LLM endpoint named '{name}'"
+            )));
+        }
+    }
+
+    if body.endpoint.is_none() && body.model.is_none() {
+        cfg.usages.remove(usage.as_str());
+    } else {
+        cfg.usages.insert(
+            usage.as_str().to_string(),
+            UsageBinding {
+                endpoint: body.endpoint,
+                model: body.model,
+            },
+        );
+    }
+
+    let to_write = cfg.clone();
+    tokio::task::spawn_blocking(move || to_write.save(&data_dir))
+        .await
+        .map_err(|e| ApiError::new(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("config write task panicked: {e}"),
+            ))??;
+
+    let active = state.container.llm_target();
+    Ok(Json(usage_json(&cfg, usage, active)))
 }

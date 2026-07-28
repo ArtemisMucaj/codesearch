@@ -567,7 +567,13 @@ impl Container {
                     Arc::new(c)
                 }
                 LlmTarget::OpenAi => {
-                    let c = OpenAiChatClient::from_config(&config.data_dir, None)?;
+                    // Query expansion may name its own endpoint + model.
+                    let binding = expand_binding(&config.data_dir);
+                    let c = OpenAiChatClient::from_config_with_model(
+                        &config.data_dir,
+                        binding.endpoint.as_deref(),
+                        binding.model.as_deref(),
+                    )?;
                     debug!(
                         "Using OpenAI query expander (url={})",
                         c.configured_base_url()
@@ -575,7 +581,11 @@ impl Container {
                     Arc::new(c)
                 }
                 LlmTarget::Copilot => {
-                    let c = CopilotChatClient::from_data_dir(&config.data_dir)?;
+                    let binding = expand_binding(&config.data_dir);
+                    let c = CopilotChatClient::from_data_dir_with_model(
+                        &config.data_dir,
+                        binding.model.clone(),
+                    )?;
                     debug!(
                         "Using Copilot query expander (model={:?})",
                         c.configured_model()
@@ -898,4 +908,19 @@ impl Container {
     pub fn memory_storage(&self) -> bool {
         self.config.memory_storage
     }
+}
+
+/// The per-usage binding for query expansion, read from `config.json`.
+///
+/// Unlike the request-time usages this is resolved once at start-up (the
+/// expander pins its client at construction), so a change here needs a restart.
+fn expand_binding(data_dir: &str) -> crate::connector::adapter::UsageBinding {
+    crate::connector::adapter::CodesearchConfig::load(data_dir)
+        .ok()
+        .and_then(|c| {
+            c.usages
+                .get(crate::connector::adapter::LlmUsage::ExpandQueries.as_str())
+                .cloned()
+        })
+        .unwrap_or_default()
 }

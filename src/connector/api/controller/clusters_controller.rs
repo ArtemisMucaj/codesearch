@@ -4,7 +4,8 @@ use crate::cli::{LlmTarget, OutputFormat, OutputFormatTextJson};
 use crate::domain::community_label;
 
 use super::super::Container;
-use super::build_chat_client;
+use super::build_chat_client_for;
+use crate::connector::adapter::LlmUsage;
 
 pub struct ClustersController<'a> {
     container: &'a Container,
@@ -51,7 +52,7 @@ impl<'a> ClustersController<'a> {
         // (e.g. TLS init) is non-fatal here — degrade to ids rather than aborting
         // the listing.
         if !no_llm {
-            match build_chat_client(llm, self.container.data_dir()) {
+            match build_chat_client_for(LlmUsage::LabelCommunities, llm, self.container.data_dir()) {
                 Ok(chat) => {
                     self.container
                         .community_naming_use_case()

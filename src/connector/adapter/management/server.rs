@@ -109,6 +109,13 @@ pub fn routes(state: AppState) -> Router {
             axum::routing::put(handlers::llm::upsert_endpoint),
         )
         .route("/api/llm/active", post(handlers::llm::set_active_endpoint))
+        // Per-usage model selection: each LLM job can name its own backend +
+        // model, falling back to the active one.
+        .route("/api/llm/usages", get(handlers::llm::list_usages))
+        .route(
+            "/api/llm/usages/{id}",
+            axum::routing::put(handlers::llm::set_usage),
+        )
         // Active LLM backend: report/switch which provider (openai/anthropic/
         // copilot) answers explain, dream, and model discovery — persisted and
         // applied live, so a GUI can change backends without a restart.

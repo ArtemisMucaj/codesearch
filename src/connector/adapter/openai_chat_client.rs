@@ -73,10 +73,23 @@ impl OpenAiChatClient {
         data_dir: &str,
         endpoint_override: Option<&str>,
     ) -> Result<Self, DomainError> {
+        Self::from_config_with_model(data_dir, endpoint_override, None)
+    }
+
+    /// Like [`Self::from_config`] but applies a model override on top of the
+    /// resolved endpoint's own — the path a per-usage binding takes when it
+    /// names only a model and keeps the endpoint.
+    pub fn from_config_with_model(
+        data_dir: &str,
+        endpoint_override: Option<&str>,
+        model_override: Option<&str>,
+    ) -> Result<Self, DomainError> {
         let cfg = super::CodesearchConfig::load(data_dir)?;
         match cfg.resolve_openai_endpoint(endpoint_override) {
             Some(ep) => {
-                let model = ep.model.as_deref().unwrap_or(DEFAULT_MODEL);
+                let model = model_override
+                    .or(ep.model.as_deref())
+                    .unwrap_or(DEFAULT_MODEL);
                 Self::from_endpoint(
                     &ep.base_url,
                     model,
@@ -84,7 +97,19 @@ impl OpenAiChatClient {
                     DEFAULT_TIMEOUT_SECS,
                 )
             }
-            None => Self::from_env(),
+            // Nothing registered: fall back to the environment, still honouring
+            // a model the usage named.
+            None => match model_override {
+                Some(model) => {
+                    let base = std::env::var("OPENAI_BASE_URL")
+                        .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+                    let api_key = std::env::var("OPENAI_API_KEY")
+                        .ok()
+                        .filter(|k| !k.is_empty());
+                    Self::from_endpoint(&base, model, api_key.as_deref(), DEFAULT_TIMEOUT_SECS)
+                }
+                None => Self::from_env(),
+            },
         }
     }
 
