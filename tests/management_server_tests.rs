@@ -303,9 +303,11 @@ async fn clusters_and_graph_endpoints_support_global_scope() {
     // `/api/symbol-clusters` now has a global form too, scoped the same way as
     // the file level, so the structured community list matches what
     // `/api/graph?level=symbol&global=true` renders.
-    let resp = reqwest::get(format!("{base_url}/api/symbol-clusters?global=true&namespace=search"))
-        .await
-        .expect("global symbol-clusters request failed");
+    let resp = reqwest::get(format!(
+        "{base_url}/api/symbol-clusters?global=true&namespace=search"
+    ))
+    .await
+    .expect("global symbol-clusters request failed");
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
     let body: serde_json::Value = resp
         .json()

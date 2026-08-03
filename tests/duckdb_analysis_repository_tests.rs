@@ -354,6 +354,77 @@ async fn delete_by_repository_removes_all_analyses() {
     assert!(repo.load_cluster_graph("repo-2").await.unwrap().is_some());
 }
 
+#[tokio::test]
+async fn explanation_cache_round_trips_per_symbol_and_model() {
+    let repo = create_repo().await;
+
+    // Nothing cached yet.
+    assert!(repo
+        .get_cached_explanation("repo-1", "App#run", "copilot:gpt-5.6-luna")
+        .await
+        .unwrap()
+        .is_none());
+
+    repo.save_explanation("repo-1", "App#run", "copilot:gpt-5.6-luna", "luna says hi")
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.get_cached_explanation("repo-1", "App#run", "copilot:gpt-5.6-luna")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("luna says hi")
+    );
+
+    // A different model is a distinct entry (miss), not the same text.
+    assert!(repo
+        .get_cached_explanation("repo-1", "App#run", "copilot:claude-opus-4.8")
+        .await
+        .unwrap()
+        .is_none());
+
+    // Regenerate overwrites the same (repo, symbol, model) key.
+    repo.save_explanation("repo-1", "App#run", "copilot:gpt-5.6-luna", "regenerated")
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.get_cached_explanation("repo-1", "App#run", "copilot:gpt-5.6-luna")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("regenerated")
+    );
+}
+
+/// A re-index (which calls delete_by_repository) must drop cached explanations
+/// too — that's the only path that invalidates them.
+#[tokio::test]
+async fn delete_by_repository_clears_cached_explanations() {
+    let repo = create_repo().await;
+    repo.save_explanation("repo-1", "App#run", "m", "hi")
+        .await
+        .unwrap();
+    repo.save_explanation("repo-2", "App#run", "m", "keep")
+        .await
+        .unwrap();
+
+    repo.delete_by_repository("repo-1").await.unwrap();
+
+    assert!(repo
+        .get_cached_explanation("repo-1", "App#run", "m")
+        .await
+        .unwrap()
+        .is_none());
+    // Other repositories keep their cached explanations.
+    assert_eq!(
+        repo.get_cached_explanation("repo-2", "App#run", "m")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("keep")
+    );
+}
+
 /// Detection with storage attached must serve the stored result instead of
 /// recomputing: after the call graph rows are deleted, a second detection
 /// still returns the communities computed from the original graph.

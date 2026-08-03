@@ -27,7 +27,9 @@ use serde_json::{json, Value};
 
 use crate::cli::LlmTarget;
 use crate::connector::adapter::{
-    CodesearchConfig, CopilotChatClient, OpenAiChatClient, OpenAiEndpoint, LlmUsage, UsageBinding, COPILOT_ENDPOINT};
+    CodesearchConfig, CopilotChatClient, LlmUsage, OpenAiChatClient, OpenAiEndpoint, UsageBinding,
+    COPILOT_ENDPOINT,
+};
 
 use super::super::error::{ApiError, ApiResult};
 use super::super::server::AppState;
@@ -376,17 +378,18 @@ fn usage_json(cfg: &CodesearchConfig, usage: LlmUsage, active: LlmTarget) -> Val
                     LlmTarget::Copilot => Some(COPILOT_ENDPOINT.to_string()),
                     _ => cfg.openai.as_ref().and_then(|o| o.active.clone()),
                 });
-            let model = binding.and_then(|b| b.model.clone()).or_else(|| {
-                match (active, name.as_deref()) {
-                    (LlmTarget::Copilot, _) | (_, Some(COPILOT_ENDPOINT)) => {
-                        cfg.copilot.as_ref().and_then(|c| c.model.clone())
-                    }
-                    _ => name
-                        .as_deref()
-                        .and_then(|n| cfg.openai.as_ref()?.endpoints.get(n))
-                        .and_then(|e| e.model.clone()),
-                }
-            });
+            let model =
+                binding
+                    .and_then(|b| b.model.clone())
+                    .or_else(|| match (active, name.as_deref()) {
+                        (LlmTarget::Copilot, _) | (_, Some(COPILOT_ENDPOINT)) => {
+                            cfg.copilot.as_ref().and_then(|c| c.model.clone())
+                        }
+                        _ => name
+                            .as_deref()
+                            .and_then(|n| cfg.openai.as_ref()?.endpoints.get(n))
+                            .and_then(|e| e.model.clone()),
+                    });
             (name, model)
         }
     };
@@ -468,10 +471,12 @@ pub async fn set_usage(
     let to_write = cfg.clone();
     tokio::task::spawn_blocking(move || to_write.save(&data_dir))
         .await
-        .map_err(|e| ApiError::new(
+        .map_err(|e| {
+            ApiError::new(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("config write task panicked: {e}"),
-            ))??;
+            )
+        })??;
 
     let active = state.container.llm_target();
     Ok(Json(usage_json(&cfg, usage, active)))

@@ -41,12 +41,12 @@ pub use connector::{
 };
 
 pub use domain::{
-    compute_file_hash, namespace_scope_id, stable_community_id, ChannelEdge, ChannelEndpoint, ChannelRole, Cluster,
-    ClusterGraph, CodeChunk, CommunityCoupling, CouplingElement, CouplingElementKind,
-    CouplingReport, DomainError, Embedding, EmbeddingConfig, EndpointSource, ExecutionFeature,
-    FeatureNode, FileHash, IndexingStatus, Language, NodeType, Protocol, ReferenceKind, Repository,
-    SearchQuery, SearchResult, SymbolCommunity, SymbolCommunityGraph, SymbolReference, VectorStore,
-    NAMESPACE_SCOPE_ID,
+    compute_file_hash, namespace_scope_id, stable_community_id, ChannelEdge, ChannelEndpoint,
+    ChannelRole, Cluster, ClusterGraph, CodeChunk, CommunityCoupling, CouplingElement,
+    CouplingElementKind, CouplingReport, DomainError, Embedding, EmbeddingConfig, EndpointSource,
+    ExecutionFeature, FeatureNode, FileHash, IndexingStatus, Language, NodeType, Protocol,
+    ReferenceKind, Repository, SearchQuery, SearchResult, SymbolCommunity, SymbolCommunityGraph,
+    SymbolReference, VectorStore, NAMESPACE_SCOPE_ID,
 };
 
 pub use domain::{CommunityMeta, GraphEdge, GraphLevel, GraphNode, GraphView};

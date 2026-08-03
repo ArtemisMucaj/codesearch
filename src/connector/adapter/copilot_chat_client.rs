@@ -49,7 +49,17 @@ impl CopilotChatClient {
     /// caller is expected to have logged in first.
     pub fn new(github_token: Option<String>, model: Option<String>) -> Result<Self, DomainError> {
         let endpoint = CopilotEndpoint::from_optional_token(github_token.map(CopilotToken::new));
-        let model_id = model.clone().unwrap_or_default();
+        // There is no sensible default Copilot model: the catalog is per-account
+        // and changes over time, so an empty id would only surface as an opaque
+        // upstream 400. Fail here with the actionable message instead.
+        let model_id = match model.as_deref().map(str::trim) {
+            Some(m) if !m.is_empty() => m.to_string(),
+            _ => {
+                return Err(DomainError::invalid_input(
+                    "no Copilot model selected — run `codesearch copilot login` to pick one",
+                ))
+            }
+        };
         debug!(
             "CopilotChatClient: endpoint={}, model={model_id:?}",
             endpoint.base_url()

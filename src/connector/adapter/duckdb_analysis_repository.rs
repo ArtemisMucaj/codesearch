@@ -283,6 +283,23 @@ impl DuckdbAnalysisRepository {
                 name TEXT NOT NULL,
                 generated_at TIMESTAMP NOT NULL DEFAULT current_timestamp
             );
+
+            -- Cache of LLM call-flow explanations, keyed by (repository, symbol,
+            -- model). Scoped to the repository and wiped by delete_by_repository
+            -- on re-index, so a cached explanation only ever describes the
+            -- current index. The model is part of the key so switching models
+            -- serves (or computes) the right one rather than a stale answer.
+            CREATE TABLE IF NOT EXISTS explanations (
+                repository_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                model TEXT NOT NULL,
+                explanation TEXT NOT NULL,
+                computed_at TIMESTAMP NOT NULL DEFAULT current_timestamp,
+                PRIMARY KEY (repository_id, symbol, model)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_explanations_repo
+            ON explanations(repository_id);
             "#,
         )
         .map_err(|e| {
@@ -883,6 +900,9 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
                 "DELETE FROM execution_feature_nodes WHERE repository_id = ?",
                 "DELETE FROM execution_features WHERE repository_id = ?",
                 "DELETE FROM analysis_runs WHERE repository_id = ?",
+                // Cached explanations derive from the call graph too, so a
+                // re-index must drop them — this is the sole invalidation path.
+                "DELETE FROM explanations WHERE repository_id = ?",
             ] {
                 tx.execute(sql, params![repository_id]).map_err(|e| {
                     DomainError::storage(format!("Failed to delete stored analyses: {}", e))
@@ -957,6 +977,67 @@ impl AnalysisRepository for DuckdbAnalysisRepository {
             }
             tx.commit()
                 .map_err(|e| DomainError::storage(format!("Failed to commit: {}", e)))?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn get_cached_explanation(
+        &self,
+        repository_id: &str,
+        symbol: &str,
+        model: &str,
+    ) -> Result<Option<String>, DomainError> {
+        let conn = self.conn.lock().await;
+        if !Self::schema_exists(&conn)? {
+            return Ok(None);
+        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT explanation FROM explanations \
+                 WHERE repository_id = ? AND symbol = ? AND model = ?",
+            )
+            .map_err(|e| DomainError::storage(format!("Failed to prepare statement: {}", e)))?;
+        let mut rows = stmt
+            .query_map(params![repository_id, symbol, model], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| {
+                DomainError::storage(format!("Failed to query cached explanation: {}", e))
+            })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row.map_err(|e| {
+                DomainError::storage(format!("Failed to read explanation row: {}", e))
+            })?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn save_explanation(
+        &self,
+        repository_id: &str,
+        symbol: &str,
+        model: &str,
+        explanation: &str,
+    ) -> Result<(), DomainError> {
+        let (repository_id, symbol, model, explanation) = (
+            repository_id.to_string(),
+            symbol.to_string(),
+            model.to_string(),
+            explanation.to_string(),
+        );
+        self.with_write_conn(move |conn| {
+            // `computed_at` is left to its column DEFAULT on insert and untouched
+            // on conflict (same DuckDB caveat as community_names). A Regenerate
+            // overwrites the previous explanation for this exact key.
+            conn.execute(
+                "INSERT INTO explanations (repository_id, symbol, model, explanation) \
+                 VALUES (?, ?, ?, ?) \
+                 ON CONFLICT (repository_id, symbol, model) \
+                 DO UPDATE SET explanation = excluded.explanation",
+                params![repository_id, symbol, model, explanation],
+            )
+            .map_err(|e| DomainError::storage(format!("Failed to save explanation: {}", e)))?;
             Ok(())
         })
         .await

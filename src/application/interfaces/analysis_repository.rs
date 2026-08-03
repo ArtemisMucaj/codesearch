@@ -57,6 +57,29 @@ pub trait AnalysisRepository: Send + Sync {
     /// repository is deleted or its call graph is re-indexed.
     async fn delete_by_repository(&self, repository_id: &str) -> Result<(), DomainError>;
 
+    /// Look up a cached LLM call-flow explanation for `(repository, symbol,
+    /// model)`. `None` means none is stored (compute it). Like the other
+    /// analyses, this cache is wiped by [`Self::delete_by_repository`] on
+    /// re-index, so a cached explanation only ever describes the current index.
+    /// Keyed on the model too, so switching models yields a fresh explanation
+    /// rather than serving one written by a different model.
+    async fn get_cached_explanation(
+        &self,
+        repository_id: &str,
+        symbol: &str,
+        model: &str,
+    ) -> Result<Option<String>, DomainError>;
+
+    /// Store an LLM call-flow explanation for `(repository, symbol, model)`,
+    /// overwriting any previous one (what a Regenerate does).
+    async fn save_explanation(
+        &self,
+        repository_id: &str,
+        symbol: &str,
+        model: &str,
+        explanation: &str,
+    ) -> Result<(), DomainError>;
+
     /// Look up cached LLM-generated display names for the given community ids.
     ///
     /// Names are keyed on the *stable, content-addressed* community id

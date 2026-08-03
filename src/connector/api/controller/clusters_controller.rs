@@ -52,7 +52,8 @@ impl<'a> ClustersController<'a> {
         // (e.g. TLS init) is non-fatal here — degrade to ids rather than aborting
         // the listing.
         if !no_llm {
-            match build_chat_client_for(LlmUsage::LabelCommunities, llm, self.container.data_dir()) {
+            match build_chat_client_for(LlmUsage::LabelCommunities, llm, self.container.data_dir())
+            {
                 Ok(chat) => {
                     self.container
                         .community_naming_use_case()

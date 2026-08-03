@@ -75,7 +75,8 @@ impl<'a> OverviewController<'a> {
         // levels, then the closing executive summary. `--no-llm` skips all of
         // it; cached names still appear because the analyses load them.
         if !no_llm {
-            match build_chat_client_for(LlmUsage::LabelCommunities, llm, self.container.data_dir()) {
+            match build_chat_client_for(LlmUsage::LabelCommunities, llm, self.container.data_dir())
+            {
                 Ok(chat) => {
                     let naming = self.container.community_naming_use_case();
                     if let Some(modules) = report.modules.as_mut() {
