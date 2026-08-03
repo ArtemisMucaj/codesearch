@@ -22,6 +22,17 @@
 * unit tests for `InMemoryVectorRepository` hybrid paths: cosine vs RRF score ranges, dual-leg ranking, post-fusion `min_score` filtering, no early pruning, empty-term fallback, and limit enforcement
 * integration tests for end-to-end hybrid search: results returned with positive scores, keyword-matched chunk surfaces, special SQL characters (`%`, `_`, `!`) do not cause errors, and semantic-only baseline confirms the flag gates the BM25 leg
 
+## [2.0.0](https://github.com/ArtemisMucaj/codesearch/compare/v1.11.0...v2.0.0) (2026-08-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* the memory/session/dream REST + MCP surfaces are gone; consumers must talk to memory-rs instead.
+
+### Code Refactoring
+
+* extract memory, Leiden and the LLM stack into standalone crates ([#207](https://github.com/ArtemisMucaj/codesearch/issues/207)) ([2cb9169](https://github.com/ArtemisMucaj/codesearch/commit/2cb9169407f375babd1c35fca7d48283830f1b43))
+
 ## [1.11.0](https://github.com/ArtemisMucaj/codesearch/compare/v1.10.0...v1.11.0) (2026-07-22)
 
 
