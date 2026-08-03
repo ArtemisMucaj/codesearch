@@ -39,7 +39,11 @@ pub(crate) fn build_chat_client_for(
     llm: LlmTarget,
     data_dir: &str,
 ) -> Result<Arc<dyn ChatClient>> {
-    let cfg = CodesearchConfig::load(data_dir).unwrap_or_default();
+    // A malformed config must not silently degrade into "no overrides at all":
+    // that would route a usage to the wrong backend without any signal.
+    let cfg = CodesearchConfig::load(data_dir).with_context(|| {
+        format!("Failed to load LLM configuration from {data_dir} for usage `{usage:?}`")
+    })?;
     let binding = cfg.usages.get(usage.as_str()).cloned().unwrap_or_default();
 
     // The reserved `copilot` name selects the Copilot backend regardless of the
@@ -55,8 +59,39 @@ pub(crate) fn build_chat_client_for(
         return build_chat_client(llm, data_dir);
     }
 
-    // An override implies an OpenAI-compatible endpoint (Copilot is handled
-    // above, and Anthropic has no named-endpoint registry to select from).
+    // A model-only override keeps the ACTIVE backend and just swaps the model —
+    // it must not reroute the request to a different provider. Only a named
+    // endpoint override selects the OpenAI-compatible registry.
+    if binding.endpoint.is_none() {
+        return match llm {
+            LlmTarget::Copilot => {
+                let client =
+                    CopilotChatClient::from_data_dir_with_model(data_dir, binding.model.clone())
+                        .context("Failed to initialise Copilot chat client")?;
+                Ok(Arc::new(client))
+            }
+            // The Anthropic backend reads its model from `ANTHROPIC_MODEL` and
+            // has no per-request model selection here; rejecting is better than
+            // silently answering from a different provider.
+            LlmTarget::Anthropic => anyhow::bail!(
+                "usage `{usage:?}` sets a model override, but the active Anthropic backend \
+                 does not support per-usage model selection — set ANTHROPIC_MODEL instead, \
+                 or name an endpoint in the binding"
+            ),
+            LlmTarget::OpenAi => {
+                let client = OpenAiChatClient::from_config_with_model(
+                    data_dir,
+                    None,
+                    binding.model.as_deref(),
+                )
+                .context("Failed to initialise OpenAI chat client")?;
+                Ok(Arc::new(client))
+            }
+        };
+    }
+
+    // A named endpoint override selects the OpenAI-compatible registry (Copilot
+    // is handled above, and Anthropic has no named-endpoint registry).
     let client = OpenAiChatClient::from_config_with_model(
         data_dir,
         binding.endpoint.as_deref(),

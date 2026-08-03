@@ -34,3 +34,6 @@ Thumbs.db
 *.profdata
 coverage/
 .claude/worktrees/
+
+# SCIP indexes emitted by scip-typescript / scip-php during indexing and tests
+*.scip

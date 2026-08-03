@@ -313,7 +313,7 @@ impl Container {
                     Arc::new(OpenAiEmbedding::new(
                         effective_model.clone(),
                         config.embedding_dimensions,
-                    ))
+                    )?)
                 }
             }
         };
@@ -782,7 +782,13 @@ impl Container {
                     .iter()
                     .find(|r| r.id() == repo_id)
                     .and_then(|r| r.namespace().map(str::to_string)),
-                Err(_) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        "Could not list repositories to resolve the namespace for '{repo_id}', \
+                         falling back to boot-namespace snippets: {e}"
+                    );
+                    None
+                }
             };
             if let Some(ns) = namespace {
                 if ns != self.config.namespace {

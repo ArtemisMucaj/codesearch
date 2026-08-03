@@ -339,41 +339,129 @@ async fn clusters_and_graph_endpoints_support_global_scope() {
     server.abort();
 }
 
+/// Index the two messaging fixtures as separate repositories, so channel tests
+/// have a producer in one repo and a consumer in another. Returns each one's
+/// `(name, id)` in `(producer, consumer)` order — the query filter takes names
+/// while the report keys endpoints by repository id.
+async fn index_messaging_fixtures(container: &Container) -> ((String, String), (String, String)) {
+    for (path, name) in [
+        ("tests/fixtures/messaging/orders-service", "orders-service"),
+        (
+            "tests/fixtures/messaging/notification-service",
+            "notification-service",
+        ),
+    ] {
+        container
+            .index_use_case()
+            .execute(
+                path,
+                Some(name),
+                VectorStore::InMemory,
+                Some("search".to_string()),
+                false,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("failed to index {name}: {e}"));
+    }
+
+    let repos = container
+        .metadata_repository()
+        .list()
+        .await
+        .expect("failed to list indexed repositories");
+    let id_of = |name: &str| {
+        repos
+            .iter()
+            .find(|r| r.name() == name)
+            .map(|r| (name.to_string(), r.id().to_string()))
+            .unwrap_or_else(|| panic!("{name} was not indexed"))
+    };
+    (id_of("orders-service"), id_of("notification-service"))
+}
+
+/// `GET /api/channels[?query]`, asserting the response is a well-formed report
+/// and returning its body.
+async fn channels(base_url: &str, query: &str) -> serde_json::Value {
+    let url = if query.is_empty() {
+        format!("{base_url}/api/channels")
+    } else {
+        format!("{base_url}/api/channels?{query}")
+    };
+    let resp = reqwest::get(url)
+        .await
+        .expect("request to /api/channels failed");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "channels should accept `{query}`"
+    );
+    let body: serde_json::Value = resp.json().await.expect("channels body was not JSON");
+    assert!(body["edges"].is_array());
+    assert!(body["unmatched_producers"].is_array());
+    assert!(body["unmatched_consumers"].is_array());
+    body
+}
+
+/// Collect the set of repository ids appearing anywhere in a channels report,
+/// so a filter can be checked for actually excluding the repositories it omits.
+fn repositories_in_report(body: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    let mut repos = std::collections::BTreeSet::new();
+    let mut record = |endpoint: &serde_json::Value| {
+        if let Some(repo) = endpoint["repository_id"].as_str() {
+            repos.insert(repo.to_string());
+        }
+    };
+    for key in ["unmatched_producers", "unmatched_consumers"] {
+        for endpoint in body[key].as_array().into_iter().flatten() {
+            record(endpoint);
+        }
+    }
+    for edge in body["edges"].as_array().into_iter().flatten() {
+        for side in ["producer", "consumer"] {
+            record(&edge[side]);
+        }
+    }
+    repos
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_endpoint_accepts_comma_separated_repository_filter() {
     let (container, _dir) = test_container().await;
-    index_fixture(&container).await;
+    let ((producer_repo, producer_id), (consumer_repo, consumer_id)) =
+        index_messaging_fixtures(&container).await;
     let (base_url, server) = spawn_management_server_with_container(container).await;
 
-    // The `repository` filter is a comma-separated string (a Vec can't be
-    // deserialized from a query key). A single repo and a comma list must both
-    // bind — before this fix the param failed to deserialize and the filter was
-    // silently dropped, leaking every namespace's channels.
-    // Single repo, and a comma list (repeated to exercise splitting without
-    // needing a second fixture). Both must bind and return the report shape.
-    for query in [
-        "repository=fixture-repo",
-        "repository=fixture-repo,fixture-repo",
-    ] {
-        let resp = reqwest::get(format!("{base_url}/api/channels?{query}"))
-            .await
-            .expect("request to /api/channels failed");
-        assert_eq!(
-            resp.status(),
-            reqwest::StatusCode::OK,
-            "channels should accept `{query}`"
-        );
-        let body: serde_json::Value = resp.json().await.expect("channels body was not JSON");
-        assert!(body["edges"].is_array());
-        assert!(body["unmatched_producers"].is_array());
-        assert!(body["unmatched_consumers"].is_array());
-    }
+    // Unfiltered (cwd namespace) sees both services.
+    let all = repositories_in_report(&channels(&base_url, "").await);
+    assert!(
+        all.contains(&producer_id) && all.contains(&consumer_id),
+        "unfiltered report should span both services, got {all:?}"
+    );
 
-    // No filter is still valid (scopes to the cwd namespace).
-    let resp = reqwest::get(format!("{base_url}/api/channels"))
-        .await
-        .expect("unfiltered channels request failed");
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    // The `repository` filter is a comma-separated string (a Vec can't be
+    // deserialized from a query key). Before the fix the param failed to
+    // deserialize and the filter was silently dropped, leaking every
+    // repository's channels — so assert the filtered report actually EXCLUDES
+    // the repository it does not name, not merely that it is well-shaped.
+    let filtered =
+        repositories_in_report(&channels(&base_url, &format!("repository={producer_repo}")).await);
+    assert!(
+        !filtered.contains(&consumer_id),
+        "filtering on `{producer_repo}` must exclude `{consumer_repo}`, got {filtered:?}"
+    );
+
+    // A comma list binds too, and naming both repositories restores both.
+    let both = repositories_in_report(
+        &channels(
+            &base_url,
+            &format!("repository={producer_repo},{consumer_repo}"),
+        )
+        .await,
+    );
+    assert_eq!(
+        both, all,
+        "naming both repositories should match the unfiltered report"
+    );
 
     server.abort();
 }

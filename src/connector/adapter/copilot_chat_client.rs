@@ -72,7 +72,7 @@ impl CopilotChatClient {
             .with_headers(endpoint.protocol_headers())
             .with_timeout(endpoint.timeout())
             .with_optional_api_key(endpoint.token().map(|t| t.expose().to_string()));
-        let transport = Transport::new(&openai_endpoint)?;
+        let transport = Transport::new(&openai_endpoint).map_err(super::map_openai_err)?;
         let inner = OpenAiChatClient::with_transport(transport, model_id);
 
         Ok(Self {
@@ -120,8 +120,8 @@ impl CopilotChatClient {
             .token()
             .cloned()
             .ok_or_else(|| DomainError::internal("Copilot is not authenticated"))?;
-        let catalog = CopilotModelCatalog::new(token)?;
-        Ok(catalog.list_models().await?)
+        let catalog = CopilotModelCatalog::new(token).map_err(super::map_copilot_err)?;
+        catalog.list_models().await.map_err(super::map_copilot_err)
     }
 }
 

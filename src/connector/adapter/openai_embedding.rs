@@ -36,7 +36,7 @@ impl OpenAiEmbedding {
     /// `dimensions` — the number of dimensions the model outputs; must match the
     /// value stored in `namespace_config` for the target namespace (enforced by
     /// the vector repository on open).
-    pub fn new(model: impl Into<String>, dimensions: usize) -> Self {
+    pub fn new(model: impl Into<String>, dimensions: usize) -> Result<Self, DomainError> {
         let base =
             std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         let model = model.into();
@@ -48,13 +48,15 @@ impl OpenAiEmbedding {
 
         let endpoint =
             Endpoint::new(base).with_timeout(Duration::from_secs(EMBEDDING_TIMEOUT_SECS));
-        let client = OpenAiEmbeddingClient::new(&endpoint, model.clone())
-            .expect("OpenAiEmbeddingClient build failed");
+        // Building the client is fallible (a malformed `OPENAI_BASE_URL` is the
+        // usual cause), so propagate rather than abort the process.
+        let client =
+            OpenAiEmbeddingClient::new(&endpoint, model.clone()).map_err(super::map_openai_err)?;
 
-        Self {
+        Ok(Self {
             client,
             config: EmbeddingConfig::new(model, dimensions, 512),
-        }
+        })
     }
 
     /// Embed `texts`, returning one vector per input (batched and L2-normalised
@@ -66,7 +68,11 @@ impl OpenAiEmbedding {
         }
 
         let n = texts.len();
-        let embeddings = self.client.embed_batch(&texts).await?;
+        let embeddings = self
+            .client
+            .embed_batch(&texts)
+            .await
+            .map_err(super::map_openai_err)?;
 
         let expected = self.config.dimensions();
         if let Some(width) = embeddings.first().map(|v| v.len()) {

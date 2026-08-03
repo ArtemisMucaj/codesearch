@@ -53,9 +53,9 @@ Treat the OpenAPI file as the source of truth; this page is the orientation.
 
 All request/response endpoints live under `/api/...` (excluding
 `/api/stream/...`). Errors are returned as `{ "error": "<message>" }` with an
-appropriate status: `400` for malformed input (unknown protocol / memory kind,
-bad body), `404` when a named repository, symbol, or memory item is not found,
-and `500` for any other use-case failure.
+appropriate status: `400` for malformed input (unknown protocol / graph level,
+bad body), `404` when a named repository or symbol is not found, and `500` for
+any other use-case failure.
 
 ### Health & discovery
 

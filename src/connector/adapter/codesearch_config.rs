@@ -28,7 +28,9 @@ pub struct CodesearchConfig {
     /// (e.g. `"copilot"`) survives restarts and can be switched at runtime via
     /// the management API. Absent means "use the boot default" (the
     /// `--llm-target` flag, else the built-in default). Values match
-    /// [`LlmTarget`]'s string form: `"open-ai"`, `"anthropic"`, `"copilot"`.
+    /// `LlmTarget::as_str()`, which is what is persisted here: `"openai"`
+    /// (note: no hyphen, unlike the `--llm-target open-ai` CLI spelling),
+    /// `"anthropic"`, `"copilot"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_target: Option<String>,
 

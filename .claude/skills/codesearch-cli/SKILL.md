@@ -70,7 +70,7 @@ codesearch search "middleware that validates auth tokens before issuing a sessio
 # Weak — fix by choosing the right tool
 codesearch search "error"           # too generic → "error handling for X"
 codesearch search "HandleRequest"   # you already know the symbol → skip search;
-                                    #   go to Phase 4 (context / impact) instead
+                                    #   go to Phase 3 (context / impact) instead
 ```
 
 Then read the top hits (each result has `file_path`, line range, symbol, and

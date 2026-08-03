@@ -154,11 +154,16 @@ impl ExecutionFeaturesUseCase {
         &self,
         repository_id: &str,
     ) -> Result<Vec<ExecutionFeature>, DomainError> {
-        let entry_points = self.find_entry_points(repository_id).await?;
+        // The traversal scope depends only on `repository_id`, so resolve it
+        // once and lend it to every step. Recomputing it per entry point would
+        // re-run `repositories.list()` against the metadata store N+1 times for
+        // an identical answer.
+        let scope = self.traversal_scope(repository_id).await;
+        let entry_points = self.find_entry_points(repository_id, &scope).await?;
         let mut features = Vec::with_capacity(entry_points.len());
 
         for ep in entry_points {
-            let feature = self.build_feature(&ep, repository_id).await?;
+            let feature = self.build_feature(&ep, repository_id, &scope).await?;
             features.push(feature);
         }
 
@@ -281,7 +286,9 @@ impl ExecutionFeaturesUseCase {
             }
         }
 
-        let feature = self.build_feature(&fqn, &effective_repo).await?;
+        // Reuses the scope resolved above for the entry-point check — same
+        // repository, same answer.
+        let feature = self.build_feature(&fqn, &effective_repo, &scope).await?;
         Ok(Some(feature))
     }
 
@@ -346,14 +353,21 @@ impl ExecutionFeaturesUseCase {
     /// bulk of a SCIP-imported graph is structural references (imports, type
     /// references) that must not be mistaken for calls, or every getter and
     /// type-referenced symbol surfaces as a spurious "entry point".
-    async fn find_entry_points(&self, repository_id: &str) -> Result<Vec<String>, DomainError> {
+    ///
+    /// `scope` is the caller-resolved traversal scope for `repository_id` (see
+    /// [`Self::traversal_scope`]), passed in so a whole computation resolves it
+    /// once rather than per entry point.
+    async fn find_entry_points(
+        &self,
+        repository_id: &str,
+        scope: &HashMap<String, String>,
+    ) -> Result<Vec<String>, DomainError> {
         // Detection is NAMESPACE-wide: a shared-library method called only
         // from a sibling service repo is not an entry point of the library —
         // it's mid-flow in the sibling's feature (which now traverses into
         // this repo). Candidate entry points still come from THIS repo's own
         // edges, so every feature stays attributed to the repo its code roots
         // in; only the "is it called by anything?" disqualifier widens.
-        let scope = self.traversal_scope(repository_id).await;
         let scope_ids: Vec<String> = scope.keys().cloned().collect();
         let all_refs = self.call_graph.find_by_repositories(&scope_ids).await?;
 
@@ -396,17 +410,21 @@ impl ExecutionFeaturesUseCase {
 
     /// Build an `ExecutionFeature` for `entry_point` in `repository_id` by
     /// running a forward BFS through the call graph and scoring the result.
+    ///
+    /// `scope` is the caller-resolved traversal scope for `repository_id` (see
+    /// [`Self::traversal_scope`]), passed in so a whole computation resolves it
+    /// once rather than per entry point.
     async fn build_feature(
         &self,
         entry_point: &str,
         repository_id: &str,
+        scope: &HashMap<String, String>,
     ) -> Result<ExecutionFeature, DomainError> {
         // Traverse the entry point's whole namespace, not just its repo: call
         // edges are stored under the CALLER's repository, so a repo-filtered
         // query shows the first hop into a shared sibling library but can
         // never walk into it — cross-repo flows silently truncated one level
         // deep. The query stays unfiltered and edges are scoped here instead.
-        let scope = self.traversal_scope(repository_id).await;
         let in_scope =
             |r: &SymbolReference| is_execution_edge(r) && scope.contains_key(r.repository_id());
         let query = CallGraphQuery::new();

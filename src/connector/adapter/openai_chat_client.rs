@@ -6,7 +6,9 @@
 //! thin codesearch boundary: it resolves credentials from `config.json` /
 //! `OPENAI_*` (which the crate deliberately never touches), builds the crate
 //! client, implements codesearch's [`ChatClient`] port over it, and converts
-//! [`openai_rs::OpenAiError`] into [`DomainError`].
+//! [`openai_rs::OpenAiError`] into [`DomainError`] via
+//! [`map_openai_err`](super::map_openai_err) — the conversion lives here rather
+//! than as a `From` impl in the domain layer, which stays crate-free.
 //!
 //! **Determinism.** codesearch's JSON-extraction paths (community naming,
 //! execution-feature naming) rely on a fixed temperature, so every request this
@@ -46,6 +48,13 @@ const DETERMINISTIC_TEMPERATURE: f32 = 0.0;
 pub struct OpenAiChatClient {
     inner: CrateChatClient,
     base_url: String,
+    /// The fully configured endpoint (api key + timeout included) when this
+    /// client was built from one. `list_models` reuses it so model discovery is
+    /// authenticated and timed exactly like `complete` — rebuilding it from
+    /// `base_url` alone would 401 against any key-protected server. `None` on
+    /// the [`Self::with_transport`] path, whose auth lives in the transport's
+    /// headers rather than an `Endpoint`.
+    endpoint: Option<Endpoint>,
 }
 
 impl OpenAiChatClient {
@@ -126,8 +135,12 @@ impl OpenAiChatClient {
         let endpoint = Endpoint::new(base_url.clone())
             .with_optional_api_key(api_key.filter(|k| !k.is_empty()))
             .with_timeout(Duration::from_secs(timeout_secs));
-        let inner = CrateChatClient::new(&endpoint, model)?;
-        Ok(Self { inner, base_url })
+        let inner = CrateChatClient::new(&endpoint, model).map_err(super::map_openai_err)?;
+        Ok(Self {
+            inner,
+            base_url,
+            endpoint: Some(endpoint),
+        })
     }
 
     /// Construct from a pre-built [`Transport`] (whose headers already carry any
@@ -138,7 +151,11 @@ impl OpenAiChatClient {
     pub fn with_transport(transport: Transport, model: String) -> Self {
         let base_url = transport.base_url().to_string();
         let inner = CrateChatClient::with_transport(transport, model);
-        Self { inner, base_url }
+        Self {
+            inner,
+            base_url,
+            endpoint: None,
+        }
     }
 
     /// The base URL this client is configured to use — useful for log messages.
@@ -157,9 +174,19 @@ impl OpenAiChatClient {
     /// OpenAI-compatible server (LM Studio, OpenAI, vLLM, …). Errors if the
     /// endpoint is unreachable or returns a non-success status.
     pub async fn list_models(&self) -> Result<Vec<String>, DomainError> {
-        let endpoint = Endpoint::new(self.base_url.clone());
-        let catalog = OpenAiModelCatalog::new(&endpoint)?;
-        let models = catalog.list_models().await?;
+        // Reuse the configured endpoint so the catalog call carries the same api
+        // key and timeout as chat requests; only the transport-built path (whose
+        // auth lives in its headers) falls back to a bare endpoint.
+        let fallback;
+        let endpoint = match &self.endpoint {
+            Some(ep) => ep,
+            None => {
+                fallback = Endpoint::new(self.base_url.clone());
+                &fallback
+            }
+        };
+        let catalog = OpenAiModelCatalog::new(endpoint).map_err(super::map_openai_err)?;
+        let models = catalog.list_models().await.map_err(super::map_openai_err)?;
         Ok(models.into_iter().map(|m| m.id).collect())
     }
 
@@ -173,7 +200,10 @@ impl OpenAiChatClient {
 #[async_trait]
 impl ChatClient for OpenAiChatClient {
     async fn complete(&self, system: &str, user: &str) -> Result<String, DomainError> {
-        Ok(self.inner.chat(&self.request(system, user)).await?)
+        self.inner
+            .chat(&self.request(system, user))
+            .await
+            .map_err(super::map_openai_err)
     }
 
     async fn complete_json(
@@ -186,7 +216,10 @@ impl ChatClient for OpenAiChatClient {
         let request = self
             .request(system, user)
             .with_schema(JsonSchema::new(schema_name, schema.clone()));
-        Ok(self.inner.chat(&request).await?)
+        self.inner
+            .chat(&request)
+            .await
+            .map_err(super::map_openai_err)
     }
 
     async fn complete_stream(
@@ -195,9 +228,9 @@ impl ChatClient for OpenAiChatClient {
         user: &str,
         token_tx: UnboundedSender<String>,
     ) -> Result<String, DomainError> {
-        Ok(self
-            .inner
+        self.inner
             .chat_stream(&self.request(system, user), token_tx)
-            .await?)
+            .await
+            .map_err(super::map_openai_err)
     }
 }
