@@ -344,11 +344,14 @@ async fn clusters_and_graph_endpoints_support_global_scope() {
 /// `(name, id)` in `(producer, consumer)` order — the query filter takes names
 /// while the report keys endpoints by repository id.
 async fn index_messaging_fixtures(container: &Container) -> ((String, String), (String, String)) {
+    // Both fixtures are Python: producing a channel graph must not depend on an
+    // external indexer being installed. The JS notification fixture would drag
+    // in `scip-typescript`, which CI does not have on PATH.
     for (path, name) in [
         ("tests/fixtures/messaging/orders-service", "orders-service"),
         (
-            "tests/fixtures/messaging/notification-service",
-            "notification-service",
+            "tests/fixtures/messaging/notifications-py",
+            "notifications-py",
         ),
     ] {
         container
@@ -376,7 +379,7 @@ async fn index_messaging_fixtures(container: &Container) -> ((String, String), (
             .map(|r| (name.to_string(), r.id().to_string()))
             .unwrap_or_else(|| panic!("{name} was not indexed"))
     };
-    (id_of("orders-service"), id_of("notification-service"))
+    (id_of("orders-service"), id_of("notifications-py"))
 }
 
 /// `GET /api/channels[?query]`, asserting the response is a well-formed report
