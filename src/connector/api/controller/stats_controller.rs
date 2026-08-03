@@ -22,7 +22,6 @@ impl<'a> StatsController<'a> {
         let call_graph_use_case = self.container.call_graph_use_case();
         let channel_repo = self.container.channel_endpoint_repository();
         let analysis_repo = self.container.analysis_repository();
-        let memory_stats = self.fetch_memory_stats().await.unwrap_or_default();
 
         let mut repo_details = Vec::new();
         let mut globals = GlobalStats::default();
@@ -104,12 +103,7 @@ impl<'a> StatsController<'a> {
             });
         }
 
-        Ok(self.format_output(&repos, &repo_details, &globals, &memory_stats))
-    }
-
-    async fn fetch_memory_stats(&self) -> Result<crate::application::MemoryStats> {
-        let repo = self.container.memory_repository()?;
-        repo.stats().await.map_err(|e| anyhow::anyhow!("{}", e))
+        Ok(self.format_output(&repos, &repo_details, &globals))
     }
 
     fn format_embedding_info(&self, namespace: Option<&str>) -> String {
@@ -132,7 +126,6 @@ impl<'a> StatsController<'a> {
         repos: &[crate::Repository],
         repo_details: &[RepoDetail],
         globals: &GlobalStats,
-        memory_stats: &crate::application::MemoryStats,
     ) -> String {
         let total_repos = repos.len();
         let total_files: u64 = repos.iter().map(|r| r.file_count()).sum();
@@ -194,29 +187,6 @@ impl<'a> StatsController<'a> {
             lines.push(format!("  Total endpoints: {}", globals.channels));
             lines.push(String::new());
         }
-
-        // Memory store summary
-        lines.push("Memory Store".to_string());
-        lines.push("-".repeat(40));
-        lines.push(format!("  Total items:     {}", memory_stats.total_items));
-        if !memory_stats.items_by_kind.is_empty() {
-            lines.push("  Items by kind:".to_string());
-            for (kind, count) in &memory_stats.items_by_kind {
-                lines.push(format!("    {}: {}", kind, count));
-            }
-        }
-        lines.push(format!(
-            "  Total sessions:  {}",
-            memory_stats.total_sessions
-        ));
-        lines.push(format!("  Total nodes:     {}", memory_stats.total_nodes));
-        if !memory_stats.nodes_by_kind.is_empty() {
-            lines.push("  Nodes by kind:".to_string());
-            for (kind, count) in &memory_stats.nodes_by_kind {
-                lines.push(format!("    {}: {}", kind, count));
-            }
-        }
-        lines.push(String::new());
 
         // Per-repository detail
         if !repo_details.is_empty() {

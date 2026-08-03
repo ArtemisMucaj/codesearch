@@ -7,15 +7,12 @@ use tracing::{debug, warn};
 
 use crate::application::{
     AnalysisRepository, CallGraphRepository, CallGraphUseCase, ChannelEndpointRepository,
-    ChannelLinkUseCase, ChatClient, FileHashRepository, ImportSessionUseCase, MemoryBrowseUseCase,
-    MemoryDreamUseCase, MemoryExtractionUseCase, MemoryRepository, MemorySearchUseCase,
-    MetadataRepository, QueryExpander, SummarizeMemoryUseCase,
+    ChannelLinkUseCase, FileHashRepository, MetadataRepository, QueryExpander,
 };
 use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::scip::ScipRunner;
 use crate::connector::adapter::{
-    DuckdbAnalysisRepository, DuckdbMemoryRepository, NamespaceEmbeddingConfig, NoEmbedding,
-    MEMORY_DB_FILE, NO_EMBEDDINGS_MODEL,
+    DuckdbAnalysisRepository, NamespaceEmbeddingConfig, NoEmbedding, NO_EMBEDDINGS_MODEL,
 };
 use crate::{
     AnthropicClient, AnthropicReranking, ClusterDetectionUseCase, CommunityNamingUseCase,
@@ -131,11 +128,6 @@ pub struct Container {
     /// `vector_repo` so cross-namespace read views can be built (`None` for
     /// in-memory storage).
     duckdb_vector: Option<Arc<DuckdbVectorRepository>>,
-    /// Lazily opened memory store, shared across calls. Caching matters for
-    /// the long-running MCP server: DuckDB allows only one writer per file,
-    /// so concurrent tool calls must reuse a single connection instead of
-    /// each opening `memory.duckdb`.
-    memory_repo: std::sync::Mutex<Option<Arc<dyn MemoryRepository>>>,
     /// The live active LLM backend. Seeded at boot from the persisted config
     /// (`config.json`'s `llm_target`, falling back to the `--llm-target` flag)
     /// and switchable at runtime via the management API, so a native app can
@@ -321,7 +313,7 @@ impl Container {
                     Arc::new(OpenAiEmbedding::new(
                         effective_model.clone(),
                         config.embedding_dimensions,
-                    ))
+                    )?)
                 }
             }
         };
@@ -575,7 +567,13 @@ impl Container {
                     Arc::new(c)
                 }
                 LlmTarget::OpenAi => {
-                    let c = OpenAiChatClient::from_config(&config.data_dir, None)?;
+                    // Query expansion may name its own endpoint + model.
+                    let binding = expand_binding(&config.data_dir);
+                    let c = OpenAiChatClient::from_config_with_model(
+                        &config.data_dir,
+                        binding.endpoint.as_deref(),
+                        binding.model.as_deref(),
+                    )?;
                     debug!(
                         "Using OpenAI query expander (url={})",
                         c.configured_base_url()
@@ -583,7 +581,11 @@ impl Container {
                     Arc::new(c)
                 }
                 LlmTarget::Copilot => {
-                    let c = CopilotChatClient::from_data_dir(&config.data_dir)?;
+                    let binding = expand_binding(&config.data_dir);
+                    let c = CopilotChatClient::from_data_dir_with_model(
+                        &config.data_dir,
+                        binding.model.clone(),
+                    )?;
                     debug!(
                         "Using Copilot query expander (model={:?})",
                         c.configured_model()
@@ -608,7 +610,6 @@ impl Container {
             channel_endpoint_repo,
             analysis_repo,
             duckdb_vector,
-            memory_repo: std::sync::Mutex::new(None),
             // A backend chosen through the app (persisted in config.json) wins
             // over the flag's default, so the choice survives restarts. The flag
             // is the fallback when nothing was persisted.
@@ -781,7 +782,13 @@ impl Container {
                     .iter()
                     .find(|r| r.id() == repo_id)
                     .and_then(|r| r.namespace().map(str::to_string)),
-                Err(_) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        "Could not list repositories to resolve the namespace for '{repo_id}', \
+                         falling back to boot-namespace snippets: {e}"
+                    );
+                    None
+                }
             };
             if let Some(ns) = namespace {
                 if ns != self.config.namespace {
@@ -868,105 +875,6 @@ impl Container {
         )
     }
 
-    /// Open the memory store — a dedicated DuckDB file (`memory.duckdb`)
-    /// separate from the code index, created on first use.
-    ///
-    /// The store is keyed to the container's embedding setup (model +
-    /// dimensions); opening it with a different setup is a hard error, since
-    /// stored memory vectors would be incomparable with new queries.
-    pub fn memory_repository(&self) -> Result<Arc<dyn MemoryRepository>> {
-        let mut cache = self
-            .memory_repo
-            .lock()
-            .map_err(|_| anyhow::anyhow!("memory repository cache lock poisoned"))?;
-        if let Some(repo) = cache.as_ref() {
-            return Ok(Arc::clone(repo));
-        }
-        let db_path = PathBuf::from(&self.config.data_dir).join(MEMORY_DB_FILE);
-        let embedding_cfg = self.embedding_service.config();
-        let repo: Arc<dyn MemoryRepository> = Arc::new(DuckdbMemoryRepository::new(
-            &db_path,
-            embedding_cfg.dimensions(),
-            embedding_cfg.model_name(),
-        )?);
-        *cache = Some(Arc::clone(&repo));
-        Ok(repo)
-    }
-
-    /// Session import + memory extraction + virtual-filesystem summarization,
-    /// all driven by the given chat model.
-    pub fn memory_import_use_case(
-        &self,
-        chat_client: Arc<dyn ChatClient>,
-    ) -> Result<ImportSessionUseCase> {
-        let memory_repo = self.memory_repository()?;
-        let extraction = MemoryExtractionUseCase::new(
-            Arc::clone(&chat_client),
-            Arc::clone(&memory_repo),
-            self.embedding_service.clone(),
-        );
-        let summary = SummarizeMemoryUseCase::new(
-            chat_client,
-            Arc::clone(&memory_repo),
-            self.embedding_service.clone(),
-        );
-        Ok(ImportSessionUseCase::new(memory_repo, extraction, summary))
-    }
-
-    pub fn memory_search_use_case(&self) -> Result<MemorySearchUseCase> {
-        Ok(MemorySearchUseCase::new(
-            self.memory_repository()?,
-            self.embedding_service.clone(),
-        ))
-    }
-
-    /// Unified memory search/browse over items + filesystem nodes (used by the
-    /// TUI's Memory mode).
-    pub fn memory_browse_use_case(&self) -> Result<MemoryBrowseUseCase> {
-        Ok(MemoryBrowseUseCase::new(
-            self.memory_repository()?,
-            self.embedding_service.clone(),
-        ))
-    }
-
-    /// The dream cycle (harvest finished sessions + consolidate the memory
-    /// store), driven by the given chat model.
-    pub fn memory_dream_use_case(
-        &self,
-        chat_client: Arc<dyn ChatClient>,
-    ) -> Result<MemoryDreamUseCase> {
-        let memory_repo = self.memory_repository()?;
-        let import = self.memory_import_use_case(Arc::clone(&chat_client))?;
-        let summary = SummarizeMemoryUseCase::new(
-            Arc::clone(&chat_client),
-            Arc::clone(&memory_repo),
-            self.embedding_service.clone(),
-        );
-        Ok(MemoryDreamUseCase::new(
-            memory_repo,
-            chat_client,
-            self.embedding_service.clone(),
-            Arc::new(crate::connector::adapter::LocalSessionDiscovery::new(Some(
-                self.metadata_db_path(),
-            ))),
-            import,
-            summary,
-        ))
-    }
-
-    /// Summarization use case (session/resource nodes + digest), driven by the
-    /// given chat model. Used to add resources and regenerate the digest.
-    pub fn memory_summary_use_case(
-        &self,
-        chat_client: Arc<dyn ChatClient>,
-    ) -> Result<SummarizeMemoryUseCase> {
-        Ok(SummarizeMemoryUseCase::new(
-            chat_client,
-            self.memory_repository()?,
-            self.embedding_service.clone(),
-        ))
-    }
-
     pub fn data_dir(&self) -> &str {
         &self.config.data_dir
     }
@@ -1006,4 +914,19 @@ impl Container {
     pub fn memory_storage(&self) -> bool {
         self.config.memory_storage
     }
+}
+
+/// The per-usage binding for query expansion, read from `config.json`.
+///
+/// Unlike the request-time usages this is resolved once at start-up (the
+/// expander pins its client at construction), so a change here needs a restart.
+fn expand_binding(data_dir: &str) -> crate::connector::adapter::UsageBinding {
+    crate::connector::adapter::CodesearchConfig::load(data_dir)
+        .ok()
+        .and_then(|c| {
+            c.usages
+                .get(crate::connector::adapter::LlmUsage::ExpandQueries.as_str())
+                .cloned()
+        })
+        .unwrap_or_default()
 }

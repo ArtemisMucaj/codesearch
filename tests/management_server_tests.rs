@@ -14,12 +14,11 @@ use codesearch::{
 };
 use tempfile::{tempdir, TempDir};
 
-/// Build an in-memory container suitable for tests: memory storage, mock
-/// embeddings, no reranking, no network.
+/// Build an in-memory container suitable for tests: in-memory vector storage,
+/// mock embeddings, no reranking, no network.
 ///
 /// Returns the `TempDir` guard alongside the container: the data directory
-/// backs the lazily-opened `memory.duckdb`, so it must outlive the server (the
-/// memory endpoints open it on first request).
+/// backs the DuckDB metadata store, so it must outlive the server.
 async fn test_container() -> (Arc<Container>, TempDir) {
     let dir = tempdir().expect("failed to create temp dir");
     let config = ContainerConfig {
@@ -168,7 +167,6 @@ async fn index_endpoint_describes_the_api() {
         "/api/graph",
         "/api/couplings",
         "/api/channels",
-        "/api/memory",
     ] {
         assert!(
             paths.contains(&expected),
@@ -302,13 +300,29 @@ async fn clusters_and_graph_endpoints_support_global_scope() {
     );
     assert_eq!(body["level"], "symbol");
 
-    // Conflicting scope selectors and unsupported combinations are 400s.
-    // (`/api/symbol-clusters` — the structured community list — has no global
-    // form; the render-ready `/api/graph` above is the symbol-global surface.)
+    // `/api/symbol-clusters` now has a global form too, scoped the same way as
+    // the file level, so the structured community list matches what
+    // `/api/graph?level=symbol&global=true` renders.
+    let resp = reqwest::get(format!(
+        "{base_url}/api/symbol-clusters?global=true&namespace=search"
+    ))
+    .await
+    .expect("global symbol-clusters request failed");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .expect("global symbol-clusters body was not JSON");
+    assert_eq!(
+        body["repository_id"],
+        codesearch::namespace_scope_id("search")
+    );
+
+    // Conflicting scope selectors are still 400s.
     for path in [
         "/api/clusters?global=true&repository=fixture-repo",
         "/api/graph?global=true&repository=fixture-repo",
-        "/api/symbol-clusters?global=true",
+        "/api/symbol-clusters?global=true&repository=fixture-repo",
     ] {
         let resp = reqwest::get(format!("{base_url}{path}"))
             .await
@@ -325,41 +339,132 @@ async fn clusters_and_graph_endpoints_support_global_scope() {
     server.abort();
 }
 
+/// Index the two messaging fixtures as separate repositories, so channel tests
+/// have a producer in one repo and a consumer in another. Returns each one's
+/// `(name, id)` in `(producer, consumer)` order — the query filter takes names
+/// while the report keys endpoints by repository id.
+async fn index_messaging_fixtures(container: &Container) -> ((String, String), (String, String)) {
+    // Both fixtures are Python: producing a channel graph must not depend on an
+    // external indexer being installed. The JS notification fixture would drag
+    // in `scip-typescript`, which CI does not have on PATH.
+    for (path, name) in [
+        ("tests/fixtures/messaging/orders-service", "orders-service"),
+        (
+            "tests/fixtures/messaging/notifications-py",
+            "notifications-py",
+        ),
+    ] {
+        container
+            .index_use_case()
+            .execute(
+                path,
+                Some(name),
+                VectorStore::InMemory,
+                Some("search".to_string()),
+                false,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("failed to index {name}: {e}"));
+    }
+
+    let repos = container
+        .metadata_repository()
+        .list()
+        .await
+        .expect("failed to list indexed repositories");
+    let id_of = |name: &str| {
+        repos
+            .iter()
+            .find(|r| r.name() == name)
+            .map(|r| (name.to_string(), r.id().to_string()))
+            .unwrap_or_else(|| panic!("{name} was not indexed"))
+    };
+    (id_of("orders-service"), id_of("notifications-py"))
+}
+
+/// `GET /api/channels[?query]`, asserting the response is a well-formed report
+/// and returning its body.
+async fn channels(base_url: &str, query: &str) -> serde_json::Value {
+    let url = if query.is_empty() {
+        format!("{base_url}/api/channels")
+    } else {
+        format!("{base_url}/api/channels?{query}")
+    };
+    let resp = reqwest::get(url)
+        .await
+        .expect("request to /api/channels failed");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "channels should accept `{query}`"
+    );
+    let body: serde_json::Value = resp.json().await.expect("channels body was not JSON");
+    assert!(body["edges"].is_array());
+    assert!(body["unmatched_producers"].is_array());
+    assert!(body["unmatched_consumers"].is_array());
+    body
+}
+
+/// Collect the set of repository ids appearing anywhere in a channels report,
+/// so a filter can be checked for actually excluding the repositories it omits.
+fn repositories_in_report(body: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    let mut repos = std::collections::BTreeSet::new();
+    let mut record = |endpoint: &serde_json::Value| {
+        if let Some(repo) = endpoint["repository_id"].as_str() {
+            repos.insert(repo.to_string());
+        }
+    };
+    for key in ["unmatched_producers", "unmatched_consumers"] {
+        for endpoint in body[key].as_array().into_iter().flatten() {
+            record(endpoint);
+        }
+    }
+    for edge in body["edges"].as_array().into_iter().flatten() {
+        for side in ["producer", "consumer"] {
+            record(&edge[side]);
+        }
+    }
+    repos
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_endpoint_accepts_comma_separated_repository_filter() {
     let (container, _dir) = test_container().await;
-    index_fixture(&container).await;
+    let ((producer_repo, producer_id), (consumer_repo, consumer_id)) =
+        index_messaging_fixtures(&container).await;
     let (base_url, server) = spawn_management_server_with_container(container).await;
 
-    // The `repository` filter is a comma-separated string (a Vec can't be
-    // deserialized from a query key). A single repo and a comma list must both
-    // bind — before this fix the param failed to deserialize and the filter was
-    // silently dropped, leaking every namespace's channels.
-    // Single repo, and a comma list (repeated to exercise splitting without
-    // needing a second fixture). Both must bind and return the report shape.
-    for query in [
-        "repository=fixture-repo",
-        "repository=fixture-repo,fixture-repo",
-    ] {
-        let resp = reqwest::get(format!("{base_url}/api/channels?{query}"))
-            .await
-            .expect("request to /api/channels failed");
-        assert_eq!(
-            resp.status(),
-            reqwest::StatusCode::OK,
-            "channels should accept `{query}`"
-        );
-        let body: serde_json::Value = resp.json().await.expect("channels body was not JSON");
-        assert!(body["edges"].is_array());
-        assert!(body["unmatched_producers"].is_array());
-        assert!(body["unmatched_consumers"].is_array());
-    }
+    // Unfiltered (cwd namespace) sees both services.
+    let all = repositories_in_report(&channels(&base_url, "").await);
+    assert!(
+        all.contains(&producer_id) && all.contains(&consumer_id),
+        "unfiltered report should span both services, got {all:?}"
+    );
 
-    // No filter is still valid (scopes to the cwd namespace).
-    let resp = reqwest::get(format!("{base_url}/api/channels"))
-        .await
-        .expect("unfiltered channels request failed");
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    // The `repository` filter is a comma-separated string (a Vec can't be
+    // deserialized from a query key). Before the fix the param failed to
+    // deserialize and the filter was silently dropped, leaking every
+    // repository's channels — so assert the filtered report actually EXCLUDES
+    // the repository it does not name, not merely that it is well-shaped.
+    let filtered =
+        repositories_in_report(&channels(&base_url, &format!("repository={producer_repo}")).await);
+    assert!(
+        !filtered.contains(&consumer_id),
+        "filtering on `{producer_repo}` must exclude `{consumer_repo}`, got {filtered:?}"
+    );
+
+    // A comma list binds too, and naming both repositories restores both.
+    let both = repositories_in_report(
+        &channels(
+            &base_url,
+            &format!("repository={producer_repo},{consumer_repo}"),
+        )
+        .await,
+    );
+    assert_eq!(
+        both, all,
+        "naming both repositories should match the unfiltered report"
+    );
 
     server.abort();
 }
@@ -453,22 +558,6 @@ async fn repository_get_unknown_id_returns_404_json() {
         body["error"].is_string(),
         "errors should be JSON {{\"error\": ...}}, got {body}"
     );
-
-    server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn memory_list_endpoint_returns_empty_shape() {
-    let (base_url, server, _dir) = spawn_management_server().await;
-
-    let resp = reqwest::get(format!("{base_url}/api/memory"))
-        .await
-        .expect("request to /api/memory failed");
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-
-    let body: serde_json::Value = resp.json().await.expect("response body was not JSON");
-    assert_eq!(body["count"], 0);
-    assert!(body["items"].is_array(), "items should be an array");
 
     server.abort();
 }
@@ -573,30 +662,6 @@ async fn index_stream_emits_well_formed_sse_events() {
         parsed.is_object(),
         "SSE data payload should be a JSON object"
     );
-
-    server.abort();
-}
-
-/// Dream endpoints answer 503 when the server booted without a dream service
-/// (no LLM backend at startup) instead of panicking or 404ing.
-#[tokio::test(flavor = "multi_thread")]
-async fn memory_dream_endpoints_report_unavailable_without_service() {
-    let (base, server, _dir) = spawn_management_server().await;
-
-    let status = reqwest::get(format!("{base}/api/memory/dream"))
-        .await
-        .expect("GET /api/memory/dream failed")
-        .status();
-    assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
-
-    let client = reqwest::Client::new();
-    let status = client
-        .post(format!("{base}/api/memory/dream"))
-        .send()
-        .await
-        .expect("POST /api/memory/dream failed")
-        .status();
-    assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
     server.abort();
 }

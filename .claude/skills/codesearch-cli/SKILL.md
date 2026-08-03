@@ -1,18 +1,16 @@
 ---
 name: codesearch-cli
-description: Use before implementing a feature, refactoring, fixing a bug, or changing any code, and whenever you need to understand how code relates — where something is handled, what calls a function, what a change would break, how modules depend. Load it first to find the right code and the blast radius before you edit. Traces relationships and recalls project memory that reading files alone misses.
+description: Use before implementing a feature, refactoring, fixing a bug, or changing any code, and whenever you need to understand how code relates — where something is handled, what calls a function, what a change would break, how modules depend. Load it first to find the right code and the blast radius before you edit. Traces relationships that reading files alone misses.
 metadata:
   author: ArtemisMucaj
-  version: "1.7.0"
-compatibility: Requires the codesearch binary installed. Code search needs the repository indexed with `codesearch index`; memory recall works as soon as any sessions have been imported.
+  version: "2.0.0"
+compatibility: Requires the codesearch binary installed and the repository indexed with `codesearch index`.
 ---
 
 # Codesearch
 
-A CLI that gives an AI assistant four capabilities over one index:
+A CLI that gives an AI assistant three capabilities over one index:
 
-- Recall — long-term memory from past sessions: user preferences, project
-  overview, experiences, and facts. Load it first, every session.
 - Map — architecture at a glance: a one-page `overview`, modules and
   communities (`clusters`, `symbol-clusters`), coupling hotspots, entry-point
   `features`, and cross-service `channels`.
@@ -34,28 +32,7 @@ Follow these phases in order. Run every command from inside the repository —
 codesearch auto-resolves the namespace and embedding config from the repo's git
 remote, so you almost never need `--namespace` or any embedding flags.
 
-## Phase 1 — Recall memory (do this first)
-
-Before any substantive work, load what past sessions learned. It is cheap and
-keeps you from re-asking things the user already told you or working against
-their conventions.
-
-```shell
-# The "read this first" digest across all memory (project + preferences overview)
-codesearch memory show memory://memory
-
-# The user's standing preferences (code style, tooling, workflow)
-codesearch memory list --kind preference
-
-# Anything specific to the task you're about to start
-codesearch memory search "how do we handle <the thing you're about to touch>"
-```
-
-`memory search` is auto-scoped to this project + globals. If memory is empty
-(nothing imported yet) these return little — that's fine, proceed. Don't skip
-the check just because it *might* be empty. (Full memory reference below.)
-
-## Phase 2 — Get the architecture overview
+## Phase 1 — Get the architecture overview
 
 Orient in the codebase before diving in. Start broad, then zoom in only if the
 task needs it.
@@ -80,7 +57,7 @@ codesearch visualize -o graph.html        # interactive community graph
 `overview` caches its analysis and refreshes automatically when you re-index.
 Add `-r/--repository` if several repos are indexed.
 
-## Phase 3 — Search by intent
+## Phase 2 — Search by intent
 
 Describe *what the code does* — include the domain noun and the behaviour.
 Prefer a short phrase or question over one word.
@@ -93,7 +70,7 @@ codesearch search "middleware that validates auth tokens before issuing a sessio
 # Weak — fix by choosing the right tool
 codesearch search "error"           # too generic → "error handling for X"
 codesearch search "HandleRequest"   # you already know the symbol → skip search;
-                                    #   go to Phase 4 (context / impact) instead
+                                    #   go to Phase 3 (context / impact) instead
 ```
 
 Then read the top hits (each result has `file_path`, line range, symbol, and
@@ -101,7 +78,7 @@ a preview): search → Read the top 3–5 at their lines → confirm. Treat the
 ranking as a lead, not a verdict.
 
 > If you already have the exact symbol name, `search` is the wrong phase — jump
-> straight to Phase 4 (`context` / `impact`) to see its callers, callees, and
+> straight to Phase 3 (`context` / `impact`) to see its callers, callees, and
 > blast radius.
 
 If the first query misses, refine rather than repeat:
@@ -118,9 +95,9 @@ Rephrase using vocabulary you saw in the first batch. Scoring note: hybrid RRF
 scores are ~0.016–0.033; semantic-only cosine scores are 0.0–1.0 — set
 `--min-score` to match the mode.
 
-## Phase 4 — Understand a symbol (start here when you know its name)
+## Phase 3 — Understand a symbol (start here when you know its name)
 
-Once you have a symbol name — from Phase 3, or because the user named it — this
+Once you have a symbol name — from Phase 2, or because the user named it — this
 is how you learn where it's used and where a change lands. These query the call
 graph, so they report real callers, callees, and blast radius.
 
@@ -144,14 +121,13 @@ codesearch impact "^MyNs/.*Service#get$" --regex
 codesearch features impacted authenticate hash_password   # which features a change touches
 ```
 
-## Phase 5 — Change, re-index, record
+## Phase 4 — Change, then re-index
 
 After editing, keep the index (and thus the call graph and architecture
-analysis) in sync, and capture what you learned:
+analysis) in sync:
 
 ```shell
-codesearch index <path>                     # incremental — only changed files re-parse
-codesearch memory import <transcript.jsonl> # distill this session for next time
+codesearch index <path>   # incremental — only changed files re-parse
 ```
 
 ---
@@ -174,35 +150,6 @@ codesearch index /path/to/repo --force   # full re-index, ignore cached hashes
 Supported languages: Rust, Python, JavaScript, TypeScript, Go, HCL/Terraform,
 PHP, C++. Indexing extracts functions, methods, classes/structs/enums, traits,
 impls, modules, constants, typedefs, and imports.
-
-## Memory in depth
-
-Four kinds: preference (how the user likes to work), fact (project facts
-and decisions), experience (a reusable insight — trigger, approach,
-guardrails), and skill (a reusable procedure).
-
-Recall (Phase 1) — more ways to read:
-
-```shell
-codesearch memory list --kind fact                  # project facts & decisions
-codesearch memory search "deploy steps" --kind skill
-codesearch memory search "..." --project <name>     # another project (or --all-projects)
-codesearch memory tree                              # browse the memory:// virtual filesystem
-codesearch memory show memory://sessions/<id>       # a past session's transcript
-codesearch memory show experience/<name>            # one item by kind/name
-```
-
-`memory://memory` is the digest across all memory; `memory://projects/<project>`
-is one project's overview. `memory search` auto-scopes to the current project +
-globals; `memory list` lists all items of a kind, newest first.
-
-Record (Phase 5) — more ways to write:
-
-```shell
-codesearch memory add ./docs/design.md               # store a file as a summarized resource
-codesearch memory add https://example.com/g --name g # store a URL
-codesearch memory dream                              # consolidate: merge dupes, resolve conflicts
-```
 
 ## Interactive TUI
 
@@ -239,6 +186,4 @@ call graph, impact analysis, blast radius, symbol context, callers, callees,
 explain, call flow, execution features, criticality, clusters, modules,
 architecture overview, dossier, Leiden, community detection, symbol clusters,
 communities, coupling, hub dependency, cross-service channels, kafka, cross-
-repository dependencies, uses, visualize, graph, TUI, regex symbol match,
-long-term memory, recall preferences, project overview, session start memory,
-remember decisions, user preferences, project facts
+repository dependencies, uses, visualize, graph, TUI, regex symbol match

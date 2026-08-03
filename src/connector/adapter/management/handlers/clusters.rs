@@ -23,6 +23,13 @@ pub struct ClusterParams {
     /// members are `repo:path`-qualified). File-level clusters only.
     #[serde(default)]
     pub global: bool,
+    /// Namespace to scope a `global` run to. Defaults to the server's own
+    /// namespace. Without this the endpoint silently ignored a client's
+    /// requested namespace and analysed whichever one `serve` was started in,
+    /// so a namespace-wide graph could come back full of another namespace's
+    /// repositories.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 impl ClusterParams {
@@ -48,8 +55,9 @@ pub async fn clusters(
     params.reject_global_with_repository()?;
     let use_case = state.container.cluster_detection_use_case();
     let graph = if params.global {
-        // This endpoint has no namespace param, so it uses the server's default.
-        use_case.create_namespace_clusters(None).await?
+        use_case
+            .create_namespace_clusters(params.namespace.as_deref())
+            .await?
     } else {
         let repository_id = state
             .container
@@ -66,20 +74,21 @@ pub async fn symbol_clusters(
     State(state): State<AppState>,
     Query(params): Query<ClusterParams>,
 ) -> ApiResult<Json<SymbolCommunityGraph>> {
-    if params.global {
-        return Err(ApiError::bad_request(
-            "`global` is not supported for symbol clusters: symbol communities \
-             are detected per repository",
-        ));
-    }
-    let repository_id = state
-        .container
-        .resolve_repository_id(params.repository.as_deref())
-        .await;
-    let graph = state
-        .container
-        .symbol_cluster_detection_use_case()
-        .detect_communities(&repository_id)
-        .await?;
+    params.reject_global_with_repository()?;
+    let use_case = state.container.symbol_cluster_detection_use_case();
+    let graph = if params.global {
+        // One Leiden run over every repository's call graph in the namespace.
+        // This used to 400 ("symbol communities are detected per repository"),
+        // which left the symbol level with no namespace-wide view at all.
+        use_case
+            .create_namespace_symbol_communities(params.namespace.as_deref())
+            .await?
+    } else {
+        let repository_id = state
+            .container
+            .resolve_repository_id(params.repository.as_deref())
+            .await;
+        use_case.detect_communities(&repository_id).await?
+    };
     Ok(Json(graph))
 }

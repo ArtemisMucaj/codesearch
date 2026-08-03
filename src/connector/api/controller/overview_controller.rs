@@ -7,7 +7,8 @@ use crate::cli::{LlmTarget, OutputFormatTextJson, OverviewSection};
 use crate::domain::{community_label, ChannelEndpoint, ExecutionFeature};
 
 use super::super::Container;
-use super::build_chat_client;
+use super::build_chat_client_for;
+use crate::connector::adapter::LlmUsage;
 
 /// Communities / coupling hotspots shown at most in the text rendering.
 const MAX_COUPLING_ROWS: usize = 5;
@@ -74,7 +75,8 @@ impl<'a> OverviewController<'a> {
         // levels, then the closing executive summary. `--no-llm` skips all of
         // it; cached names still appear because the analyses load them.
         if !no_llm {
-            match build_chat_client(llm, self.container.data_dir()) {
+            match build_chat_client_for(LlmUsage::LabelCommunities, llm, self.container.data_dir())
+            {
                 Ok(chat) => {
                     let naming = self.container.community_naming_use_case();
                     if let Some(modules) = report.modules.as_mut() {
@@ -87,8 +89,21 @@ impl<'a> OverviewController<'a> {
                             .name_symbol_communities(&mut communities.communities, chat.as_ref())
                             .await;
                     }
+                    // The executive summary is its own usage: it reasons over
+                    // the whole report, where naming is a short per-cluster
+                    // call, so they can want different models.
                     if !skip.contains(&OverviewSection::Summary) {
-                        report.summary = generate_summary(&report, top, chat.as_ref()).await;
+                        match build_chat_client_for(
+                            LlmUsage::SummarizeOverview,
+                            llm,
+                            self.container.data_dir(),
+                        ) {
+                            Ok(summary_chat) => {
+                                report.summary =
+                                    generate_summary(&report, top, summary_chat.as_ref()).await;
+                            }
+                            Err(e) => tracing::warn!("LLM disabled for overview summary: {e}"),
+                        }
                     }
                 }
                 Err(e) => tracing::warn!("LLM disabled for overview, showing ids: {e}"),

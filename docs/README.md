@@ -38,12 +38,6 @@ tour; use this index to go deep on any subsystem.
   readable OpenAPI contract for the management API (served at
   `GET /api/openapi.json`).
 
-## Long-term memory
-
-- [Long-Term Memory](./features/memory.md) — importing finished sessions, the
-  four memory kinds, the `memory://` virtual filesystem, project scoping,
-  dreaming (consolidation), and the memory MCP tools.
-
 ## Architecture & contributing
 
 - [Architecture Overview](./architecture/overview.md) — the Domain-Driven

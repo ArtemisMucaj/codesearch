@@ -28,7 +28,9 @@ pub struct CodesearchConfig {
     /// (e.g. `"copilot"`) survives restarts and can be switched at runtime via
     /// the management API. Absent means "use the boot default" (the
     /// `--llm-target` flag, else the built-in default). Values match
-    /// [`LlmTarget`]'s string form: `"open-ai"`, `"anthropic"`, `"copilot"`.
+    /// `LlmTarget::as_str()`, which is what is persisted here: `"openai"`
+    /// (note: no hyphen, unlike the `--llm-target open-ai` CLI spelling),
+    /// `"anthropic"`, `"copilot"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_target: Option<String>,
 
@@ -40,60 +42,94 @@ pub struct CodesearchConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai: Option<OpenAiConfig>,
 
-    /// Long-term memory / dream-cycle configuration.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory: Option<MemoryConfig>,
+    /// Per-usage overrides, keyed by [`LlmUsage::as_str`].
+    ///
+    /// `llm_target` + `openai.active` answer "which backend", but the jobs here
+    /// differ in what they need: explaining a call flow wants a strong
+    /// reasoner, labelling a few hundred communities wants something cheap and
+    /// fast. A usage with no entry inherits the active backend, so this stays
+    /// empty until someone deliberately splits one out.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub usages: std::collections::BTreeMap<String, UsageBinding>,
 }
 
-/// Configuration for the memory dream scheduler run by `codesearch serve`.
-///
-/// Every field is optional so a hand-edited partial section round-trips; the
-/// accessor methods apply the defaults.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MemoryConfig {
-    /// Master switch for scheduled dreaming in serve mode (default `true`).
-    /// `codesearch memory dream` always works regardless.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dream_enabled: Option<bool>,
+/// The reserved endpoint name that selects the Copilot backend for one usage,
+/// independently of the active `llm_target`.
+pub const COPILOT_ENDPOINT: &str = "copilot";
 
-    /// Hours between full dream cycles in serve mode (default 4).
+/// One usage's chosen backend + model. Either half may be absent: naming only
+/// the model keeps the active backend and swaps the model, which is the common
+/// case when one server hosts several.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageBinding {
+    /// A registered OpenAI endpoint name, or the reserved `"copilot"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dream_interval_hours: Option<u64>,
-
-    /// Minutes a session must be inactive before it counts as finished and is
-    /// harvested (default 60).
+    pub endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_idle_minutes: Option<u64>,
-
-    /// Whether serve mode automatically imports finished sessions between
-    /// dream cycles (default `true`). Each import spends LLM extraction calls,
-    /// so users on paid endpoints may want this off.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_import: Option<bool>,
+    pub model: Option<String>,
 }
 
-impl MemoryConfig {
-    pub const DEFAULT_DREAM_INTERVAL_HOURS: u64 = 4;
-    pub const DEFAULT_SESSION_IDLE_MINUTES: u64 = 60;
+/// A distinct LLM job codesearch runs. Each can name its own endpoint + model;
+/// unset ones follow the active backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmUsage {
+    /// Streamed natural-language explanation of a symbol's call flow.
+    ExplainCode,
+    /// Display names for file and symbol communities.
+    LabelCommunities,
+    /// The closing executive summary on a repository overview.
+    SummarizeOverview,
+    /// Rewriting a search query into related terms before retrieval.
+    ExpandQueries,
+}
 
-    pub fn dream_enabled(&self) -> bool {
-        self.dream_enabled.unwrap_or(true)
+impl LlmUsage {
+    pub const ALL: [LlmUsage; 4] = [
+        LlmUsage::ExplainCode,
+        LlmUsage::LabelCommunities,
+        LlmUsage::SummarizeOverview,
+        LlmUsage::ExpandQueries,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LlmUsage::ExplainCode => "explain_code",
+            LlmUsage::LabelCommunities => "label_communities",
+            LlmUsage::SummarizeOverview => "summarize_overview",
+            LlmUsage::ExpandQueries => "expand_queries",
+        }
     }
 
-    pub fn dream_interval_hours(&self) -> u64 {
-        self.dream_interval_hours
-            .filter(|h| *h > 0)
-            .unwrap_or(Self::DEFAULT_DREAM_INTERVAL_HOURS)
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|u| u.as_str() == s)
     }
 
-    pub fn session_idle_minutes(&self) -> u64 {
-        self.session_idle_minutes
-            .filter(|m| *m > 0)
-            .unwrap_or(Self::DEFAULT_SESSION_IDLE_MINUTES)
+    /// Human-readable label for a settings screen.
+    pub fn label(&self) -> &'static str {
+        match self {
+            LlmUsage::ExplainCode => "Explain code",
+            LlmUsage::LabelCommunities => "Label communities",
+            LlmUsage::SummarizeOverview => "Summarize overview",
+            LlmUsage::ExpandQueries => "Expand queries",
+        }
     }
 
-    pub fn auto_import(&self) -> bool {
-        self.auto_import.unwrap_or(true)
+    pub fn description(&self) -> &'static str {
+        match self {
+            LlmUsage::ExplainCode => {
+                "Stream a natural-language walkthrough of a symbol's call flow. Benefits from a strong reasoner."
+            }
+            LlmUsage::LabelCommunities => {
+                "Name detected file and symbol communities. Runs over hundreds of clusters, so favour something fast."
+            }
+            LlmUsage::SummarizeOverview => {
+                "Write the closing executive summary on a repository overview."
+            }
+            LlmUsage::ExpandQueries => {
+                "Rewrite a search query into related terms before retrieval. Resolved once at start-up."
+            }
+        }
     }
 }
 

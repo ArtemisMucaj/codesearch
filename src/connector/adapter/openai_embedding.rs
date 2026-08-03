@@ -1,35 +1,23 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use openai_rs::{EmbeddingClient, Endpoint, OpenAiEmbeddingClient};
 use tracing::{debug, warn};
 
 use crate::application::EmbeddingService;
 use crate::domain::{CodeChunk, DomainError, Embedding, EmbeddingConfig};
 
 const DEFAULT_BASE_URL: &str = "http://localhost:1234";
-const EMBEDDINGS_PATH: &str = "/v1/embeddings";
-const BATCH_SIZE: usize = 32;
-
-#[derive(Serialize)]
-struct EmbeddingRequest<'a> {
-    model: &'a str,
-    input: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct EmbeddingResponse {
-    data: Vec<EmbeddingData>,
-}
-
-#[derive(Deserialize)]
-struct EmbeddingData {
-    embedding: Vec<f32>,
-    index: usize,
-}
+/// Request timeout preserved from the pre-crate adapter (the crate's `Endpoint`
+/// default is far higher, tuned for slow chat completions rather than embeddings).
+const EMBEDDING_TIMEOUT_SECS: u64 = 60;
 
 /// HTTP embedding adapter targeting the OpenAI-compatible `/v1/embeddings`
-/// endpoint — e.g. LM Studio running locally.
+/// endpoint — e.g. LM Studio running locally. The HTTP protocol (batching and
+/// L2-normalisation, both on by default) is delegated to
+/// [`openai_rs::OpenAiEmbeddingClient`]; this adapter keeps the
+/// [`EmbeddingService`] port, the [`EmbeddingConfig`], and the dimension-mismatch
+/// warning (the crate has no expected width to check against).
 ///
 /// **Configuration**:
 /// - Base URL: `OPENAI_BASE_URL` env var (default `http://localhost:1234`).
@@ -37,8 +25,7 @@ struct EmbeddingData {
 ///   and `--embedding-dimensions` CLI flags; they are stored in `namespace_config`
 ///   and validated on every subsequent open.
 pub struct OpenAiEmbedding {
-    client: reqwest::Client,
-    url: String,
+    client: OpenAiEmbeddingClient,
     config: EmbeddingConfig,
 }
 
@@ -49,88 +36,57 @@ impl OpenAiEmbedding {
     /// `dimensions` — the number of dimensions the model outputs; must match the
     /// value stored in `namespace_config` for the target namespace (enforced by
     /// the vector repository on open).
-    pub fn new(model: impl Into<String>, dimensions: usize) -> Self {
+    pub fn new(model: impl Into<String>, dimensions: usize) -> Result<Self, DomainError> {
         let base =
             std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        let url = format!("{}{}", base.trim_end_matches('/'), EMBEDDINGS_PATH);
         let model = model.into();
 
         debug!(
-            "OpenAiEmbedding: endpoint={}, model={}, dims={}",
-            url, model, dimensions
+            "OpenAiEmbedding: base={}, model={}, dims={}",
+            base, model, dimensions
         );
 
-        Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(60))
-                .build()
-                .expect("reqwest::Client build failed"),
-            url,
+        let endpoint =
+            Endpoint::new(base).with_timeout(Duration::from_secs(EMBEDDING_TIMEOUT_SECS));
+        // Building the client is fallible (a malformed `OPENAI_BASE_URL` is the
+        // usual cause), so propagate rather than abort the process.
+        let client =
+            OpenAiEmbeddingClient::new(&endpoint, model.clone()).map_err(super::map_openai_err)?;
+
+        Ok(Self {
+            client,
             config: EmbeddingConfig::new(model, dimensions, 512),
-        }
+        })
     }
 
+    /// Embed `texts`, returning one vector per input (batched and L2-normalised
+    /// by the crate). Emits a warning if the model's output width does not match
+    /// the configured dimensions, then returns the vectors as-is.
     async fn embed_texts(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, DomainError> {
         if texts.is_empty() {
             return Ok(vec![]);
         }
 
         let n = texts.len();
-        let request = EmbeddingRequest {
-            model: self.config.model_name(),
-            input: texts,
-        };
-
-        let response = self
+        let embeddings = self
             .client
-            .post(&self.url)
-            .json(&request)
-            .send()
+            .embed_batch(&texts)
             .await
-            .map_err(|e| DomainError::internal(format!("OpenAI embedding request failed: {e}")))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(DomainError::internal(format!(
-                "OpenAI embedding API returned {status}: {body}"
-            )));
-        }
-
-        let api_response: EmbeddingResponse = response.json().await.map_err(|e| {
-            DomainError::internal(format!("Failed to parse OpenAI embedding response: {e}"))
-        })?;
-
-        // The OpenAI spec doesn't guarantee ordering; sort by index.
-        let mut data = api_response.data;
-        data.sort_by_key(|d| d.index);
+            .map_err(super::map_openai_err)?;
 
         let expected = self.config.dimensions();
-
-        let embeddings = data
-            .into_iter()
-            .map(|d| {
-                let mut vec = d.embedding;
-                if vec.len() != expected {
-                    warn!(
-                        "OpenAiEmbedding: model '{}' returned {} dimensions, expected {}. \
-                         Check that the model matches --embedding-model and \
-                         --embedding-dimensions.",
-                        self.config.model_name(),
-                        vec.len(),
-                        expected
-                    );
-                }
-                // L2-normalise so cosine similarity equals dot product.
-                let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-                if norm > 0.0 {
-                    for v in &mut vec {
-                        *v /= norm;
-                    }
-                }
-                vec
-            })
-            .collect::<Vec<_>>();
+        if let Some(width) = embeddings.first().map(|v| v.len()) {
+            if width != expected {
+                warn!(
+                    "OpenAiEmbedding: model '{}' returned {} dimensions, expected {}. \
+                     Check that the model matches --embedding-model and \
+                     --embedding-dimensions.",
+                    self.config.model_name(),
+                    width,
+                    expected
+                );
+            }
+        }
 
         debug!(
             "OpenAiEmbedding: {} embedding(s) ({}-dim)",
@@ -163,32 +119,30 @@ impl EmbeddingService for OpenAiEmbedding {
             return Ok(vec![]);
         }
 
-        let mut all_embeddings = Vec::with_capacity(chunks.len());
+        let texts: Vec<String> = chunks
+            .iter()
+            .map(|c| {
+                format!(
+                    "{} {}",
+                    c.qualified_name().as_deref().unwrap_or(""),
+                    c.content()
+                )
+            })
+            .collect();
 
-        for batch in chunks.chunks(BATCH_SIZE) {
-            let texts: Vec<String> = batch
-                .iter()
-                .map(|c| {
-                    format!(
-                        "{} {}",
-                        c.qualified_name().as_deref().unwrap_or(""),
-                        c.content()
-                    )
-                })
-                .collect();
+        let vectors = self.embed_texts(texts).await?;
 
-            let vectors = self.embed_texts(texts).await?;
-
-            for (chunk, vector) in batch.iter().zip(vectors) {
-                all_embeddings.push(Embedding::new(
+        Ok(chunks
+            .iter()
+            .zip(vectors)
+            .map(|(chunk, vector)| {
+                Embedding::new(
                     chunk.id().to_string(),
                     vector,
                     self.config.model_name().to_string(),
-                ));
-            }
-        }
-
-        Ok(all_embeddings)
+                )
+            })
+            .collect())
     }
 
     async fn embed_query(&self, query: &str) -> Result<Vec<f32>, DomainError> {

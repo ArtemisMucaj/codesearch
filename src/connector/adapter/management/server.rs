@@ -41,13 +41,6 @@ const OPENAPI_JSON: &str = include_str!("../../../../docs/management-api.openapi
 pub struct AppState {
     /// The dependency-injection container wiring adapters to use cases.
     pub container: Arc<Container>,
-    /// Dream scheduler state, present when `serve` runs with dreaming
-    /// available (an LLM backend could be built). `None` disables the
-    /// `/api/memory/dream` endpoints.
-    pub dream: Option<Arc<super::DreamService>>,
-    /// Session discovery + background import state (serve mode). `None`
-    /// disables the `/api/sessions/*` endpoints.
-    pub sessions: Option<Arc<super::SessionImportService>>,
     /// GitHub Copilot device-flow login state, so a GUI can authenticate
     /// Copilot without running the terminal `copilot login` command.
     pub copilot_login: Arc<super::CopilotLoginService>,
@@ -59,22 +52,8 @@ impl AppState {
         let copilot_login = super::CopilotLoginService::new(container.data_dir().to_string());
         Self {
             container,
-            dream: None,
-            sessions: None,
             copilot_login,
         }
-    }
-
-    /// Attach the dream scheduler state (serve mode).
-    pub fn with_dream(mut self, dream: Option<Arc<super::DreamService>>) -> Self {
-        self.dream = dream;
-        self
-    }
-
-    /// Attach the session-import service (serve mode).
-    pub fn with_sessions(mut self, sessions: Option<Arc<super::SessionImportService>>) -> Self {
-        self.sessions = sessions;
-        self
     }
 }
 
@@ -122,33 +101,6 @@ pub fn routes(state: AppState) -> Router {
         .route("/api/couplings", get(handlers::couplings::couplings))
         // Cross-service channels.
         .route("/api/channels", get(handlers::channels::channels))
-        // Memory queries + dream management.
-        .route("/api/memory", get(handlers::memory::list))
-        .route("/api/memory/search", get(handlers::memory::search))
-        .route("/api/memory/stats", get(handlers::memory::stats))
-        .route("/api/memory/sessions", get(handlers::memory::sessions))
-        .route("/api/memory/tree", get(handlers::memory::tree))
-        // Dream (memory consolidation) status + manual trigger.
-        .route(
-            "/api/memory/dream",
-            get(handlers::memory::dream_status).post(handlers::memory::dream_trigger),
-        )
-        // Update the dream scheduler's settings (applied live + persisted).
-        .route(
-            "/api/memory/dream/config",
-            axum::routing::put(handlers::memory::dream_config),
-        )
-        .route("/api/memory/{id}", get(handlers::memory::get))
-        // Session discovery + background import (what the import TUI does).
-        .route("/api/sessions", get(handlers::sessions::discover))
-        .route(
-            "/api/sessions/transcript",
-            get(handlers::sessions::transcript),
-        )
-        .route(
-            "/api/sessions/import",
-            get(handlers::sessions::import_status).post(handlers::sessions::import),
-        )
         // LLM backend introspection + runtime configuration.
         .route("/api/llm/models", get(handlers::llm::models))
         .route("/api/llm/endpoints", get(handlers::llm::list_endpoints))
@@ -157,6 +109,13 @@ pub fn routes(state: AppState) -> Router {
             axum::routing::put(handlers::llm::upsert_endpoint),
         )
         .route("/api/llm/active", post(handlers::llm::set_active_endpoint))
+        // Per-usage model selection: each LLM job can name its own backend +
+        // model, falling back to the active one.
+        .route("/api/llm/usages", get(handlers::llm::list_usages))
+        .route(
+            "/api/llm/usages/{id}",
+            axum::routing::put(handlers::llm::set_usage),
+        )
         // Active LLM backend: report/switch which provider (openai/anthropic/
         // copilot) answers explain, dream, and model discovery — persisted and
         // applied live, so a GUI can change backends without a restart.
@@ -223,19 +182,6 @@ async fn index(State(_state): State<AppState>) -> Json<Value> {
             { "method": "GET", "path": "/api/graph", "description": "render-ready community graph with edges (?level=file|symbol&aggregate=&global=)" },
             { "method": "GET", "path": "/api/couplings", "description": "coupling elements holding fragile communities together (?level=file|symbol)" },
             { "method": "GET", "path": "/api/channels", "description": "cross-service channel links" },
-            { "method": "GET", "path": "/api/memory", "description": "list stored memory items (?kind=)" },
-            { "method": "GET", "path": "/api/memory/search", "description": "search stored memories (?query=)" },
-            { "method": "GET", "path": "/api/memory/stats", "description": "memory item/session counts" },
-            { "method": "GET", "path": "/api/memory/sessions", "description": "imported sessions" },
-            { "method": "GET", "path": "/api/memory/tree", "description": "browse the memory filesystem (?uri=)" },
-            { "method": "GET", "path": "/api/memory/dream", "description": "dream scheduler status + last run" },
-            { "method": "POST", "path": "/api/memory/dream", "description": "trigger a dream cycle" },
-            { "method": "PUT", "path": "/api/memory/dream/config", "description": "update dream scheduler settings (applied live + persisted)" },
-            { "method": "GET", "path": "/api/memory/{id}", "description": "one memory item or node" },
-            { "method": "GET", "path": "/api/sessions", "description": "discover importable sessions (claude/opencode/zed)" },
-            { "method": "GET", "path": "/api/sessions/transcript", "description": "one discovered session's transcript (?source=&id=)" },
-            { "method": "POST", "path": "/api/sessions/import", "description": "queue a background import ({source,id,force?})" },
-            { "method": "GET", "path": "/api/sessions/import", "description": "per-session import status map" },
             { "method": "GET", "path": "/api/llm/target", "description": "the active LLM backend + pinned copilot model" },
             { "method": "POST", "path": "/api/llm/target", "description": "switch the active LLM backend ({target}); applied live + persisted" },
             { "method": "PUT", "path": "/api/llm/copilot/model", "description": "pin the copilot model ({model}); empty clears it" },
@@ -265,24 +211,18 @@ async fn openapi() -> impl IntoResponse {
 ///
 /// This intentionally mirrors the MCP HTTP server's lifecycle so both can be
 /// driven concurrently from `main` (e.g. via `tokio::select!`).
-#[tracing::instrument(skip(container, dream), fields(port, public))]
+#[tracing::instrument(skip(container), fields(port, public))]
 pub async fn run_management_server(
     container: Arc<Container>,
     port: u16,
     public: bool,
-    dream: Option<Arc<super::DreamService>>,
 ) -> Result<()> {
     let bind_addr: [u8; 4] = if public { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
     let addr = SocketAddr::from((bind_addr, port));
 
     tracing::info!("Starting codesearch management API on {}", addr);
 
-    // Session discovery + background import is always available in serve mode
-    // (it builds its LLM client lazily, per import, so it never fails at boot).
-    let sessions = super::SessionImportService::build(Arc::clone(&container));
-    let state = AppState::new(container)
-        .with_dream(dream)
-        .with_sessions(Some(sessions));
+    let state = AppState::new(container);
     let app = routes(state);
 
     let listener = tokio::net::TcpListener::bind(addr)

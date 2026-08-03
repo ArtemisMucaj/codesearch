@@ -8,8 +8,8 @@ pub const DEFAULT_MGMT_PORT: u16 = 8676;
 
 /// Namespace used when `--namespace` is not given. Repositories indexed here
 /// were not deliberately grouped by the user, so features that treat a shared
-/// namespace as "these projects belong together" (e.g. memory scoping) must
-/// not apply that meaning to this one.
+/// namespace as "these projects belong together" must not apply that meaning
+/// to this one.
 pub const DEFAULT_NAMESPACE: &str = "search";
 
 /// Validates a namespace for use as a DuckDB schema name.
@@ -251,172 +251,6 @@ pub enum TuiMode {
     Impact,
     /// Open in context mode.
     Context,
-}
-
-/// Memory kind filter for `memory search` / `memory list`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum MemoryKindArg {
-    Preference,
-    Experience,
-    Skill,
-    Fact,
-}
-
-impl From<MemoryKindArg> for crate::domain::MemoryKind {
-    fn from(arg: MemoryKindArg) -> Self {
-        match arg {
-            MemoryKindArg::Preference => crate::domain::MemoryKind::Preference,
-            MemoryKindArg::Experience => crate::domain::MemoryKind::Experience,
-            MemoryKindArg::Skill => crate::domain::MemoryKind::Skill,
-            MemoryKindArg::Fact => crate::domain::MemoryKind::Fact,
-        }
-    }
-}
-
-/// Subcommands for the `memory` command — long-term memory extracted from
-/// finished assistant sessions (stored in `memory.duckdb`, separate from the
-/// code index).
-#[derive(Subcommand)]
-pub enum MemorySubcommand {
-    /// Import a finished session transcript and extract memories from it.
-    ///
-    /// With no PATH, opens an interactive picker that discovers Claude Code,
-    /// OpenCode, and Zed sessions on this machine — shown with their names, how
-    /// long ago they ran, and a preview from the end of the conversation — and
-    /// imports the ones you select.
-    ///
-    /// With a PATH, imports that transcript directly: a Claude Code session log
-    /// (~/.claude/projects/<project>/<id>.jsonl) or a generic JSONL chat log
-    /// ({"role": "...", "content": "..."} per line). Extraction calls the
-    /// configured LLM — point ANTHROPIC_BASE_URL / ANTHROPIC_MODEL /
-    /// ANTHROPIC_API_KEY (or the OPENAI_* equivalents with --llm open-ai) at a
-    /// small model; extraction is a summarization-style task.
-    Import {
-        /// Path to a transcript file (JSONL). Omit to open the session picker.
-        path: Option<String>,
-
-        /// LLM provider for extraction: 'open-ai' (default), 'anthropic', or 'copilot'
-        #[arg(long, value_enum, default_value = "open-ai")]
-        llm: LlmTarget,
-
-        /// Re-import even if this session was already imported.
-        #[arg(short, long)]
-        force: bool,
-    },
-
-    /// Search stored memories (hybrid semantic + keyword).
-    Search {
-        query: String,
-
-        /// Maximum number of results.
-        #[arg(long, default_value = "10")]
-        num: usize,
-
-        /// Restrict to one memory kind.
-        #[arg(short, long, value_enum)]
-        kind: Option<MemoryKindArg>,
-
-        /// Restrict to memories relevant in this project/namespace (its items
-        /// plus globals). Defaults to the project resolved from the current
-        /// directory; pass --all-projects to search everything.
-        #[arg(long, conflicts_with = "all_projects")]
-        project: Option<String>,
-
-        /// Search across every project instead of the current directory's.
-        #[arg(long)]
-        all_projects: bool,
-
-        /// Output format: text or json.
-        #[arg(short = 'F', long, value_enum, default_value = "text")]
-        format: OutputFormatTextJson,
-    },
-
-    /// List stored memories, newest first.
-    List {
-        /// Restrict to one memory kind.
-        #[arg(short, long, value_enum)]
-        kind: Option<MemoryKindArg>,
-
-        /// Output format: text or json.
-        #[arg(short = 'F', long, value_enum, default_value = "text")]
-        format: OutputFormatTextJson,
-    },
-
-    /// Show the full content of one memory item or virtual-filesystem node.
-    Show {
-        /// Memory item ID, a 'kind/name' item reference, or a 'memory://' node
-        /// URI (e.g. 'memory://memory', 'memory://sessions/<id>').
-        id: String,
-    },
-
-    /// Delete a memory item by ID.
-    Delete {
-        /// Memory item ID.
-        id: String,
-    },
-
-    /// List imported sessions.
-    Sessions {
-        /// Output format: text or json.
-        #[arg(short = 'F', long, value_enum, default_value = "text")]
-        format: OutputFormatTextJson,
-    },
-
-    /// Add a resource (a file or a URL) to the memory virtual filesystem.
-    ///
-    /// Fetches the content (URLs and HTML are decluttered to Markdown via the
-    /// `defuddle` CLI; plain files are read as-is), generates an L0 abstract +
-    /// L1 overview, and stores it at 'memory://resources/<name>' with the full
-    /// text as L2. Like `import`, this uses the configured LLM for the summary.
-    Add {
-        /// A local file path or an http(s):// URL.
-        source: String,
-
-        /// Name (slug) for the resource node; derived from the source when
-        /// omitted. Reusing a name overwrites that resource.
-        #[arg(long)]
-        name: Option<String>,
-
-        /// LLM provider for the summary: 'open-ai' (default), 'anthropic', or 'copilot'.
-        #[arg(long, value_enum, default_value = "open-ai")]
-        llm: LlmTarget,
-    },
-
-    /// Run one dream cycle: harvest finished sessions, then consolidate the
-    /// memory store.
-    ///
-    /// Harvest imports sessions that have been inactive for at least the idle
-    /// window and were never imported. Consolidation clusters near-duplicate
-    /// memories by embedding similarity and asks the configured LLM to merge
-    /// them — resolving contradictions into boundary insights ("X holds in
-    /// context A, Y in context B") rather than dropping a side — then a
-    /// reflection pass promotes cross-session patterns (repeated experiences
-    /// into a skill, per-project facts into globals). `codesearch serve` runs
-    /// this automatically on a schedule; this command runs one cycle now.
-    Dream {
-        /// LLM provider: 'open-ai' (default), 'anthropic', or 'copilot'.
-        #[arg(long, value_enum, default_value = "open-ai")]
-        llm: LlmTarget,
-
-        /// Minutes a session must be inactive to count as finished.
-        #[arg(long, default_value = "60")]
-        idle_minutes: u64,
-    },
-
-    /// Browse the memory virtual filesystem (L0/L1 abstracts).
-    ///
-    /// With no URI, lists the top-level roots (the whole-memory digest and the
-    /// sessions/resources directories). With a directory URI, lists its
-    /// children with their one-line abstracts — the "read this first" view
-    /// before drilling into a node with `memory show <uri>`.
-    Tree {
-        /// Directory URI to list (e.g. 'memory://sessions'). Omit for the root.
-        uri: Option<String>,
-
-        /// Output format: text or json.
-        #[arg(short = 'F', long, value_enum, default_value = "text")]
-        format: OutputFormatTextJson,
-    },
 }
 
 /// Embedding backend to use for indexing and search.
@@ -777,12 +611,6 @@ pub enum Commands {
         /// Auto-aggregate when the graph has more than this many nodes.
         #[arg(long, default_value_t = 5000)]
         node_limit: usize,
-    },
-
-    /// Long-term memory: import finished sessions and search what was learned
-    Memory {
-        #[command(subcommand)]
-        subcommand: MemorySubcommand,
     },
 
     /// Start MCP (Model Context Protocol) server for integration with AI tools

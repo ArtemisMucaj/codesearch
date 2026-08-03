@@ -10,13 +10,16 @@
 //! - **`models`** — print the available models (table or JSON).
 //! - **`status`** — print auth state and the currently-selected model.
 //!
-//! codesearch performs the device flow itself (see [`copilot_auth`]) and calls
-//! the Copilot API directly, so there is no external CLI dependency.
+//! The device flow and Copilot API calls come from `gh-copilot-rs`, so there is
+//! no external CLI dependency.
+
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use gh_copilot_rs::{GitHubDeviceFlow, LoginUseCase};
 
 use crate::cli::CopilotSubcommand;
-use crate::connector::adapter::{copilot_auth, CodesearchConfig, CopilotChatClient, CopilotModel};
+use crate::connector::adapter::{CodesearchConfig, CopilotChatClient, CopilotModel};
 
 mod picker;
 
@@ -35,28 +38,33 @@ pub async fn run(subcommand: CopilotSubcommand, data_dir: &str) -> Result<String
 /// `copilot login`: run the device flow, store the token, then (unless
 /// `--no-pick`) run the model picker and persist the selection.
 async fn login(data_dir: &str, no_pick: bool) -> Result<String> {
-    let http = reqwest::Client::new();
+    let login = LoginUseCase::new(Arc::new(
+        GitHubDeviceFlow::new().context("failed to build GitHub device-flow client")?,
+    ));
 
     // Step 1: get a device code and show it to the user.
-    let device = copilot_auth::request_device_code(&http)
+    let authorization = login
+        .begin()
         .await
         .context("failed to start GitHub device-flow login")?;
 
     println!(
         "To authorize codesearch with GitHub Copilot:\n\n  \
          1. Open {}\n  2. Enter the code: {}\n\nWaiting for authorization…",
-        device.verification_uri(),
-        device.user_code()
+        authorization.verification_uri(),
+        authorization.user_code()
     );
 
-    // Step 2: poll until the user completes the browser step.
-    let token = copilot_auth::poll_for_token(&http, &device)
+    // Step 2: poll until the user completes the browser step. Gives up at the
+    // device code's expiry rather than polling forever.
+    let token = login
+        .wait_for_token(&authorization)
         .await
         .context("GitHub device-flow login failed")?;
 
     // Persist the token immediately so a later picker failure doesn't lose it.
     let mut cfg = CodesearchConfig::load(data_dir)?;
-    cfg.copilot_mut().github_token = Some(token);
+    cfg.copilot_mut().github_token = Some(token.expose().to_string());
     cfg.save(data_dir)?;
 
     if no_pick {

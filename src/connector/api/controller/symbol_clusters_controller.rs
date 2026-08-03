@@ -3,7 +3,8 @@ use anyhow::{Context, Result};
 use crate::cli::{LlmTarget, OutputFormat, OutputFormatTextJson};
 
 use super::super::Container;
-use super::build_chat_client;
+use super::build_chat_client_for;
+use crate::connector::adapter::LlmUsage;
 use crate::domain::community_label;
 
 /// CLI controller for symbol-level communities (Leiden over the call graph).
@@ -49,7 +50,8 @@ impl<'a> SymbolClustersController<'a> {
         // probes once and falls back to ids if the endpoint is down. `--no-llm`
         // skips it. A chat-client build failure is non-fatal — degrade to ids.
         if !no_llm {
-            match build_chat_client(llm, self.container.data_dir()) {
+            match build_chat_client_for(LlmUsage::LabelCommunities, llm, self.container.data_dir())
+            {
                 Ok(chat) => {
                     self.container
                         .community_naming_use_case()

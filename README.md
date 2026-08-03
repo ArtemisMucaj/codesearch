@@ -26,9 +26,7 @@ codesearch is three tools in one binary, all built on a single index:
   one-page repository dossier (`overview`) — plus interactive graph rendering.
 
 It also ships an **MCP server** (so AI agents can call it), a **REST + SSE
-management API**, an **interactive TUI**, editor integrations (Neovim,
-Zed), and a **long-term memory** subsystem that distills finished assistant
-sessions into searchable knowledge.
+management API**, an **interactive TUI**, and editor integrations (Neovim, Zed).
 
 **Languages:** Rust, Python, JavaScript, TypeScript, Go, HCL/Terraform, PHP,
 C++. JavaScript/TypeScript and PHP get a precise call graph via SCIP
@@ -121,7 +119,6 @@ global flags. See [Namespaces & automatic resolution](#namespaces--automatic-res
 | `uses <from> <to>` | Files in one repo that reference symbols in another |
 | `overview` | One-page Markdown dossier combining every analysis |
 | `visualize` | Render communities as interactive HTML, SVG, or Obsidian canvas |
-| `memory <sub>` | Long-term memory from finished assistant sessions |
 | `tui` | Interactive terminal UI (search + impact + context) |
 | `mcp` | Start the MCP server (stdio or HTTP) |
 | `serve` | Run the MCP server **and** the REST/SSE management API together |
@@ -267,11 +264,10 @@ codesearch mcp --http 8080           # HTTP; endpoint at /mcp
 codesearch mcp --http 8080 --public  # bind 0.0.0.0
 ```
 
-Exposes 20 tools: `search_code`, `analyze_impact`, `get_symbol_context`,
+Exposes 16 tools: `search_code`, `analyze_impact`, `get_symbol_context`,
 `query_graph`, `overview`, `list_repositories`, `list_features`, `get_feature`,
 `get_impacted_features`, `file_uses`, `list_clusters`, `get_file_cluster`,
-`list_symbol_clusters`, `get_symbol_cluster`, `couplings`, `channels`,
-`search_memory`, `list_memories`, `read_memory`, and `add_memory_resource`.
+`list_symbol_clusters`, `get_symbol_cluster`, `couplings`, and `channels`.
 `query_graph` supports eight intention-named patterns (`callers_of`,
 `callees_of`, `imports_of`, `importers_of`, `inheritors_of`, `children_of`,
 `tests_for`, `file_summary`).
@@ -285,9 +281,9 @@ codesearch serve --public
 ```
 
 `serve` runs the MCP HTTP server and a **REST/JSON + SSE management API** side
-by side, and schedules memory dreaming in the background. The management API
-covers search, call-graph, clusters, couplings, channels, memory, LLM backend
-management, and streaming (`/api/stream/index`, `/api/stream/explain/{symbol}`).
+by side. The management API covers search, call-graph, clusters, couplings,
+channels, LLM backend management, and streaming (`/api/stream/index`,
+`/api/stream/explain/{symbol}`).
 The full contract is the checked-in OpenAPI spec at
 [`docs/management-api.openapi.json`](docs/management-api.openapi.json) (served
 verbatim at `GET /api/openapi.json`). Overview:
@@ -304,8 +300,8 @@ See [docs/features/editor-integrations.md](docs/features/editor-integrations.md)
 ### Agent skills
 
 Two [agent skills](https://skills.md) ship in `.claude/skills/`, teaching an AI
-assistant how to drive codesearch as a runbook (recall memory → map the
-architecture → search by intent → trace call graph):
+assistant how to drive codesearch as a runbook (map the architecture → search by
+intent → trace call graph):
 
 | Skill | Use it when | Surface |
 |---|---|---|
@@ -341,30 +337,10 @@ codesearch tui --query "auth flow"   # pre-populate and dispatch
 
 ---
 
-## Long-term memory
-
-Import finished assistant sessions (Claude Code transcripts or generic JSONL
-chat logs) and distill them into durable, searchable memories — preferences,
-experiences, skills, and facts — in a separate `memory.duckdb`.
-
-```bash
-codesearch memory import ~/.claude/projects/<project>/<session>.jsonl
-codesearch memory search "how do we handle lock conflicts"
-codesearch memory add https://example.com/guide --name guide   # add a file/URL
-codesearch memory tree                                          # browse the memory:// VFS
-codesearch memory dream                                         # consolidate the store
-```
-
-`serve` schedules importing and consolidation automatically. Full design:
-[docs/features/memory.md](docs/features/memory.md).
-
----
-
 ## LLM backends
 
-LLM features (`explain`, community naming, query expansion, memory extraction,
-dreaming) run through one of three interchangeable backends, selected with the
-global `--llm-target`:
+LLM features (`explain`, community naming, query expansion) run through one of
+three interchangeable backends, selected with the global `--llm-target`:
 
 | Target | Backend | Configure with |
 |---|---|---|

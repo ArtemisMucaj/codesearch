@@ -8,9 +8,7 @@
    operations, meant for scripts, dashboards, and native front-ends that want to
    drive a running index without speaking MCP.
 
-It also starts the **memory-dream scheduler** in the background (see
-[Long-Term Memory — Dreaming](./memory.md#dreaming)). Both servers shut down
-gracefully on ctrl-c.
+Both servers shut down gracefully on ctrl-c.
 
 ```bash
 # MCP on 8677, management API on 8676 (defaults), bound to 127.0.0.1
@@ -55,9 +53,9 @@ Treat the OpenAPI file as the source of truth; this page is the orientation.
 
 All request/response endpoints live under `/api/...` (excluding
 `/api/stream/...`). Errors are returned as `{ "error": "<message>" }` with an
-appropriate status: `400` for malformed input (unknown protocol / memory kind,
-bad body), `404` when a named repository, symbol, or memory item is not found,
-and `500` for any other use-case failure.
+appropriate status: `400` for malformed input (unknown protocol / graph level,
+bad body), `404` when a named repository or symbol is not found, and `500` for
+any other use-case failure.
 
 ### Health & discovery
 
@@ -95,19 +93,6 @@ and `500` for any other use-case failure.
 | `GET /api/graph` | Render-ready community graph with edges (`level=file\|symbol`, `aggregate=`, `global=` for the namespace-wide file graph) |
 | `GET /api/couplings` | Coupling elements (`repository`, `level=file\|symbol`) |
 | `GET /api/channels` | Cross-service channel links |
-
-### Memory
-
-| Method & path | Purpose |
-|---|---|
-| `GET /api/memory` | List memory items (`kind` filter) |
-| `GET /api/memory/{id}` | One memory item |
-| `GET /api/memory/search` | Hybrid memory recall |
-| `GET /api/memory/tree` | Browse the `memory://` virtual filesystem |
-| `GET /api/memory/sessions` | Imported sessions |
-| `GET /api/memory/stats` | Memory-store statistics |
-| `GET /api/memory/dream` | Dream-scheduler status + last run |
-| `POST /api/memory/dream` | Trigger a dream cycle in the background |
 
 ### LLM backend management
 

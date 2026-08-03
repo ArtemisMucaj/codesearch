@@ -8,18 +8,23 @@
 //! (a feature, a collaborating set of functions) that frequently cut across file
 //! and even directory boundaries, which the file-level view cannot show.
 //!
-//! The graph primitives and the algorithm are reused verbatim from
-//! `cluster_detection` (`Graph`, `leiden`, `kind_weight`) so the two levels stay
+//! The algorithm (`leiden::partition`) and the façade split
+//! (`leiden_coupling::partition_with_facade_split`) come from the same crates as
+//! the file level, and the edge-weight policy (`kind_weight`, the façade-split
+//! configuration) is shared with `cluster_detection`, so the two levels stay
 //! behaviourally identical and benefit from the same fixes.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+use leiden::Graph;
+use leiden_coupling::partition_with_facade_split;
 use tracing::{debug, warn};
 
-use super::cluster_detection::{
-    facade_split_config, kind_weight, leiden, partition_with_facade_split, Graph,
-};
+// `leiden` / `leiden_coupling` are imported directly above: this branch moved
+// them out of `cluster_detection` into their own crates, so only the shared
+// edge-weight policy still comes from the file-level module.
+use super::cluster_detection::{facade_split_config, kind_weight};
 use crate::application::{AnalysisRepository, CallGraphUseCase, MetadataRepository};
 use crate::domain::{
     community_label, namespace_scope_id, stable_community_id, CommunityMeta, DomainError,
@@ -50,10 +55,12 @@ pub(crate) struct SymbolGraph {
     pub(crate) graph: Graph,
     /// Dominant language per symbol (first seen wins).
     language_of: HashMap<String, String>,
-    /// Owning repository id per symbol, for the namespace-wide graph (first
-    /// reference that mentions the symbol wins). Empty for the single-repo path,
-    /// where every symbol trivially belongs to the one repo. Resolved to a
-    /// display name at render time.
+    /// Owning repository id per symbol, for the namespace-wide graph. Only
+    /// symbols observed as a *caller* are recorded, since that is the only
+    /// authoritative attribution available here; a symbol seen solely as a
+    /// callee is absent and renders without a repository. Empty for the
+    /// single-repo path, where every symbol trivially belongs to the one repo.
+    /// Resolved to a display name at render time.
     repo_of: HashMap<String, String>,
     /// Distinct undirected (lo, hi, weight) edges — used as the edge count, to
     /// compute per-community cohesion, and to drive the visualization view.
@@ -220,7 +227,7 @@ impl SymbolClusterDetectionUseCase {
         // façades) when it is enabled.
         let partition = match facade_split_config() {
             Some(pct) => partition_with_facade_split(&sg.symbols, &sg.edges, pct),
-            None => leiden(&sg.graph),
+            None => leiden::partition(&sg.graph),
         };
         let num_communities = partition.iter().copied().max().map(|m| m + 1).unwrap_or(0);
 
@@ -512,14 +519,15 @@ impl SymbolClusterDetectionUseCase {
                 .or_insert_with(|| lang.clone());
             language_of.entry(callee.to_string()).or_insert(lang);
 
-            // Attribute each symbol to a repository. The *caller* is defined in
-            // the reference's repository, so that's authoritative — always record
-            // it. The callee's own definition site is unknown here (it may live in
-            // another repo); take the reference's repo only as a first-seen guess,
-            // which a later reference where the callee is itself a caller corrects.
-            let repo = reference.repository_id().to_string();
-            repo_of.insert(caller.to_string(), repo.clone());
-            repo_of.entry(callee.to_string()).or_insert(repo);
+            // Attribute each symbol to a repository. Only the *caller* is
+            // authoritative: it is defined in the reference's repository. The
+            // callee's definition site is unknown here — it may live in another
+            // repo — and guessing the caller's repo would be wrong for every
+            // cross-repository leaf callee (one that never appears as a caller
+            // itself, so nothing would ever correct the guess). Leave those
+            // unattributed; the graph renders them with `repository: None`
+            // rather than confidently naming the wrong repository.
+            repo_of.insert(caller.to_string(), reference.repository_id().to_string());
 
             node_set.insert(caller.to_string());
             node_set.insert(callee.to_string());
