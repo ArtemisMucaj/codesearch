@@ -57,6 +57,9 @@ INSTALL_DIR="$HOME/.local/bin" sh .claude/skills/codesearch-cli/install.sh
 
 Either way, make sure `~/.local/bin` is on your `PATH`.
 
+The macOS release binary is signed with a Developer ID and notarized by Apple,
+so it runs without a Gatekeeper exception.
+
 ### From source
 
 ```bash
