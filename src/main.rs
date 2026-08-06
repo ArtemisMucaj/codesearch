@@ -115,6 +115,18 @@ struct Cli {
     #[arg(long, global = true, value_enum, default_value = "open-ai")]
     llm_target: LlmTarget,
 
+    /// Force direct database access for write commands even if a `serve`
+    /// process is running. Fails with a DuckDB lock error if the server still
+    /// holds the write lock — use only when you know the server is stopped.
+    #[arg(long, global = true)]
+    local: bool,
+
+    /// Route write commands (create/index/delete) through the management API of
+    /// a specific running server (e.g. http://127.0.0.1:8676) instead of
+    /// auto-detecting one. Implies not opening the database directly.
+    #[arg(long, global = true)]
+    server: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -214,6 +226,63 @@ async fn main() -> Result<()> {
     }
 
     let db_path = std::path::Path::new(&data_dir).join("codesearch.duckdb");
+
+    // Write commands (create / index / delete) need a DuckDB write lock. If a
+    // `serve` process is running against this data-dir it already holds that
+    // lock, so route the command through its management API instead of failing.
+    // Read commands don't come here — they open the DB read-only, which is
+    // allowed alongside the writer. `--local` forces direct access; `--server`
+    // forces a specific target. On a server-owned dir where the API call fails,
+    // we error out (rather than silently hitting the lock).
+    if matches!(
+        &cli.command,
+        Commands::Create { .. } | Commands::Index { .. } | Commands::Delete { .. }
+    ) {
+        use codesearch::cli::server_client::{resolve_route, RouteTarget, ServerClient};
+        let route = resolve_route(
+            std::path::Path::new(&data_dir),
+            cli.local,
+            cli.server.as_deref(),
+        )
+        .await?;
+        if let RouteTarget::Server(base) = route {
+            let client = ServerClient::new(base);
+            let output = match &cli.command {
+                Commands::Create {
+                    name,
+                    embedding_target,
+                    embedding_model,
+                    embedding_dimensions,
+                    no_embeddings,
+                } => {
+                    let namespace = name.as_deref().unwrap_or(&cli.namespace);
+                    let target = match embedding_target {
+                        EmbeddingTarget::Onnx => "onnx",
+                        EmbeddingTarget::Api => "api",
+                    };
+                    client
+                        .create_namespace(
+                            namespace,
+                            target,
+                            embedding_model.as_deref(),
+                            *embedding_dimensions,
+                            *no_embeddings,
+                        )
+                        .await?
+                }
+                Commands::Index { path, name, force } => {
+                    client
+                        .index_repository(path, name.as_deref(), *force)
+                        .await?
+                }
+                Commands::Delete { id_or_path } => client.delete_repository(id_or_path).await?,
+                _ => unreachable!("guarded by the matches! above"),
+            };
+            println!("{output}");
+            return Ok(());
+        }
+        // RouteTarget::Local — fall through to the direct-DB paths below.
+    }
 
     // `create` only writes namespace configuration — handle it before the
     // container is built so no embedding model is loaded or downloaded.
@@ -329,6 +398,10 @@ async fn main() -> Result<()> {
                 | Commands::Tui { .. }
         );
 
+    // `data_dir` is moved into ContainerConfig below; keep a copy for the serve
+    // block's run-info file (written next to the DB in this directory).
+    let data_dir_for_runinfo = data_dir.clone();
+
     let config = ContainerConfig {
         data_dir,
         mock_embeddings: cli.mock_embeddings,
@@ -374,6 +447,18 @@ async fn main() -> Result<()> {
 
         let container = Arc::new(Container::new(config).await?);
 
+        // Advertise this server so one-shot CLI invocations against the same
+        // data-dir route their write commands through it instead of hitting the
+        // DuckDB write lock we hold. Removed after the servers exit; a stale
+        // file (hard kill) is caught by the CLI's /health probe.
+        let runinfo = codesearch::ServeRunInfo {
+            mgmt_port: serve_mgmt_port,
+            mcp_port: serve_mcp_port,
+            pid: std::process::id(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        codesearch::write_runinfo(std::path::Path::new(&data_dir_for_runinfo), &runinfo);
+
         let mcp = run_http_server(container.clone(), serve_mcp_port, serve_public);
         let mgmt = codesearch::run_management_server(container, serve_mgmt_port, serve_public);
 
@@ -383,10 +468,33 @@ async fn main() -> Result<()> {
             serve_mgmt_port
         );
 
-        tokio::select! {
-            res = mcp => res?,
-            res = mgmt => res?,
-        }
+        // The HTTP servers shut down on ctrl-c (SIGINT), but a supervising app
+        // (e.g. Hoplon) stops the process with SIGTERM. On Unix, watch for
+        // SIGTERM too so the run-info file is removed on that path rather than
+        // leaking. A leaked file isn't fatal — the CLI's /health probe rejects a
+        // stale one — but cleaning up keeps the common case tidy.
+        #[cfg(unix)]
+        let result: Result<()> = {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to install SIGTERM handler");
+            tokio::select! {
+                res = mcp => res,
+                res = mgmt => res,
+                _ = sigterm.recv() => {
+                    tracing::info!("received SIGTERM; shutting down serve");
+                    Ok(())
+                }
+            }
+        };
+        #[cfg(not(unix))]
+        let result: Result<()> = tokio::select! {
+            res = mcp => res,
+            res = mgmt => res,
+        };
+
+        codesearch::remove_runinfo(std::path::Path::new(&data_dir_for_runinfo));
+        result?;
         return Ok(());
     }
 

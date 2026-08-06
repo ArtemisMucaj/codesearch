@@ -1,5 +1,7 @@
 use clap::{Subcommand, ValueEnum};
 
+pub mod server_client;
+
 /// Default port for the MCP HTTP server started by `codesearch serve`.
 pub const DEFAULT_MCP_PORT: u16 = 8677;
 

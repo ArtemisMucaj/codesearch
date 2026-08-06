@@ -27,7 +27,8 @@ pub use cli::{
 };
 
 pub use connector::adapter::management::{
-    routes as management_routes, run_management_server, AppState as ManagementAppState,
+    read_runinfo, remove_runinfo, routes as management_routes, run_management_server,
+    write_runinfo, AppState as ManagementAppState, ServeRunInfo,
 };
 
 pub use connector::{
