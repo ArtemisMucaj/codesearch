@@ -15,6 +15,7 @@ pub mod couplings;
 pub mod graph;
 pub mod graph_view;
 pub mod llm;
+pub mod namespaces;
 pub mod repositories;
 pub mod search;
 

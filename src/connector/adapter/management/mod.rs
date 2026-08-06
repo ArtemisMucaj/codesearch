@@ -13,8 +13,12 @@
 mod copilot_login;
 mod error;
 mod handlers;
+mod runinfo;
 mod server;
 mod streaming;
 
 pub use copilot_login::CopilotLoginService;
+pub use runinfo::{
+    read as read_runinfo, remove as remove_runinfo, write as write_runinfo, ServeRunInfo,
+};
 pub use server::{routes, run_management_server, AppState};

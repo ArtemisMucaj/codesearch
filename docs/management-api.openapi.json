@@ -270,6 +270,86 @@
         }
       }
     },
+    "/api/namespaces": {
+      "post": {
+        "summary": "Create a namespace with a fixed embedding configuration",
+        "description": "Mirrors the `codesearch create` CLI command so it can be routed through a running serve process instead of contending for the DuckDB write lock.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Namespace to create"
+                  },
+                  "embedding_target": {
+                    "type": "string",
+                    "enum": [
+                      "onnx",
+                      "api"
+                    ],
+                    "description": "Embedding backend (default onnx)"
+                  },
+                  "embedding_model": {
+                    "type": "string",
+                    "description": "Model id; required for api"
+                  },
+                  "embedding_dimensions": {
+                    "type": "integer",
+                    "description": "Vector dimensionality (default 384)"
+                  },
+                  "no_embeddings": {
+                    "type": "boolean",
+                    "description": "Keyword + call-graph only"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Namespace created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "created": {
+                      "type": "boolean"
+                    },
+                    "namespace": {
+                      "type": "string"
+                    },
+                    "embedding_target": {
+                      "type": "string"
+                    },
+                    "embedding_model": {
+                      "type": "string"
+                    },
+                    "embedding_dimensions": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "500": {
+            "description": "Internal error"
+          }
+        }
+      }
+    },
     "/api/search": {
       "post": {
         "tags": [
