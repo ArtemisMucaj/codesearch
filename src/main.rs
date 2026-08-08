@@ -271,8 +271,14 @@ async fn main() -> Result<()> {
                         .await?
                 }
                 Commands::Index { path, name, force } => {
+                    // Only forward a namespace the user actually asked for:
+                    // `--namespace` has a default, so sending it unconditionally
+                    // would make every routed index carry one — which an
+                    // in-memory server rejects, breaking a plain `index .`.
+                    let namespace =
+                        flag_set(&matches, "namespace").then_some(cli.namespace.as_str());
                     client
-                        .index_repository(path, name.as_deref(), &cli.namespace, *force)
+                        .index_repository(path, name.as_deref(), namespace, *force)
                         .await?
                 }
                 Commands::Delete { id_or_path } => client.delete_repository(id_or_path).await?,

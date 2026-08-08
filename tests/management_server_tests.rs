@@ -695,6 +695,38 @@ async fn index_stream_emits_well_formed_sse_events() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn index_stream_treats_a_null_namespace_as_absent() {
+    // The CLI serializes an unset `--namespace` as JSON `null` rather than
+    // omitting the key. That has to read as "no override" — treating it as one
+    // would reject every routed `index` against an in-memory server.
+    let repo_dir = tempdir().expect("failed to create repo temp dir");
+    std::fs::write(repo_dir.path().join("sample.rs"), "pub fn a() {}\n")
+        .expect("failed to write fixture file");
+
+    let (base_url, server, _dir) = spawn_management_server().await;
+
+    let body = reqwest::Client::new()
+        .post(format!("{base_url}/api/stream/index"))
+        .json(&serde_json::json!({
+            "path": repo_dir.path().to_string_lossy(),
+            "namespace": serde_json::Value::Null,
+        }))
+        .send()
+        .await
+        .expect("request to /api/stream/index failed")
+        .text()
+        .await
+        .expect("failed to read SSE body");
+
+    assert!(
+        body.contains("event: done"),
+        "a null namespace must behave as if absent, got:\n{body}"
+    );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn index_stream_rejects_a_namespace_in_memory() {
     // In-memory storage has no namespaces, so an override there cannot be
     // honoured. Failing loudly beats indexing somewhere the caller didn't ask
