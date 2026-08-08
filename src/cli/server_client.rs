@@ -159,9 +159,19 @@ impl ServerClient {
         &self,
         path: &str,
         name: Option<&str>,
+        namespace: Option<&str>,
         force: bool,
     ) -> Result<String> {
-        let body = serde_json::json!({ "path": path, "name": name, "force": force });
+        // An explicit `--namespace` travels with the request: the server's own
+        // namespace is fixed at startup, so omitting it would silently index
+        // into whatever `serve` was launched with. When the user did not ask
+        // for one, the field stays absent and the server picks its own.
+        let body = serde_json::json!({
+            "path": path,
+            "name": name,
+            "namespace": namespace,
+            "force": force,
+        });
         let resp = self
             .client
             .post(format!("{}/api/stream/index", self.base))

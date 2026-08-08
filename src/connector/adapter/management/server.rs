@@ -189,7 +189,7 @@ async fn index(State(_state): State<AppState>) -> Json<Value> {
             { "method": "PUT", "path": "/api/llm/copilot/model", "description": "pin the copilot model ({model}); empty clears it" },
             { "method": "GET", "path": "/api/openapi.json", "description": "OpenAPI 3.1 description of this API" },
             { "method": "GET/POST", "path": "/api/stream/explain/{symbol}", "description": "SSE: stream an LLM call-flow explanation for a symbol" },
-            { "method": "POST", "path": "/api/stream/index", "description": "SSE: stream indexing progress for a repository path" },
+            { "method": "POST", "path": "/api/stream/index", "description": "SSE: stream indexing progress for a repository path ({path, name?, namespace?, force?})" },
         ],
     }))
 }
