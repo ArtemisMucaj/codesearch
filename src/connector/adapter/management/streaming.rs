@@ -82,6 +82,14 @@ pub struct IndexStreamRequest {
     /// Optional human-readable name (defaults to the directory name).
     #[serde(default)]
     pub name: Option<String>,
+    /// Namespace to index into. Defaults to the one `serve` was started with.
+    ///
+    /// Without this a client can create a namespace over the API but never
+    /// index into it, since the server's namespace is fixed at startup — so a
+    /// UI that creates a namespace and then adds repositories to it would need
+    /// the server restarted in between.
+    #[serde(default)]
+    pub namespace: Option<String>,
     /// Force a full re-index, discarding any existing data for this path.
     #[serde(default)]
     pub force: bool,
@@ -464,10 +472,30 @@ async fn run_index_stream(
         json!({ "stage": "started", "message": format!("indexing {}", req.path) }),
     ));
 
+    // In-memory storage has no namespaces at all, so an override there is
+    // meaningless rather than merely unused — reject it instead of silently
+    // indexing somewhere the caller did not ask for.
     let (store, namespace): (VectorStore, Option<String>) = if container.memory_storage() {
+        if req.namespace.is_some() {
+            let _ = event_tx.send(sse_event(
+                "error",
+                json!({ "message": "namespace is not supported with in-memory storage" }),
+            ));
+            return;
+        }
         (VectorStore::InMemory, None)
     } else {
-        (VectorStore::DuckDb, Some(container.namespace().to_string()))
+        let requested = match req.namespace.as_deref() {
+            Some(name) => match crate::cli::validate_namespace(name.trim()) {
+                Ok(valid) => valid,
+                Err(e) => {
+                    let _ = event_tx.send(sse_event("error", json!({ "message": e })));
+                    return;
+                }
+            },
+            None => container.namespace().to_string(),
+        };
+        (VectorStore::DuckDb, Some(requested))
     };
 
     let use_case = container.index_use_case();

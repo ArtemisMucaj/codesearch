@@ -367,7 +367,7 @@ pub enum Commands {
         /// Path to the repository (or file) to index
         path: String,
 
-        /// Namespace to index into (defaults to the global --namespace value)
+        /// Repository name to index under (defaults to the directory name)
         #[arg(short, long)]
         name: Option<String>,
 

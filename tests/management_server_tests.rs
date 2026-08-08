@@ -45,6 +45,34 @@ async fn test_container() -> (Arc<Container>, TempDir) {
     (container, dir)
 }
 
+/// Like [`test_container`] but backed by DuckDB, for the tests that need real
+/// namespaces — in-memory storage has none.
+async fn duckdb_container() -> (Arc<Container>, TempDir) {
+    let dir = tempdir().expect("failed to create temp dir");
+    let config = ContainerConfig {
+        data_dir: dir.path().to_string_lossy().to_string(),
+        mock_embeddings: true,
+        namespace: "search".to_string(),
+        memory_storage: false,
+        no_rerank: true,
+        no_embeddings: false,
+        read_only: false,
+        expand_query: false,
+        embedding_target: EmbeddingTarget::Onnx,
+        reranking_target: RerankingTarget::Onnx,
+        llm_target: LlmTarget::Anthropic,
+        embedding_model: None,
+        embedding_dimensions: 384,
+        parse_concurrency: 1,
+    };
+    let container = Arc::new(
+        Container::new(config)
+            .await
+            .expect("failed to build DuckDB-backed container"),
+    );
+    (container, dir)
+}
+
 /// Index a tiny Rust fixture into the container so repository/search endpoints
 /// have data to return. Uses the same `index_use_case` the CLI drives.
 async fn index_fixture(container: &Container) {
@@ -661,6 +689,124 @@ async fn index_stream_emits_well_formed_sse_events() {
     assert!(
         parsed.is_object(),
         "SSE data payload should be a JSON object"
+    );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn index_stream_rejects_a_namespace_in_memory() {
+    // In-memory storage has no namespaces, so an override there cannot be
+    // honoured. Failing loudly beats indexing somewhere the caller didn't ask
+    // for, which is what silently ignoring the field would do.
+    let repo_dir = tempdir().expect("failed to create repo temp dir");
+    std::fs::write(
+        repo_dir.path().join("sample.rs"),
+        "pub fn greet() -> &'static str { \"hi\" }\n",
+    )
+    .expect("failed to write fixture file");
+
+    let (base_url, server, _dir) = spawn_management_server().await;
+
+    let body = reqwest::Client::new()
+        .post(format!("{base_url}/api/stream/index"))
+        .json(&serde_json::json!({
+            "path": repo_dir.path().to_string_lossy(),
+            "namespace": "platform",
+        }))
+        .send()
+        .await
+        .expect("request to /api/stream/index failed")
+        .text()
+        .await
+        .expect("failed to read SSE body");
+
+    assert!(
+        body.contains("event: error"),
+        "expected an `error` event, got:\n{body}"
+    );
+    assert!(
+        !body.contains("event: done"),
+        "indexing must not complete when the namespace cannot be honoured:\n{body}"
+    );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn index_stream_indexes_into_a_new_namespace() {
+    // The flow a UI drives: create a namespace, then index into it. Before the
+    // request carried a namespace this was impossible without restarting the
+    // server, since indexing always used the one `serve` started with.
+    let repo_dir = tempdir().expect("failed to create repo temp dir");
+    std::fs::write(
+        repo_dir.path().join("sample.rs"),
+        "pub fn greet() -> &'static str { \"hi\" }\n",
+    )
+    .expect("failed to write fixture file");
+
+    let (container, _dir) = duckdb_container().await;
+    let (base_url, server) = spawn_management_server_with_container(container).await;
+    let client = reqwest::Client::new();
+
+    let create = client
+        .post(format!("{base_url}/api/namespaces"))
+        .json(&serde_json::json!({ "name": "platform" }))
+        .send()
+        .await
+        .expect("request to /api/namespaces failed");
+    assert_eq!(create.status(), reqwest::StatusCode::OK);
+
+    let body = client
+        .post(format!("{base_url}/api/stream/index"))
+        .json(&serde_json::json!({
+            "path": repo_dir.path().to_string_lossy(),
+            "namespace": "platform",
+        }))
+        .send()
+        .await
+        .expect("request to /api/stream/index failed")
+        .text()
+        .await
+        .expect("failed to read SSE body");
+
+    assert!(
+        body.contains("event: done"),
+        "indexing into the new namespace should succeed, got:\n{body}"
+    );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn index_stream_rejects_an_invalid_namespace() {
+    // The namespace becomes a DuckDB schema name, so it is validated the same
+    // way the CLI validates `--namespace` rather than reaching the query layer.
+    // Runs on DuckDB storage: the in-memory path rejects any namespace before
+    // validation, so this would otherwise pass without exercising the check.
+    let repo_dir = tempdir().expect("failed to create repo temp dir");
+    std::fs::write(repo_dir.path().join("sample.rs"), "pub fn a() {}\n")
+        .expect("failed to write fixture file");
+
+    let (container, _dir) = duckdb_container().await;
+    let (base_url, server) = spawn_management_server_with_container(container).await;
+
+    let body = reqwest::Client::new()
+        .post(format!("{base_url}/api/stream/index"))
+        .json(&serde_json::json!({
+            "path": repo_dir.path().to_string_lossy(),
+            "namespace": "bad\"name",
+        }))
+        .send()
+        .await
+        .expect("request to /api/stream/index failed")
+        .text()
+        .await
+        .expect("failed to read SSE body");
+
+    assert!(
+        body.contains("event: error"),
+        "an invalid namespace must fail the stream, got:\n{body}"
     );
 
     server.abort();

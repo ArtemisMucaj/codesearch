@@ -272,7 +272,7 @@ async fn main() -> Result<()> {
                 }
                 Commands::Index { path, name, force } => {
                     client
-                        .index_repository(path, name.as_deref(), *force)
+                        .index_repository(path, name.as_deref(), &cli.namespace, *force)
                         .await?
                 }
                 Commands::Delete { id_or_path } => client.delete_repository(id_or_path).await?,
