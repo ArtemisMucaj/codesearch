@@ -1353,12 +1353,26 @@ fn filter_ignored_scip_refs(
     let mut builder = ignore::gitignore::GitignoreBuilder::new(absolute_path);
     let gitignore_path = absolute_path.join(".gitignore");
     if gitignore_path.exists() {
-        // A malformed .gitignore shouldn't fail the index; it just means fewer
-        // paths match, which is the pre-existing behaviour.
-        let _ = builder.add(&gitignore_path);
+        // `add` reports a malformed rule but still installs the valid ones, so a
+        // bad line costs us that rule, not the index. Say so rather than
+        // swallowing it — a silently-unenforced ignore rule looks like this
+        // filter is broken.
+        if let Some(e) = builder.add(&gitignore_path) {
+            warn!("Ignoring malformed rule(s) in {gitignore_path:?}: {e}");
+        }
     }
-    let Ok(matcher) = builder.build() else {
-        return refs;
+    let matcher = match builder.build() {
+        Ok(matcher) => matcher,
+        Err(e) => {
+            // Without a matcher nothing can be classified, so every reference is
+            // kept — the pre-filter behaviour. Log it: the alternative is a
+            // silent return to the exact bug this function exists to fix.
+            warn!(
+                "Could not build the ignore matcher for {absolute_path:?} ({e}); \
+                 keeping all SCIP references"
+            );
+            return refs;
+        }
     };
 
     // `is_dir = false`: every path tested here is a file.
@@ -1395,9 +1409,13 @@ fn filter_ignored_scip_refs(
             dropped_edges += before - kept_refs.len();
             (relative_path, kept_refs)
         })
-        // A file whose every reference pointed into build output has nothing
-        // left to record.
-        .filter(|(_, file_refs)| !file_refs.is_empty())
+        // An entry left with no references is deliberately KEPT, as an empty
+        // vector. The incremental resync deletes a file's stored edges only for
+        // keys still present in this map, so dropping the entry would strand the
+        // very `dist` edges this filter exists to remove: on a re-index of an
+        // already-indexed repository the caller is unchanged, its entry is gone,
+        // `delete_by_file` never runs, and the stale edge survives. Saving an
+        // empty slice is a no-op, so the cost of keeping it is nil.
         .collect();
 
     if dropped_files > 0 || dropped_edges > 0 {
@@ -1586,10 +1604,16 @@ mod scip_filter_tests {
         );
     }
 
-    /// When every edge from a file pointed into build output, the entry itself
-    /// carries nothing worth recording.
+    /// A caller whose every edge pointed into build output keeps its entry, as
+    /// an empty vector.
+    ///
+    /// Dropping it would break the incremental resync: that path deletes a
+    /// file's stored edges only for keys still present in the map, so on a
+    /// re-index of an already-indexed repository the stale `dist` edge would
+    /// never be deleted — the filter would appear to work on a fresh index and
+    /// silently fail on every subsequent one.
     #[test]
-    fn drops_entries_left_empty_after_filtering() {
+    fn keeps_emptied_entries_so_resync_can_delete_their_stale_edges() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join(".gitignore"), "**/dist/\n").unwrap();
 
@@ -1600,7 +1624,13 @@ mod scip_filter_tests {
             vec![edge(caller, "packages/lib/dist/index.d.ts")],
         );
 
-        assert!(filter_ignored_scip_refs(dir.path(), refs).is_empty());
+        let kept = filter_ignored_scip_refs(dir.path(), refs);
+
+        assert!(
+            kept.contains_key(caller),
+            "the entry must survive so the resync still calls delete_by_file for it"
+        );
+        assert!(kept[caller].is_empty(), "but with no references left");
     }
 
     /// A `.d.ts` that is genuinely part of the source tree (hand-written types,

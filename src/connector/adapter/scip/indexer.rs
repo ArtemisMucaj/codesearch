@@ -260,11 +260,14 @@ impl ScipIndexer {
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let stdout = String::from_utf8_lossy(&output.stdout);
+                // Label first, truncate once: truncating each stream separately
+                // would keep a tail (and an omission marker) per stream, so a
+                // failure that wrote to both could still return twice the limit.
                 let output_msg = match (stdout.trim(), stderr.trim()) {
                     ("", "") => "(no output)".to_string(),
                     ("", e) => tail_lines(e),
                     (o, "") => tail_lines(o),
-                    (o, e) => format!("stdout: {}\nstderr: {}", tail_lines(o), tail_lines(e)),
+                    (o, e) => tail_lines(&format!("stdout: {o}\nstderr: {e}")),
                 };
                 Err(anyhow!(
                     "{} failed (exit {:?}):\n{}",
@@ -394,6 +397,30 @@ mod tests {
         assert!(out.ends_with("FATAL ERROR: JavaScript heap out of memory"));
         // 12 kept lines + the marker.
         assert_eq!(out.lines().count(), MAX_OUTPUT_LINES + 1);
+    }
+
+    /// Both streams long: the limit applies to the *combined* message, so the
+    /// error carries one tail and one marker rather than one of each per stream.
+    #[test]
+    fn combined_streams_are_truncated_once() {
+        let long = |prefix: &str| {
+            (0..100)
+                .map(|i| format!("{prefix} line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let combined = format!("stdout: {}\nstderr: {}", long("out"), long("err"));
+
+        let out = tail_lines(&combined);
+
+        assert_eq!(out.lines().count(), MAX_OUTPUT_LINES + 1);
+        assert_eq!(
+            out.matches("earlier line(s) omitted").count(),
+            1,
+            "one marker for the combined output, not one per stream"
+        );
+        // The tail of the *last* stream is what survives.
+        assert!(out.ends_with("err line 99"), "got: {out}");
     }
 
     #[tokio::test]
