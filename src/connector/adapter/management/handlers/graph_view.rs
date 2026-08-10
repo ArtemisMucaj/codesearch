@@ -9,7 +9,7 @@ use axum::extract::{Query, State};
 use axum::Json;
 use serde::Deserialize;
 
-use crate::application::{aggregate, ClusterNamer, DEFAULT_NODE_LIMIT};
+use crate::application::{aggregate, DEFAULT_NODE_LIMIT};
 use crate::domain::GraphView;
 
 use super::super::error::{ApiError, ApiResult};
@@ -64,22 +64,11 @@ pub async fn graph(
     Query(params): Query<GraphParams>,
 ) -> ApiResult<Json<GraphView>> {
     // Communities are detected with only a content-addressed id, and the view
-    // materialises each name as it is built — so without a namer every community
-    // reaches the client as `c-8c26c91492df`. The CLI names them before
-    // printing; do the same here so an API-driven UI isn't stuck with ids.
-    // Best-effort and cached by id: the first request per partition pays the LLM
-    // calls, later ones are a cache read, and an unreachable endpoint degrades
-    // to ids instead of failing the graph.
-    let chat = super::naming_chat_client(&state);
-    let naming = state.container.community_naming_use_case();
-    let namer = chat.as_ref().map(|chat| ClusterNamer {
-        naming: &naming,
-        chat: chat.as_ref(),
-    });
-    let namer = namer.as_ref();
-
-    // Build the render-ready graph from the requested scope and level, reusing
-    // the same use-case builders the `visualize` CLI drives.
+    // materialises each name as it is built — so an unnamed community reaches
+    // the client as `c-8c26c91492df`. Cached names are applied by the use cases;
+    // any still missing are generated *after* the response, because naming is
+    // one LLM call per community and this endpoint already runs Leiden. The next
+    // request serves them from cache.
     let view: GraphView = if params.global {
         if params.repository.is_some() {
             return Err(ApiError::bad_request(
@@ -90,18 +79,22 @@ pub async fn graph(
         let namespace = params.namespace.as_deref();
         match params.level {
             GraphViewLevel::File => {
-                state
+                let (view, clusters) = state
                     .container
                     .cluster_detection_use_case()
-                    .namespace_graph_view_named(namespace, namer)
-                    .await?
+                    .namespace_graph_view_with_clusters(namespace)
+                    .await?;
+                super::spawn_cluster_naming(&state, &clusters);
+                view
             }
             GraphViewLevel::Symbol => {
-                state
+                let (view, communities) = state
                     .container
                     .symbol_cluster_detection_use_case()
-                    .namespace_graph_view_named(namespace, namer)
-                    .await?
+                    .namespace_graph_view_with_communities(namespace)
+                    .await?;
+                super::spawn_symbol_naming(&state, &communities);
+                view
             }
         }
     } else {
@@ -111,18 +104,22 @@ pub async fn graph(
             .await;
         match params.level {
             GraphViewLevel::File => {
-                state
+                let (view, clusters) = state
                     .container
                     .cluster_detection_use_case()
-                    .graph_view_named(&repository_id, namer)
-                    .await?
+                    .graph_view_with_clusters(&repository_id)
+                    .await?;
+                super::spawn_cluster_naming(&state, &clusters);
+                view
             }
             GraphViewLevel::Symbol => {
-                state
+                let (view, communities) = state
                     .container
                     .symbol_cluster_detection_use_case()
-                    .graph_view_named(&repository_id, namer)
-                    .await?
+                    .graph_view_with_communities(&repository_id)
+                    .await?;
+                super::spawn_symbol_naming(&state, &communities);
+                view
             }
         }
     };

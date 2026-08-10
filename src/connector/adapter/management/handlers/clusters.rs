@@ -54,7 +54,7 @@ pub async fn clusters(
 ) -> ApiResult<Json<ClusterGraph>> {
     params.reject_global_with_repository()?;
     let use_case = state.container.cluster_detection_use_case();
-    let mut graph = if params.global {
+    let graph = if params.global {
         use_case
             .create_namespace_clusters(params.namespace.as_deref())
             .await?
@@ -65,15 +65,11 @@ pub async fn clusters(
             .await;
         use_case.create_clusters(&repository_id).await?
     };
-    // Detection yields content-addressed ids only; name them the way the CLI's
-    // `clusters` command does. Best-effort and cached by id.
-    if let Some(chat) = super::naming_chat_client(&state) {
-        state
-            .container
-            .community_naming_use_case()
-            .name_clusters(&mut graph.clusters, chat.as_ref())
-            .await;
-    }
+    // Detection yields content-addressed ids; cached display names are already
+    // applied by the use case. Generate any still missing in the background so
+    // the next request has them, rather than blocking this one on an LLM call
+    // per unnamed community.
+    super::spawn_cluster_naming(&state, &graph.clusters);
     Ok(Json(graph))
 }
 
@@ -85,7 +81,7 @@ pub async fn symbol_clusters(
 ) -> ApiResult<Json<SymbolCommunityGraph>> {
     params.reject_global_with_repository()?;
     let use_case = state.container.symbol_cluster_detection_use_case();
-    let mut graph = if params.global {
+    let graph = if params.global {
         // One Leiden run over every repository's call graph in the namespace.
         // This used to 400 ("symbol communities are detected per repository"),
         // which left the symbol level with no namespace-wide view at all.
@@ -99,12 +95,6 @@ pub async fn symbol_clusters(
             .await;
         use_case.detect_communities(&repository_id).await?
     };
-    if let Some(chat) = super::naming_chat_client(&state) {
-        state
-            .container
-            .community_naming_use_case()
-            .name_symbol_communities(&mut graph.communities, chat.as_ref())
-            .await;
-    }
+    super::spawn_symbol_naming(&state, &graph.communities);
     Ok(Json(graph))
 }

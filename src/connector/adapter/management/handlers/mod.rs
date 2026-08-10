@@ -21,13 +21,13 @@ pub mod search;
 
 use std::sync::Arc;
 
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::application::ChatClient;
 use crate::cli::LlmTarget;
 use crate::connector::adapter::LlmUsage;
 use crate::connector::api::controller::build_chat_client_for;
-use crate::domain::Repository;
+use crate::domain::{Cluster, Repository, SymbolCommunity};
 
 use super::error::ApiError;
 use super::server::AppState;
@@ -46,31 +46,10 @@ fn resolve_repo<'a>(key: &str, repos: &'a [Repository]) -> Result<&'a Repository
         .ok_or_else(|| ApiError::not_found(format!("repository not found: '{key}'")))
 }
 
-/// Fill in LLM display names for detected communities, exactly as the CLI does.
-///
-/// Detection only produces a content-addressed id (`c-8c26c91492df`), so without
-/// this every community reaches an API client as that id. The CLI's `clusters`,
-/// `symbol-clusters` and `overview` commands all name them before printing; the
-/// management API did not, so a GUI driving this API could never show a readable
-/// name no matter how its LLM was configured.
-///
-/// **Best-effort by design.** Names are a presentation nicety, not data: a
-/// missing endpoint, an unreachable server, or a model that fails mid-run must
-/// degrade to ids rather than fail the request that carries the graph. Every
-/// failure path here logs and returns.
-///
-/// Cheap after the first call — [`CommunityNamingUseCase`] caches by stable id,
-/// so a repeated request pays a cache read, and a re-index only re-names the
-/// communities whose membership actually changed.
-///
-/// [`CommunityNamingUseCase`]: crate::application::CommunityNamingUseCase
 /// Build the chat client bound to the community-naming usage, or `None` when one
 /// can't be constructed (no endpoint configured, malformed config, TLS init
 /// failure). Logged at warn: "names are missing" is otherwise indistinguishable
 /// from "the LLM had nothing to say".
-///
-/// The caller pairs this with the naming use case to make a
-/// [`ClusterNamer`](crate::application::ClusterNamer).
 fn naming_chat_client(state: &AppState) -> Option<Arc<dyn ChatClient>> {
     let target: LlmTarget = state.container.llm_target();
     match build_chat_client_for(
@@ -84,4 +63,77 @@ fn naming_chat_client(state: &AppState) -> Option<Arc<dyn ChatClient>> {
             None
         }
     }
+}
+
+/// Generate any missing LLM display names for `clusters` **in the background**,
+/// populating the name cache for subsequent requests.
+///
+/// Detection produces only a content-addressed id (`c-8c26c91492df`); the CLI
+/// names communities inline before printing, but doing that in an HTTP handler
+/// would block the response on one LLM call per community — dozens of them on a
+/// first view of a real repository, on an endpoint that is already slow because
+/// it runs Leiden.
+///
+/// So the request returns immediately with whatever names are already cached
+/// (ids for the rest), and this fills the cache behind it. The next request
+/// serves them from cache in milliseconds. A client that wants them without a
+/// reload can poll the same endpoint.
+///
+/// Returns without spawning when nothing is missing, so a warm cache costs one
+/// lookup and no task.
+///
+/// Best-effort by design: names are presentation, not data. An unreachable
+/// endpoint or a failed model leaves ids in place and logs; it never affects the
+/// response that carries the graph.
+fn spawn_cluster_naming(state: &AppState, clusters: &[Cluster]) {
+    let missing: Vec<Cluster> = clusters
+        .iter()
+        .filter(|c| c.display_name.is_none())
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let Some(chat) = naming_chat_client(state) else {
+        return;
+    };
+    let container = Arc::clone(&state.container);
+    tokio::spawn(async move {
+        let mut missing = missing;
+        debug!(
+            "naming {} community/communities in the background",
+            missing.len()
+        );
+        container
+            .community_naming_use_case()
+            .name_clusters(&mut missing, chat.as_ref())
+            .await;
+    });
+}
+
+/// [`spawn_cluster_naming`] for symbol communities.
+fn spawn_symbol_naming(state: &AppState, communities: &[SymbolCommunity]) {
+    let missing: Vec<SymbolCommunity> = communities
+        .iter()
+        .filter(|c| c.display_name.is_none())
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let Some(chat) = naming_chat_client(state) else {
+        return;
+    };
+    let container = Arc::clone(&state.container);
+    tokio::spawn(async move {
+        let mut missing = missing;
+        debug!(
+            "naming {} symbol community/communities in the background",
+            missing.len()
+        );
+        container
+            .community_naming_use_case()
+            .name_symbol_communities(&mut missing, chat.as_ref())
+            .await;
+    });
 }
