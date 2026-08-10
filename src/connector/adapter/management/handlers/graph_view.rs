@@ -9,7 +9,7 @@ use axum::extract::{Query, State};
 use axum::Json;
 use serde::Deserialize;
 
-use crate::application::{aggregate, DEFAULT_NODE_LIMIT};
+use crate::application::{aggregate, ClusterNamer, DEFAULT_NODE_LIMIT};
 use crate::domain::GraphView;
 
 use super::super::error::{ApiError, ApiResult};
@@ -63,6 +63,21 @@ pub async fn graph(
     State(state): State<AppState>,
     Query(params): Query<GraphParams>,
 ) -> ApiResult<Json<GraphView>> {
+    // Communities are detected with only a content-addressed id, and the view
+    // materialises each name as it is built — so without a namer every community
+    // reaches the client as `c-8c26c91492df`. The CLI names them before
+    // printing; do the same here so an API-driven UI isn't stuck with ids.
+    // Best-effort and cached by id: the first request per partition pays the LLM
+    // calls, later ones are a cache read, and an unreachable endpoint degrades
+    // to ids instead of failing the graph.
+    let chat = super::naming_chat_client(&state);
+    let naming = state.container.community_naming_use_case();
+    let namer = chat.as_ref().map(|chat| ClusterNamer {
+        naming: &naming,
+        chat: chat.as_ref(),
+    });
+    let namer = namer.as_ref();
+
     // Build the render-ready graph from the requested scope and level, reusing
     // the same use-case builders the `visualize` CLI drives.
     let view: GraphView = if params.global {
@@ -78,14 +93,14 @@ pub async fn graph(
                 state
                     .container
                     .cluster_detection_use_case()
-                    .namespace_graph_view(namespace)
+                    .namespace_graph_view_named(namespace, namer)
                     .await?
             }
             GraphViewLevel::Symbol => {
                 state
                     .container
                     .symbol_cluster_detection_use_case()
-                    .namespace_graph_view(namespace)
+                    .namespace_graph_view_named(namespace, namer)
                     .await?
             }
         }
@@ -99,14 +114,14 @@ pub async fn graph(
                 state
                     .container
                     .cluster_detection_use_case()
-                    .graph_view(&repository_id)
+                    .graph_view_named(&repository_id, namer)
                     .await?
             }
             GraphViewLevel::Symbol => {
                 state
                     .container
                     .symbol_cluster_detection_use_case()
-                    .graph_view(&repository_id)
+                    .graph_view_named(&repository_id, namer)
                     .await?
             }
         }

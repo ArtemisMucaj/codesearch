@@ -30,6 +30,7 @@ use crate::application::{AnalysisRepository, FileRelationshipUseCase};
 use crate::domain::{
     community_label, namespace_scope_id, stable_community_id, Cluster, ClusterGraph, CommunityMeta,
     DomainError, FileEdge, FileGraph, GraphEdge, GraphLevel, GraphNode, GraphView, Language,
+    SymbolCommunity,
 };
 
 // ── Edge-weight constants by reference kind ───────────────────────────────
@@ -350,6 +351,33 @@ impl ModuleOverview {
     }
 }
 
+/// Pairs the naming use case with the chat client that drives it, so a view
+/// builder can generate display names without knowing anything about LLM
+/// plumbing.
+///
+/// Borrowed rather than owned because callers already hold both: the handler
+/// builds the client once per request and the use case comes from the DI
+/// container.
+pub struct ClusterNamer<'a> {
+    pub naming: &'a super::CommunityNamingUseCase,
+    pub chat: &'a dyn crate::application::ChatClient,
+}
+
+impl ClusterNamer<'_> {
+    /// Name file clusters in place. Best-effort: the underlying use case logs
+    /// and leaves a community unnamed rather than failing the caller.
+    pub async fn name(&self, clusters: &mut [Cluster]) {
+        self.naming.name_clusters(clusters, self.chat).await;
+    }
+
+    /// Name symbol communities in place.
+    pub async fn name_symbols(&self, communities: &mut [SymbolCommunity]) {
+        self.naming
+            .name_symbol_communities(communities, self.chat)
+            .await;
+    }
+}
+
 pub struct ClusterDetectionUseCase {
     file_graph: Arc<FileRelationshipUseCase>,
     /// Optional persistence for detected clusters. When present, detection
@@ -631,7 +659,28 @@ impl ClusterDetectionUseCase {
     /// the community index of each node is the cluster's position in the
     /// size-sorted [`ClusterGraph::clusters`] list.
     pub async fn graph_view(&self, repository_id: &str) -> Result<GraphView, DomainError> {
-        let (cg, graph) = self.clusters_and_graph(repository_id).await?;
+        self.graph_view_named(repository_id, None).await
+    }
+
+    /// [`Self::graph_view`], optionally generating LLM display names first.
+    ///
+    /// A [`GraphView`]'s `CommunityMeta.name` is materialised while the view is
+    /// built, falling back to the community's content-addressed id when no
+    /// display name exists — so naming has to happen *before* the view is built,
+    /// not after. That is why this takes the namer rather than letting callers
+    /// rename the finished view.
+    ///
+    /// `namer` is `None` for callers that want whatever is already cached
+    /// (the previous behaviour, no LLM calls).
+    pub async fn graph_view_named(
+        &self,
+        repository_id: &str,
+        namer: Option<&ClusterNamer<'_>>,
+    ) -> Result<GraphView, DomainError> {
+        let (mut cg, graph) = self.clusters_and_graph(repository_id).await?;
+        if let Some(namer) = namer {
+            namer.name(&mut cg.clusters).await;
+        }
         Ok(build_file_graph_view(&cg, &graph, repository_id))
     }
 
@@ -696,6 +745,17 @@ impl ClusterDetectionUseCase {
         &self,
         namespace: Option<&str>,
     ) -> Result<GraphView, DomainError> {
+        self.namespace_graph_view_named(namespace, None).await
+    }
+
+    /// [`Self::namespace_graph_view`], optionally generating LLM display names
+    /// first. See [`Self::graph_view_named`] for why the namer runs here rather
+    /// than over the finished view.
+    pub async fn namespace_graph_view_named(
+        &self,
+        namespace: Option<&str>,
+        namer: Option<&ClusterNamer<'_>>,
+    ) -> Result<GraphView, DomainError> {
         let scope = self.namespace_scope_key(namespace);
         let graph = self.namespace_graph(namespace).await?;
         let mut cg = match self.load_stored(&scope).await {
@@ -707,6 +767,9 @@ impl ClusterDetectionUseCase {
             }
         };
         self.apply_cached_names(&mut cg.clusters).await;
+        if let Some(namer) = namer {
+            namer.name(&mut cg.clusters).await;
+        }
         Ok(build_file_graph_view(&cg, &graph, &scope))
     }
 

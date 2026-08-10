@@ -311,6 +311,18 @@ impl SymbolClusterDetectionUseCase {
     /// size-sorted [`SymbolCommunityGraph::communities`] list, so it matches the
     /// `symbol-clusters` command's ordering, names, and cohesion.
     pub async fn graph_view(&self, repository_id: &str) -> Result<GraphView, DomainError> {
+        self.graph_view_named(repository_id, None).await
+    }
+
+    /// [`Self::graph_view`], optionally generating LLM display names first.
+    ///
+    /// The view materialises each community's name as it is built, falling back
+    /// to the content-addressed id, so naming must run before rendering.
+    pub async fn graph_view_named(
+        &self,
+        repository_id: &str,
+        namer: Option<&super::ClusterNamer<'_>>,
+    ) -> Result<GraphView, DomainError> {
         // The node/edge view always needs the symbol graph; the community
         // assignment can come from storage. Both derive deterministically from
         // the same call-graph snapshot (stored analyses are invalidated on
@@ -325,6 +337,9 @@ impl SymbolClusterDetectionUseCase {
             }
         };
         self.apply_cached_names(&mut scg.communities).await;
+        if let Some(namer) = namer {
+            namer.name_symbols(&mut scg.communities).await;
+        }
         // Per-repository: every symbol trivially belongs to the one repo, so no
         // per-node repository field (empty name map → all `None`).
         Ok(Self::render_symbol_view(
@@ -366,6 +381,16 @@ impl SymbolClusterDetectionUseCase {
         &self,
         namespace: Option<&str>,
     ) -> Result<GraphView, DomainError> {
+        self.namespace_graph_view_named(namespace, None).await
+    }
+
+    /// [`Self::namespace_graph_view`], optionally generating LLM display names
+    /// first.
+    pub async fn namespace_graph_view_named(
+        &self,
+        namespace: Option<&str>,
+        namer: Option<&super::ClusterNamer<'_>>,
+    ) -> Result<GraphView, DomainError> {
         let scope = self.namespace_scope_key(namespace).await?;
         let sg = self.build_namespace_symbol_graph(namespace).await?;
         let mut scg = match self.load_stored(&scope).await {
@@ -377,6 +402,9 @@ impl SymbolClusterDetectionUseCase {
             }
         };
         self.apply_cached_names(&mut scg.communities).await;
+        if let Some(namer) = namer {
+            namer.name_symbols(&mut scg.communities).await;
+        }
         // Label each symbol node with its owning repository's display name so the
         // client's repo picker/coloring show git projects, not slices of FQNs.
         let repo_names = self.namespace_repo_names(namespace).await?;
