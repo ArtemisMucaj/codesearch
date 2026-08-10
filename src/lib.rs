@@ -36,8 +36,8 @@ pub use connector::{
     DuckdbAnalysisRepository, DuckdbCallGraphRepository, DuckdbChannelEndpointRepository,
     DuckdbFileHashRepository, DuckdbMetadataRepository, DuckdbVectorRepository,
     InMemoryVectorRepository, LlmQueryExpander, MockEmbedding, MockReranking,
-    NamespaceEmbeddingConfig, NoEmbedding, OpenAiChatClient, OpenAiEmbedding, OpenAiReranking,
-    OrtEmbedding, OrtReranking, TreeSitterChannelExtractor, TreeSitterParser,
+    NamespaceEmbeddingConfig, NamespaceInfo, NoEmbedding, OpenAiChatClient, OpenAiEmbedding,
+    OpenAiReranking, OrtEmbedding, OrtReranking, TreeSitterChannelExtractor, TreeSitterParser,
     DEFAULT_ONNX_EMBEDDING_MODEL, NO_EMBEDDINGS_MODEL,
 };
 

@@ -1,14 +1,18 @@
 //! Namespace endpoints.
 //!
-//! - `POST /api/namespaces` — create a namespace with a fixed embedding config.
+//! - `GET    /api/namespaces`        — list every configured namespace.
+//! - `POST   /api/namespaces`        — create a namespace with a fixed embedding config.
+//! - `DELETE /api/namespaces/{name}` — delete a namespace and everything in it.
 //!
-//! This mirrors the `codesearch create` CLI command. It exists so that command
+//! `POST` mirrors the `codesearch create` CLI command. It exists so that command
 //! can be routed through a running `serve` process: `create` only writes
 //! namespace configuration (no embedding model is loaded), but it still needs a
 //! DuckDB *write* lock, which the running server holds. Rather than fight over
-//! the lock, the CLI POSTs here and the server performs the write.
+//! the lock, the CLI POSTs here and the server performs the write. `GET` and
+//! `DELETE` need that same write lock (or a consistent read of it), so they are
+//! served here for the same reason.
 
-use axum::extract::State;
+use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
@@ -122,5 +126,111 @@ pub async fn create(
         "embedding_target": embedding_target,
         "embedding_model": embedding_model,
         "embedding_dimensions": dimensions,
+    })))
+}
+
+/// `GET /api/namespaces` — every configured namespace with its embedding config
+/// and the repositories indexed into it.
+///
+/// Read from `namespace_config`, not derived from the `repositories` table, so
+/// a namespace that was created but never indexed into is still listed. A
+/// client that groups repositories by their `namespace` field cannot see those,
+/// which is precisely the gap this endpoint fills.
+pub async fn list(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let db_path = Path::new(state.container.data_dir()).join("codesearch.duckdb");
+
+    let namespaces =
+        tokio::task::spawn_blocking(move || DuckdbVectorRepository::list_namespaces(&db_path))
+            .await
+            .map_err(|e| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("namespace list task failed: {e}"),
+                )
+            })??;
+
+    // Repository counts come from the metadata store, so one call answers
+    // "which namespaces exist" and "what is in them" together.
+    let repos = state.container.list_use_case().execute().await?;
+
+    let items: Vec<Value> = namespaces
+        .iter()
+        .map(|ns| {
+            let members: Vec<&crate::domain::Repository> = repos
+                .iter()
+                .filter(|r| r.namespace() == Some(ns.name.as_str()))
+                .collect();
+            json!({
+                "name": ns.name,
+                "embedding_target": ns.embedding_target,
+                "embedding_model": ns.embedding_model,
+                "embedding_dimensions": ns.dimensions,
+                "repositories": members.len(),
+                "total_files": members.iter().map(|r| r.file_count()).sum::<u64>(),
+                "total_chunks": members.iter().map(|r| r.chunk_count()).sum::<u64>(),
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({ "namespaces": items })))
+}
+
+/// `DELETE /api/namespaces/{name}` — delete a namespace and everything indexed
+/// into it.
+///
+/// Cascading by design: every repository in the namespace is deleted through
+/// `DeleteRepositoryUseCase` first — the one place that knows every global
+/// table a repository touches (chunks, embeddings, call graph, file hashes,
+/// channel endpoints, cached analyses) — and only then is the namespace's own
+/// schema and config row dropped. Doing it in that order means a failure
+/// part-way leaves the namespace present and re-deletable, rather than orphaning
+/// repository rows behind a config that no longer exists.
+pub async fn delete(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> ApiResult<Json<Value>> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::bad_request("name must not be empty"));
+    }
+
+    // Delete the member repositories first, so nothing is left keyed to a
+    // namespace that no longer has a config row.
+    let repos = state.container.list_use_case().execute().await?;
+    let members: Vec<String> = repos
+        .iter()
+        .filter(|r| r.namespace() == Some(name.as_str()))
+        .map(|r| r.id().to_string())
+        .collect();
+
+    let delete_use_case = state.container.delete_use_case();
+    for id in &members {
+        delete_use_case.execute(id).await?;
+    }
+
+    let db_path = Path::new(state.container.data_dir()).join("codesearch.duckdb");
+    let name_owned = name.clone();
+    let existed = tokio::task::spawn_blocking(move || {
+        DuckdbVectorRepository::drop_namespace(&db_path, &name_owned)
+    })
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("namespace delete task failed: {e}"),
+        )
+    })??;
+
+    if !existed && members.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            format!("Namespace '{name}' not found"),
+        ));
+    }
+
+    Ok(Json(json!({
+        "deleted": true,
+        "namespace": name,
+        "repositories_deleted": members.len(),
     })))
 }

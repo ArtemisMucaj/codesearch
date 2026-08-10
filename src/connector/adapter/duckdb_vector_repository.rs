@@ -49,6 +49,22 @@ pub struct NamespaceEmbeddingConfig {
     pub dimensions: usize,
 }
 
+/// One configured namespace as reported by [`DuckdbVectorRepository::list_namespaces`].
+///
+/// Sourced from `namespace_config`, so it covers namespaces that exist but have
+/// nothing indexed into them yet — which the `repositories` table cannot show.
+#[derive(Debug, Clone)]
+pub struct NamespaceInfo {
+    /// User-facing namespace name.
+    pub name: String,
+    /// `"onnx"`, `"api"`, or the no-embeddings sentinel.
+    pub embedding_target: String,
+    /// Model identifier fixed at creation.
+    pub embedding_model: String,
+    /// Vector dimensionality fixed at creation.
+    pub dimensions: usize,
+}
+
 pub struct DuckdbVectorRepository {
     conn: Arc<Mutex<Connection>>,
     /// User-facing namespace name (e.g. `homeframework`). Used as the
@@ -429,6 +445,99 @@ impl DuckdbVectorRepository {
 
         Self::initialize(&conn, namespace, cfg, false)?;
         Ok(())
+    }
+
+    /// List every configured namespace with its embedding configuration.
+    ///
+    /// Reads `namespace_config` directly rather than deriving names from the
+    /// `repositories` table, so a namespace created but never indexed into is
+    /// still reported. That distinction is the whole point of the endpoint this
+    /// backs: a freshly created, empty namespace has no repositories yet.
+    pub fn list_namespaces(path: &Path) -> Result<Vec<NamespaceInfo>, DomainError> {
+        let conn = Connection::open(path)
+            .map_err(|e| DomainError::storage(format!("Failed to open DuckDB database: {}", e)))?;
+
+        // The global tables may not exist yet on a database that has never been
+        // written to; creating them here keeps a first-run list from erroring.
+        Self::init_extensions_and_global_tables(&conn)?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT namespace, embedding_target, embedding_model, dimensions \
+                 FROM namespace_config ORDER BY namespace",
+            )
+            .map_err(|e| DomainError::storage(format!("Failed to list namespaces: {}", e)))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(NamespaceInfo {
+                    name: row.get::<_, String>(0)?,
+                    embedding_target: row.get::<_, String>(1)?,
+                    embedding_model: row.get::<_, String>(2)?,
+                    dimensions: row.get::<_, i64>(3)? as usize,
+                })
+            })
+            .map_err(|e| DomainError::storage(format!("Failed to list namespaces: {}", e)))?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DomainError::storage(format!("Failed to read namespaces: {}", e)))
+    }
+
+    /// Drop `namespace`: its DuckDB schema (chunks + embeddings) and its
+    /// `namespace_config` row.
+    ///
+    /// This removes only what is namespace-*scoped*. Rows in the global tables
+    /// keyed by repository (`repositories`, `symbol_references`, `file_hashes`,
+    /// the analysis tables, …) belong to the repositories indexed into the
+    /// namespace, and the caller is expected to have deleted those first
+    /// through `DeleteRepositoryUseCase` — which is the one place that knows
+    /// every table a repository touches. Duplicating that list here would rot
+    /// the moment a new per-repository table is added.
+    ///
+    /// Returns `false` when the namespace has no stored config (nothing to do).
+    pub fn drop_namespace(path: &Path, namespace: &str) -> Result<bool, DomainError> {
+        let conn = Connection::open(path)
+            .map_err(|e| DomainError::storage(format!("Failed to open DuckDB database: {}", e)))?;
+
+        let trimmed = namespace.trim();
+        let namespace = if trimmed.is_empty() { "main" } else { trimmed };
+
+        Self::init_extensions_and_global_tables(&conn)?;
+
+        // The schema token is generated, never user-supplied, so interpolating
+        // it into the DDL below is safe by construction (see
+        // `generate_schema_token`). Look it up before deleting the config row.
+        let schema_token: Option<String> = conn
+            .query_row(
+                "SELECT schema_token FROM namespace_config WHERE namespace = ?",
+                params![namespace],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let Some(schema) = schema_token else {
+            return Ok(false);
+        };
+
+        conn.execute_batch(&format!(r#"DROP SCHEMA IF EXISTS "{schema}" CASCADE;"#))
+            .map_err(|e| {
+                DomainError::storage(format!(
+                    "Failed to drop schema for namespace '{namespace}': {e}"
+                ))
+            })?;
+
+        conn.execute(
+            "DELETE FROM namespace_config WHERE namespace = ?",
+            params![namespace],
+        )
+        .map_err(|e| {
+            DomainError::storage(format!(
+                "Failed to delete config for namespace '{namespace}': {e}"
+            ))
+        })?;
+
+        debug!("Dropped namespace '{namespace}' (schema {schema})");
+        Ok(true)
     }
 
     /// Read the stored `namespace_config` row, validate it against `cfg`, and

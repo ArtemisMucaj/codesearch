@@ -271,6 +271,53 @@
       }
     },
     "/api/namespaces": {
+      "get": {
+        "summary": "List configured namespaces",
+        "description": "Read from `namespace_config`, so namespaces that exist but have nothing indexed into them are included — unlike grouping `/api/repositories` by namespace.",
+        "responses": {
+          "200": {
+            "description": "Configured namespaces",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "namespaces": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "embedding_target": {
+                            "type": "string"
+                          },
+                          "embedding_model": {
+                            "type": "string"
+                          },
+                          "embedding_dimensions": {
+                            "type": "integer"
+                          },
+                          "repositories": {
+                            "type": "integer"
+                          },
+                          "total_files": {
+                            "type": "integer"
+                          },
+                          "total_chunks": {
+                            "type": "integer"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "summary": "Create a namespace with a fixed embedding configuration",
         "description": "Mirrors the `codesearch create` CLI command so it can be routed through a running serve process instead of contending for the DuckDB write lock.",
@@ -343,6 +390,55 @@
           },
           "400": {
             "description": "Invalid request"
+          },
+          "500": {
+            "description": "Internal error"
+          }
+        }
+      }
+    },
+    "/api/namespaces/{name}": {
+      "delete": {
+        "summary": "Delete a namespace and everything indexed into it",
+        "description": "Cascading: every repository in the namespace is deleted first (chunks, embeddings, call graph, file hashes, channel endpoints and cached analyses), then the namespace's schema and config row are dropped.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Namespace to delete"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deleted": {
+                      "type": "boolean"
+                    },
+                    "namespace": {
+                      "type": "string"
+                    },
+                    "repositories_deleted": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "404": {
+            "description": "Namespace not found"
           },
           "500": {
             "description": "Internal error"
