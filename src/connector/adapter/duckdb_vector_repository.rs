@@ -507,13 +507,25 @@ impl DuckdbVectorRepository {
         // The schema token is generated, never user-supplied, so interpolating
         // it into the DDL below is safe by construction (see
         // `generate_schema_token`). Look it up before deleting the config row.
-        let schema_token: Option<String> = conn
-            .query_row(
-                "SELECT schema_token FROM namespace_config WHERE namespace = ?",
-                params![namespace],
-                |row| row.get(0),
-            )
-            .ok();
+        //
+        // Only "no such row" means the namespace is absent. Every other failure
+        // (a lock conflict, a corrupt database) must propagate: swallowing it
+        // here would report a missing namespace to the caller, and in the delete
+        // path that 404 would arrive *after* the member repositories were
+        // already removed.
+        let schema_token: Option<String> = match conn.query_row(
+            "SELECT schema_token FROM namespace_config WHERE namespace = ?",
+            params![namespace],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(token) => Some(token),
+            Err(duckdb::Error::QueryReturnedNoRows) => None,
+            Err(e) => {
+                return Err(DomainError::storage(format!(
+                    "Failed to read config for namespace '{namespace}': {e}"
+                )))
+            }
+        };
 
         let Some(schema) = schema_token else {
             return Ok(false);
