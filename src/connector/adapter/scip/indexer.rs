@@ -205,11 +205,35 @@ impl ScipIndexer {
 
         info!("Running {} in {:?}", kind.display_name(), repo_path);
 
-        let result = tokio::process::Command::new(kind.binary())
-            .args(kind.args(&output_path))
-            .current_dir(repo_path)
-            .output()
-            .await;
+        let mut command = tokio::process::Command::new(kind.binary());
+        command.args(kind.args(&output_path)).current_dir(repo_path);
+
+        // scip-typescript is a Node program, and Node's default old-space cap
+        // (~4 GB on 64-bit) is not enough for a large TypeScript project: the
+        // process dies with "JavaScript heap out of memory" partway through.
+        // Raise the ceiling rather than let a big repo be unindexable.
+        //
+        // An existing NODE_OPTIONS is respected — the user may have set flags we
+        // shouldn't drop, including their own --max-old-space-size.
+        if kind == IndexerKind::TypeScript {
+            match std::env::var("NODE_OPTIONS") {
+                Ok(existing) if existing.contains("--max-old-space-size") => {}
+                Ok(existing) => {
+                    command.env(
+                        "NODE_OPTIONS",
+                        format!("{existing} --max-old-space-size={NODE_HEAP_MB}"),
+                    );
+                }
+                Err(_) => {
+                    command.env(
+                        "NODE_OPTIONS",
+                        format!("--max-old-space-size={NODE_HEAP_MB}"),
+                    );
+                }
+            }
+        }
+
+        let result = command.output().await;
 
         // Clean up the synthesised tsconfig before returning down any path.
         if let Some(guard) = tsconfig_guard {
@@ -236,11 +260,14 @@ impl ScipIndexer {
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let stdout = String::from_utf8_lossy(&output.stdout);
+                // Label first, truncate once: truncating each stream separately
+                // would keep a tail (and an omission marker) per stream, so a
+                // failure that wrote to both could still return twice the limit.
                 let output_msg = match (stdout.trim(), stderr.trim()) {
                     ("", "") => "(no output)".to_string(),
-                    ("", e) => e.to_string(),
-                    (o, "") => o.to_string(),
-                    (o, e) => format!("stdout: {o}\nstderr: {e}"),
+                    ("", e) => tail_lines(e),
+                    (o, "") => tail_lines(o),
+                    (o, e) => tail_lines(&format!("stdout: {o}\nstderr: {e}")),
                 };
                 Err(anyhow!(
                     "{} failed (exit {:?}):\n{}",
@@ -276,6 +303,35 @@ impl ScipIndexer {
             .map(|o| o.status.success())
             .unwrap_or(false)
     }
+}
+
+/// How many trailing lines of a failed indexer's output to keep in the error.
+///
+/// A crashing Node indexer can emit hundreds of lines — a V8 out-of-memory dump
+/// is a GC log plus a full native stack trace — and all of it used to travel
+/// into the error, through the API, and into a client's error label. The last
+/// few lines are where the actual cause is; the frame addresses above them are
+/// noise to everyone but a Node maintainer.
+const MAX_OUTPUT_LINES: usize = 12;
+
+/// Old-space heap ceiling (MB) given to `scip-typescript`'s Node process.
+///
+/// Node's own default (~4 GB) is not enough for a large TypeScript project, and
+/// the failure mode is a hard V8 abort mid-index rather than a graceful error.
+const NODE_HEAP_MB: usize = 8192;
+
+/// Keep the last [`MAX_OUTPUT_LINES`] lines of `text`, prefixing a marker when
+/// anything was dropped so the message never looks like the whole story.
+///
+/// The tail, not the head: a process that dies reports *why* on its way out.
+fn tail_lines(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= MAX_OUTPUT_LINES {
+        return text.to_string();
+    }
+    let dropped = lines.len() - MAX_OUTPUT_LINES;
+    let tail = lines[lines.len() - MAX_OUTPUT_LINES..].join("\n");
+    format!("[…{dropped} earlier line(s) omitted]\n{tail}")
 }
 
 /// Run all required SCIP indexers for a repository.
@@ -317,6 +373,55 @@ pub async fn run_applicable_indexers(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn short_output_is_kept_verbatim() {
+        let text = "error: something broke\n  at line 3";
+        assert_eq!(tail_lines(text), text);
+    }
+
+    #[test]
+    fn long_output_keeps_the_tail_and_says_what_it_dropped() {
+        // A V8 OOM dump in miniature: the cause is near the end, buried under
+        // stack frames that must not reach a user-facing error.
+        let mut lines: Vec<String> = (0..200).map(|i| format!("{i}: 0x10a frame")).collect();
+        lines.push("FATAL ERROR: JavaScript heap out of memory".to_string());
+        let text = lines.join("\n");
+
+        let out = tail_lines(&text);
+
+        assert!(
+            out.starts_with("[…189 earlier line(s) omitted]"),
+            "got: {out}"
+        );
+        assert!(out.ends_with("FATAL ERROR: JavaScript heap out of memory"));
+        // 12 kept lines + the marker.
+        assert_eq!(out.lines().count(), MAX_OUTPUT_LINES + 1);
+    }
+
+    /// Both streams long: the limit applies to the *combined* message, so the
+    /// error carries one tail and one marker rather than one of each per stream.
+    #[test]
+    fn combined_streams_are_truncated_once() {
+        let long = |prefix: &str| {
+            (0..100)
+                .map(|i| format!("{prefix} line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let combined = format!("stdout: {}\nstderr: {}", long("out"), long("err"));
+
+        let out = tail_lines(&combined);
+
+        assert_eq!(out.lines().count(), MAX_OUTPUT_LINES + 1);
+        assert_eq!(
+            out.matches("earlier line(s) omitted").count(),
+            1,
+            "one marker for the combined output, not one per stream"
+        );
+        // The tail of the *last* stream is what survives.
+        assert!(out.ends_with("err line 99"), "got: {out}");
+    }
 
     #[tokio::test]
     async fn synthesises_tsconfig_when_absent_and_cleans_it_up() {

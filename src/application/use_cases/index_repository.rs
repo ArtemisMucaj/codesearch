@@ -188,7 +188,10 @@ impl IndexRepositoryUseCase {
         has_php: bool,
     ) -> Result<HashMap<String, Vec<SymbolReference>>, DomainError> {
         match &self.scip {
-            Some(scip) => scip.run(absolute_path, repo_id, has_js_ts, has_php).await,
+            Some(scip) => {
+                let refs = scip.run(absolute_path, repo_id, has_js_ts, has_php).await?;
+                Ok(filter_ignored_scip_refs(absolute_path, refs))
+            }
             None => Ok(HashMap::new()),
         }
     }
@@ -1329,6 +1332,101 @@ async fn parse_only(
     })
 }
 
+/// Drop SCIP references for files the file walker would never index.
+///
+/// The tree-sitter walker honours `.gitignore`, but the SCIP indexers do not:
+/// `scip-typescript` follows `tsconfig.json`, and TypeScript pulls in a sibling
+/// package's generated `dist/*.d.ts` when source imports it. Those declaration
+/// files are build output — ignored by git, absent from `chunks` — yet their
+/// symbols used to land in the call graph, so the graph referred to files that
+/// are not part of the repository's source.
+///
+/// Filtering here rather than at each call site covers both the fresh-index and
+/// the resync paths, which each store `scip_refs` separately.
+fn filter_ignored_scip_refs(
+    absolute_path: &Path,
+    refs: HashMap<String, Vec<SymbolReference>>,
+) -> HashMap<String, Vec<SymbolReference>> {
+    // Build the ignore matcher once from the repository root, then test each
+    // path against it. `WalkBuilder` is the walker's own machinery, so the two
+    // agree by construction on what "ignored" means.
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(absolute_path);
+    let gitignore_path = absolute_path.join(".gitignore");
+    if gitignore_path.exists() {
+        // `add` reports a malformed rule but still installs the valid ones, so a
+        // bad line costs us that rule, not the index. Say so rather than
+        // swallowing it — a silently-unenforced ignore rule looks like this
+        // filter is broken.
+        if let Some(e) = builder.add(&gitignore_path) {
+            warn!("Ignoring malformed rule(s) in {gitignore_path:?}: {e}");
+        }
+    }
+    let matcher = match builder.build() {
+        Ok(matcher) => matcher,
+        Err(e) => {
+            // Without a matcher nothing can be classified, so every reference is
+            // kept — the pre-filter behaviour. Log it: the alternative is a
+            // silent return to the exact bug this function exists to fix.
+            warn!(
+                "Could not build the ignore matcher for {absolute_path:?} ({e}); \
+                 keeping all SCIP references"
+            );
+            return refs;
+        }
+    };
+
+    // `is_dir = false`: every path tested here is a file.
+    let is_ignored = |relative: &str| -> bool {
+        matcher
+            .matched_path_or_any_parents(absolute_path.join(relative), false)
+            .is_ignore()
+    };
+
+    let mut dropped_files = 0usize;
+    let mut dropped_edges = 0usize;
+
+    let kept: HashMap<String, Vec<SymbolReference>> = refs
+        .into_iter()
+        // Drop entries keyed by an ignored file: the whole file is build output.
+        .filter(|(relative_path, _)| {
+            let ignored = is_ignored(relative_path);
+            if ignored {
+                dropped_files += 1;
+            }
+            !ignored
+        })
+        // Then drop individual edges *pointing into* ignored files. This is the
+        // common case and the one a key-only filter misses entirely: the caller
+        // is real source (`packages/*/src/**.ts`) while the callee resolves to a
+        // sibling package's generated `dist/**.d.ts`, so the entry survives on
+        // its key but carries references to files that aren't in the repository.
+        .map(|(relative_path, file_refs)| {
+            let before = file_refs.len();
+            let kept_refs: Vec<SymbolReference> = file_refs
+                .into_iter()
+                .filter(|r| !is_ignored(r.reference_file_path()))
+                .collect();
+            dropped_edges += before - kept_refs.len();
+            (relative_path, kept_refs)
+        })
+        // An entry left with no references is deliberately KEPT, as an empty
+        // vector. The incremental resync deletes a file's stored edges only for
+        // keys still present in this map, so dropping the entry would strand the
+        // very `dist` edges this filter exists to remove: on a re-index of an
+        // already-indexed repository the caller is unchanged, its entry is gone,
+        // `delete_by_file` never runs, and the stale edge survives. Saving an
+        // empty slice is a no-op, so the cost of keeping it is nil.
+        .collect();
+
+    if dropped_files > 0 || dropped_edges > 0 {
+        debug!(
+            "Dropped {dropped_files} gitignored file(s) and {dropped_edges} reference(s) into \
+             gitignored files (e.g. generated dist/*.d.ts) from the call graph"
+        );
+    }
+    kept
+}
+
 /// Discover the JS/TS sources the channel resolver may search: config modules
 /// (for direct `this.config…` access) plus files that define or instantiate a
 /// class (for the `this.<param>.<key>` constructor-parameter indirection).
@@ -1422,4 +1520,146 @@ fn leading_ident(s: &str) -> String {
     s.chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
         .collect()
+}
+
+#[cfg(test)]
+mod scip_filter_tests {
+    use super::*;
+    use crate::domain::ReferenceKind;
+    use tempfile::tempdir;
+
+    fn reference(path: &str) -> SymbolReference {
+        edge(path, path)
+    }
+
+    /// A reference from `caller` to a symbol defined in `target`.
+    fn edge(caller: &str, target: &str) -> SymbolReference {
+        SymbolReference::new(
+            None,
+            "Callee".to_string(),
+            caller.to_string(),
+            target.to_string(),
+            1,
+            1,
+            ReferenceKind::Call,
+            Language::TypeScript,
+            "repo".to_string(),
+        )
+    }
+
+    /// The reported bug: a monorepo gitignores `**/dist/`, but scip-typescript
+    /// still resolves imports to a sibling package's generated `dist/*.d.ts`,
+    /// so those declaration files ended up in the call graph even though no
+    /// chunk exists for them.
+    #[test]
+    fn drops_references_from_gitignored_dist_output() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "**/dist/\n").unwrap();
+
+        let mut refs = HashMap::new();
+        refs.insert(
+            "packages/lib-a/src/index.ts".to_string(),
+            vec![reference("packages/lib-a/src/index.ts")],
+        );
+        refs.insert(
+            "packages/lib-a/dist/index.d.ts".to_string(),
+            vec![reference("packages/lib-a/dist/index.d.ts")],
+        );
+
+        let kept = filter_ignored_scip_refs(dir.path(), refs);
+
+        assert!(kept.contains_key("packages/lib-a/src/index.ts"));
+        assert!(
+            !kept.contains_key("packages/lib-a/dist/index.d.ts"),
+            "generated dist declaration files must not reach the call graph"
+        );
+    }
+
+    /// The shape actually observed in a monorepo: the *caller* is real source,
+    /// so its map entry is kept, but the symbol it calls resolves to a sibling
+    /// package's generated `dist/**.d.ts`. A key-only filter keeps these edges;
+    /// the call graph then points at files that were never indexed.
+    #[test]
+    fn drops_edges_pointing_into_ignored_output_from_real_source() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "**/dist/\n").unwrap();
+
+        let caller = "packages/svc-a/src/connector/api/application.ts";
+        let mut refs = HashMap::new();
+        refs.insert(
+            caller.to_string(),
+            vec![
+                edge(caller, "packages/svc-a/src/domain/model.ts"),
+                edge(caller, "packages/svc-b/dist/src/index.d.ts"),
+            ],
+        );
+
+        let kept = filter_ignored_scip_refs(dir.path(), refs);
+
+        let edges = kept.get(caller).expect("real source must be kept");
+        assert_eq!(edges.len(), 1, "the dist edge should have been dropped");
+        assert_eq!(
+            edges[0].reference_file_path(),
+            "packages/svc-a/src/domain/model.ts"
+        );
+    }
+
+    /// A caller whose every edge pointed into build output keeps its entry, as
+    /// an empty vector.
+    ///
+    /// Dropping it would break the incremental resync: that path deletes a
+    /// file's stored edges only for keys still present in the map, so on a
+    /// re-index of an already-indexed repository the stale `dist` edge would
+    /// never be deleted — the filter would appear to work on a fresh index and
+    /// silently fail on every subsequent one.
+    #[test]
+    fn keeps_emptied_entries_so_resync_can_delete_their_stale_edges() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "**/dist/\n").unwrap();
+
+        let caller = "packages/app/src/index.ts";
+        let mut refs = HashMap::new();
+        refs.insert(
+            caller.to_string(),
+            vec![edge(caller, "packages/lib/dist/index.d.ts")],
+        );
+
+        let kept = filter_ignored_scip_refs(dir.path(), refs);
+
+        assert!(
+            kept.contains_key(caller),
+            "the entry must survive so the resync still calls delete_by_file for it"
+        );
+        assert!(kept[caller].is_empty(), "but with no references left");
+    }
+
+    /// A `.d.ts` that is genuinely part of the source tree (hand-written types,
+    /// not build output) is still indexed — the rule is "gitignored", not
+    /// "ends in .d.ts".
+    #[test]
+    fn keeps_checked_in_declaration_files() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "**/dist/\n").unwrap();
+
+        let mut refs = HashMap::new();
+        refs.insert(
+            "types/global.d.ts".to_string(),
+            vec![reference("types/global.d.ts")],
+        );
+
+        let kept = filter_ignored_scip_refs(dir.path(), refs);
+        assert!(kept.contains_key("types/global.d.ts"));
+    }
+
+    /// No `.gitignore` at all: nothing is dropped.
+    #[test]
+    fn keeps_everything_without_a_gitignore() {
+        let dir = tempdir().unwrap();
+        let mut refs = HashMap::new();
+        refs.insert("src/a.ts".to_string(), vec![reference("src/a.ts")]);
+        refs.insert("dist/a.d.ts".to_string(), vec![reference("dist/a.d.ts")]);
+
+        let kept = filter_ignored_scip_refs(dir.path(), refs);
+        assert_eq!(kept.len(), 2);
+    }
 }
