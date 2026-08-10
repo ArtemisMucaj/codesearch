@@ -22,6 +22,19 @@
 * unit tests for `InMemoryVectorRepository` hybrid paths: cosine vs RRF score ranges, dual-leg ranking, post-fusion `min_score` filtering, no early pruning, empty-term fallback, and limit enforcement
 * integration tests for end-to-end hybrid search: results returned with positive scores, keyword-matched chunk surfaces, special SQL characters (`%`, `_`, `!`) do not cause errors, and semantic-only baseline confirms the flag gates the BM25 leg
 
+## [2.3.0](https://github.com/ArtemisMucaj/codesearch/compare/v2.2.0...v2.3.0) (2026-08-10)
+
+
+### Features
+
+* **serve:** list and delete namespaces over the management API ([#217](https://github.com/ArtemisMucaj/codesearch/issues/217)) ([fa5c589](https://github.com/ArtemisMucaj/codesearch/commit/fa5c589481f269d6ddb7e4c9ad1f9cb88da4ba18))
+* **serve:** name communities in the management API ([#220](https://github.com/ArtemisMucaj/codesearch/issues/220)) ([c02e319](https://github.com/ArtemisMucaj/codesearch/commit/c02e3194b9e157c8abbae3176c930f38b2937cf2))
+
+
+### Bug Fixes
+
+* **index:** keep generated build output out of the call graph ([#219](https://github.com/ArtemisMucaj/codesearch/issues/219)) ([a658160](https://github.com/ArtemisMucaj/codesearch/commit/a6581600a71b02fb54ee782dcc5e87101796b3c1))
+
 ## [2.2.0](https://github.com/ArtemisMucaj/codesearch/compare/v2.1.0...v2.2.0) (2026-08-08)
 
 
