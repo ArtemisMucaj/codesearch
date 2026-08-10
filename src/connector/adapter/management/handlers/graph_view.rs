@@ -63,8 +63,12 @@ pub async fn graph(
     State(state): State<AppState>,
     Query(params): Query<GraphParams>,
 ) -> ApiResult<Json<GraphView>> {
-    // Build the render-ready graph from the requested scope and level, reusing
-    // the same use-case builders the `visualize` CLI drives.
+    // Communities are detected with only a content-addressed id, and the view
+    // materialises each name as it is built — so an unnamed community reaches
+    // the client as `c-8c26c91492df`. Cached names are applied by the use cases;
+    // any still missing are generated *after* the response, because naming is
+    // one LLM call per community and this endpoint already runs Leiden. The next
+    // request serves them from cache.
     let view: GraphView = if params.global {
         if params.repository.is_some() {
             return Err(ApiError::bad_request(
@@ -75,18 +79,22 @@ pub async fn graph(
         let namespace = params.namespace.as_deref();
         match params.level {
             GraphViewLevel::File => {
-                state
+                let (view, clusters) = state
                     .container
                     .cluster_detection_use_case()
-                    .namespace_graph_view(namespace)
-                    .await?
+                    .namespace_graph_view_with_clusters(namespace)
+                    .await?;
+                super::spawn_cluster_naming(&state, &clusters);
+                view
             }
             GraphViewLevel::Symbol => {
-                state
+                let (view, communities) = state
                     .container
                     .symbol_cluster_detection_use_case()
-                    .namespace_graph_view(namespace)
-                    .await?
+                    .namespace_graph_view_with_communities(namespace)
+                    .await?;
+                super::spawn_symbol_naming(&state, &communities);
+                view
             }
         }
     } else {
@@ -96,18 +104,22 @@ pub async fn graph(
             .await;
         match params.level {
             GraphViewLevel::File => {
-                state
+                let (view, clusters) = state
                     .container
                     .cluster_detection_use_case()
-                    .graph_view(&repository_id)
-                    .await?
+                    .graph_view_with_clusters(&repository_id)
+                    .await?;
+                super::spawn_cluster_naming(&state, &clusters);
+                view
             }
             GraphViewLevel::Symbol => {
-                state
+                let (view, communities) = state
                     .container
                     .symbol_cluster_detection_use_case()
-                    .graph_view(&repository_id)
-                    .await?
+                    .graph_view_with_communities(&repository_id)
+                    .await?;
+                super::spawn_symbol_naming(&state, &communities);
+                view
             }
         }
     };

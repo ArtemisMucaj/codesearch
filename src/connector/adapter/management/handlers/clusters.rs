@@ -65,6 +65,11 @@ pub async fn clusters(
             .await;
         use_case.create_clusters(&repository_id).await?
     };
+    // Detection yields content-addressed ids; cached display names are already
+    // applied by the use case. Generate any still missing in the background so
+    // the next request has them, rather than blocking this one on an LLM call
+    // per unnamed community.
+    super::spawn_cluster_naming(&state, &graph.clusters);
     Ok(Json(graph))
 }
 
@@ -90,5 +95,6 @@ pub async fn symbol_clusters(
             .await;
         use_case.detect_communities(&repository_id).await?
     };
+    super::spawn_symbol_naming(&state, &graph.communities);
     Ok(Json(graph))
 }

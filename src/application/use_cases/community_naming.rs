@@ -19,8 +19,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::{stream, StreamExt};
+use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use super::cluster_detection::ancestor_dir_frequencies;
@@ -31,6 +33,16 @@ use crate::domain::{Cluster, DomainError, SymbolCommunity};
 /// so this is kept conservative — enough to hide per-call latency without
 /// hammering the provider.
 const NAMING_CONCURRENCY: usize = 6;
+
+/// Deadline for the serial probe call that decides whether the endpoint is
+/// usable at all.
+///
+/// Generous enough for a cold local model (loading weights on the first request
+/// can take tens of seconds) but bounded, so a server that accepts the
+/// connection and then never responds degrades to ids instead of hanging the
+/// naming run. Only the probe is bounded — once it answers, the endpoint has
+/// proven itself and the remaining calls use the client's own timeout.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// System prompt: the model returns a single short label, nothing else. Kept
 /// terse so small local models behave; the JSON schema on the request enforces
@@ -151,10 +163,30 @@ impl CommunityNamingUseCase {
         // endpoint is reachable this one call fails fast and we skip the rest —
         // rather than firing a timeout per community and leaving everything on the
         // id fallback the slow way.
+        //
+        // Bounded, because "unreachable" is not the only failure: a local server
+        // can accept the connection and then never answer (a model that reports
+        // itself loaded but is wedged emits no bytes at all). Without a deadline
+        // the probe inherits the client's, so the whole naming run hangs on one
+        // dead model instead of degrading to ids.
         let (first_idx, first_members) = &misses[0];
-        let first = generate_name(first_members, chat).await;
+        let first = match timeout(PROBE_TIMEOUT, generate_name(first_members, chat)).await {
+            Ok(result) => result,
+            Err(_) => {
+                warn!(
+                    "LLM naming timed out after {}s on the first community; showing ids. \
+                     The configured model may be loaded but not serving completions.",
+                    PROBE_TIMEOUT.as_secs()
+                );
+                return;
+            }
+        };
         if let Err(e) = &first {
-            debug!("LLM naming unavailable ({e}); showing ids");
+            // Warn, not debug: this is the difference between "the LLM had
+            // nothing to say" and "naming is silently disabled", and the server
+            // runs at info level, so a debug line here is invisible exactly when
+            // someone is asking why every community shows an id.
+            warn!("LLM naming unavailable ({e}); showing ids");
             return;
         }
 

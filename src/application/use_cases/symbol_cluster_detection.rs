@@ -311,6 +311,15 @@ impl SymbolClusterDetectionUseCase {
     /// size-sorted [`SymbolCommunityGraph::communities`] list, so it matches the
     /// `symbol-clusters` command's ordering, names, and cohesion.
     pub async fn graph_view(&self, repository_id: &str) -> Result<GraphView, DomainError> {
+        Ok(self.graph_view_with_communities(repository_id).await?.0)
+    }
+
+    /// [`Self::graph_view`], also returning the communities the view was built
+    /// from, so a caller can see which are still unnamed without rebuilding it.
+    pub async fn graph_view_with_communities(
+        &self,
+        repository_id: &str,
+    ) -> Result<(GraphView, Vec<SymbolCommunity>), DomainError> {
         // The node/edge view always needs the symbol graph; the community
         // assignment can come from storage. Both derive deterministically from
         // the same call-graph snapshot (stored analyses are invalidated on
@@ -327,12 +336,8 @@ impl SymbolClusterDetectionUseCase {
         self.apply_cached_names(&mut scg.communities).await;
         // Per-repository: every symbol trivially belongs to the one repo, so no
         // per-node repository field (empty name map → all `None`).
-        Ok(Self::render_symbol_view(
-            repository_id,
-            &sg,
-            &scg,
-            &HashMap::new(),
-        ))
+        let view = Self::render_symbol_view(repository_id, &sg, &scg, &HashMap::new());
+        Ok((view, scg.communities))
     }
 
     /// Namespace-wide symbol community detection: one Leiden run over the union
@@ -366,6 +371,18 @@ impl SymbolClusterDetectionUseCase {
         &self,
         namespace: Option<&str>,
     ) -> Result<GraphView, DomainError> {
+        Ok(self
+            .namespace_graph_view_with_communities(namespace)
+            .await?
+            .0)
+    }
+
+    /// [`Self::namespace_graph_view`], also returning the communities the view
+    /// was built from. See [`Self::graph_view_with_communities`].
+    pub async fn namespace_graph_view_with_communities(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<(GraphView, Vec<SymbolCommunity>), DomainError> {
         let scope = self.namespace_scope_key(namespace).await?;
         let sg = self.build_namespace_symbol_graph(namespace).await?;
         let mut scg = match self.load_stored(&scope).await {
@@ -380,7 +397,8 @@ impl SymbolClusterDetectionUseCase {
         // Label each symbol node with its owning repository's display name so the
         // client's repo picker/coloring show git projects, not slices of FQNs.
         let repo_names = self.namespace_repo_names(namespace).await?;
-        Ok(Self::render_symbol_view(&scope, &sg, &scg, &repo_names))
+        let view = Self::render_symbol_view(&scope, &sg, &scg, &repo_names);
+        Ok((view, scg.communities))
     }
 
     /// The cache scope id for a namespace's symbol run — the same sentinel the

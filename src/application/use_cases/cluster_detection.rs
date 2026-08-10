@@ -631,8 +631,23 @@ impl ClusterDetectionUseCase {
     /// the community index of each node is the cluster's position in the
     /// size-sorted [`ClusterGraph::clusters`] list.
     pub async fn graph_view(&self, repository_id: &str) -> Result<GraphView, DomainError> {
+        Ok(self.graph_view_with_clusters(repository_id).await?.0)
+    }
+
+    /// [`Self::graph_view`], also returning the clusters the view was built from.
+    ///
+    /// A [`GraphView`] materialises each community's name as it is built,
+    /// falling back to the content-addressed id, so a caller cannot tell from
+    /// the finished view which communities are still unnamed. Handing back the
+    /// clusters lets one generate the missing names (in the background, off the
+    /// request path) without rebuilding the graph.
+    pub async fn graph_view_with_clusters(
+        &self,
+        repository_id: &str,
+    ) -> Result<(GraphView, Vec<Cluster>), DomainError> {
         let (cg, graph) = self.clusters_and_graph(repository_id).await?;
-        Ok(build_file_graph_view(&cg, &graph, repository_id))
+        let view = build_file_graph_view(&cg, &graph, repository_id);
+        Ok((view, cg.clusters))
     }
 
     // ── Namespace-wide detection ──────────────────────────────────────────
@@ -696,6 +711,15 @@ impl ClusterDetectionUseCase {
         &self,
         namespace: Option<&str>,
     ) -> Result<GraphView, DomainError> {
+        Ok(self.namespace_graph_view_with_clusters(namespace).await?.0)
+    }
+
+    /// [`Self::namespace_graph_view`], also returning the clusters the view was
+    /// built from. See [`Self::graph_view_with_clusters`].
+    pub async fn namespace_graph_view_with_clusters(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<(GraphView, Vec<Cluster>), DomainError> {
         let scope = self.namespace_scope_key(namespace);
         let graph = self.namespace_graph(namespace).await?;
         let mut cg = match self.load_stored(&scope).await {
@@ -707,7 +731,8 @@ impl ClusterDetectionUseCase {
             }
         };
         self.apply_cached_names(&mut cg.clusters).await;
-        Ok(build_file_graph_view(&cg, &graph, &scope))
+        let view = build_file_graph_view(&cg, &graph, &scope);
+        Ok((view, cg.clusters))
     }
 
     /// Return the cluster a given file belongs to.
