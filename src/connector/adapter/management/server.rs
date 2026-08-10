@@ -82,7 +82,14 @@ pub fn routes(state: AppState) -> Router {
             get(handlers::repositories::get).delete(handlers::repositories::delete),
         )
         .route("/api/stats", get(handlers::repositories::stats))
-        .route("/api/namespaces", post(handlers::namespaces::create))
+        .route(
+            "/api/namespaces",
+            get(handlers::namespaces::list).post(handlers::namespaces::create),
+        )
+        .route(
+            "/api/namespaces/{name}",
+            axum::routing::delete(handlers::namespaces::delete),
+        )
         // Search.
         .route("/api/search", post(handlers::search::search))
         // Call-graph queries.
@@ -173,7 +180,9 @@ async fn index(State(_state): State<AppState>) -> Json<Value> {
             { "method": "GET", "path": "/api/repositories/{id}", "description": "one repository + architecture overview" },
             { "method": "DELETE", "path": "/api/repositories/{id}", "description": "delete a repository by ID or path" },
             { "method": "GET", "path": "/api/stats", "description": "index-wide statistics" },
+            { "method": "GET", "path": "/api/namespaces", "description": "list configured namespaces, including empty ones" },
             { "method": "POST", "path": "/api/namespaces", "description": "create a namespace with a fixed embedding config" },
+            { "method": "DELETE", "path": "/api/namespaces/{name}", "description": "delete a namespace and every repository in it" },
             { "method": "POST", "path": "/api/search", "description": "hybrid semantic + keyword code search" },
             { "method": "POST", "path": "/api/impact", "description": "blast radius of changing a symbol" },
             { "method": "GET", "path": "/api/context/{symbol}", "description": "callers + callees of a symbol" },

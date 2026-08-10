@@ -811,6 +811,138 @@ async fn index_stream_indexes_into_a_new_namespace() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn namespaces_list_includes_one_with_nothing_indexed() {
+    // The reason this endpoint exists: a client that groups /api/repositories by
+    // namespace cannot see a namespace that was created but never indexed into.
+    let (container, _dir) = duckdb_container().await;
+    let (base_url, server) = spawn_management_server_with_container(container).await;
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("{base_url}/api/namespaces"))
+        .json(&serde_json::json!({ "name": "platform" }))
+        .send()
+        .await
+        .expect("request to /api/namespaces failed");
+
+    let body: serde_json::Value = client
+        .get(format!("{base_url}/api/namespaces"))
+        .send()
+        .await
+        .expect("request to GET /api/namespaces failed")
+        .json()
+        .await
+        .expect("failed to decode namespace list");
+
+    let listed = body["namespaces"]
+        .as_array()
+        .expect("namespaces should be an array");
+    let platform = listed
+        .iter()
+        .find(|ns| ns["name"] == "platform")
+        .expect("the empty namespace should still be listed");
+    assert_eq!(platform["repositories"], 0);
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_namespace_removes_its_repositories() {
+    // Deletion cascades: the repositories indexed into the namespace go with it,
+    // so neither the namespace nor its repos survive.
+    let repo_dir = tempdir().expect("failed to create repo temp dir");
+    std::fs::write(
+        repo_dir.path().join("sample.rs"),
+        "pub fn greet() -> &'static str { \"hi\" }\n",
+    )
+    .expect("failed to write fixture file");
+
+    let (container, _dir) = duckdb_container().await;
+    let (base_url, server) = spawn_management_server_with_container(container).await;
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("{base_url}/api/namespaces"))
+        .json(&serde_json::json!({ "name": "platform" }))
+        .send()
+        .await
+        .expect("request to /api/namespaces failed");
+    client
+        .post(format!("{base_url}/api/stream/index"))
+        .json(&serde_json::json!({
+            "path": repo_dir.path().to_string_lossy(),
+            "namespace": "platform",
+        }))
+        .send()
+        .await
+        .expect("request to /api/stream/index failed")
+        .text()
+        .await
+        .expect("failed to read SSE body");
+
+    let deleted: serde_json::Value = client
+        .delete(format!("{base_url}/api/namespaces/platform"))
+        .send()
+        .await
+        .expect("request to DELETE /api/namespaces failed")
+        .json()
+        .await
+        .expect("failed to decode delete response");
+    assert_eq!(deleted["deleted"], true);
+    assert_eq!(deleted["repositories_deleted"], 1);
+
+    let listed: serde_json::Value = client
+        .get(format!("{base_url}/api/namespaces"))
+        .send()
+        .await
+        .expect("request to GET /api/namespaces failed")
+        .json()
+        .await
+        .expect("failed to decode namespace list");
+    assert!(
+        !listed["namespaces"]
+            .as_array()
+            .expect("namespaces should be an array")
+            .iter()
+            .any(|ns| ns["name"] == "platform"),
+        "the deleted namespace should be gone, got: {listed}"
+    );
+
+    let repos: serde_json::Value = client
+        .get(format!("{base_url}/api/repositories"))
+        .send()
+        .await
+        .expect("request to /api/repositories failed")
+        .json()
+        .await
+        .expect("failed to decode repository list");
+    assert!(
+        repos["repositories"]
+            .as_array()
+            .expect("repositories should be an array")
+            .is_empty(),
+        "the namespace's repositories should be deleted with it, got: {repos}"
+    );
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_an_unknown_namespace_is_a_404() {
+    let (container, _dir) = duckdb_container().await;
+    let (base_url, server) = spawn_management_server_with_container(container).await;
+
+    let response = reqwest::Client::new()
+        .delete(format!("{base_url}/api/namespaces/nope"))
+        .send()
+        .await
+        .expect("request to DELETE /api/namespaces failed");
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn index_stream_rejects_an_invalid_namespace() {
     // The namespace becomes a DuckDB schema name, so it is validated the same
     // way the CLI validates `--namespace` rather than reaching the query layer.
