@@ -1,9 +1,7 @@
-use std::collections::HashMap;
-
 use anyhow::Result;
 
 use crate::cli::OutputFormat;
-use crate::{ImpactAnalysis, ImpactNode};
+use crate::{CallGraphNode, ImpactAnalysis};
 
 use super::super::Container;
 
@@ -65,55 +63,14 @@ impl<'a> ImpactController<'a> {
             analysis.root_symbol
         );
 
-        let all_nodes: Vec<&ImpactNode> = analysis.by_depth.iter().flatten().collect();
+        // One chain per leaf: the leaf (nothing calls it) is the root of the
+        // inverted tree, traced back down to the queried symbol.
+        let chains = analysis.call_chains();
 
-        // Build children_map: symbol → nodes that list it as via_symbol.
-        let mut children_map: HashMap<&str, Vec<&ImpactNode>> = HashMap::new();
-        for node in &all_nodes {
-            if let Some(via) = node.via_symbol.as_deref() {
-                children_map.entry(via).or_default().push(node);
-            }
-        }
+        for (idx, path) in chains.iter().enumerate() {
+            Self::render_reversed_path(path, &analysis.root_symbol, &mut out);
 
-        // Leaf nodes (no one calls them) become roots in the inverted tree.
-        let leaf_nodes: Vec<&ImpactNode> = all_nodes
-            .iter()
-            .copied()
-            .filter(|n| !children_map.contains_key(n.symbol.as_str()))
-            .collect();
-
-        // Lookup by (depth, symbol) for unambiguous path tracing.
-        // or_insert keeps only the *first* ImpactNode seen for any (depth, symbol) pair.
-        // When the same symbol appears at the same depth via two different call paths, the
-        // duplicate is intentionally dropped so that each (depth, symbol) key maps to exactly
-        // one parent — giving the path-tracing loop a single, deterministic choice at every
-        // step.  The trade-off is that alternate routes to the same node are not rendered;
-        // this is acceptable here because the goal is to show one representative call chain
-        // from each leaf up to the queried symbol, not to enumerate every possible path.
-        let mut node_by_depth_symbol: HashMap<(usize, &str), &ImpactNode> = HashMap::new();
-        for node in &all_nodes {
-            node_by_depth_symbol
-                .entry((node.depth, node.symbol.as_str()))
-                .or_insert(node);
-        }
-
-        for (idx, &leaf) in leaf_nodes.iter().enumerate() {
-            // Trace from leaf back toward the root symbol.
-            let mut path: Vec<&ImpactNode> = vec![leaf];
-            let mut current = leaf;
-            while let Some(via) = current.via_symbol.as_deref() {
-                let parent_depth = current.depth.saturating_sub(1);
-                if let Some(&parent) = node_by_depth_symbol.get(&(parent_depth, via)) {
-                    path.push(parent);
-                    current = parent;
-                } else {
-                    break;
-                }
-            }
-
-            Self::render_reversed_path(&path, &analysis.root_symbol, &mut out);
-
-            if idx < leaf_nodes.len() - 1 {
+            if idx < chains.len() - 1 {
                 out.push('\n');
             }
         }
@@ -131,7 +88,7 @@ impl<'a> ImpactController<'a> {
     /// Render a single path (leaf → … → root) as an indented tree.
     /// `path[0]` is the most-upstream caller (tree root); the queried symbol
     /// is appended as the terminal leaf.
-    fn render_reversed_path(path: &[&ImpactNode], root_symbol: &str, out: &mut String) {
+    fn render_reversed_path(path: &[&CallGraphNode], root_symbol: &str, out: &mut String) {
         if path.is_empty() {
             return;
         }

@@ -8,8 +8,7 @@ use crate::domain::{CodeChunk, DomainError};
 
 /// Retrieves an indexed [`CodeChunk`] for a reference location shown in the TUI.
 ///
-/// Given a file path and a line number (as returned by [`ContextNode`] or
-/// [`ImpactNode`]), this use case queries the vector store for the chunks that
+/// Given a file path and a line number (as returned by [`CallGraphNode`]), this use case queries the vector store for the chunks that
 /// belong to that file and returns the smallest chunk whose line range contains
 /// the reference line. Code is therefore always sourced from the indexed store,
 /// never from the live filesystem.
@@ -55,7 +54,7 @@ impl SnippetLookupUseCase {
     /// Return the definition chunk for a callee symbol given its fully-qualified name.
     ///
     /// Used for callee nodes in the Context tree view where only the callee FQN is
-    /// known — the stored `file_path`/`line` on a callee `ContextNode` point to the
+    /// known — the stored `file_path`/`line` on a callee `CallGraphNode` point to the
     /// call-site inside the root symbol, not the callee's own definition.
     ///
     /// Resolution strategy:

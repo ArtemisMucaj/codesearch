@@ -5,18 +5,18 @@ pub mod domain;
 pub mod tui;
 
 pub use application::{
-    AnalysisRepository, CallGraphQuery, CallGraphRepository, CallGraphStats, CallGraphUseCase,
-    ChannelEndpointRepository, ChannelExtractor, ChannelLinkOptions, ChannelLinkReport,
-    ChannelLinkUseCase, ChannelOverview, ChannelResolver, ChatClient, ClusterDetectionUseCase,
-    CommunityNamingUseCase, ContextNode, CouplingDetectionUseCase, DeleteRepositoryUseCase,
-    EmbeddingService, ExecutionFeaturesUseCase, ExplainResult, ExplainUseCase, FileHashRepository,
-    FileRelationshipUseCase, GraphExpansionUseCase, ImpactAnalysis, ImpactAnalysisUseCase,
-    ImpactNode, IndexRepositoryUseCase, LanguageShare, ListRepositoriesUseCase, MetadataRepository,
-    ModuleDependency, ModuleOverview, OverviewOptions, OverviewReport, OverviewStats,
-    ParserService, QueryExpander, RepositoryOverviewUseCase, RerankingService,
-    ResolveChannelsUseCase, ResolvedConfigValue, Scip, SearchCodeUseCase, SkippedSection,
-    SnippetLookupUseCase, SymbolClusterDetectionUseCase, SymbolContext, SymbolContextUseCase,
-    VectorRepository,
+    AnalysisRepository, CallGraphNode, CallGraphQuery, CallGraphRepository, CallGraphStats,
+    CallGraphUseCase, ChannelEndpointRepository, ChannelExtractor, ChannelLinkOptions,
+    ChannelLinkReport, ChannelLinkUseCase, ChannelOverview, ChannelResolver, ChatClient,
+    ClusterDetectionUseCase, CommunityNamingUseCase, CouplingDetectionUseCase,
+    DeleteRepositoryUseCase, EmbeddingService, ExecutionFeaturesUseCase, ExplainResult,
+    ExplainUseCase, FileHashRepository, FileRelationshipUseCase, GraphExpansionUseCase,
+    ImpactAnalysis, ImpactAnalysisUseCase, IndexRepositoryUseCase, LanguageShare,
+    ListRepositoriesUseCase, MetadataRepository, ModuleDependency, ModuleOverview, OverviewOptions,
+    OverviewReport, OverviewStats, ParserService, QueryExpander, RepositoryOverviewUseCase,
+    RerankingService, ResolveChannelsUseCase, ResolvedConfigValue, Scip, SearchCodeUseCase,
+    SkippedSection, SnippetLookupUseCase, SymbolClusterDetectionUseCase, SymbolContext,
+    SymbolContextUseCase, VectorRepository,
 };
 
 pub use application::{aggregate, render, VizFormat, DEFAULT_NODE_LIMIT};

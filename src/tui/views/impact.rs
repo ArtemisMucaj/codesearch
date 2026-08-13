@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::application::ImpactNode;
+use crate::application::CallGraphNode;
 use crate::tui::state::{AppState, ImpactPane};
 use crate::tui::widgets::result_list;
 use crate::tui::widgets::result_list::ListEntry;
@@ -199,7 +199,7 @@ fn render_right(frame: &mut Frame, area: Rect, state: &AppState) {
 fn render_path_tree(
     frame: &mut Frame,
     area: Rect,
-    path: &[&ImpactNode], // leaf-first order
+    path: &[&CallGraphNode], // leaf-first order
     root_symbol: &str,
     chain_focused: bool,
     selected: usize,

@@ -4,8 +4,9 @@ use std::sync::Arc;
 use crate::application::ChatClient;
 use crate::domain::DomainError;
 
+use super::call_graph_traversal::{leaf_nodes, CallGraphNode};
 use super::snippet_lookup::SnippetLookupUseCase;
-use super::symbol_context::{ContextNode, SymbolContext, SymbolContextUseCase};
+use super::symbol_context::{SymbolContext, SymbolContextUseCase};
 
 const SYSTEM_PROMPT: &str = "\
 You are a senior software engineer performing call-flow analysis. \
@@ -357,25 +358,16 @@ fn remove_paired(s: &str, delim: &str) -> String {
 /// Each path is ordered outermost-caller-first down to the direct caller
 /// of the root symbol. The root itself is not included in the path — it is
 /// rendered separately as the "root symbol" header.
-fn reconstruct_caller_paths(callers_by_depth: &[Vec<ContextNode>]) -> Vec<Vec<&ContextNode>> {
-    let all_nodes: Vec<&ContextNode> = callers_by_depth.iter().flatten().collect();
+fn reconstruct_caller_paths(callers_by_depth: &[Vec<CallGraphNode>]) -> Vec<Vec<&CallGraphNode>> {
+    let all_nodes: Vec<&CallGraphNode> = callers_by_depth.iter().flatten().collect();
 
-    // children_map[sym] = nodes that list sym as their via_symbol.
-    let mut children_map: HashMap<&str, Vec<&ContextNode>> = HashMap::new();
-    for node in &all_nodes {
-        if let Some(via) = node.via_symbol.as_deref() {
-            children_map.entry(via).or_default().push(node);
-        }
-    }
+    // Outermost callers — not called by any other node in the set.
+    let leaves = leaf_nodes(&all_nodes);
 
-    // Leaf nodes: outermost callers — not called by any other node in the set.
-    let leaf_nodes: Vec<&ContextNode> = all_nodes
-        .iter()
-        .copied()
-        .filter(|n| !children_map.contains_key(n.symbol.as_str()))
-        .collect();
-
-    let mut node_by_depth_symbol: HashMap<(usize, &str), Vec<&ContextNode>> = HashMap::new();
+    // Unlike the single representative chain the renderers trace, an
+    // explanation enumerates every distinct route, so a `(depth, symbol)` key
+    // keeps all its candidates and the walk below branches across them.
+    let mut node_by_depth_symbol: HashMap<(usize, &str), Vec<&CallGraphNode>> = HashMap::new();
     for node in &all_nodes {
         node_by_depth_symbol
             .entry((node.depth, node.symbol.as_str()))
@@ -384,8 +376,8 @@ fn reconstruct_caller_paths(callers_by_depth: &[Vec<ContextNode>]) -> Vec<Vec<&C
     }
 
     let mut paths = Vec::new();
-    for leaf in leaf_nodes {
-        let mut stack: Vec<(Vec<&ContextNode>, &ContextNode)> = vec![(vec![leaf], leaf)];
+    for leaf in leaves {
+        let mut stack: Vec<(Vec<&CallGraphNode>, &CallGraphNode)> = vec![(vec![leaf], leaf)];
 
         while let Some((path, current)) = stack.pop() {
             match current.via_symbol.as_deref() {
@@ -418,7 +410,7 @@ fn reconstruct_caller_paths(callers_by_depth: &[Vec<ContextNode>]) -> Vec<Vec<&C
 }
 
 /// Collect all callees across every BFS depth.
-fn all_callees(callees_by_depth: &[Vec<ContextNode>]) -> Vec<&ContextNode> {
+fn all_callees(callees_by_depth: &[Vec<CallGraphNode>]) -> Vec<&CallGraphNode> {
     callees_by_depth.iter().flatten().collect()
 }
 

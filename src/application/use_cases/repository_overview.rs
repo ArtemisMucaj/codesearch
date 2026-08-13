@@ -227,7 +227,7 @@ impl RepositoryOverviewUseCase {
 
         // Call-graph size is best-effort: an empty or missing graph is a
         // normal state (indexed without SCIP), not a stats failure.
-        let cg = match self.call_graph.stats(repository_id).await {
+        let cg = match self.call_graph.get_stats(repository_id).await {
             Ok(stats) => stats,
             Err(e) => {
                 tracing::warn!("failed to compute call-graph stats for '{repository_id}': {e}");
