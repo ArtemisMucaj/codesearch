@@ -501,16 +501,9 @@ impl CodesearchMcpServer {
             // only in direction: inheritors are the callers of the type,
             // children the callees.
             QueryPattern::InheritorsOf | QueryPattern::ChildrenOf => {
-                // Halve the per-query limit so the combined result stays within
-                // the requested bound before deduplication.
-                let per_limit = input.limit.map(|n| n.div_ceil(2) as u32);
-                let kind_query = |kind: &str| {
-                    let q = base_query.clone().with_reference_kind(kind);
-                    match per_limit {
-                        Some(pl) => q.with_limit(pl),
-                        None => q,
-                    }
-                };
+                // Full limit per kind; the dedup-and-take below bounds the union.
+                // Halving it would return 5 of 10 when all edges are one kind.
+                let kind_query = |kind: &str| base_query.clone().with_reference_kind(kind);
                 let up = matches!(input.pattern, QueryPattern::InheritorsOf);
 
                 let mut refs = Vec::new();
