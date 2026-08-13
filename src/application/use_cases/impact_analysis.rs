@@ -8,12 +8,6 @@ use crate::application::use_cases::call_graph_traversal::{
 use crate::application::{CallGraphQuery, CallGraphUseCase};
 use crate::domain::DomainError;
 
-/// Maximum number of fully-qualified symbols to resolve from a short name before
-/// seeding the blast-radius BFS. Caps the ambiguity fan-out; when a name resolves
-/// to more than this many FQNs the extras are dropped and the display label says
-/// so, rather than silently analysing an arbitrary alphabetical slice.
-const RESOLVE_SYMBOLS_LIMIT: u32 = 100;
-
 /// Full blast-radius report for a symbol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImpactAnalysis {
@@ -86,14 +80,8 @@ impl ImpactAnalysisUseCase {
             query = query.with_regex();
         }
 
-        let (root_symbols, root_symbol) = resolve_roots(
-            &self.call_graph,
-            symbol,
-            &query,
-            is_regex,
-            RESOLVE_SYMBOLS_LIMIT,
-        )
-        .await?;
+        let (root_symbols, root_symbol) =
+            resolve_roots(&self.call_graph, symbol, &query, is_regex).await?;
 
         let by_depth = bfs(&self.call_graph, &root_symbols, &query, Direction::Callers).await?;
         let (total_affected, max_depth_reached) = depth_summary(&by_depth);

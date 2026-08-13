@@ -84,11 +84,6 @@ impl SymbolContext {
     }
 }
 
-/// Default maximum number of fully-qualified symbols to resolve from a short
-/// name. Caps the ambiguity fan-out; lower than the impact-analysis cap
-/// because a context view renders both directions for every root.
-const FALLBACK_RESOLUTION_LIMIT: u32 = 10;
-
 /// Use case: return a complete depth-grouped caller + callee BFS view for a named symbol.
 pub struct SymbolContextUseCase {
     call_graph: Arc<CallGraphUseCase>,
@@ -118,14 +113,8 @@ impl SymbolContextUseCase {
             query = query.with_regex();
         }
 
-        let (root_symbols, display_symbol) = resolve_roots(
-            &self.call_graph,
-            symbol,
-            &query,
-            is_regex,
-            FALLBACK_RESOLUTION_LIMIT,
-        )
-        .await?;
+        let (root_symbols, display_symbol) =
+            resolve_roots(&self.call_graph, symbol, &query, is_regex).await?;
 
         // Run both BFS passes in parallel.
         let (callers, callees) = tokio::join!(

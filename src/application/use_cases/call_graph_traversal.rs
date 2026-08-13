@@ -152,41 +152,55 @@ pub fn depth_summary(by_depth: &[Vec<CallGraphNode>]) -> (usize, usize) {
     (total, max_depth)
 }
 
-/// Resolve `symbol` to the fully-qualified names a BFS should start from,
-/// together with the label to display for the query.
+/// Maximum number of fully-qualified symbols a short name may resolve to.
+/// Caps the ambiguity fan-out so a walk is never seeded with an unbounded
+/// root set; when a name exceeds it the result is reported as capped rather
+/// than silently covering an arbitrary alphabetical slice.
+pub const RESOLVE_SYMBOLS_LIMIT: u32 = 100;
+
+/// Resolve `symbol` to the fully-qualified names that match it, plus whether
+/// the match set hit [`RESOLVE_SYMBOLS_LIMIT`]. Empty when nothing matches.
 ///
 /// `is_regex` – when `true`, `symbol` is used as-is as a POSIX regex. When
 ///              `false` (the default) it is first tried as an exact match; if
 ///              that finds nothing it is wrapped as `.*<symbol>.*` so that
 ///              `codesearch impact load` still finds every FQN containing
 ///              "load".
-/// `limit`    – caps the ambiguity fan-out. One row beyond the cap is
-///              requested so that hitting it can be detected: the extras are
-///              dropped, a warning is logged, and the display label says so —
-///              never a silent walk over an arbitrary alphabetical slice.
+pub async fn resolve_matches(
+    call_graph: &CallGraphUseCase,
+    symbol: &str,
+    query: &CallGraphQuery,
+    is_regex: bool,
+) -> Result<(Vec<String>, bool), DomainError> {
+    let (resolved, truncated) = resolve_capped(call_graph, symbol, query).await?;
+    if !resolved.is_empty() || is_regex {
+        // Regex mode takes the pattern at face value: no auto-wrap retry.
+        return Ok((resolved, truncated));
+    }
+
+    let auto_pattern = format!(".*{}.*", build_fuzzy_pattern(symbol));
+    let auto_query = query.clone().with_regex();
+    debug!(
+        symbol,
+        auto_pattern, "call graph: exact match empty, retrying as substring regex"
+    );
+    resolve_capped(call_graph, &auto_pattern, &auto_query).await
+}
+
+/// Resolve `symbol` to the names a BFS should start from, together with the
+/// label to display for the query.
 ///
 /// When nothing resolves, the literal input is returned as the sole root so
 /// the caller still gets a (necessarily empty) result keyed by what was asked.
+/// Callers that need to tell "no match" apart from that use
+/// [`resolve_matches`] directly.
 pub async fn resolve_roots(
     call_graph: &CallGraphUseCase,
     symbol: &str,
     query: &CallGraphQuery,
     is_regex: bool,
-    limit: u32,
 ) -> Result<(Vec<String>, String), DomainError> {
-    let (mut resolved, mut truncated) = resolve_capped(call_graph, symbol, query, limit).await?;
-
-    // Regex mode takes the pattern at face value: no auto-wrap retry.
-    if resolved.is_empty() && !is_regex {
-        let auto_pattern = format!(".*{}.*", build_fuzzy_pattern(symbol));
-        let auto_query = query.clone().with_regex();
-        debug!(
-            symbol,
-            auto_pattern, "call graph: exact match empty, retrying as substring regex"
-        );
-        (resolved, truncated) =
-            resolve_capped(call_graph, &auto_pattern, &auto_query, limit).await?;
-    }
+    let (resolved, truncated) = resolve_matches(call_graph, symbol, query, is_regex).await?;
 
     if resolved.is_empty() {
         debug!(
@@ -202,28 +216,29 @@ pub async fn resolve_roots(
         "call graph: resolved {} root symbols",
         resolved.len()
     );
-    let label = display_label(symbol, &resolved, truncated, limit);
+    let label = display_label(symbol, &resolved, truncated);
     Ok((resolved, label))
 }
 
-/// Resolve `pattern` capped at `limit`, reporting whether the cap was hit.
+/// Resolve `pattern`, reporting whether the cap was hit. One row beyond the
+/// cap is requested so that hitting it is detectable rather than invisible.
 async fn resolve_capped(
     call_graph: &CallGraphUseCase,
     pattern: &str,
     query: &CallGraphQuery,
-    limit: u32,
 ) -> Result<(Vec<String>, bool), DomainError> {
     let mut resolved = call_graph
-        .resolve_symbols(pattern, query, limit + 1)
+        .resolve_symbols(pattern, query, RESOLVE_SYMBOLS_LIMIT + 1)
         .await?;
-    let truncated = resolved.len() as u32 > limit;
+    let truncated = resolved.len() as u32 > RESOLVE_SYMBOLS_LIMIT;
     if truncated {
-        resolved.truncate(limit as usize);
+        resolved.truncate(RESOLVE_SYMBOLS_LIMIT as usize);
         warn!(
             pattern,
-            cap = limit,
-            "call graph: symbol resolved to more than {limit} FQNs; the walk covers \
-             only the first {limit} — narrow the symbol for a complete result"
+            cap = RESOLVE_SYMBOLS_LIMIT,
+            "call graph: symbol resolved to more than {RESOLVE_SYMBOLS_LIMIT} FQNs; the walk \
+             covers only the first {RESOLVE_SYMBOLS_LIMIT} — narrow the symbol for a complete \
+             result"
         );
     }
     Ok((resolved, truncated))
@@ -232,10 +247,10 @@ async fn resolve_capped(
 /// Human-readable label for the analysed symbol. A single root is shown
 /// verbatim; multiple roots show the count, with a `capped` note when
 /// resolution hit the limit so the user knows the result is partial.
-fn display_label(symbol: &str, resolved: &[String], truncated: bool, limit: u32) -> String {
+fn display_label(symbol: &str, resolved: &[String], truncated: bool) -> String {
     match resolved.len() {
         1 => resolved[0].clone(),
-        n if truncated => format!("{symbol} ({n}+ symbols, capped at {limit})"),
+        n if truncated => format!("{symbol} ({n}+ symbols, capped at {RESOLVE_SYMBOLS_LIMIT})"),
         n => format!("{symbol} ({n} symbols)"),
     }
 }
