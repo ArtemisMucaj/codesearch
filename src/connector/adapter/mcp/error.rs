@@ -29,7 +29,9 @@ pub fn tool_error(err: impl Into<anyhow::Error>) -> McpError {
     let err: anyhow::Error = err.into();
     match err.downcast_ref::<DomainError>() {
         Some(e) if e.is_not_found() || e.is_invalid_input() => {
-            McpError::invalid_params(err.to_string(), None)
+            // `{err:#}` renders the whole chain; plain Display would report only
+            // the outermost `.context(..)`, dropping the symbol that failed.
+            McpError::invalid_params(format!("{err:#}"), None)
         }
         _ => {
             tracing::error!("MCP tool internal error: {err:#}");
@@ -85,8 +87,8 @@ mod tests {
         );
     }
 
-    /// A not-found nested in an anyhow context chain still classifies — use
-    /// cases annotate with `.context(..)` before propagating.
+    /// A not-found nested in an anyhow context chain still classifies, and the
+    /// detail underneath the context survives.
     #[test]
     fn a_wrapped_not_found_is_still_classified() {
         let mcp = tool_error(
@@ -95,6 +97,11 @@ mod tests {
         );
 
         assert_eq!(mcp.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(
+            mcp.message.contains("symbol 'x'"),
+            "the wrapped caller-facing detail must survive, got: {}",
+            mcp.message
+        );
     }
 
     #[test]
