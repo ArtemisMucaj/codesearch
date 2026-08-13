@@ -121,14 +121,13 @@ pub trait CallGraphRepository: Send + Sync {
     /// (matching after `#`, `/`, or at the start of the string).
     /// Used as a fallback when exact match returns zero results.
     ///
-    /// `resolve_limit` caps the number of resolved symbols returned.  Named
-    /// distinctly from [`CallGraphQuery::limit`] (which caps edge results) to
-    /// prevent callers from confusing the two different limit semantics.
+    /// Every match is returned. An ambiguous name resolving to many symbols is
+    /// answered in full rather than truncated to an arbitrary alphabetical
+    /// slice; narrowing the query is the caller's business, not this port's.
     async fn resolve_symbols(
         &self,
         short_name: &str,
         query: &CallGraphQuery,
-        resolve_limit: u32,
     ) -> Result<Vec<String>, DomainError>;
 }
 

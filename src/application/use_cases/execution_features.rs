@@ -229,7 +229,7 @@ impl ExecutionFeaturesUseCase {
         // Resolve the symbol to a fully-qualified name, through the same
         // exact → substring-regex resolution the impact and context walks use,
         // so `features get foo` accepts the same names those commands do.
-        let (resolved, _) = resolve_matches(&self.call_graph, symbol, &query, false).await?;
+        let resolved = resolve_matches(&self.call_graph, symbol, &query, false).await?;
 
         let Some(fqn) = resolved.first().cloned() else {
             return Ok(None);

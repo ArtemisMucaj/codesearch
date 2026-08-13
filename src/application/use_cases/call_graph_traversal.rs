@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::pattern_utils::build_fuzzy_pattern;
 use crate::application::{CallGraphQuery, CallGraphUseCase};
@@ -152,14 +152,13 @@ pub fn depth_summary(by_depth: &[Vec<CallGraphNode>]) -> (usize, usize) {
     (total, max_depth)
 }
 
-/// Maximum number of fully-qualified symbols a short name may resolve to.
-/// Caps the ambiguity fan-out so a walk is never seeded with an unbounded
-/// root set; when a name exceeds it the result is reported as capped rather
-/// than silently covering an arbitrary alphabetical slice.
-pub const RESOLVE_SYMBOLS_LIMIT: u32 = 100;
-
-/// Resolve `symbol` to the fully-qualified names that match it, plus whether
-/// the match set hit [`RESOLVE_SYMBOLS_LIMIT`]. Empty when nothing matches.
+/// Resolve `symbol` to every fully-qualified name that matches it. Empty when
+/// nothing matches.
+///
+/// The match set is not capped: an ambiguous name is answered in full, so a
+/// walk always covers everything the name refers to rather than an arbitrary
+/// alphabetical slice of it. Narrowing an over-broad query is the caller's
+/// business.
 ///
 /// `is_regex` – when `true`, `symbol` is used as-is as a POSIX regex. When
 ///              `false` (the default) it is first tried as an exact match; if
@@ -171,11 +170,11 @@ pub async fn resolve_matches(
     symbol: &str,
     query: &CallGraphQuery,
     is_regex: bool,
-) -> Result<(Vec<String>, bool), DomainError> {
-    let (resolved, truncated) = resolve_capped(call_graph, symbol, query).await?;
+) -> Result<Vec<String>, DomainError> {
+    let resolved = call_graph.resolve_symbols(symbol, query).await?;
     if !resolved.is_empty() || is_regex {
         // Regex mode takes the pattern at face value: no auto-wrap retry.
-        return Ok((resolved, truncated));
+        return Ok(resolved);
     }
 
     let auto_pattern = format!(".*{}.*", build_fuzzy_pattern(symbol));
@@ -184,7 +183,7 @@ pub async fn resolve_matches(
         symbol,
         auto_pattern, "call graph: exact match empty, retrying as substring regex"
     );
-    resolve_capped(call_graph, &auto_pattern, &auto_query).await
+    call_graph.resolve_symbols(&auto_pattern, &auto_query).await
 }
 
 /// Resolve `symbol` to the names a BFS should start from, together with the
@@ -200,7 +199,7 @@ pub async fn resolve_roots(
     query: &CallGraphQuery,
     is_regex: bool,
 ) -> Result<(Vec<String>, String), DomainError> {
-    let (resolved, truncated) = resolve_matches(call_graph, symbol, query, is_regex).await?;
+    let resolved = resolve_matches(call_graph, symbol, query, is_regex).await?;
 
     if resolved.is_empty() {
         debug!(
@@ -216,41 +215,16 @@ pub async fn resolve_roots(
         "call graph: resolved {} root symbols",
         resolved.len()
     );
-    let label = display_label(symbol, &resolved, truncated);
+    let label = display_label(symbol, &resolved);
     Ok((resolved, label))
 }
 
-/// Resolve `pattern`, reporting whether the cap was hit. One row beyond the
-/// cap is requested so that hitting it is detectable rather than invisible.
-async fn resolve_capped(
-    call_graph: &CallGraphUseCase,
-    pattern: &str,
-    query: &CallGraphQuery,
-) -> Result<(Vec<String>, bool), DomainError> {
-    let mut resolved = call_graph
-        .resolve_symbols(pattern, query, RESOLVE_SYMBOLS_LIMIT + 1)
-        .await?;
-    let truncated = resolved.len() as u32 > RESOLVE_SYMBOLS_LIMIT;
-    if truncated {
-        resolved.truncate(RESOLVE_SYMBOLS_LIMIT as usize);
-        warn!(
-            pattern,
-            cap = RESOLVE_SYMBOLS_LIMIT,
-            "call graph: symbol resolved to more than {RESOLVE_SYMBOLS_LIMIT} FQNs; the walk \
-             covers only the first {RESOLVE_SYMBOLS_LIMIT} — narrow the symbol for a complete \
-             result"
-        );
-    }
-    Ok((resolved, truncated))
-}
-
 /// Human-readable label for the analysed symbol. A single root is shown
-/// verbatim; multiple roots show the count, with a `capped` note when
-/// resolution hit the limit so the user knows the result is partial.
-fn display_label(symbol: &str, resolved: &[String], truncated: bool) -> String {
+/// verbatim; multiple roots show the count, so an ambiguous query reads as
+/// ambiguous.
+fn display_label(symbol: &str, resolved: &[String]) -> String {
     match resolved.len() {
         1 => resolved[0].clone(),
-        n if truncated => format!("{symbol} ({n}+ symbols, capped at {RESOLVE_SYMBOLS_LIMIT})"),
         n => format!("{symbol} ({n} symbols)"),
     }
 }
