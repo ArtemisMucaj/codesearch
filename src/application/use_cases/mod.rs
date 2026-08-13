@@ -1,4 +1,5 @@
 mod call_graph;
+mod call_graph_traversal;
 mod channel_link;
 mod cluster_detection;
 mod community_naming;
@@ -23,6 +24,7 @@ mod symbol_context;
 mod visualize_graph;
 
 pub use call_graph::*;
+pub use call_graph_traversal::*;
 pub use channel_link::*;
 pub use cluster_detection::*;
 pub use community_naming::*;

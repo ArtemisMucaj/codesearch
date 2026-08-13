@@ -15,7 +15,7 @@ use super::cache::TuiCache;
 use super::event::TuiEvent;
 use super::state::{ActiveMode, AppState, ContextPane, ImpactPane, SearchPane};
 use super::views;
-use super::views::context::{build_flat_tree_for_selected, leaf_caller_nodes};
+use super::views::context::build_flat_tree_for_selected;
 use crate::cli::TuiMode;
 
 const SEARCH_LIMIT: usize = 20;
@@ -467,7 +467,7 @@ impl TuiApp {
                     .context
                     .as_ref()
                     .map(|ctx| {
-                        let leaf_count = leaf_caller_nodes(ctx).len();
+                        let leaf_count = ctx.caller_leaves().len();
                         // When there are no callers we show a single synthetic
                         // "callees only" entry so the right pane can render.
                         leaf_count.max(if ctx.total_callers == 0 { 1 } else { 0 })

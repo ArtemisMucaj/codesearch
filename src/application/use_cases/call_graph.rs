@@ -47,15 +47,6 @@ impl CallGraphUseCase {
         Ok(count)
     }
 
-    /// Aggregate call-graph statistics for a repository (reference counts,
-    /// unique callers/callees, breakdowns by kind and language).
-    pub async fn stats(&self, repository_id: &str) -> anyhow::Result<CallGraphStats> {
-        self.repository
-            .get_stats(repository_id)
-            .await
-            .with_context(|| format!("failed to load call-graph stats for '{repository_id}'"))
-    }
-
     /// Delete all symbol references for a specific file within a repository.
     /// Returns the number of references deleted.
     pub async fn delete_by_file(
@@ -118,7 +109,8 @@ impl CallGraphUseCase {
         self.repository.find_by_repositories(repository_ids).await
     }
 
-    /// Get statistics about the call graph for a repository.
+    /// Aggregate call-graph statistics for a repository (reference counts,
+    /// unique callers/callees, breakdowns by kind and language).
     pub async fn get_stats(&self, repository_id: &str) -> Result<CallGraphStats, DomainError> {
         self.repository.get_stats(repository_id).await
     }
@@ -133,21 +125,13 @@ impl CallGraphUseCase {
             .await
     }
 
-    /// Resolve a short symbol name to fully-qualified symbol names.
-    /// Returns distinct callee_symbol values that end with the given short name
-    /// at a word boundary (after `#` or `/`).
-    ///
-    /// `resolve_limit` caps the number of results; named distinctly from
-    /// [`CallGraphQuery::limit`] to avoid confusion between edge limits and
-    /// resolution limits.
+    /// Resolve a short symbol name to every fully-qualified symbol name that
+    /// ends with it at a word boundary (after `#` or `/`).
     pub async fn resolve_symbols(
         &self,
         short_name: &str,
         query: &CallGraphQuery,
-        resolve_limit: u32,
     ) -> Result<Vec<String>, DomainError> {
-        self.repository
-            .resolve_symbols(short_name, query, resolve_limit)
-            .await
+        self.repository.resolve_symbols(short_name, query).await
     }
 }

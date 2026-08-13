@@ -39,7 +39,10 @@ impl<'a> StatsController<'a> {
             }
 
             // Call graph stats
-            let cg_stats = call_graph_use_case.stats(repo_id).await.unwrap_or_default();
+            let cg_stats = call_graph_use_case
+                .get_stats(repo_id)
+                .await
+                .unwrap_or_default();
             globals.cg_refs += cg_stats.total_references;
             globals.cg_callers += cg_stats.unique_callers;
             globals.cg_callees += cg_stats.unique_callees;

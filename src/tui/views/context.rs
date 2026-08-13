@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::application::{ContextNode, SymbolContext};
+use crate::application::{CallGraphNode, SymbolContext};
 use crate::tui::state::{AppState, ContextPane};
 use crate::tui::widgets::result_list;
 use crate::tui::widgets::result_list::ListEntry;
@@ -45,7 +45,7 @@ fn render_entry_points(frame: &mut Frame, area: Rect, state: &AppState) {
     let entries: Vec<ListEntry> = match &s.context {
         None => vec![],
         Some(ctx) => {
-            let leaves = leaf_caller_nodes(ctx);
+            let leaves = ctx.caller_leaves();
             if leaves.is_empty() {
                 // No callers: show a synthetic "callees only" entry.
                 vec![ListEntry {
@@ -167,18 +167,16 @@ fn render_right(frame: &mut Frame, area: Rect, state: &AppState) {
         Color::White
     };
 
-    let all_callers: Vec<&ContextNode> = ctx.callers_by_depth.iter().flatten().collect();
-    let leaves = leaf_caller_nodes(ctx);
+    let leaves = ctx.caller_leaves();
 
     let (path, has_callers) = if leaves.is_empty() {
         (vec![], false)
     } else {
         let leaf = leaves.get(s.selected).copied().unwrap_or(leaves[0]);
-        let path = trace_caller_path(leaf, &all_callers);
-        (path, true)
+        (ctx.path_for_leaf(leaf), true)
     };
 
-    let callee_children = build_callee_children_map(ctx);
+    let callee_children = ctx.callee_children();
 
     // Record the inner pane height so the navigator can auto-scroll.
     // We compute it here (same formula as the renderer uses internally).
@@ -205,88 +203,17 @@ fn render_right(frame: &mut Frame, area: Rect, state: &AppState) {
 ///
 /// Returns `None` if the context hasn't loaded yet.
 pub fn build_flat_tree_for_selected(ctx: &SymbolContext, selected_entry: usize) -> Vec<FlatNode> {
-    let all_callers: Vec<&ContextNode> = ctx.callers_by_depth.iter().flatten().collect();
-    let leaves = leaf_caller_nodes(ctx);
-    let callee_children = build_callee_children_map(ctx);
+    let leaves = ctx.caller_leaves();
+    let callee_children = ctx.callee_children();
 
     let (path, has_callers) = if leaves.is_empty() {
         (vec![], false)
     } else {
         let leaf = leaves.get(selected_entry).copied().unwrap_or(leaves[0]);
-        let p = trace_caller_path(leaf, &all_callers);
-        (p, true)
+        (ctx.path_for_leaf(leaf), true)
     };
 
     flat_tree_nodes(&path, &ctx.symbol, &callee_children, has_callers)
-}
-
-/// Extract the top-most entry-point nodes from the callers BFS.
-///
-/// A node is a leaf (entry-point) if no other caller node lists it as its
-/// `via_symbol`.
-pub fn leaf_caller_nodes(ctx: &SymbolContext) -> Vec<&ContextNode> {
-    let all_callers: Vec<&ContextNode> = ctx.callers_by_depth.iter().flatten().collect();
-    // Build a set of symbols that appear as via_symbol (i.e. are intermediate
-    // nodes, not entry-points).  Checking membership is then O(1) per node.
-    let via_set: HashSet<&str> = all_callers
-        .iter()
-        .filter_map(|n| n.via_symbol.as_deref())
-        .collect();
-    all_callers
-        .into_iter()
-        .filter(|n| !via_set.contains(n.symbol.as_str()))
-        .collect()
-}
-
-/// Build the caller path from a leaf node back to the direct caller of the root symbol.
-///
-/// Returns a Vec where index 0 is the leaf (top-most caller), last index is the
-/// direct caller of the root symbol.
-pub fn trace_caller_path<'a>(
-    leaf: &'a ContextNode,
-    all_callers: &[&'a ContextNode],
-) -> Vec<&'a ContextNode> {
-    let node_by_depth_sym: HashMap<(usize, &str), &ContextNode> = all_callers
-        .iter()
-        .map(|n| ((n.depth, n.symbol.as_str()), *n))
-        .collect();
-
-    let mut path = vec![leaf];
-    let mut current = leaf;
-    while let Some(via) = current.via_symbol.as_deref() {
-        let parent_depth = current.depth.saturating_sub(1);
-        if let Some(&parent) = node_by_depth_sym.get(&(parent_depth, via)) {
-            path.push(parent);
-            current = parent;
-        } else {
-            break;
-        }
-    }
-    path
-}
-
-/// Build a map from parent_symbol → direct callee ContextNodes.
-fn build_callee_children_map<'a>(ctx: &'a SymbolContext) -> HashMap<String, Vec<&'a ContextNode>> {
-    let mut map: HashMap<String, Vec<&'a ContextNode>> = HashMap::new();
-    for node in ctx.callees_by_depth.iter().flatten() {
-        let key = node.via_symbol.as_deref().unwrap_or(&ctx.symbol).to_owned();
-        map.entry(key).or_default().push(node);
-    }
-    // For multi-root-symbol queries, `ctx.symbol` is a display label like
-    // "authenticate (3 symbols)".  Depth-1 callee nodes have `via_symbol`
-    // pointing to the real FQN (e.g., "MyModule::authenticate"), not the
-    // display label.  Create a synthetic entry under the display label so the
-    // renderer can always start from `ctx.symbol`.
-    let root_sym_set: HashSet<&str> = ctx.root_symbols.iter().map(String::as_str).collect();
-    let depth1_nodes: Vec<&ContextNode> = ctx
-        .callees_by_depth
-        .first()
-        .map(|d| d.iter().collect())
-        .unwrap_or_default();
-    if !root_sym_set.contains(ctx.symbol.as_str()) && !depth1_nodes.is_empty() {
-        map.insert(ctx.symbol.clone(), depth1_nodes);
-    }
-    map
 }
 
 /// A selectable node in the flattened tree.
@@ -315,9 +242,9 @@ pub struct FlatNode {
 /// Returns `(flat_nodes, lines_per_caller_node)` where `lines_per_caller_node`
 /// encodes how many rendered lines come before each caller in the `lines` vec.
 pub fn flat_tree_nodes(
-    path: &[&ContextNode],
+    path: &[&CallGraphNode],
     root_symbol: &str,
-    callee_children: &HashMap<String, Vec<&ContextNode>>,
+    callee_children: &HashMap<String, Vec<&CallGraphNode>>,
     has_callers: bool,
 ) -> Vec<FlatNode> {
     let mut result = Vec::new();
@@ -404,7 +331,7 @@ fn root_flat_node(root_symbol: &str, repository_id: &str, lines_index: usize) ->
 
 fn collect_flat_callees(
     parent_symbol: &str,
-    callee_children: &HashMap<String, Vec<&ContextNode>>,
+    callee_children: &HashMap<String, Vec<&CallGraphNode>>,
     base_lines_index: usize,
     offset: &mut usize,
     result: &mut Vec<FlatNode>,
@@ -457,9 +384,9 @@ fn collect_flat_callees(
 fn render_call_context_tree(
     frame: &mut Frame,
     area: Rect,
-    path: &[&ContextNode],
+    path: &[&CallGraphNode],
     root_symbol: &str,
-    callee_children: &HashMap<String, Vec<&ContextNode>>,
+    callee_children: &HashMap<String, Vec<&CallGraphNode>>,
     has_callers: bool,
     tree_focused: bool,
     selected: usize,
@@ -638,7 +565,7 @@ fn render_call_context_tree(
 #[allow(clippy::too_many_arguments)]
 fn render_callees_subtree(
     parent_symbol: &str,
-    callee_children: &HashMap<String, Vec<&ContextNode>>,
+    callee_children: &HashMap<String, Vec<&CallGraphNode>>,
     prefix: &str,
     lines: &mut Vec<Line>,
     visited: &mut HashSet<String>,
@@ -647,7 +574,7 @@ fn render_callees_subtree(
     flat_base: usize,
     counter: &mut usize,
 ) {
-    let children: &Vec<&ContextNode> = match callee_children.get(parent_symbol) {
+    let children: &Vec<&CallGraphNode> = match callee_children.get(parent_symbol) {
         Some(c) => c,
         None => return,
     };

@@ -77,6 +77,7 @@ The codebase follows **Domain-Driven Design (DDD)** with a strict **Ports & Adap
 | Impact (blast radius) analysis | `src/application/use_cases/impact_analysis.rs` |
 | Symbol context (callers/callees) | `src/application/use_cases/symbol_context.rs` |
 | Call graph extraction & relationship queries | `src/application/use_cases/call_graph.rs` |
+| Shared call-graph BFS primitives (node type, root resolution, traversal, path tracing) | `src/application/use_cases/call_graph_traversal.rs` |
 | LLM explanation of a symbol's call flow | `src/application/use_cases/explain.rs` |
 | Execution features + criticality scoring | `src/application/use_cases/execution_features.rs` |
 | Architectural (file-level) cluster detection (Leiden) | `src/application/use_cases/cluster_detection.rs` |

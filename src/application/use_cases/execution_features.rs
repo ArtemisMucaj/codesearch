@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use tracing::{debug, warn};
 
+use super::call_graph_traversal::resolve_matches;
 use super::execution_features_naming::short_name;
 use crate::application::{
     AnalysisRepository, CallGraphQuery, CallGraphUseCase, MetadataRepository,
@@ -216,7 +217,7 @@ impl ExecutionFeaturesUseCase {
         // set is cached, an exact entry-point match can be served without
         // touching the live call graph at all. Exact match is unambiguous, so
         // this never returns a different result than the graph path would;
-        // substring names still fall through to `resolve_symbols` below.
+        // substring names still fall through to the resolver below.
         if let Some(repo) = repository_id {
             if let Some(stored) = self.load_stored(repo).await {
                 if let Some(feature) = stored.into_iter().find(|f| f.entry_point == symbol) {
@@ -225,14 +226,14 @@ impl ExecutionFeaturesUseCase {
             }
         }
 
-        // Resolve the symbol to a fully-qualified name.
-        let resolved = self.call_graph.resolve_symbols(symbol, &query, 10).await?;
+        // Resolve the symbol to a fully-qualified name, through the same
+        // exact → substring-regex resolution the impact and context walks use,
+        // so `features get foo` accepts the same names those commands do.
+        let resolved = resolve_matches(&self.call_graph, symbol, &query, false).await?;
 
-        if resolved.is_empty() {
+        let Some(fqn) = resolved.first().cloned() else {
             return Ok(None);
-        }
-
-        let fqn = resolved[0].clone();
+        };
 
         // Determine the effective repository, either from the caller-supplied
         // hint or by discovering it from the resolved symbol's call-graph edges.

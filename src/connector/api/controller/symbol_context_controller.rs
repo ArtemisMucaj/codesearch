@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 
 use crate::cli::OutputFormat;
-use crate::{ContextNode, SymbolContext};
+use crate::{CallGraphNode, SymbolContext};
 
 use super::super::Container;
 
@@ -63,7 +63,7 @@ impl<'a> SymbolContextController<'a> {
         let has_callees = ctx.total_callees > 0;
 
         // Build callee children map once, reused per caller chain.
-        let callee_children = Self::build_callee_children_map(ctx);
+        let callee_children = ctx.callee_children();
 
         if !has_callers && !has_callees {
             out.push_str("No callers or callees found for this symbol.\n");
@@ -71,47 +71,13 @@ impl<'a> SymbolContextController<'a> {
         }
 
         if has_callers {
-            let all_callers: Vec<&ContextNode> = ctx.callers_by_depth.iter().flatten().collect();
+            // One chain per entry point, each traced back down to the queried
+            // symbol: path[0] = top-most caller, path[last] = direct caller.
+            let chains = ctx.caller_chains();
 
-            // Build caller children map: via_symbol → [nodes that list it as via_symbol].
-            let mut caller_children: HashMap<&str, Vec<&ContextNode>> = HashMap::new();
-            for node in &all_callers {
-                if let Some(via) = node.via_symbol.as_deref() {
-                    caller_children.entry(via).or_default().push(node);
-                }
-            }
-
-            // Leaf = top-most entry-point: no other node lists this symbol as its via_symbol.
-            let leaf_nodes: Vec<&ContextNode> = all_callers
-                .iter()
-                .copied()
-                .filter(|n| !caller_children.contains_key(n.symbol.as_str()))
-                .collect();
-
-            // Lookup by (depth, symbol) for unambiguous path tracing.
-            let mut node_by_depth_sym: HashMap<(usize, &str), &ContextNode> = HashMap::new();
-            for node in &all_callers {
-                node_by_depth_sym
-                    .entry((node.depth, node.symbol.as_str()))
-                    .or_insert(node);
-            }
-
-            for (idx, &leaf) in leaf_nodes.iter().enumerate() {
-                // Trace from leaf back toward the queried symbol via via_symbol links.
-                let mut path: Vec<&ContextNode> = vec![leaf];
-                let mut current = leaf;
-                while let Some(via) = current.via_symbol.as_deref() {
-                    let parent_depth = current.depth.saturating_sub(1);
-                    if let Some(&parent) = node_by_depth_sym.get(&(parent_depth, via)) {
-                        path.push(parent);
-                        current = parent;
-                    } else {
-                        break;
-                    }
-                }
-                // path[0] = leaf (top-most caller), path[last] = direct caller of queried symbol.
-                Self::render_chain(&path, &ctx.symbol, &callee_children, &mut out);
-                if idx < leaf_nodes.len() - 1 {
+            for (idx, path) in chains.iter().enumerate() {
+                Self::render_chain(path, &ctx.symbol, &callee_children, &mut out);
+                if idx < chains.len() - 1 {
                     out.push('\n');
                 }
             }
@@ -125,42 +91,12 @@ impl<'a> SymbolContextController<'a> {
         out
     }
 
-    /// Build a map from parent_symbol → direct callee nodes (keyed by via_symbol).
-    fn build_callee_children_map<'b>(
-        ctx: &'b SymbolContext,
-    ) -> HashMap<String, Vec<&'b ContextNode>> {
-        let mut map: HashMap<String, Vec<&'b ContextNode>> = HashMap::new();
-        for node in ctx.callees_by_depth.iter().flatten() {
-            let key = node.via_symbol.as_deref().unwrap_or(&ctx.symbol).to_owned();
-            map.entry(key).or_default().push(node);
-        }
-        // For multi-root-symbol queries, `ctx.symbol` is a display label like
-        // "authenticate (3 symbols)".  Depth-1 callee nodes have `via_symbol`
-        // pointing to the real FQN (e.g., "MyModule::authenticate"), not to
-        // the display label.  Create a synthetic entry under the display label
-        // that aggregates all depth-1 nodes so that `render_callees_subtree`
-        // can always start from `ctx.symbol`.
-        let root_sym_set: std::collections::HashSet<&str> =
-            ctx.root_symbols.iter().map(String::as_str).collect();
-        let depth1_nodes: Vec<&ContextNode> = ctx
-            .callees_by_depth
-            .first()
-            .map(|d| d.iter().collect())
-            .unwrap_or_default();
-        // Only add the synthetic entry when the display label differs from
-        // all real root symbols (i.e., it's a multi-root aggregation label).
-        if !root_sym_set.contains(ctx.symbol.as_str()) && !depth1_nodes.is_empty() {
-            map.insert(ctx.symbol.clone(), depth1_nodes);
-        }
-        map
-    }
-
     /// Render one caller chain (top-most entry → direct caller) then the queried symbol
     /// with its callees subtree hanging off it.
     fn render_chain(
-        path: &[&ContextNode],
+        path: &[&CallGraphNode],
         root_symbol: &str,
-        callee_children: &HashMap<String, Vec<&ContextNode>>,
+        callee_children: &HashMap<String, Vec<&CallGraphNode>>,
         out: &mut String,
     ) {
         if path.is_empty() {
@@ -205,7 +141,7 @@ impl<'a> SymbolContextController<'a> {
     /// Recursively render the callees subtree rooted at `parent_symbol`.
     fn render_callees_subtree(
         parent_symbol: &str,
-        callee_children: &HashMap<String, Vec<&ContextNode>>,
+        callee_children: &HashMap<String, Vec<&CallGraphNode>>,
         prefix: &str,
         out: &mut String,
         visited: &mut HashSet<String>,
