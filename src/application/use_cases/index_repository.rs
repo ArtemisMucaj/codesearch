@@ -614,6 +614,10 @@ impl IndexRepositoryUseCase {
 
         // Collect current files
         let mut current_files: HashMap<String, String> = HashMap::new();
+        // Files present on disk but unreadable this run. Tracked separately so
+        // change detection does not mistake "could not read" for "deleted" —
+        // `current_files` is its only other input.
+        let mut unreadable: HashSet<String> = HashSet::new();
         let walker = WalkBuilder::new(absolute_path)
             .hidden(true)
             .git_ignore(true)
@@ -649,7 +653,11 @@ impl IndexRepositoryUseCase {
             let content = match tokio::fs::read_to_string(entry_path).await {
                 Ok(c) => c,
                 Err(e) => {
-                    warn!("Failed to read file {}: {}", relative_path, e);
+                    warn!(
+                        "Failed to read file {}: {} — retaining existing index entry",
+                        relative_path, e
+                    );
+                    unreadable.insert(relative_path);
                     continue;
                 }
             };
@@ -658,12 +666,30 @@ impl IndexRepositoryUseCase {
             current_files.insert(relative_path, content_hash);
         }
 
+        // Per-file warnings scroll past unread in a large repository, which is
+        // part of why this went unnoticed. Summarise once.
+        if !unreadable.is_empty() {
+            warn!(
+                "{} file(s) could not be read this run; their index entries were retained",
+                unreadable.len()
+            );
+        }
+
         // Detect changes
         let current_paths: HashSet<&String> = current_files.keys().collect();
         let existing_paths: HashSet<&String> = existing_hash_map.keys().collect();
 
         let added: Vec<&String> = current_paths.difference(&existing_paths).copied().collect();
-        let deleted: Vec<&String> = existing_paths.difference(&current_paths).copied().collect();
+        // An unreadable file is absent from `current_files`, so it would
+        // otherwise land here and be purged while still on disk. Retaining a
+        // possibly-stale entry is strictly safer than deleting a live one: the
+        // next successful index corrects staleness, whereas deletion loses data
+        // until a full re-index.
+        let deleted: Vec<&String> = existing_paths
+            .difference(&current_paths)
+            .filter(|p| !unreadable.contains(**p))
+            .copied()
+            .collect();
         let modified: Vec<&String> = current_paths
             .intersection(&existing_paths)
             .filter(|path| current_files.get(**path) != existing_hash_map.get(**path))
@@ -918,9 +944,25 @@ impl IndexRepositoryUseCase {
             }
         }
 
-        let total_file_count = unchanged_count as u64 + processed_count;
+        // Unreadable files keep their index entries, so they keep their place
+        // in the per-language counts too. `chunk_count` is untouched: no new
+        // chunks were produced for them this run.
+        for path in &unreadable {
+            let language = Language::from_path(&absolute_path.join(path));
+            if language != Language::Unknown {
+                let lang_key = language.as_str().to_string();
+                let stats = language_stats.entry(lang_key).or_default();
+                stats.file_count += 1;
+            }
+        }
+
+        // Unreadable files are in neither `unchanged_count` nor
+        // `processed_count`, but their index entries were retained above, so
+        // they must be counted or the persisted total under-reports.
+        let total_file_count = unchanged_count as u64 + processed_count + unreadable.len() as u64;
         let previous_chunk_count = repository.chunk_count();
-        let total_chunk_count = previous_chunk_count - deleted_chunk_count + new_chunk_count;
+        let total_chunk_count =
+            next_chunk_count(previous_chunk_count, deleted_chunk_count, new_chunk_count);
 
         self.repository_repo
             .update_stats(repository.id(), total_chunk_count, total_file_count)
@@ -977,6 +1019,17 @@ struct EmbedResult {
     flat_chunks: Vec<crate::domain::CodeChunk>,
     per_file_chunk_count: Vec<usize>,
     per_file_embeddings: Vec<Option<Vec<Embedding>>>,
+}
+
+/// The repository's chunk count after an incremental run.
+///
+/// Saturating in both directions on purpose. The stored `previous` count is
+/// cached arithmetic, not a live `COUNT(*)`, so it can drift from reality after
+/// an interrupted index or a partial write. Plain `u64` subtraction would then
+/// panic in debug and wrap to an astronomical count in release; saturating
+/// keeps a drifted count merely wrong rather than catastrophic.
+fn next_chunk_count(previous: u64, deleted: u64, added: u64) -> u64 {
+    previous.saturating_sub(deleted).saturating_add(added)
 }
 
 /// Accumulate the stats returned by a single [`do_flush`] call into the
@@ -1661,5 +1714,27 @@ mod scip_filter_tests {
 
         let kept = filter_ignored_scip_refs(dir.path(), refs);
         assert_eq!(kept.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod chunk_count_tests {
+    use super::next_chunk_count;
+
+    #[test]
+    fn adds_new_chunks_and_subtracts_deleted_ones() {
+        assert_eq!(next_chunk_count(10, 4, 6), 12);
+    }
+
+    #[test]
+    fn chunk_count_does_not_underflow_when_deletions_exceed_stored_count() {
+        // The stored count had drifted below reality. Must clamp at zero and
+        // still add the new chunks — not panic, not wrap to u64::MAX.
+        assert_eq!(next_chunk_count(5, 10, 3), 3);
+    }
+
+    #[test]
+    fn chunk_count_saturates_instead_of_overflowing() {
+        assert_eq!(next_chunk_count(u64::MAX, 0, 1), u64::MAX);
     }
 }

@@ -680,6 +680,16 @@ impl Container {
         self.repo_adapter.clone()
     }
 
+    /// The chunk/embedding store.
+    pub fn vector_repository(&self) -> Arc<dyn crate::application::VectorRepository> {
+        self.vector_repo.clone()
+    }
+
+    /// The per-file content-hash store that drives incremental change detection.
+    pub fn file_hash_repository(&self) -> Arc<dyn crate::application::FileHashRepository> {
+        self.file_hash_repo.clone()
+    }
+
     /// The channel-endpoint repository (Kafka/HTTP/MQTT endpoints).
     pub fn channel_endpoint_repository(
         &self,
