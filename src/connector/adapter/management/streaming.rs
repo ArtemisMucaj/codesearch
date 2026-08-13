@@ -273,8 +273,8 @@ async fn run_explain_stream(
     cache: Option<ExplanationCacheKey>,
     event_tx: mpsc::UnboundedSender<Event>,
 ) {
-    // Cache hit: replay the stored explanation as token frames + a done event so
-    // the client renders it identically to a live run, without any LLM call.
+    // Cache hit: emit the stored explanation in the terminal `done` event so the
+    // client renders it identically to a live run, without any LLM call.
     // Skipped when regenerating (the user asked for a fresh answer).
     if !req.regenerate {
         if let Some(key) = &cache {
