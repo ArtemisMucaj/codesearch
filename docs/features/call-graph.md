@@ -159,14 +159,17 @@ verify_session [call]  src/middleware/session.rs:18
 
 ## LLM Explanation (`codesearch explain`)
 
-Uses an LLM to produce a natural-language explanation of a symbol's complete call flow, data flow, and business purpose. It runs the same context analysis as `codesearch context`, collects source snippets for every symbol in the call chain, and sends everything to the configured LLM backend (default `open-ai`; see [LLM backends](../../AGENTS.md#llm-backends)).
+Uses an LLM to produce a short orientation briefing on a symbol's call flow. It runs the same context analysis as `codesearch context`, collects source snippets for every symbol in the call chain, and sends everything to the configured LLM backend (default `open-ai`; see [LLM backends](../../AGENTS.md#llm-backends)).
 
-The LLM response is structured into four sections:
+The output is deliberately terse — typically 150–250 words. It is meant to tell you (or a coding agent) where to spend your attention before you start editing, not to document every hop; use `codesearch context` when you need the exhaustive graph.
 
-- **Purpose** — what the symbol does and why it exists
-- **Data and control flow** — a hop-by-hop breakdown of every caller path and callee
-- **Business feature** — the end-to-end user-visible capability the call chain implements
-- **Key patterns and dependencies** — notable abstractions, external services, or design patterns
+The LLM response is structured into three sections:
+
+- **Summary** — what the symbol does and the capability its call chain serves (≤ 60 words)
+- **Flow** — up to six load-bearing hops, entry point first; pass-through wrappers are collapsed
+- **Where to focus** — two to four concrete risks for an agent changing this symbol: invariants, callers that would break, shared state, external contracts
+
+The explanation is generated in full and printed once it is complete — nothing is streamed token by token, in the CLI or over the management API.
 
 ### Usage
 
@@ -220,31 +223,21 @@ backend and configuration reference.
 Explanation for `authenticate`
 ════════════════════════════════════════════════════════════
 
-## Purpose
-authenticate validates user credentials by looking up the account, verifying
-the password hash, and issuing a session token. The caller chain shows it is
-the central gate called by both the web handler and the CLI login flow.
+## Summary
+authenticate verifies a username and password and issues a signed session
+token. It is the single identity gate behind the login endpoint and the CLI
+login flow — no session exists that did not pass through it.
 
-## Data and control flow
-• `handle_login` → `authenticate`
-  - Extracts username and password from the HTTP request body.
-  - Calls authenticate(username, password) and returns 401 on failure.
-• `authenticate` → `lookup_user`
-  - Queries the user store by username; returns Err if not found.
-• `authenticate` → `verify_password`
-  - Passes the stored hash and the plaintext candidate to verify_password.
-• `authenticate` → `generate_token`
-  - On success, generates a signed JWT and returns it to the caller.
+## Flow
+• `handle_login` → `authenticate` — extracts credentials from the request body; a failure returns 401.
+• `authenticate` → `lookup_user` — queries the user store; a miss ends the flow before any hashing.
+• `authenticate` → `verify_password` — argon2 comparison against the stored hash; the only place the plaintext is read.
+• `authenticate` → `generate_token` — on success only, mints the JWT that every later request is authorised by.
 
-## Business feature
-The chain implements the login endpoint exposed by handle_login. A client
-POSTs credentials; authenticate is the integrity gate that verifies identity
-before any session token is issued.
-
-## Key patterns and dependencies
-• `argon2` (argon2 crate) — used by `verify_password`
-  - Memory-hard password hashing algorithm.
-  - Protects stored credentials against brute-force attacks.
+## Where to focus
+• `verify_password` is the sole password check — an early return added above it silently disables authentication.
+• `generate_token` claims are read by every downstream authorisation check; changing their shape breaks existing sessions.
+• `lookup_user` returns Err for both "unknown user" and "store unavailable"; collapsing them would leak account existence.
 
 ---
 Analysed 4 symbols across 2 call levels.

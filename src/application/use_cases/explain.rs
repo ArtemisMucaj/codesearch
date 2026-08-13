@@ -8,86 +8,61 @@ use super::snippet_lookup::SnippetLookupUseCase;
 use super::symbol_context::{ContextNode, SymbolContext, SymbolContextUseCase};
 
 const SYSTEM_PROMPT: &str = "\
-You are a senior software engineer performing call-flow analysis. \
-You will receive a root symbol together with its full bidirectional call context: \
-the callers (who calls the root symbol and from where) and the callees \
-(what the root symbol itself calls). \
-Each caller path lists every symbol in the chain from the outermost entry point \
-down to the root symbol, with source code for each hop.
+You are analysing a code symbol for an AI coding agent that is about to work on it. \
+The agent can read any file itself — your job is orientation, not documentation. \
+Be dense and specific. Omit anything the agent could infer from a ten-second read \
+of the source.
 
-You MUST analyse every symbol and every hop present in the provided paths \
-as well as every callee listed. \
-Do not summarise or skip any symbol. \
-If multiple paths share a symbol, mention it once but note which paths it appears in.
+You receive a root symbol with its caller paths (entry point down to the root) \
+and its callees, with source for each.
 
-Respond using exactly the four XML sections below. \
-Do not add, rename, reorder, or skip any section. \
-Do not output anything outside these XML tags. \
-Replace the example content with your actual analysis.
+Respond using exactly the three XML sections below, in order, with nothing \
+outside them. Obey the length budgets — going over is a failure, and it is \
+always better to drop a weak item than to pad.
 
-<purpose>
-[One paragraph. State what the root symbol does and why it exists, \
-grounded in what both the full caller chain and the callees reveal about its role.
+<summary>
+[Two or three sentences, at most 60 words. What the root symbol does, and the \
+user-visible capability its call chain serves. No hedging, no restating the signature.
 
-Example: compute_checksum validates the integrity of an incoming payload by \
-hashing its bytes with SHA-256. The call chain shows it is invoked only after \
-the payload has been decoded, making it the last defence against data corruption \
-before the record is persisted.]
-</purpose>
+Example: compute_checksum hashes a decoded payload and compares the digest to the \
+expected value. It is the last integrity gate in the record-ingestion endpoint, \
+run after validation and immediately before the record is persisted.]
+</summary>
 
-<data_and_control_flow>
-[One entry per hop across ALL caller paths (outermost caller first, root symbol last), \
-followed by one entry per direct callee of the root symbol. \
-Every symbol in the provided paths and every callee must appear here. \
-Use this format for each entry:
+<flow>
+[At most 6 bullets, one line each, ordered entry point first. Cover only \
+load-bearing hops: where a decision is made, state changes, data is validated \
+or transformed, or an external system is touched. Collapse pass-through wrappers \
+into the neighbouring hop. If several caller paths converge, describe the shape \
+once and name the variants.
 
-• `<caller>` → `<callee>`
-  - What the caller validates, prepares, or checks before the call.
-  - What arguments it passes and what the callee does with them.
-  - Any conditional or secondary calls made within this hop.
+Format: `<caller>` → `<callee>` — what is decided or transformed here.
 
 Example:
-• `handle_request` → `decode_payload`
-  - Receives the raw HTTP body and the request context.
-  - Calls `decode_payload(body)` to deserialise the bytes into a Record struct.
-• `decode_payload` → `validate_record`
-  - Passes the Record to `validate_record(record)`, which checks required fields \
-    and rejects malformed input.
-• `validate_record` → `compute_checksum`
-  - Passes the validated Record to `compute_checksum(record)`, which hashes the \
-    payload bytes and compares the digest to the expected value.
-• `compute_checksum` → `sha256_digest`  ← callee of root
-  - compute_checksum calls sha256_digest to produce the hash bytes.]
-</data_and_control_flow>
+• `handle_request` → `decode_payload` — parses the raw body; rejects malformed input before anything else runs.
+• `validate_record` → `compute_checksum` — the integrity gate; a mismatch aborts the write.
+• `compute_checksum` → `sha256_digest` — produces the digest that is compared and then stored.]
+</flow>
 
-<business_feature>
-[One paragraph describing the end-to-end user-visible capability the entire call chain implements. \
-Mention the entry-point symbols (API endpoints, CLI commands, event handlers, etc.) \
-and the root symbol's contribution to that capability.
-
-Example: The chain implements the record-ingestion API endpoint exposed by handle_request. \
-A client posts a JSON payload; the system decodes, validates, and checksums it before \
-writing it to the database. compute_checksum is the integrity gate that ensures \
-no corrupted record is ever persisted.]
-</business_feature>
-
-<key_patterns_and_dependencies>
-[One entry per notable abstraction, external service, framework, or design pattern \
-that appears in the provided source snippets. \
-Use this format for each entry:
-
-• `<item name>` (<source or type>) — used by `<symbol>`
-  - What the item is.
-  - Why it is used here.
+<focus>
+[Two to four bullets. Where an agent changing this symbol should look, and why. \
+Each bullet names a concrete symbol or `file:line` from the provided context and \
+states the risk in one clause: an invariant that must hold, a caller that would \
+break, shared state, an error path, or an external contract. No generic advice \
+(\"add tests\", \"be careful\") — if you have nothing concrete, emit fewer bullets.
 
 Example:
-• `SHA-256` (ring crate) — used by `compute_checksum`
-  - Cryptographic hash function that produces a deterministic 256-bit digest.
-  - Used to verify payload integrity before persisting the record.
-• Repository pattern — used by `validate_record`
-  - `validate_record` depends on a `RecordRepository` trait rather than a concrete type.
-  - Decouples business validation logic from the storage backend.]
-</key_patterns_and_dependencies>";
+• `validate_record` assumes the payload is already decoded — changing the argument type breaks both caller paths.
+• `sha256_digest` output is persisted; altering the algorithm invalidates every stored record.]
+</focus>";
+
+/// Heading for the symbol list appended to the user prompt.
+///
+/// Framed as reference material rather than a coverage mandate: an earlier
+/// "symbols you MUST cover" checklist made the model walk every entry, which
+/// was the main source of over-long explanations.
+const SYMBOL_INVENTORY_HEADING: &str =
+    "## Symbol inventory (reference — mention only what carries the flow)\n\n";
 
 /// Output produced by [`ExplainUseCase::execute`].
 pub struct ExplainResult {
@@ -189,75 +164,6 @@ impl ExplainUseCase {
             is_regex,
         })
     }
-
-    /// Run the full explain pipeline with streaming LLM output.
-    ///
-    /// Identical to [`Self::execute`] except that LLM tokens are forwarded to
-    /// `token_tx` as they arrive.  The returned [`ExplainResult`] contains the
-    /// complete (post-processed) explanation once the stream is exhausted.
-    pub async fn execute_streaming(
-        &self,
-        symbol: &str,
-        repository: Option<&str>,
-        chat_client: &dyn ChatClient,
-        is_regex: bool,
-        token_tx: tokio::sync::mpsc::UnboundedSender<String>,
-    ) -> Result<ExplainResult, DomainError> {
-        let ctx = self
-            .context
-            .get_context(symbol, repository, is_regex)
-            .await?;
-
-        if ctx.root_symbols.len() > 1 {
-            return Ok(ExplainResult {
-                root_symbol: symbol.to_string(),
-                explanation: String::new(),
-                total_affected: 0,
-                max_depth_reached: 0,
-                symbol_sources: Vec::new(),
-                ambiguous_candidates: ctx.root_symbols,
-                is_regex,
-            });
-        }
-
-        if ctx.total_callers == 0 && ctx.total_callees == 0 {
-            return Ok(ExplainResult {
-                root_symbol: symbol.to_string(),
-                explanation: format!(
-                    "No callers or callees found for '{}'. \
-                     The symbol may be isolated or has not been indexed yet.",
-                    symbol
-                ),
-                total_affected: 0,
-                max_depth_reached: 0,
-                symbol_sources: Vec::new(),
-                ambiguous_candidates: Vec::new(),
-                is_regex,
-            });
-        }
-
-        let total_affected = ctx.total_callers + ctx.total_callees;
-        let max_depth_reached = ctx.max_caller_depth.max(ctx.max_callee_depth);
-
-        let (prompt, symbol_sources) = build_prompt(&ctx, &self.snippet_lookup).await;
-
-        let raw_explanation = chat_client
-            .complete_stream(SYSTEM_PROMPT, &prompt, token_tx)
-            .await
-            .map_err(|e| {
-                DomainError::internal(format!("LLM stream call failed during explain: {e}"))
-            })?;
-
-        Ok(ExplainResult {
-            root_symbol: ctx.symbol,
-            explanation: xml_to_markdown(&raw_explanation),
-            total_affected,
-            max_depth_reached,
-            symbol_sources,
-            ambiguous_candidates: Vec::new(),
-            is_regex,
-        })
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -267,13 +173,9 @@ impl ExplainUseCase {
 /// Convert an XML-tagged LLM response into Markdown sections.
 fn xml_to_markdown(s: &str) -> String {
     const SECTIONS: &[(&str, &str)] = &[
-        ("purpose", "## Purpose"),
-        ("data_and_control_flow", "## Data and control flow"),
-        ("business_feature", "## Business feature"),
-        (
-            "key_patterns_and_dependencies",
-            "## Key patterns and dependencies",
-        ),
+        ("summary", "## Summary"),
+        ("flow", "## Flow"),
+        ("focus", "## Where to focus"),
     ];
 
     let mut out = String::new();
@@ -586,8 +488,9 @@ async fn build_prompt(
             }
         }
 
-        // Explicit checklist.
-        prompt.push_str("## Symbols you MUST cover in your response\n\n");
+        // Reference inventory — deliberately NOT a coverage mandate: the
+        // response is meant to orient, not to enumerate every symbol.
+        prompt.push_str(SYMBOL_INVENTORY_HEADING);
         for sym in &all_symbols {
             prompt.push_str(&format!("- `{sym}`\n"));
         }
@@ -611,7 +514,7 @@ async fn build_prompt(
             ));
             all_symbols.push(node.symbol.clone());
         }
-        prompt.push_str("## Symbols you MUST cover in your response\n\n");
+        prompt.push_str(SYMBOL_INVENTORY_HEADING);
         for sym in &all_symbols {
             prompt.push_str(&format!("- `{sym}`\n"));
         }
