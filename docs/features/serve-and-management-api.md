@@ -120,14 +120,13 @@ If the client disconnects, the server drops the in-flight work.
 | Method & path | Streams |
 |---|---|
 | `POST /api/stream/index` | Live indexing progress |
-| `GET` / `POST /api/stream/explain/{symbol}` | Token-by-token LLM explanation |
+| `GET` / `POST /api/stream/explain/{symbol}` | LLM explanation, delivered complete in the terminal `done` event |
 
 Event names:
 
 | Event | Emitted by | Payload |
 |---|---|---|
 | `progress` | `index` | Per-stage indexing progress |
-| `token` | `explain` | One chunk of the streamed LLM explanation |
 | `done` | both | Terminal success. For `explain`, a `status` field distinguishes a normal result from `"ambiguous"` (the symbol matched more than one candidate, listed under `candidates`). |
 | `error` | both | Terminal failure (`{"message":"…"}`) |
 

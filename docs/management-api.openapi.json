@@ -857,7 +857,7 @@
           "channels"
         ],
         "summary": "Cross-service channel links",
-        "description": "Matched producer\u2192consumer links (Kafka topics, HTTP routes, MQTT/AMQP topics, gRPC methods). Returns the serialized `ChannelLinkReport` domain value. With no `repository`, scoped to the current namespace's repositories.",
+        "description": "Matched producer→consumer links (Kafka topics, HTTP routes, MQTT/AMQP topics, gRPC methods). Returns the serialized `ChannelLinkReport` domain value. With no `repository`, scoped to the current namespace's repositories.",
         "operationId": "channels",
         "parameters": [
           {
@@ -894,7 +894,7 @@
             "name": "min_confidence",
             "in": "query",
             "required": false,
-            "description": "Drop edges below this confidence (0.0\u20131.0).",
+            "description": "Drop edges below this confidence (0.0–1.0).",
             "schema": {
               "type": "number",
               "format": "float"
@@ -976,11 +976,11 @@
           "stream"
         ],
         "summary": "Stream an LLM call-flow explanation (SSE)",
-        "description": "Streams the LLM's explanation of a symbol's bidirectional call flow token by token.\n\n**Response is `text/event-stream`.** Events, in order:\n- `token` \u2014 one chunk of the explanation; payload `{ \"text\": string }`. Zero or more.\n- `done` \u2014 terminal summary; payload `SseExplainDone`. Exactly one on success.\n- `error` \u2014 terminal failure; payload `{ \"message\": string }`. Replaces `done` on failure.\n\nIf the symbol is ambiguous (matches several fully-qualified names), no `token` events are emitted and the `done` event carries `status: \"ambiguous\"` with a `candidates` list instead of an explanation.\n\nNo request body is required for `GET`; use `POST` to pass options.",
+        "description": "Returns the LLM's explanation of a symbol's bidirectional call flow.\n\n**Response is `text/event-stream`.** The explanation is generated in full before anything is sent — explain is deliberately non-streaming, so no `token` events are emitted. Events, in order:\n- `done` — terminal summary carrying the complete explanation; payload `SseExplainDone`. Exactly one on success.\n- `error` — terminal failure; payload `{ \"message\": string }`. Replaces `done` on failure.\n\nIf the symbol is ambiguous (matches several fully-qualified names), the `done` event carries `status: \"ambiguous\"` with a `candidates` list instead of an explanation.\n\nNo request body is required for `GET`; use `POST` to pass options.",
         "operationId": "explainStreamGet",
         "responses": {
           "200": {
-            "description": "SSE stream of `token` events followed by a terminal `done` or `error` event.",
+            "description": "SSE stream carrying a single terminal `done` or `error` event.",
             "content": {
               "text/event-stream": {
                 "schema": {
@@ -996,7 +996,7 @@
           "stream"
         ],
         "summary": "Stream an LLM call-flow explanation (SSE)",
-        "description": "Same as the `GET` form, but accepts an optional JSON body of options.",
+        "description": "Returns the LLM's explanation of a symbol's bidirectional call flow.\n\n**Response is `text/event-stream`.** The explanation is generated in full before anything is sent — explain is deliberately non-streaming, so no `token` events are emitted. Events, in order:\n- `done` — terminal summary carrying the complete explanation; payload `SseExplainDone`. Exactly one on success.\n- `error` — terminal failure; payload `{ \"message\": string }`. Replaces `done` on failure.\n\nIf the symbol is ambiguous (matches several fully-qualified names), the `done` event carries `status: \"ambiguous\"` with a `candidates` list instead of an explanation.\n\nNo request body is required for `GET`; use `POST` to pass options.",
         "operationId": "explainStreamPost",
         "requestBody": {
           "required": false,
@@ -1010,7 +1010,7 @@
         },
         "responses": {
           "200": {
-            "description": "SSE stream of `token` events followed by a terminal `done` or `error` event.",
+            "description": "SSE stream carrying a single terminal `done` or `error` event.",
             "content": {
               "text/event-stream": {
                 "schema": {
@@ -1028,7 +1028,7 @@
           "stream"
         ],
         "summary": "Stream repository indexing progress (SSE)",
-        "description": "Indexes a repository path and streams coarse lifecycle progress.\n\n**Response is `text/event-stream`.** Events, in order:\n- `progress` \u2014 a lifecycle update; payload `{ \"stage\": string, \"message\": string }`. `stage` is `started` first, then periodic `running` heartbeats.\n- `done` \u2014 terminal summary; payload `SseIndexDone`. Exactly one on success.\n- `error` \u2014 terminal failure; payload `{ \"message\": string }`. Replaces `done` on failure.\n\nProgress is coarse (start / running heartbeats / done) because the underlying use case does not yet expose a per-file progress channel.",
+        "description": "Indexes a repository path and streams coarse lifecycle progress.\n\n**Response is `text/event-stream`.** Events, in order:\n- `progress` — a lifecycle update; payload `{ \"stage\": string, \"message\": string }`. `stage` is `started` first, then periodic `running` heartbeats.\n- `done` — terminal summary; payload `SseIndexDone`. Exactly one on success.\n- `error` — terminal failure; payload `{ \"message\": string }`. Replaces `done` on failure.\n\nProgress is coarse (start / running heartbeats / done) because the underlying use case does not yet expose a per-file progress channel.",
         "operationId": "indexStream",
         "requestBody": {
           "required": true,
@@ -1201,7 +1201,7 @@
           },
           "languages": {
             "type": "object",
-            "description": "Map of language name \u2192 per-language stats.",
+            "description": "Map of language name → per-language stats.",
             "additionalProperties": {
               "type": "object",
               "properties": {
@@ -1338,7 +1338,7 @@
           },
           "node_type": {
             "type": "string",
-            "description": "AST node type (function, class, method, \u2026)."
+            "description": "AST node type (function, class, method, …)."
           },
           "symbol_name": {
             "type": [
@@ -1383,7 +1383,7 @@
       },
       "SymbolContext": {
         "type": "object",
-        "description": "Serialized `SymbolContext` domain value: callers (entry points \u2192 symbol) and callees (symbol \u2192 leaves) as trees.",
+        "description": "Serialized `SymbolContext` domain value: callers (entry points → symbol) and callees (symbol → leaves) as trees.",
         "additionalProperties": true
       },
       "FileEdge": {
@@ -1413,7 +1413,7 @@
       },
       "ChannelLinkReport": {
         "type": "object",
-        "description": "Serialized `ChannelLinkReport` domain value: matched producer\u2192consumer channel links with protocol, channel name, endpoints, and confidence.",
+        "description": "Serialized `ChannelLinkReport` domain value: matched producer→consumer channel links with protocol, channel name, endpoints, and confidence.",
         "additionalProperties": true
       },
       "ExplainStreamRequest": {
@@ -1471,11 +1471,8 @@
         }
       },
       "SseExplainEvent": {
-        "description": "One SSE frame emitted by `/api/stream/explain/{symbol}`. `event` names the frame; `data` is the JSON payload. Modelled as a union for documentation \u2014 the wire format is SSE, not JSON.",
+        "description": "One SSE frame emitted by `/api/stream/explain/{symbol}`. `event` names the frame; `data` is the JSON payload. Modelled as a union for documentation — the wire format is SSE, not JSON.",
         "oneOf": [
-          {
-            "$ref": "#/components/schemas/SseTokenEvent"
-          },
           {
             "$ref": "#/components/schemas/SseExplainDoneEvent"
           },
@@ -1498,21 +1495,9 @@
           }
         ]
       },
-      "SseTokenEvent": {
-        "type": "object",
-        "description": "`event: token` \u2014 one chunk of streamed explanation text.",
-        "required": [
-          "text"
-        ],
-        "properties": {
-          "text": {
-            "type": "string"
-          }
-        }
-      },
       "SseProgressEvent": {
         "type": "object",
-        "description": "`event: progress` \u2014 a coarse lifecycle update.",
+        "description": "`event: progress` — a coarse lifecycle update.",
         "required": [
           "stage",
           "message"
@@ -1532,7 +1517,7 @@
       },
       "SseErrorEvent": {
         "type": "object",
-        "description": "`event: error` \u2014 terminal failure. Last frame of the stream.",
+        "description": "`event: error` — terminal failure. Last frame of the stream.",
         "required": [
           "message"
         ],
@@ -1544,7 +1529,7 @@
       },
       "SseExplainDoneEvent": {
         "type": "object",
-        "description": "`event: done` \u2014 terminal success for the explain stream.",
+        "description": "`event: done` — terminal success for the explain stream.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/SseExplainDoneOk"
@@ -1576,7 +1561,7 @@
           },
           "explanation": {
             "type": "string",
-            "description": "Full post-processed Markdown explanation (also delivered incrementally as `token` events)."
+            "description": "Full post-processed Markdown explanation (Summary / Flow / Where to focus)."
           },
           "total_affected": {
             "type": "integer"
@@ -1637,7 +1622,7 @@
       },
       "SseIndexDoneEvent": {
         "type": "object",
-        "description": "`event: done` \u2014 terminal success for the index stream.",
+        "description": "`event: done` — terminal success for the index stream.",
         "required": [
           "status",
           "name",

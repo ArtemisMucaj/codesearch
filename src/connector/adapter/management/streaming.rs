@@ -12,7 +12,6 @@
 //!
 //! | `event`    | Emitted by            | JSON `data` payload                                      |
 //! |------------|-----------------------|---------------------------------------------------------|
-//! | `token`    | explain               | `{ "text": "<chunk>" }`                                  |
 //! | `progress` | index                 | `{ "stage": "<stage>", "message": "<human text>" }`     |
 //! | `done`     | explain, index        | operation-specific summary object (see handlers)        |
 //! | `error`    | explain, index        | `{ "message": "<human-readable error>" }`               |
@@ -159,11 +158,12 @@ fn receiver_stream(
 // GET/POST /api/stream/explain/:symbol
 // ---------------------------------------------------------------------------
 
-/// `GET/POST /api/stream/explain/:symbol` — stream an LLM call-flow explanation.
+/// `GET/POST /api/stream/explain/:symbol` — produce an LLM call-flow explanation.
 ///
-/// Bridges [`ExplainUseCase::execute_streaming`]'s per-token channel onto SSE
-/// `token` events, then finishes with a single `done` event carrying the
-/// analysis summary (or an `error` event if the LLM/analysis failed).
+/// The explanation is generated in full and delivered as a single `done` event
+/// carrying the complete Markdown plus the analysis summary (or an `error`
+/// event if the LLM/analysis failed). No `token` events are emitted: explain is
+/// deliberately non-streaming so the client renders one finished document.
 ///
 /// The heavy work runs in a spawned task; if the client disconnects, the SSE
 /// stream is dropped, which drops the event receiver and lets the spawned task
@@ -273,8 +273,8 @@ async fn run_explain_stream(
     cache: Option<ExplanationCacheKey>,
     event_tx: mpsc::UnboundedSender<Event>,
 ) {
-    // Cache hit: replay the stored explanation as token frames + a done event so
-    // the client renders it identically to a live run, without any LLM call.
+    // Cache hit: emit the stored explanation in the terminal `done` event so the
+    // client renders it identically to a live run, without any LLM call.
     // Skipped when regenerating (the user asked for a fresh answer).
     if !req.regenerate {
         if let Some(key) = &cache {
@@ -282,7 +282,6 @@ async fn run_explain_stream(
                 .get_cached_explanation(&key.repository_id, &key.symbol, &key.model)
                 .await
             {
-                let _ = event_tx.send(sse_event("token", json!({ "text": cached })));
                 let _ = event_tx.send(sse_event(
                     "done",
                     json!({
@@ -326,41 +325,29 @@ async fn run_explain_stream(
         }
     };
 
-    // Per-token channel from the use case; we relay each token as an SSE frame.
-    let (token_tx, mut token_rx) = mpsc::unbounded_channel::<String>();
+    // The explanation is generated in full before anything is emitted: a partial
+    // call-flow analysis is not useful to read, and buffering lets the response
+    // be post-processed (XML sections → Markdown) as one document.
+    //
+    // Nothing is sent until the LLM returns, so the send-failure path no longer
+    // detects a departed client. Race the work against the event channel closing
+    // instead, so a disconnect still drops the in-flight LLM call rather than
+    // paying for an answer nobody will read.
+    let explain = use_case.execute(
+        &symbol,
+        req.repository.as_deref(),
+        chat_client.as_ref(),
+        req.regex,
+    );
+    tokio::pin!(explain);
 
-    let symbol_c = symbol.clone();
-    let repo_c = req.repository.clone();
-    let is_regex = req.regex;
-    let client_c = chat_client.clone();
+    let outcome = tokio::select! {
+        result = &mut explain => result,
+        _ = event_tx.closed() => return,
+    };
 
-    let work = tokio::spawn(async move {
-        use_case
-            .execute_streaming(
-                &symbol_c,
-                repo_c.as_deref(),
-                client_c.as_ref(),
-                is_regex,
-                token_tx,
-            )
-            .await
-    });
-
-    // Relay tokens as they arrive. `send` fails once the client disconnects
-    // (the SSE stream's receiver is dropped); we stop early in that case.
-    while let Some(token) = token_rx.recv().await {
-        if event_tx
-            .send(sse_event("token", json!({ "text": token })))
-            .is_err()
-        {
-            work.abort();
-            return;
-        }
-    }
-
-    // Token stream drained — collect the final result.
-    match work.await {
-        Ok(Ok(result)) => {
+    match outcome {
+        Ok(result) => {
             if !result.ambiguous_candidates.is_empty() {
                 let _ = event_tx.send(sse_event(
                     "done",
@@ -417,16 +404,10 @@ async fn run_explain_stream(
                 }),
             ));
         }
-        Ok(Err(err)) => {
+        Err(err) => {
             let _ = event_tx.send(sse_event(
                 "error",
                 json!({ "message": format!("explain failed: {err}") }),
-            ));
-        }
-        Err(join_err) => {
-            let _ = event_tx.send(sse_event(
-                "error",
-                json!({ "message": format!("explain task panicked: {join_err}") }),
             ));
         }
     }
