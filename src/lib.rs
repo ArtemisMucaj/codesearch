@@ -12,11 +12,11 @@ pub use application::{
     DeleteRepositoryUseCase, EmbeddingService, ExecutionFeaturesUseCase, ExplainResult,
     ExplainUseCase, FileHashRepository, FileRelationshipUseCase, GraphExpansionUseCase,
     ImpactAnalysis, ImpactAnalysisUseCase, IndexRepositoryUseCase, LanguageShare,
-    ListRepositoriesUseCase, MetadataRepository, ModuleDependency, ModuleOverview, OverviewOptions,
-    OverviewReport, OverviewStats, ParserService, QueryExpander, RepositoryOverviewUseCase,
-    RerankingService, ResolveChannelsUseCase, ResolvedConfigValue, Scip, SearchCodeUseCase,
-    SkippedSection, SnippetLookupUseCase, SymbolClusterDetectionUseCase, SymbolContext,
-    SymbolContextUseCase, VectorRepository,
+    ListRepositoriesUseCase, MetadataRepository, ModuleDependency, ModuleOverview, NamingRegistry,
+    OverviewOptions, OverviewReport, OverviewStats, ParserService, QueryExpander,
+    RepositoryOverviewUseCase, RerankingService, ResolveChannelsUseCase, ResolvedConfigValue, Scip,
+    SearchCodeUseCase, SkippedSection, SnippetLookupUseCase, SymbolClusterDetectionUseCase,
+    SymbolContext, SymbolContextUseCase, VectorRepository,
 };
 
 pub use application::{aggregate, render, VizFormat, DEFAULT_NODE_LIMIT};

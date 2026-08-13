@@ -17,8 +17,8 @@
 //! cache survives re-index: an unchanged community keeps its name, a changed one
 //! gets a new id and is re-named on next view.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::{stream, StreamExt};
@@ -100,15 +100,82 @@ fn name_schema() -> serde_json::Value {
     })
 }
 
+/// Ids currently being named, shared by every caller that names communities.
+///
+/// Naming is slow (one LLM call per community, [`NAMING_CONCURRENCY`] at a time)
+/// and its results only reach the cache when the whole batch finishes. A client
+/// polling for names — or simply switching between the graph and cluster views —
+/// therefore issues several requests inside that window, and without a claim
+/// every one of them re-names the same ids, multiplying LLM traffic on what is
+/// usually a single local server.
+///
+/// Held behind an `Arc` and handed to the use case rather than owned by it: the
+/// container builds a fresh [`CommunityNamingUseCase`] per call, so instance
+/// state would dedupe nothing. A process-wide `static` would work too, but this
+/// keeps the registry injectable — tests construct their own and cannot leak
+/// claims into each other.
+#[derive(Debug, Default)]
+pub struct NamingRegistry {
+    in_flight: Mutex<HashSet<String>>,
+}
+
+impl NamingRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Claim the ids in `ids` that nobody else is naming.
+    ///
+    /// Returns the claim, or `None` when every id is already in flight — the
+    /// caller then has nothing to do. A partially-overlapping batch still claims
+    /// its new ids rather than being refused wholesale.
+    fn claim(self: &Arc<Self>, ids: impl Iterator<Item = String>) -> Option<NamingClaim> {
+        let mut in_flight = self.in_flight.lock().ok()?;
+        let claimed: Vec<String> = ids.filter(|id| in_flight.insert(id.clone())).collect();
+        if claimed.is_empty() {
+            return None;
+        }
+        Some(NamingClaim {
+            registry: Arc::clone(self),
+            ids: claimed,
+        })
+    }
+
+    fn release(&self, ids: &[String]) {
+        if let Ok(mut in_flight) = self.in_flight.lock() {
+            for id in ids {
+                in_flight.remove(id);
+            }
+        }
+    }
+}
+
+/// Ids claimed for naming, released on drop.
+///
+/// A guard rather than a bare remove: naming can end at any `await` (a cancelled
+/// runtime, a panic inside the use case), and a claim leaked by an early exit
+/// would suppress naming for those ids until the process restarts.
+struct NamingClaim {
+    registry: Arc<NamingRegistry>,
+    ids: Vec<String>,
+}
+
+impl Drop for NamingClaim {
+    fn drop(&mut self) {
+        self.registry.release(&self.ids);
+    }
+}
+
 /// Use case: fill in `display_name` on communities, generating missing names via
 /// the LLM and caching them by stable id.
 pub struct CommunityNamingUseCase {
     storage: Arc<dyn AnalysisRepository>,
+    registry: Arc<NamingRegistry>,
 }
 
 impl CommunityNamingUseCase {
-    pub fn new(storage: Arc<dyn AnalysisRepository>) -> Self {
-        Self { storage }
+    pub fn new(storage: Arc<dyn AnalysisRepository>, registry: Arc<NamingRegistry>) -> Self {
+        Self { storage, registry }
     }
 
     /// Enrich file clusters with LLM display names in place.
@@ -159,6 +226,24 @@ impl CommunityNamingUseCase {
             return;
         }
 
+        // Claim the misses, after the cache read so a warm cache never blocks and
+        // never waits on the lock. Dropping the ids another task already holds
+        // leaves those items on their id — that task is generating the name and
+        // will cache it, so the next request picks it up.
+        let miss_ids = misses.iter().map(|(idx, _)| items[*idx].id().to_string());
+        let Some(_claim) = self.registry.claim(miss_ids) else {
+            debug!("community naming already in flight for these ids; skipping");
+            return;
+        };
+        let claimed: HashSet<&str> = _claim.ids.iter().map(String::as_str).collect();
+        let misses: Vec<(usize, Vec<String>)> = misses
+            .into_iter()
+            .filter(|(idx, _)| claimed.contains(items[*idx].id()))
+            .collect();
+        if misses.is_empty() {
+            return;
+        }
+
         // Probe with the first miss serially. Naming runs by default, so when no
         // endpoint is reachable this one call fails fast and we skip the rest —
         // rather than firing a timeout per community and leaving everything on the
@@ -190,38 +275,59 @@ impl CommunityNamingUseCase {
             return;
         }
 
-        let mut fresh: Vec<(String, String)> = Vec::new();
+        // Persist the probe's name before the batch runs. Naming a large
+        // repository takes one LLM call per community at NAMING_CONCURRENCY at a
+        // time, so deferring every write to the end leaves the cache empty for
+        // the whole run — the window in which concurrent requests find nothing
+        // and regenerate. Flushing as names land shrinks that window to a single
+        // call and makes partial progress survive a crash mid-run.
         if let Ok(name) = first {
-            fresh.push((items[*first_idx].id().to_string(), name.clone()));
-            items[*first_idx].set_display_name(name);
+            items[*first_idx].set_display_name(name.clone());
+            self.persist(&[(items[*first_idx].id().to_string(), name)])
+                .await;
         }
 
         // Endpoint is up — generate the remaining misses concurrently, bounded by
         // NAMING_CONCURRENCY (the clients have no backoff, so the bound protects
         // the provider).
         let rest: Vec<(usize, Vec<String>)> = misses.into_iter().skip(1).collect();
-        let generated: Vec<(usize, Result<String, DomainError>)> = stream::iter(rest)
+        let mut generated = stream::iter(rest)
             .map(|(idx, members)| async move { (idx, generate_name(&members, chat).await) })
-            .buffer_unordered(NAMING_CONCURRENCY)
-            .collect()
-            .await;
+            .buffer_unordered(NAMING_CONCURRENCY);
 
-        for (idx, result) in generated {
+        // Flushed in batches rather than per name: one write per community would
+        // multiply round-trips to the store for no benefit, since a concurrent
+        // reader only needs the window bounded, not eliminated.
+        let mut pending: Vec<(String, String)> = Vec::with_capacity(NAMING_CONCURRENCY);
+        while let Some((idx, result)) = generated.next().await {
             match result {
                 Ok(name) => {
-                    fresh.push((items[idx].id().to_string(), name.clone()));
+                    pending.push((items[idx].id().to_string(), name.clone()));
                     items[idx].set_display_name(name);
                 }
                 Err(e) => debug!("skipping LLM name for {}: {e}", items[idx].id()),
             }
-        }
-
-        if !fresh.is_empty() {
-            if let Err(e) = self.storage.save_community_names(&fresh).await {
-                // Louder than a read miss: a dropped write means these names are
-                // regenerated (and re-billed to the LLM) on every future run.
-                warn!("failed to persist community names, they will be regenerated: {e}");
+            if pending.len() >= NAMING_CONCURRENCY {
+                self.persist(&pending).await;
+                pending.clear();
             }
+        }
+        if !pending.is_empty() {
+            self.persist(&pending).await;
+        }
+    }
+
+    /// Write freshly generated names to the cache, logging a failure without
+    /// propagating it — naming is best-effort and a dropped write only costs a
+    /// regeneration.
+    async fn persist(&self, names: &[(String, String)]) {
+        if names.is_empty() {
+            return;
+        }
+        if let Err(e) = self.storage.save_community_names(names).await {
+            // Louder than a read miss: a dropped write means these names are
+            // regenerated (and re-billed to the LLM) on every future run.
+            warn!("failed to persist community names, they will be regenerated: {e}");
         }
     }
 }
@@ -306,6 +412,79 @@ fn top_directories(members: &[String]) -> Vec<(String, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ids(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The duplicate-work case: a second request arriving while the first is
+    /// still generating must not re-name the same communities.
+    #[test]
+    fn a_second_claim_on_the_same_ids_is_refused() {
+        let registry = Arc::new(NamingRegistry::new());
+        let held = registry
+            .claim(ids(&["a", "b"]).into_iter())
+            .expect("first claim should succeed");
+
+        assert!(
+            registry.claim(ids(&["a", "b"]).into_iter()).is_none(),
+            "ids already in flight must not be claimed twice"
+        );
+
+        drop(held);
+    }
+
+    /// The failure a `Drop` guard prevents: naming ending early (a panic, a
+    /// cancelled runtime) would otherwise leak its claim and suppress those ids
+    /// until the process restarts.
+    #[test]
+    fn dropping_the_claim_releases_the_ids() {
+        let registry = Arc::new(NamingRegistry::new());
+        drop(
+            registry
+                .claim(ids(&["a"]).into_iter())
+                .expect("first claim should succeed"),
+        );
+
+        assert!(
+            registry.claim(ids(&["a"]).into_iter()).is_some(),
+            "ids must be reclaimable once the previous run finished"
+        );
+    }
+
+    /// A request overlapping an in-flight one still names what is new, rather
+    /// than being refused wholesale and leaving fresh communities unnamed.
+    #[test]
+    fn only_the_unclaimed_subset_is_taken() {
+        let registry = Arc::new(NamingRegistry::new());
+        let held = registry
+            .claim(ids(&["a", "b"]).into_iter())
+            .expect("first claim");
+
+        let second = registry
+            .claim(ids(&["a", "c"]).into_iter())
+            .expect("the new id should still be claimable");
+        assert_eq!(second.ids, ids(&["c"]));
+
+        drop(held);
+    }
+
+    /// Two registries are independent, which is what makes the type injectable:
+    /// a test (or a second server instance) cannot be affected by claims made
+    /// elsewhere. This is the property the previous process-global `static`
+    /// could not offer.
+    #[test]
+    fn registries_are_independent() {
+        let one = Arc::new(NamingRegistry::new());
+        let two = Arc::new(NamingRegistry::new());
+
+        let _held = one.claim(ids(&["a"]).into_iter()).expect("claim on one");
+
+        assert!(
+            two.claim(ids(&["a"]).into_iter()).is_some(),
+            "a claim in one registry must not block another"
+        );
+    }
 
     #[test]
     fn test_parse_name_from_json() {

@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 
 use crate::application::{
     AnalysisRepository, CallGraphRepository, CallGraphUseCase, ChannelEndpointRepository,
-    ChannelLinkUseCase, FileHashRepository, MetadataRepository, QueryExpander,
+    ChannelLinkUseCase, FileHashRepository, MetadataRepository, NamingRegistry, QueryExpander,
 };
 use crate::cli::{EmbeddingTarget, LlmTarget, RerankingTarget};
 use crate::connector::adapter::scip::ScipRunner;
@@ -124,6 +124,12 @@ pub struct Container {
     call_graph_use_case: Arc<CallGraphUseCase>,
     channel_endpoint_repo: Arc<dyn ChannelEndpointRepository>,
     analysis_repo: Arc<dyn AnalysisRepository>,
+    /// Ids currently being named by an in-flight naming run.
+    ///
+    /// Lives on the container because a fresh [`CommunityNamingUseCase`] is built
+    /// per call: the registry has to outlive any one of them for concurrent
+    /// requests to see each other's claims.
+    naming_registry: Arc<NamingRegistry>,
     /// The concrete DuckDB vector store, kept alongside the erased
     /// `vector_repo` so cross-namespace read views can be built (`None` for
     /// in-memory storage).
@@ -609,6 +615,7 @@ impl Container {
             call_graph_use_case,
             channel_endpoint_repo,
             analysis_repo,
+            naming_registry: Arc::new(NamingRegistry::new()),
             duckdb_vector,
             // A backend chosen through the app (persisted in config.json) wins
             // over the flag's default, so the choice survives restarts. The flag
@@ -858,7 +865,10 @@ impl Container {
 
     /// LLM naming for detected communities, backed by the analysis cache.
     pub fn community_naming_use_case(&self) -> CommunityNamingUseCase {
-        CommunityNamingUseCase::new(self.analysis_repo.clone())
+        CommunityNamingUseCase::new(
+            self.analysis_repo.clone(),
+            Arc::clone(&self.naming_registry),
+        )
     }
 
     /// Combined single-repository overview (stats, modules, symbol
