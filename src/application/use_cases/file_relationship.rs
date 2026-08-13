@@ -2,7 +2,27 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::application::{CallGraphUseCase, MetadataRepository, VectorRepository};
-use crate::domain::{DomainError, FileEdge, FileGraph, FileGraphRepo};
+use crate::domain::{DomainError, FileEdge, FileGraph, FileGraphRepo, Repository};
+
+/// The dependency edges from one repository into another, with both endpoints
+/// resolved to their canonical id and display name.
+///
+/// Carries the resolved names so callers can echo what the user actually asked
+/// for (`from=api`) as the repository's real name, without re-reading the
+/// repository list.
+#[derive(Debug, Clone)]
+pub struct RepositoryUses {
+    /// Canonical UUID of the dependent ("from") repository.
+    pub from_id: String,
+    /// Display name of the dependent repository.
+    pub from_name: String,
+    /// Canonical UUID of the dependency ("to") repository.
+    pub to_id: String,
+    /// Display name of the dependency repository.
+    pub to_name: String,
+    /// Directed file→file edges, sorted by `(to_file, from_file)`.
+    pub edges: Vec<FileEdge>,
+}
 
 /// Use case that builds a file-level dependency graph across one or more repositories.
 ///
@@ -43,6 +63,54 @@ impl FileRelationshipUseCase {
     /// key matches the repositories the graph is actually confined to.
     pub fn namespace(&self) -> &str {
         &self.namespace
+    }
+
+    /// Resolve `from`/`to` (each a repository name or UUID) and return the
+    /// directed file→file edges flowing from the first into the second.
+    ///
+    /// The CLI, the MCP `file_uses` tool and `GET /api/uses` all asked the same
+    /// question and each rebuilt the answer — resolve both keys, build a
+    /// two-repository cross-repo graph, keep the edges pointing the right way.
+    /// Three copies had already drifted: only one sorted its output, so the same
+    /// query returned edges in a different order depending on which door you
+    /// came through.
+    ///
+    /// Edges are sorted by `(to_file, from_file)` so the result is stable across
+    /// every caller and across runs.
+    pub async fn uses_between(&self, from: &str, to: &str) -> Result<RepositoryUses, DomainError> {
+        let repos = self
+            .metadata_repo
+            .list()
+            .await
+            .map_err(|e| DomainError::storage(format!("Failed to list repositories: {e}")))?;
+
+        let from_repo = Repository::find(from, &repos)?;
+        let to_repo = Repository::find(to, &repos)?;
+        let (from_id, from_name) = (from_repo.id().to_string(), from_repo.name().to_string());
+        let (to_id, to_name) = (to_repo.id().to_string(), to_repo.name().to_string());
+
+        let graph = self
+            .build_graph(Some(&[from_id.clone(), to_id.clone()]), 1, true)
+            .await?;
+
+        let mut edges: Vec<FileEdge> = graph
+            .edges
+            .into_iter()
+            .filter(|e| e.from_repo_id == from_id && e.to_repo_id == to_id)
+            .collect();
+        edges.sort_by(|a, b| {
+            a.to_file
+                .cmp(&b.to_file)
+                .then_with(|| a.from_file.cmp(&b.from_file))
+        });
+
+        Ok(RepositoryUses {
+            from_id,
+            from_name,
+            to_id,
+            to_name,
+            edges,
+        })
     }
 
     /// Build the file dependency graph, scoped to the use case's default

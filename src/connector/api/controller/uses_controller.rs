@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use anyhow::{Context, Result};
 
 use crate::connector::api::container::Container;
-use crate::domain::Repository;
 
 /// Extract a human-readable short name from a SCIP/call-graph symbol string.
 ///
@@ -29,58 +28,24 @@ impl<'a> UsesController<'a> {
     }
 
     pub async fn uses(&self, from: String, to: String) -> Result<String> {
-        let uc = self.container.file_graph_use_case();
-
-        // Resolve names/IDs for both repos
-        let all_repos: Vec<Repository> = self
+        // Resolution, graph construction and edge filtering (including the sort
+        // by target-then-source this rendering relies on) live in the use case,
+        // shared with the MCP tool and the management endpoint.
+        let uses = self
             .container
-            .list_use_case()
-            .execute()
+            .file_graph_use_case()
+            .uses_between(&from, &to)
             .await
-            .context("Failed to list repositories")?;
+            .context("Failed to resolve repository dependencies")?;
 
-        let resolve = |name_or_id: &str| -> Option<(String, String)> {
-            all_repos
-                .iter()
-                .find(|r| r.id() == name_or_id)
-                .or_else(|| {
-                    all_repos
-                        .iter()
-                        .find(|r| r.name().eq_ignore_ascii_case(name_or_id))
-                })
-                .map(|r| (r.id().to_string(), r.name().to_string()))
-        };
-
-        let (from_id, from_name) =
-            resolve(&from).with_context(|| format!("Repository not found: '{from}'"))?;
-        let (to_id, to_name) =
-            resolve(&to).with_context(|| format!("Repository not found: '{to}'"))?;
-
-        // Build a cross-repo graph that includes both repos
-        let graph = uc
-            .build_graph(Some(&[from_id.clone(), to_id.clone()]), 1, true)
-            .await
-            .context("Failed to build file graph")?;
-
-        // Filter to edges that go from `from` repo → `to` repo
-        let mut edges: Vec<_> = graph
-            .edges
-            .iter()
-            .filter(|e| e.from_repo_id == from_id && e.to_repo_id == to_id)
-            .collect();
+        let (from_name, to_name) = (&uses.from_name, &uses.to_name);
+        let edges = &uses.edges;
 
         if edges.is_empty() {
             return Ok(format!(
                 "No dependencies found: '{from_name}' does not use any files from '{to_name}'."
             ));
         }
-
-        // Sort by target file then source file for readable output
-        edges.sort_by(|a, b| {
-            a.to_file
-                .cmp(&b.to_file)
-                .then(a.from_file.cmp(&b.from_file))
-        });
 
         // Group by target file
         let mut out = format!(
@@ -91,7 +56,7 @@ impl<'a> UsesController<'a> {
         let mut current_target = "";
         let mut unique_sources: HashSet<&str> = HashSet::new();
         let mut unique_targets: HashSet<&str> = HashSet::new();
-        for e in &edges {
+        for e in edges {
             unique_sources.insert(&e.from_file);
             if e.to_file != current_target {
                 current_target = &e.to_file;

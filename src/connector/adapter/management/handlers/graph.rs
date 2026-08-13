@@ -10,8 +10,6 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
 
-use crate::domain::Repository;
-
 use super::super::error::ApiResult;
 use super::super::server::AppState;
 
@@ -86,29 +84,16 @@ pub async fn uses(
     State(state): State<AppState>,
     Query(params): Query<UsesParams>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let all_repos: Vec<Repository> = state.container.list_use_case().execute().await?;
-
-    let from = super::resolve_repo(&params.from, &all_repos)?;
-    let (from_id, from_name) = (from.id().to_string(), from.name().to_string());
-    let to = super::resolve_repo(&params.to, &all_repos)?;
-    let (to_id, to_name) = (to.id().to_string(), to.name().to_string());
-
-    let graph = state
+    let uses = state
         .container
         .file_graph_use_case()
-        .build_graph(Some(&[from_id.clone(), to_id.clone()]), 1, true)
+        .uses_between(&params.from, &params.to)
         .await?;
 
-    let edges: Vec<&crate::domain::FileEdge> = graph
-        .edges
-        .iter()
-        .filter(|e| e.from_repo_id == from_id && e.to_repo_id == to_id)
-        .collect();
-
     Ok(Json(serde_json::json!({
-        "from": { "id": from_id, "name": from_name },
-        "to": { "id": to_id, "name": to_name },
-        "edges": edges,
+        "from": { "id": uses.from_id, "name": uses.from_name },
+        "to": { "id": uses.to_id, "name": uses.to_name },
+        "edges": uses.edges,
     })))
 }
 
