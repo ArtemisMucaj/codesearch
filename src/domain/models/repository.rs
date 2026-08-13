@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::domain::DomainError;
+
 /// The type of vector storage backend used for a repository.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -150,6 +152,24 @@ impl Repository {
         }
     }
 
+    /// Find the repository a user-supplied `key` refers to: an exact UUID first,
+    /// then a case-insensitive name match.
+    ///
+    /// Every adapter takes repository keys from its caller (a CLI flag, a query
+    /// param, an MCP tool argument) and has to answer the same question, so the
+    /// rule lives here rather than being restated — it had drifted into four
+    /// copies, one of which silently skipped the UUID leg.
+    ///
+    /// UUID before name is deliberate: ids are unambiguous, so a repository
+    /// perversely *named* after another's id can never shadow it.
+    pub fn find<'a>(key: &str, repos: &'a [Repository]) -> Result<&'a Repository, DomainError> {
+        repos
+            .iter()
+            .find(|r| r.id() == key)
+            .or_else(|| repos.iter().find(|r| r.name().eq_ignore_ascii_case(key)))
+            .ok_or_else(|| DomainError::not_found(format!("repository not found: '{key}'")))
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -289,6 +309,40 @@ impl IndexingStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_matches_an_exact_id_then_a_name_case_insensitively() {
+        let repos = vec![
+            Repository::new("api".to_string(), "/api".to_string()),
+            Repository::new("Worker".to_string(), "/worker".to_string()),
+        ];
+
+        let by_id = Repository::find(repos[0].id(), &repos).expect("id lookup");
+        assert_eq!(by_id.name(), "api");
+
+        let by_name = Repository::find("wORKER", &repos).expect("name lookup is case-insensitive");
+        assert_eq!(by_name.name(), "Worker");
+    }
+
+    /// Ids win over names, so a repository named after another's id cannot
+    /// shadow it — the reason the two legs are ordered rather than merged.
+    #[test]
+    fn find_prefers_an_id_over_a_repository_named_after_it() {
+        let target = Repository::new("target".to_string(), "/target".to_string());
+        let impostor = Repository::new(target.id().to_string(), "/impostor".to_string());
+        let repos = vec![impostor, target.clone()];
+
+        let found = Repository::find(target.id(), &repos).expect("id lookup");
+        assert_eq!(found.path(), "/target", "the real id owner must win");
+    }
+
+    #[test]
+    fn find_reports_a_not_found_naming_the_key() {
+        let err = Repository::find("ghost", &[]).expect_err("nothing can match an empty list");
+
+        assert!(err.is_not_found());
+        assert!(err.to_string().contains("ghost"), "got: {err}");
+    }
 
     #[test]
     fn test_repository_creation() {

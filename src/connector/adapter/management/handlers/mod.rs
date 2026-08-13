@@ -32,18 +32,12 @@ use crate::domain::{Cluster, Repository, SymbolCommunity};
 use super::error::ApiError;
 use super::server::AppState;
 
-/// Resolve a `name-or-UUID` key against an already-fetched repository list,
-/// returning the repository's `(id, name)`.
+/// Resolve a `name-or-UUID` key against an already-fetched repository list.
 ///
-/// Matches by exact UUID first, then case-insensitively by name — the lookup
-/// every management handler needs. Returns a 404 [`ApiError`] when nothing
-/// matches, so callers can simply `?` the result.
+/// The matching rule itself is [`Repository::find`]; this wrapper only maps its
+/// `NotFound` onto a 404 [`ApiError`] so handlers can `?` the result.
 fn resolve_repo<'a>(key: &str, repos: &'a [Repository]) -> Result<&'a Repository, ApiError> {
-    repos
-        .iter()
-        .find(|r| r.id() == key)
-        .or_else(|| repos.iter().find(|r| r.name().eq_ignore_ascii_case(key)))
-        .ok_or_else(|| ApiError::not_found(format!("repository not found: '{key}'")))
+    Repository::find(key, repos).map_err(ApiError::from)
 }
 
 /// Build the chat client bound to the community-naming usage, or `None` when one

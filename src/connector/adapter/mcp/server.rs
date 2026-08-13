@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+    CallToolResult, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
 };
 use rmcp::tool;
 use rmcp::tool_handler;
@@ -19,6 +19,7 @@ use crate::application::{CallGraphQuery, ChannelLinkOptions};
 use crate::connector::api::Container;
 use crate::domain::{FileEdge, GraphLevel, Protocol, SearchQuery};
 
+use super::error::{ok_json, tool_error};
 use super::tools::SearchResultOutput;
 
 /// Server-side maximum for the number of results a single search can return.
@@ -363,10 +364,7 @@ impl CodesearchMcpServer {
         }
 
         let use_case = self.container.search_use_case();
-        let results = use_case
-            .execute(query)
-            .await
-            .map_err(|e| McpError::internal_error(format!("Search failed: {}", e), None))?;
+        let results = use_case.execute(query).await.map_err(tool_error)?;
 
         let outputs: Vec<SearchResultOutput> = results
             .iter()
@@ -383,11 +381,7 @@ impl CodesearchMcpServer {
             })
             .collect();
 
-        let json = serde_json::to_string_pretty(&outputs).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize results: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        ok_json(outputs)
     }
 
     /// Analyse the blast radius of changing a symbol.
@@ -401,19 +395,14 @@ impl CodesearchMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let input = params.0;
 
-        let use_case = self.container.impact_use_case();
-        let analysis = use_case
+        let analysis = self
+            .container
+            .impact_use_case()
             .analyze(&input.symbol, input.repository_id.as_deref(), input.regex)
             .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Impact analysis failed: {}", e), None)
-            })?;
+            .map_err(tool_error)?;
 
-        let json = serde_json::to_string_pretty(&analysis).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize impact analysis: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        ok_json(analysis)
     }
 
     /// Get the 360-degree context for a symbol: who calls it (callers) and what it
@@ -427,17 +416,14 @@ impl CodesearchMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let input = params.0;
 
-        let use_case = self.container.context_use_case();
-        let ctx = use_case
+        let ctx = self
+            .container
+            .context_use_case()
             .get_context(&input.symbol, input.repository_id.as_deref(), input.regex)
             .await
-            .map_err(|e| McpError::internal_error(format!("Context lookup failed: {}", e), None))?;
+            .map_err(tool_error)?;
 
-        let json = serde_json::to_string_pretty(&ctx).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize context: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        ok_json(ctx)
     }
 
     /// Query the call graph using an intention-named relationship pattern.
@@ -476,117 +462,80 @@ impl CodesearchMcpServer {
         // use_caller=true  → node.symbol = caller_symbol (who performs the action)
         // use_caller=false → node.symbol = callee_symbol (what is acted upon)
         let (references, use_caller) = match input.pattern {
-            QueryPattern::CallersOf => {
-                let refs = use_case
+            QueryPattern::CallersOf => (
+                use_case
                     .find_callers(&input.target, &base_query)
                     .await
-                    .map_err(|e| {
-                        McpError::internal_error(format!("query_graph failed: {}", e), None)
-                    })?;
-                (refs, true)
-            }
-            QueryPattern::CalleesOf => {
-                let refs = use_case
+                    .map_err(tool_error)?,
+                true,
+            ),
+            QueryPattern::CalleesOf => (
+                use_case
                     .find_callees(&input.target, &base_query)
                     .await
-                    .map_err(|e| {
-                        McpError::internal_error(format!("query_graph failed: {}", e), None)
-                    })?;
-                (refs, false)
-            }
+                    .map_err(tool_error)?,
+                false,
+            ),
             QueryPattern::ImportsOf => {
                 let q = base_query.with_reference_kind("import");
-                let refs = use_case
-                    .find_callees(&input.target, &q)
-                    .await
-                    .map_err(|e| {
-                        McpError::internal_error(format!("query_graph failed: {}", e), None)
-                    })?;
-                (refs, false)
+                (
+                    use_case
+                        .find_callees(&input.target, &q)
+                        .await
+                        .map_err(tool_error)?,
+                    false,
+                )
             }
             QueryPattern::ImportersOf => {
                 let q = base_query.with_reference_kind("import");
-                let refs = use_case
-                    .find_callers(&input.target, &q)
-                    .await
-                    .map_err(|e| {
-                        McpError::internal_error(format!("query_graph failed: {}", e), None)
-                    })?;
-                (refs, true)
-            }
-            QueryPattern::InheritorsOf => {
-                // Halve the per-query limit so the combined result stays within the
-                // requested bound before deduplication.
-                let per_limit = input.limit.map(|n| n.div_ceil(2) as u32);
-                let q_inh = {
-                    let q = base_query.clone().with_reference_kind("inheritance");
-                    match per_limit {
-                        Some(pl) => q.with_limit(pl),
-                        None => q,
-                    }
-                };
-                let q_imp = {
-                    let q = base_query.clone().with_reference_kind("implementation");
-                    match per_limit {
-                        Some(pl) => q.with_limit(pl),
-                        None => q,
-                    }
-                };
-                let mut refs = use_case
-                    .find_callers(&input.target, &q_inh)
-                    .await
-                    .map_err(|e| {
-                        McpError::internal_error(format!("query_graph failed: {}", e), None)
-                    })?;
-                let mut refs2 =
+                (
                     use_case
-                        .find_callers(&input.target, &q_imp)
+                        .find_callers(&input.target, &q)
                         .await
-                        .map_err(|e| {
-                            McpError::internal_error(format!("query_graph failed: {}", e), None)
-                        })?;
-                refs.append(&mut refs2);
-                (refs, true)
+                        .map_err(tool_error)?,
+                    true,
+                )
             }
-            QueryPattern::ChildrenOf => {
+            // Inheritance and implementation are two edge kinds describing one
+            // relationship, so both arms union a query over each. They differ
+            // only in direction: inheritors are the callers of the type,
+            // children the callees.
+            QueryPattern::InheritorsOf | QueryPattern::ChildrenOf => {
+                // Halve the per-query limit so the combined result stays within
+                // the requested bound before deduplication.
                 let per_limit = input.limit.map(|n| n.div_ceil(2) as u32);
-                let q_inh = {
-                    let q = base_query.clone().with_reference_kind("inheritance");
+                let kind_query = |kind: &str| {
+                    let q = base_query.clone().with_reference_kind(kind);
                     match per_limit {
                         Some(pl) => q.with_limit(pl),
                         None => q,
                     }
                 };
-                let q_imp = {
-                    let q = base_query.clone().with_reference_kind("implementation");
-                    match per_limit {
-                        Some(pl) => q.with_limit(pl),
-                        None => q,
-                    }
-                };
-                let mut refs = use_case
-                    .find_callees(&input.target, &q_inh)
-                    .await
-                    .map_err(|e| {
-                        McpError::internal_error(format!("query_graph failed: {}", e), None)
-                    })?;
-                let mut refs2 =
-                    use_case
-                        .find_callees(&input.target, &q_imp)
-                        .await
-                        .map_err(|e| {
-                            McpError::internal_error(format!("query_graph failed: {}", e), None)
-                        })?;
-                refs.append(&mut refs2);
-                (refs, false)
+                let up = matches!(input.pattern, QueryPattern::InheritorsOf);
+
+                let mut refs = Vec::new();
+                for kind in ["inheritance", "implementation"] {
+                    let q = kind_query(kind);
+                    let mut found = if up {
+                        use_case
+                            .find_callers(&input.target, &q)
+                            .await
+                            .map_err(tool_error)?
+                    } else {
+                        use_case
+                            .find_callees(&input.target, &q)
+                            .await
+                            .map_err(tool_error)?
+                    };
+                    refs.append(&mut found);
+                }
+                (refs, up)
             }
             QueryPattern::TestsFor => {
                 let refs = use_case
                     .find_callers(&input.target, &base_query)
                     .await
-                    .map_err(|e| {
-                        McpError::internal_error(format!("query_graph failed: {}", e), None)
-                    })?;
+                    .map_err(tool_error)?;
                 let filtered: Vec<_> = refs
                     .into_iter()
                     .filter(|r| {
@@ -626,15 +575,13 @@ impl CodesearchMcpServer {
                     .collect();
                 (filtered, true)
             }
-            QueryPattern::FileSummary => {
-                let refs = use_case
+            QueryPattern::FileSummary => (
+                use_case
                     .find_by_file(&input.target, &base_query)
                     .await
-                    .map_err(|e| {
-                        McpError::internal_error(format!("query_graph failed: {}", e), None)
-                    })?;
-                (refs, false)
-            }
+                    .map_err(tool_error)?,
+                false,
+            ),
         };
 
         // Deduplicate by symbol name, keeping the first reference site per unique symbol.
@@ -664,18 +611,12 @@ impl CodesearchMcpServer {
         };
 
         let total = nodes.len();
-        let result = GraphQueryResult {
+        ok_json(GraphQueryResult {
             pattern: input.pattern,
             target: input.target,
             nodes,
             total,
-        };
-
-        let json = serde_json::to_string_pretty(&result).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize result: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        })
     }
 
     /// List every indexed repository together with its file/chunk counts and
@@ -688,16 +629,14 @@ impl CodesearchMcpServer {
         &self,
         _params: Parameters<ListRepositoriesInput>,
     ) -> Result<CallToolResult, McpError> {
-        let use_case = self.container.list_use_case();
-        let repos = use_case.execute().await.map_err(|e| {
-            McpError::internal_error(format!("Failed to list repositories: {}", e), None)
-        })?;
+        let repos = self
+            .container
+            .list_use_case()
+            .execute()
+            .await
+            .map_err(tool_error)?;
 
-        let json = serde_json::to_string_pretty(&repos).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize repositories: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        ok_json(repos)
     }
 
     /// Discover execution features — named forward call chains rooted at
@@ -713,19 +652,14 @@ impl CodesearchMcpServer {
         let input = params.0;
         let limit = input.limit.min(MAX_FEATURES_LIMIT);
 
-        let use_case = self.container.execution_features_use_case();
-        let features = use_case
+        let features = self
+            .container
+            .execution_features_use_case()
             .list_features(&input.repository_id, limit)
             .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Listing features failed: {}", e), None)
-            })?;
+            .map_err(tool_error)?;
 
-        let json = serde_json::to_string_pretty(&features).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize features: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        ok_json(features)
     }
 
     /// Retrieve a single execution feature by entry-point symbol name (exact or
@@ -739,17 +673,14 @@ impl CodesearchMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let input = params.0;
 
-        let use_case = self.container.execution_features_use_case();
-        let feature = use_case
+        let feature = self
+            .container
+            .execution_features_use_case()
             .get_feature(&input.symbol, input.repository_id.as_deref())
             .await
-            .map_err(|e| McpError::internal_error(format!("Feature lookup failed: {}", e), None))?;
+            .map_err(tool_error)?;
 
-        let json = serde_json::to_string_pretty(&feature).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize feature: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        ok_json(feature)
     }
 
     /// Given a set of changed symbols, return every execution feature whose
@@ -763,19 +694,14 @@ impl CodesearchMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let input = params.0;
 
-        let use_case = self.container.execution_features_use_case();
-        let features = use_case
+        let features = self
+            .container
+            .execution_features_use_case()
             .get_impacted_features(&input.symbols, input.repository_id.as_deref())
             .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Impacted features lookup failed: {}", e), None)
-            })?;
+            .map_err(tool_error)?;
 
-        let json = serde_json::to_string_pretty(&features).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize features: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        ok_json(features)
     }
 
     /// Show which files in one repository depend on files in another (or the same)
@@ -791,67 +717,20 @@ impl CodesearchMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let input = params.0;
 
-        let repos = self
-            .container
-            .list_use_case()
-            .execute()
-            .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Failed to list repositories: {}", e), None)
-            })?;
-
-        let resolve = |name_or_id: &str| -> Option<(String, String)> {
-            repos
-                .iter()
-                .find(|r| r.id() == name_or_id)
-                .or_else(|| {
-                    repos
-                        .iter()
-                        .find(|r| r.name().eq_ignore_ascii_case(name_or_id))
-                })
-                .map(|r| (r.id().to_string(), r.name().to_string()))
-        };
-
-        let (from_id, from_name) = resolve(&input.from).ok_or_else(|| {
-            McpError::invalid_params(format!("Repository not found: '{}'", input.from), None)
-        })?;
-        let (to_id, to_name) = resolve(&input.to).ok_or_else(|| {
-            McpError::invalid_params(format!("Repository not found: '{}'", input.to), None)
-        })?;
-
-        let graph = self
+        let uses = self
             .container
             .file_graph_use_case()
-            .build_graph(Some(&[from_id.clone(), to_id.clone()]), 1, true)
+            .uses_between(&input.from, &input.to)
             .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Failed to build file graph: {}", e), None)
-            })?;
+            .map_err(tool_error)?;
 
-        let mut edges: Vec<FileEdge> = graph
-            .edges
-            .into_iter()
-            .filter(|e| e.from_repo_id == from_id && e.to_repo_id == to_id)
-            .collect();
-        edges.sort_by(|a, b| {
-            a.to_file
-                .cmp(&b.to_file)
-                .then(a.from_file.cmp(&b.from_file))
-        });
-
-        let total = edges.len();
-        let result = FileUsesResult {
-            from_repository: from_name,
-            to_repository: to_name,
-            edges,
+        let total = uses.edges.len();
+        ok_json(FileUsesResult {
+            from_repository: uses.from_name,
+            to_repository: uses.to_name,
+            edges: uses.edges,
             total,
-        };
-
-        let json = serde_json::to_string_pretty(&result).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize file uses: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        })
     }
 
     /// Detect architectural clusters in a repository by running Leiden community
@@ -865,19 +744,14 @@ impl CodesearchMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let input = params.0;
 
-        let use_case = self.container.cluster_detection_use_case();
-        let cluster_graph = use_case
+        let cluster_graph = self
+            .container
+            .cluster_detection_use_case()
             .create_clusters(&input.repository_id)
             .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Cluster detection failed: {}", e), None)
-            })?;
+            .map_err(tool_error)?;
 
-        let json = serde_json::to_string_pretty(&cluster_graph).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize clusters: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        ok_json(cluster_graph)
     }
 
     /// Return the architectural cluster a specific file belongs to. Returns
@@ -890,17 +764,14 @@ impl CodesearchMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let input = params.0;
 
-        let use_case = self.container.cluster_detection_use_case();
-        let cluster = use_case
+        let cluster = self
+            .container
+            .cluster_detection_use_case()
             .cluster_for_file(&input.file_path, &input.repository_id)
             .await
-            .map_err(|e| McpError::internal_error(format!("Cluster lookup failed: {}", e), None))?;
+            .map_err(tool_error)?;
 
-        let json = serde_json::to_string_pretty(&cluster).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize cluster: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        ok_json(cluster)
     }
 
     /// Find coupling elements: files/symbols or dependencies whose removal would
@@ -922,19 +793,14 @@ impl CodesearchMcpServer {
             McpError::invalid_params(format!("invalid level '{}': {msg}", input.level), None)
         })?;
 
-        let use_case = self.container.coupling_detection_use_case();
-        let report = use_case
+        let report = self
+            .container
+            .coupling_detection_use_case()
             .detect(&input.repository_id, level)
             .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Coupling detection failed: {}", e), None)
-            })?;
+            .map_err(tool_error)?;
 
-        let json = serde_json::to_string_pretty(&report).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize coupling report: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        ok_json(report)
     }
 
     /// One-shot repository dossier: index statistics, architectural modules
@@ -969,12 +835,7 @@ impl CodesearchMcpServer {
             .list_use_case()
             .execute()
             .await
-            .map_err(|e| {
-                McpError::internal_error(
-                    format!("Listing repositories for channel scope failed: {}", e),
-                    None,
-                )
-            })?
+            .map_err(tool_error)?
             .iter()
             .filter(|r| r.namespace() == Some(namespace))
             .map(|r| r.id().to_string())
@@ -994,15 +855,9 @@ impl CodesearchMcpServer {
             .repository_overview_use_case()
             .execute(&repository_id, &options)
             .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Building overview failed: {}", e), None)
-            })?;
+            .map_err(tool_error)?;
 
-        let json = serde_json::to_string_pretty(&report).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize overview report: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        ok_json(report)
     }
 
     /// Show cross-service channel links between indexed repositories:
@@ -1040,15 +895,9 @@ impl CodesearchMcpServer {
             .channel_link_use_case()
             .link(input.repository_ids.as_deref(), &options)
             .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Channel linking failed: {}", e), None)
-            })?;
+            .map_err(tool_error)?;
 
-        let json = serde_json::to_string_pretty(&report).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize channel report: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        ok_json(report)
     }
 
     /// Detect symbol communities in a repository by running Leiden community
@@ -1064,19 +913,14 @@ impl CodesearchMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let input = params.0;
 
-        let use_case = self.container.symbol_cluster_detection_use_case();
-        let community_graph = use_case
+        let community_graph = self
+            .container
+            .symbol_cluster_detection_use_case()
             .detect_communities(&input.repository_id)
             .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Symbol community detection failed: {}", e), None)
-            })?;
+            .map_err(tool_error)?;
 
-        let json = serde_json::to_string_pretty(&community_graph).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize communities: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        ok_json(community_graph)
     }
 
     /// Return the symbol community a specific symbol belongs to. Resolves the
@@ -1090,19 +934,14 @@ impl CodesearchMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let input = params.0;
 
-        let use_case = self.container.symbol_cluster_detection_use_case();
-        let community = use_case
+        let community = self
+            .container
+            .symbol_cluster_detection_use_case()
             .community_for_symbol(&input.symbol, &input.repository_id)
             .await
-            .map_err(|e| {
-                McpError::internal_error(format!("Symbol community lookup failed: {}", e), None)
-            })?;
+            .map_err(tool_error)?;
 
-        let json = serde_json::to_string_pretty(&community).map_err(|e| {
-            McpError::internal_error(format!("Failed to serialize community: {}", e), None)
-        })?;
-
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        ok_json(community)
     }
 }
 

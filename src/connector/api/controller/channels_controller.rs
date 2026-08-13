@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use crate::application::{ChannelLinkOptions, ChannelLinkReport};
 use crate::cli::OutputFormatTextJson;
 use crate::connector::api::container::Container;
-use crate::domain::{ChannelEndpoint, Protocol};
+use crate::domain::{ChannelEndpoint, Protocol, Repository};
 
 pub struct ChannelsController<'a> {
     container: &'a Container,
@@ -55,17 +55,8 @@ impl<'a> ChannelsController<'a> {
             Some(keys) => {
                 let mut ids = Vec::new();
                 for key in keys {
-                    let id = all_repos
-                        .iter()
-                        .find(|r| r.id() == key)
-                        .or_else(|| {
-                            all_repos
-                                .iter()
-                                .find(|r| r.name().eq_ignore_ascii_case(&key))
-                        })
-                        .map(|r| r.id().to_string())
-                        .with_context(|| format!("Repository not found: '{key}'"))?;
-                    ids.push(id);
+                    let repo = Repository::find(&key, &all_repos)?;
+                    ids.push(repo.id().to_string());
                 }
                 Some(ids)
             }
