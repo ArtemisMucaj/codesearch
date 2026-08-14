@@ -62,17 +62,32 @@ pub enum Direction {
 /// themselves are never emitted. A global visited set deduplicates symbols and
 /// guarantees termination on cyclic graphs, so every symbol appears exactly
 /// once, at the shallowest depth it was reached.
+///
+/// Only edges satisfying [`ReferenceKind::is_impact_edge`] are walked
+/// *through*. Structural references (imports, type references, field accesses)
+/// are still reported at the depth they are found, but do not become roots for
+/// the next hop: they form a near-connected graph, so traversing them
+/// transitively saturates the repository. Depth itself is never capped —
+/// reachability along real edges stays exhaustive.
 pub async fn bfs(
     call_graph: &CallGraphUseCase,
     roots: &[String],
     query: &CallGraphQuery,
     direction: Direction,
 ) -> Result<Vec<Vec<CallGraphNode>>, DomainError> {
+    // Two sets, deliberately: `visited` gates *reporting* (each symbol appears
+    // once, at the shallowest depth it was reached) while `enqueued` gates
+    // *expansion*. Sharing one set would let a symbol first seen over a
+    // structural edge be marked seen and then never expanded when a real call
+    // edge to it turns up later — making reachability depend on intra-level
+    // edge ordering.
     let mut visited: HashSet<String> = HashSet::new();
+    let mut enqueued: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<(String, usize)> = VecDeque::new();
 
     for symbol in roots {
-        if visited.insert(symbol.clone()) {
+        visited.insert(symbol.clone());
+        if enqueued.insert(symbol.clone()) {
             queue.push_back((symbol.clone(), 0));
         }
     }
@@ -105,7 +120,16 @@ pub async fn bfs(
             // deduplicated per file rather than per symbol, since every such
             // node shares the same placeholder name.
             let (symbol, visit_key, traversable) = match next_symbol {
-                Some(name) => (name.to_string(), name.to_string(), true),
+                Some(name) => (
+                    name.to_string(),
+                    name.to_string(),
+                    // Structural edges (imports, type references, field
+                    // accesses) are reported but not walked through: they form
+                    // a near-connected graph, so traversing them transitively
+                    // reaches most of the repository and the answer stops
+                    // meaning "what breaks if I change this".
+                    reference.reference_kind().is_impact_edge(),
+                ),
                 None => (
                     ANONYMOUS_SYMBOL.to_string(),
                     format!(
@@ -116,6 +140,14 @@ pub async fn bfs(
                     false,
                 ),
             };
+
+            // Expansion is decided before the reporting guard, not after: a
+            // symbol already *reported* via a structural edge must still be
+            // expandable when a real call edge to it turns up, and the guard
+            // below short-circuits the rest of this iteration.
+            if traversable && enqueued.insert(symbol.clone()) {
+                queue.push_back((symbol.clone(), next_depth));
+            }
 
             if !visited.insert(visit_key) {
                 continue;
@@ -131,10 +163,6 @@ pub async fn bfs(
                 import_alias: reference.import_alias().map(str::to_string),
                 via_symbol: Some(current.clone()),
             });
-
-            if traversable {
-                queue.push_back((symbol, next_depth));
-            }
         }
     }
 

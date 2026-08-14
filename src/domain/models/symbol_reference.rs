@@ -279,6 +279,30 @@ impl ReferenceKind {
         }
     }
 
+    /// Edges that transfer control at run time. Used for execution-flow
+    /// reachability, where a structural edge would fabricate a flow that never
+    /// executes.
+    pub fn is_execution_edge(&self) -> bool {
+        matches!(
+            self,
+            Self::Call | Self::MethodCall | Self::Instantiation | Self::MacroInvocation
+        )
+    }
+
+    /// Edges along which a change propagates. A superset of
+    /// [`Self::is_execution_edge`]: changing a trait method affects its
+    /// implementors even though `impl` transfers no control itself. Used for
+    /// blast radius (`impact`, `context`).
+    ///
+    /// Deliberately excludes `Import`, `TypeReference`, `VariableReference`,
+    /// `FieldAccess`, `GenericArgument` and `Unknown`: these are structural,
+    /// and traversing them transitively reaches most of the repository.
+    /// `Unknown` in particular is a large bucket on SCIP-imported TS/JS
+    /// graphs, where the importer falls back to descriptor heuristics.
+    pub fn is_impact_edge(&self) -> bool {
+        self.is_execution_edge() || matches!(self, Self::Implementation | Self::Inheritance)
+    }
+
     pub fn parse(s: &str) -> Self {
         match s {
             "call" => ReferenceKind::Call,
@@ -362,6 +386,70 @@ mod tests {
             let s = kind.as_str();
             let parsed = ReferenceKind::parse(s);
             assert_eq!(kind, parsed);
+        }
+    }
+
+    const ALL_KINDS: [ReferenceKind; 12] = [
+        ReferenceKind::Call,
+        ReferenceKind::MethodCall,
+        ReferenceKind::TypeReference,
+        ReferenceKind::Import,
+        ReferenceKind::VariableReference,
+        ReferenceKind::FieldAccess,
+        ReferenceKind::MacroInvocation,
+        ReferenceKind::Instantiation,
+        ReferenceKind::Implementation,
+        ReferenceKind::Inheritance,
+        ReferenceKind::GenericArgument,
+        ReferenceKind::Unknown,
+    ];
+
+    #[test]
+    fn structural_kinds_are_never_traversed() {
+        for kind in [
+            ReferenceKind::Import,
+            ReferenceKind::TypeReference,
+            ReferenceKind::VariableReference,
+            ReferenceKind::FieldAccess,
+            ReferenceKind::GenericArgument,
+            ReferenceKind::Unknown,
+        ] {
+            assert!(!kind.is_execution_edge(), "{kind:?} is not control flow");
+            assert!(!kind.is_impact_edge(), "{kind:?} must not propagate change");
+        }
+    }
+
+    #[test]
+    fn impact_edges_are_a_superset_of_execution_edges() {
+        // Load-bearing: pins the documented relationship, so a later edit to
+        // one predicate that silently diverges from the other fails CI.
+        for kind in ALL_KINDS {
+            if kind.is_execution_edge() {
+                assert!(kind.is_impact_edge(), "{kind:?} breaks the superset rule");
+            }
+        }
+    }
+
+    #[test]
+    fn trait_edges_propagate_change_but_not_control() {
+        // The one deliberate difference between the two relations: changing a
+        // trait method affects implementors, though `impl` transfers no control.
+        for kind in [ReferenceKind::Implementation, ReferenceKind::Inheritance] {
+            assert!(!kind.is_execution_edge());
+            assert!(kind.is_impact_edge());
+        }
+    }
+
+    #[test]
+    fn call_kinds_are_both_execution_and_impact_edges() {
+        for kind in [
+            ReferenceKind::Call,
+            ReferenceKind::MethodCall,
+            ReferenceKind::Instantiation,
+            ReferenceKind::MacroInvocation,
+        ] {
+            assert!(kind.is_execution_edge(), "{kind:?}");
+            assert!(kind.is_impact_edge(), "{kind:?}");
         }
     }
 }

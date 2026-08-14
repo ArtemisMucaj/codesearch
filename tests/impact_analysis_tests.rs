@@ -234,3 +234,206 @@ async fn test_impact_substring_falls_back_to_fuzzy_match() {
     assert_eq!(analysis.root_symbols, vec!["module/handle_request"]);
     assert_eq!(analysis.by_depth[0][0].symbol, "caller");
 }
+
+// ── Edge-kind filtering ───────────────────────────────────────────────────
+//
+// `bfs` used to walk all twelve ReferenceKinds as if they were call edges, so
+// a type annotation or an import became a traversal root for the next hop.
+// Structural edges are still *reported* — only traversal through them stops.
+
+fn reference(
+    caller: Option<&str>,
+    callee: &str,
+    file: &str,
+    line: u32,
+    kind: ReferenceKind,
+) -> SymbolReference {
+    SymbolReference::new(
+        caller.map(str::to_string),
+        callee.to_string(),
+        file.to_string(),
+        file.to_string(),
+        line,
+        0,
+        kind,
+        Language::Rust,
+        "repo1".to_string(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn import_edges_are_reported_but_not_traversed() {
+    let cg = make_call_graph_use_case().await;
+    // target <- importer (import edge) <- deep_caller (call edge)
+    // `deep_caller` is reachable only *through* the import edge.
+    let refs = vec![
+        reference(
+            Some("importer"),
+            "target",
+            "src/importer.rs",
+            1,
+            ReferenceKind::Import,
+        ),
+        reference(
+            Some("deep_caller"),
+            "importer",
+            "src/deep.rs",
+            2,
+            ReferenceKind::Call,
+        ),
+    ];
+    cg.save_references(&refs).await.expect("seed failed");
+
+    let analysis = ImpactAnalysisUseCase::new(cg)
+        .analyze("target", None, false)
+        .await
+        .expect("analyze failed");
+
+    let reached: Vec<&str> = analysis
+        .by_depth
+        .iter()
+        .flatten()
+        .map(|n| n.symbol.as_str())
+        .collect();
+
+    assert!(
+        reached.contains(&"importer"),
+        "the import edge itself must still be reported: {reached:?}"
+    );
+    assert!(
+        !reached.contains(&"deep_caller"),
+        "must not walk *through* an import edge: {reached:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn call_chains_still_reach_full_depth() {
+    // The complement: filtering edges must not truncate real call chains.
+    let cg = make_call_graph_use_case().await;
+    let refs = vec![
+        reference(Some("mid"), "target", "src/mid.rs", 1, ReferenceKind::Call),
+        reference(
+            Some("top"),
+            "mid",
+            "src/top.rs",
+            2,
+            ReferenceKind::MethodCall,
+        ),
+        reference(
+            Some("apex"),
+            "top",
+            "src/apex.rs",
+            3,
+            ReferenceKind::Instantiation,
+        ),
+    ];
+    cg.save_references(&refs).await.expect("seed failed");
+
+    let analysis = ImpactAnalysisUseCase::new(cg)
+        .analyze("target", None, false)
+        .await
+        .expect("analyze failed");
+
+    assert_eq!(analysis.total_affected, 3, "no depth cap, no truncation");
+    assert_eq!(analysis.max_depth_reached, 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn trait_implementation_edges_propagate_change() {
+    // `impl` transfers no control but does propagate change, so it is an
+    // impact edge even though it is not an execution edge.
+    let cg = make_call_graph_use_case().await;
+    let refs = vec![
+        reference(
+            Some("Impl"),
+            "Trait",
+            "src/impl.rs",
+            1,
+            ReferenceKind::Implementation,
+        ),
+        reference(Some("user"), "Impl", "src/user.rs", 2, ReferenceKind::Call),
+    ];
+    cg.save_references(&refs).await.expect("seed failed");
+
+    let analysis = ImpactAnalysisUseCase::new(cg)
+        .analyze("Trait", None, false)
+        .await
+        .expect("analyze failed");
+
+    let reached: Vec<&str> = analysis
+        .by_depth
+        .iter()
+        .flatten()
+        .map(|n| n.symbol.as_str())
+        .collect();
+    assert!(reached.contains(&"Impl"));
+    assert!(
+        reached.contains(&"user"),
+        "must traverse through an impl edge: {reached:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn symbol_reached_by_import_can_still_be_expanded_via_a_call() {
+    // Regression guard for the visited/enqueued split, and for deciding
+    // expansion *before* the reporting guard.
+    //
+    //   target <- hub          (import,  depth 1 — reported, not traversable)
+    //   target <- direct       (call,    depth 1)
+    //   direct <- hub          (call,    depth 2 — hub already reported)
+    //   hub    <- upstream     (call,    depth 3)
+    //
+    // `hub` is first reached at depth 1 over an import edge, so it is marked
+    // reported there. The real call edge to it arrives later, at depth 2, and
+    // hits the `visited` guard. If expansion were decided after that guard —
+    // as it reads most naturally — the `continue` would skip the enqueue and
+    // `upstream` would never be found.
+    let cg = make_call_graph_use_case().await;
+    let refs = vec![
+        reference(
+            Some("hub"),
+            "target",
+            "src/hub_import.rs",
+            1,
+            ReferenceKind::Import,
+        ),
+        reference(
+            Some("direct"),
+            "target",
+            "src/direct.rs",
+            2,
+            ReferenceKind::Call,
+        ),
+        reference(
+            Some("hub"),
+            "direct",
+            "src/hub_call.rs",
+            3,
+            ReferenceKind::Call,
+        ),
+        reference(
+            Some("upstream"),
+            "hub",
+            "src/upstream.rs",
+            4,
+            ReferenceKind::Call,
+        ),
+    ];
+    cg.save_references(&refs).await.expect("seed failed");
+
+    let analysis = ImpactAnalysisUseCase::new(cg)
+        .analyze("target", None, false)
+        .await
+        .expect("analyze failed");
+
+    let reached: Vec<&str> = analysis
+        .by_depth
+        .iter()
+        .flatten()
+        .map(|n| n.symbol.as_str())
+        .collect();
+    assert!(
+        reached.contains(&"upstream"),
+        "a call edge to an already-reported symbol must still expand it: {reached:?}"
+    );
+}

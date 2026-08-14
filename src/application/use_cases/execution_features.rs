@@ -8,7 +8,7 @@ use super::execution_features_naming::short_name;
 use crate::application::{
     AnalysisRepository, CallGraphQuery, CallGraphUseCase, MetadataRepository,
 };
-use crate::domain::{DomainError, ExecutionFeature, FeatureNode, ReferenceKind, SymbolReference};
+use crate::domain::{DomainError, ExecutionFeature, FeatureNode, SymbolReference};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Criticality scoring constants (weights must sum to 1.0)
@@ -37,14 +37,11 @@ const REACH_REFERENCE: f32 = 40.0;
 /// occurrences, symbol mentions); traversing those as if they were calls
 /// produces shallow, meaningless "features". Restricting the call graph to real
 /// call edges is what makes reachability a faithful measure of a flow.
+///
+/// The relation itself lives on `ReferenceKind::is_execution_edge`, so this
+/// module and the call-graph BFS share one definition rather than drifting.
 fn is_execution_edge(reference: &SymbolReference) -> bool {
-    matches!(
-        reference.reference_kind(),
-        ReferenceKind::Call
-            | ReferenceKind::MethodCall
-            | ReferenceKind::Instantiation
-            | ReferenceKind::MacroInvocation
-    )
+    reference.reference_kind().is_execution_edge()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
