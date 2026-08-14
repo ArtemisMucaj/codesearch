@@ -84,7 +84,12 @@ impl GraphExpansionUseCase {
             // Symbols seen for *this* seed, so seed_count counts distinct seeds.
             let mut connected: HashSet<String> = HashSet::new();
 
-            for reference in callers?.iter() {
+            // Same edge policy as the call-graph BFS: a structural reference
+            // is not evidence that two symbols belong to the same answer.
+            for reference in callers?
+                .iter()
+                .filter(|r| r.reference_kind().is_impact_edge())
+            {
                 if let Some(caller) = reference.caller_symbol() {
                     Self::tally(
                         &mut neighbors,
@@ -95,7 +100,10 @@ impl GraphExpansionUseCase {
                     );
                 }
             }
-            for reference in callees?.iter() {
+            for reference in callees?
+                .iter()
+                .filter(|r| r.reference_kind().is_impact_edge())
+            {
                 Self::tally(
                     &mut neighbors,
                     &mut connected,
