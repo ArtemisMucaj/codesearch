@@ -28,6 +28,10 @@ pub struct SymbolContext {
     pub total_callees: usize,
     /// Deepest hop level reached that contained at least one callee.
     pub max_callee_depth: usize,
+    /// `false` when the symbol could not be resolved against the call graph.
+    /// When `false`, empty caller/callee lists mean "not indexed", NOT "no
+    /// callers or callees".
+    pub resolved: bool,
 }
 
 impl SymbolContext {
@@ -113,7 +117,7 @@ impl SymbolContextUseCase {
             query = query.with_regex();
         }
 
-        let (root_symbols, display_symbol) =
+        let (root_symbols, display_symbol, resolved) =
             resolve_roots(&self.call_graph, symbol, &query, is_regex).await?;
 
         // Run both BFS passes in parallel.
@@ -136,6 +140,7 @@ impl SymbolContextUseCase {
             callees_by_depth,
             total_callees,
             max_callee_depth,
+            resolved,
         })
     }
 }

@@ -49,10 +49,22 @@ impl<'a> ImpactController<'a> {
     }
 
     fn format_impact(&self, analysis: &ImpactAnalysis) -> String {
+        // "Not indexed" and "no callers" are opposite conclusions, and this is
+        // what an agent reads before a refactor. Never print a zero-count blast
+        // radius for a symbol that was never found.
+        if !analysis.resolved {
+            return format!(
+                "Symbol '{}' was not found in the call graph — this is NOT a clean \
+                 blast radius.\n\
+                 Is this repository indexed with call-graph support? Try: codesearch index .",
+                analysis.root_symbol
+            );
+        }
+
         if analysis.total_affected == 0 {
             return format!(
-                "No callers found for '{}'. Either the symbol is a root entry point or \
-                 it hasn't been indexed yet.",
+                "No callers found for '{}'. The symbol is indexed, so it is a root \
+                 entry point — nothing calls it.",
                 analysis.root_symbol
             );
         }

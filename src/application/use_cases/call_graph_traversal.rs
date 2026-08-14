@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::pattern_utils::build_fuzzy_pattern;
 use crate::application::{CallGraphQuery, CallGraphUseCase};
@@ -191,22 +191,27 @@ pub async fn resolve_matches(
 ///
 /// When nothing resolves, the literal input is returned as the sole root so
 /// the caller still gets a (necessarily empty) result keyed by what was asked.
-/// Callers that need to tell "no match" apart from that use
-/// [`resolve_matches`] directly.
+///
+/// Returns `(root_symbols, display_label, resolved)`.
+///
+/// `resolved` is `false` when no indexed symbol matched and `root_symbols`
+/// holds the raw query string as a fallback. Callers MUST surface this: an
+/// empty BFS result from an unresolved root means "not indexed", not "no
+/// callers", and the two are otherwise indistinguishable.
 pub async fn resolve_roots(
     call_graph: &CallGraphUseCase,
     symbol: &str,
     query: &CallGraphQuery,
     is_regex: bool,
-) -> Result<(Vec<String>, String), DomainError> {
+) -> Result<(Vec<String>, String, bool), DomainError> {
     let resolved = resolve_matches(call_graph, symbol, query, is_regex).await?;
 
     if resolved.is_empty() {
-        debug!(
+        warn!(
             symbol,
             "call graph: no rows match pattern — symbol may not be indexed"
         );
-        return Ok((vec![symbol.to_string()], symbol.to_string()));
+        return Ok((vec![symbol.to_string()], symbol.to_string(), false));
     }
 
     debug!(
@@ -216,7 +221,7 @@ pub async fn resolve_roots(
         resolved.len()
     );
     let label = display_label(symbol, &resolved);
-    Ok((resolved, label))
+    Ok((resolved, label, true))
 }
 
 /// Human-readable label for the analysed symbol. A single root is shown

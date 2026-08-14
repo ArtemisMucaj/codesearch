@@ -177,6 +177,42 @@ async fn test_impact_unknown_symbol_is_empty() {
     assert_eq!(analysis.max_depth_reached, 0);
 }
 
+// The pair below is the point: identical `total_affected`, different
+// `resolved`. Either test alone demonstrates nothing — it is the fact that a
+// zero blast radius is reported for both an unindexed symbol and a genuine
+// root entry point that makes the flag necessary.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unresolved_symbol_is_flagged_not_reported_as_zero_impact() {
+    let cg = make_call_graph_use_case().await;
+    seed_chain(&cg).await;
+
+    let analysis = ImpactAnalysisUseCase::new(cg)
+        .analyze("no_such_symbol_xyz", None, false)
+        .await
+        .expect("analyze failed");
+
+    assert!(!analysis.resolved, "must not claim a clean blast radius");
+    assert_eq!(analysis.total_affected, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn indexed_leaf_symbol_is_resolved_with_zero_callers() {
+    let cg = make_call_graph_use_case().await;
+    seed_chain(&cg).await;
+
+    // `entry` is in the seeded graph and calls `middle`, but nothing calls
+    // `entry` itself: a genuine root entry point, and the case the unresolved
+    // path was indistinguishable from.
+    let analysis = ImpactAnalysisUseCase::new(cg)
+        .analyze("entry", None, false)
+        .await
+        .expect("analyze failed");
+
+    assert!(analysis.resolved, "indexed symbol must report resolved");
+    assert_eq!(analysis.total_affected, 0);
+}
+
 /// A substring that matches no FQN exactly falls back to a `.*sub.*` regex.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_impact_substring_falls_back_to_fuzzy_match() {

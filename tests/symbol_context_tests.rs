@@ -144,3 +144,41 @@ async fn test_context_cycle_guard() {
         .expect("get_context must not loop");
     assert!(ctx.total_callees > 0);
 }
+
+// The pair below is the point: both report empty caller and callee lists, and
+// only `resolved` tells "not indexed" apart from "indexed but isolated".
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unresolved_symbol_is_flagged_not_reported_as_empty_context() {
+    let cg = make_call_graph_use_case().await;
+    seed_chain(&cg).await;
+
+    let ctx = SymbolContextUseCase::new(cg)
+        .get_context("no_such_symbol_xyz", None, false)
+        .await
+        .expect("get_context failed");
+
+    assert!(
+        !ctx.resolved,
+        "must not claim an indexed symbol has no edges"
+    );
+    assert_eq!(ctx.total_callers, 0);
+    assert_eq!(ctx.total_callees, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn indexed_symbol_with_no_edges_is_resolved() {
+    let cg = make_call_graph_use_case().await;
+    seed_chain(&cg).await;
+
+    // `entry` is indexed and calls `middle`, but nothing calls it. Its callers
+    // list is empty for a real reason, which `resolved` must distinguish from
+    // the symbol being absent entirely.
+    let ctx = SymbolContextUseCase::new(cg)
+        .get_context("entry", None, false)
+        .await
+        .expect("get_context failed");
+
+    assert!(ctx.resolved, "indexed symbol must report resolved");
+    assert_eq!(ctx.total_callers, 0);
+}

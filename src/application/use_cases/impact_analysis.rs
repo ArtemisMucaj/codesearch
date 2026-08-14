@@ -24,6 +24,9 @@ pub struct ImpactAnalysis {
     pub max_depth_reached: usize,
     /// Affected symbols grouped by hop depth (index 0 = depth 1 = direct callers).
     pub by_depth: Vec<Vec<CallGraphNode>>,
+    /// `false` when the symbol could not be resolved against the call graph.
+    /// When `false`, `total_affected == 0` means "not indexed", NOT "no callers".
+    pub resolved: bool,
 }
 
 impl ImpactAnalysis {
@@ -80,7 +83,7 @@ impl ImpactAnalysisUseCase {
             query = query.with_regex();
         }
 
-        let (root_symbols, root_symbol) =
+        let (root_symbols, root_symbol, resolved) =
             resolve_roots(&self.call_graph, symbol, &query, is_regex).await?;
 
         let by_depth = bfs(&self.call_graph, &root_symbols, &query, Direction::Callers).await?;
@@ -92,6 +95,7 @@ impl ImpactAnalysisUseCase {
             total_affected,
             max_depth_reached,
             by_depth,
+            resolved,
         })
     }
 }
