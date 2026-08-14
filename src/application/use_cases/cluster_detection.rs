@@ -30,6 +30,7 @@ use crate::application::{AnalysisRepository, FileRelationshipUseCase};
 use crate::domain::{
     community_label, namespace_scope_id, stable_community_id, Cluster, ClusterGraph, CommunityMeta,
     DomainError, FileEdge, FileGraph, GraphEdge, GraphLevel, GraphNode, GraphView, Language,
+    ReferenceKind,
 };
 
 // ── Edge-weight constants by reference kind ───────────────────────────────
@@ -47,14 +48,27 @@ const IMPORT_WEIGHT: f64 = 0.5;
 /// Default weight for unrecognised reference kinds.
 const DEFAULT_KIND_WEIGHT: f64 = 0.3;
 
-pub(crate) fn kind_weight(kind: &str) -> f64 {
-    match kind.to_lowercase().as_str() {
-        "call" | "methodcall" => CALL_WEIGHT,
-        "inheritance" => INHERITANCE_WEIGHT,
-        "implementation" => IMPLEMENTATION_WEIGHT,
-        "typereference" => TYPEREFERENCE_WEIGHT,
-        "import" => IMPORT_WEIGHT,
-        _ => DEFAULT_KIND_WEIGHT,
+/// Edge weight for a reference kind.
+///
+/// Takes the enum rather than its serialised form deliberately: the match is
+/// exhaustive, so adding a `ReferenceKind` variant is a compile error here
+/// until it is given a weight. An earlier `&str` version silently missed
+/// `method_call` and `type_reference` — the dominant kinds in OO code — and
+/// scored them at the default.
+pub(crate) fn kind_weight(kind: ReferenceKind) -> f64 {
+    match kind {
+        ReferenceKind::Call | ReferenceKind::MethodCall => CALL_WEIGHT,
+        ReferenceKind::Inheritance => INHERITANCE_WEIGHT,
+        ReferenceKind::Implementation => IMPLEMENTATION_WEIGHT,
+        ReferenceKind::TypeReference => TYPEREFERENCE_WEIGHT,
+        ReferenceKind::Import => IMPORT_WEIGHT,
+        // Deliberately on the default weight, not merely unlisted.
+        ReferenceKind::VariableReference
+        | ReferenceKind::FieldAccess
+        | ReferenceKind::MacroInvocation
+        | ReferenceKind::Instantiation
+        | ReferenceKind::GenericArgument
+        | ReferenceKind::Unknown => DEFAULT_KIND_WEIGHT,
     }
 }
 
@@ -69,7 +83,7 @@ fn composite_weight(edge: &FileEdge) -> f64 {
     let mean_kind: f64 = edge
         .reference_kinds
         .iter()
-        .map(|k| kind_weight(k))
+        .map(|k| kind_weight(ReferenceKind::parse(k)))
         .sum::<f64>()
         / edge.reference_kinds.len() as f64;
     base * mean_kind
@@ -962,10 +976,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_kind_weight() {
-        assert_eq!(kind_weight("call"), 1.0);
-        assert_eq!(kind_weight("import"), 0.5);
-        assert_eq!(kind_weight("unknown_kind"), 0.3);
+    fn kind_weight_matches_canonical_serialization() {
+        assert_eq!(kind_weight(ReferenceKind::Call), CALL_WEIGHT);
+        assert_eq!(kind_weight(ReferenceKind::MethodCall), CALL_WEIGHT);
+        assert_eq!(
+            kind_weight(ReferenceKind::TypeReference),
+            TYPEREFERENCE_WEIGHT
+        );
+        assert_eq!(kind_weight(ReferenceKind::Inheritance), INHERITANCE_WEIGHT);
+        assert_eq!(
+            kind_weight(ReferenceKind::Implementation),
+            IMPLEMENTATION_WEIGHT
+        );
+        assert_eq!(kind_weight(ReferenceKind::Import), IMPORT_WEIGHT);
+    }
+
+    #[test]
+    fn every_reference_kind_has_a_deliberate_weight() {
+        // Kinds intentionally left on the default. Update when adding a
+        // variant — this list is the record of that decision.
+        for kind in [
+            ReferenceKind::VariableReference,
+            ReferenceKind::FieldAccess,
+            ReferenceKind::MacroInvocation,
+            ReferenceKind::Instantiation,
+            ReferenceKind::GenericArgument,
+            ReferenceKind::Unknown,
+        ] {
+            assert_eq!(kind_weight(kind), DEFAULT_KIND_WEIGHT, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn parse_round_trips_every_kind() {
+        // Guards the composite_weight boundary: as_str() -> parse() must be
+        // identity, or file-level edge weights silently fall to the default.
+        for kind in [
+            ReferenceKind::Call,
+            ReferenceKind::MethodCall,
+            ReferenceKind::TypeReference,
+            ReferenceKind::Import,
+            ReferenceKind::VariableReference,
+            ReferenceKind::FieldAccess,
+            ReferenceKind::MacroInvocation,
+            ReferenceKind::Instantiation,
+            ReferenceKind::Implementation,
+            ReferenceKind::Inheritance,
+            ReferenceKind::GenericArgument,
+            ReferenceKind::Unknown,
+        ] {
+            assert_eq!(ReferenceKind::parse(kind.as_str()), kind);
+        }
     }
 
     #[test]

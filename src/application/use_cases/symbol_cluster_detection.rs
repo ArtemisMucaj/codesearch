@@ -530,7 +530,7 @@ impl SymbolClusterDetectionUseCase {
                 continue; // self-reference / direct recursion — not a community edge
             }
 
-            let weight = kind_weight(reference.reference_kind().as_str());
+            let weight = kind_weight(reference.reference_kind());
             let lang = reference.language().as_str().to_string();
             language_of
                 .entry(caller.to_string())
