@@ -14,6 +14,19 @@ use crate::domain::{Language, ReferenceKind, SymbolReference};
 const ROLE_DEFINITION: i32 = SymbolRole::Definition as i32;
 const ROLE_IMPORT: i32 = SymbolRole::Import as i32;
 const ROLE_READ_ACCESS: i32 = SymbolRole::ReadAccess as i32;
+const ROLE_FORWARD_DEFINITION: i32 = SymbolRole::ForwardDefinition as i32;
+
+/// Both roles mark a definition site: `Definition` is the real one,
+/// `ForwardDefinition` a prototype or declaration (C/C++ header, TypeScript
+/// `declare`, PHP interface method signature). Neither is a call, so neither
+/// may be imported as a reference.
+const DEFINITION_ROLES: i32 = ROLE_DEFINITION | ROLE_FORWARD_DEFINITION;
+
+// Two further SCIP roles are deliberately left as ordinary references rather
+// than overlooked: `Generated` (16), where machine-written code arguably
+// should not inflate the call graph, and `Test` (32), an indexer-provided
+// signal more reliable than the path heuristics used elsewhere. Both are
+// judgement calls beyond the scope of the definition-role fix.
 
 /// Parses a `.scip` index file and converts its occurrences into
 /// [`SymbolReference`] entries compatible with the existing DuckDB call graph
@@ -99,6 +112,12 @@ impl ScipImporter {
 /// back to leaving `reference_file_path` as the referencing file.
 fn build_definition_file_map(index: &scip::types::Index) -> HashMap<String, String> {
     let mut def_file_of: HashMap<String, String> = HashMap::new();
+    // Forward declarations are kept apart rather than merged in as they are
+    // found. `def_file_of` is first-wins and SCIP document order is not
+    // guaranteed, so a header could otherwise beat the implementation file and
+    // every reference would resolve to the prototype — worse than not
+    // recording it at all. These only fill genuine gaps, after both loops.
+    let mut forward_def_file_of: HashMap<String, String> = HashMap::new();
 
     for doc in &index.documents {
         let language = scip_language_to_domain(&doc.language, &doc.relative_path);
@@ -110,7 +129,11 @@ fn build_definition_file_map(index: &scip::types::Index) -> HashMap<String, Stri
         }
 
         for occ in &doc.occurrences {
-            if (occ.symbol_roles & ROLE_DEFINITION) == 0 || occ.range.is_empty() {
+            // An occurrence can carry both bits; a real definition takes
+            // precedence over a forward declaration of the same symbol.
+            let is_definition = (occ.symbol_roles & ROLE_DEFINITION) != 0;
+            let is_forward = (occ.symbol_roles & ROLE_FORWARD_DEFINITION) != 0;
+            if (!is_definition && !is_forward) || occ.range.is_empty() {
                 continue;
             }
             if occ.symbol.starts_with("local ") {
@@ -123,10 +146,24 @@ fn build_definition_file_map(index: &scip::types::Index) -> HashMap<String, Stri
             if normalize_symbol(&occ.symbol, language).is_empty() {
                 continue;
             }
-            def_file_of
+            let target = if is_definition {
+                &mut def_file_of
+            } else {
+                &mut forward_def_file_of
+            };
+            target
                 .entry(occ.symbol.clone())
                 .or_insert_with(|| doc.relative_path.clone());
         }
+    }
+
+    // A symbol defined only by a forward declaration (an interface method, a
+    // header prototype with the body elsewhere or absent) would otherwise be
+    // missing from the map entirely, and its references would fall back to the
+    // *referencing* file — degrading exactly the cross-file edges this map
+    // exists to produce.
+    for (symbol, path) in forward_def_file_of {
+        def_file_of.entry(symbol).or_insert(path);
     }
 
     def_file_of
@@ -180,8 +217,10 @@ fn process_document(
     let mut refs = Vec::new();
 
     for occ in &doc.occurrences {
-        // Skip definitions and occurrences without a range.
-        if (occ.symbol_roles & ROLE_DEFINITION) != 0 || occ.range.is_empty() {
+        // Skip definitions (real and forward) and occurrences without a range.
+        // A forward declaration is not a call: importing one would make a
+        // header prototype appear as a caller of its own implementation.
+        if (occ.symbol_roles & DEFINITION_ROLES) != 0 || occ.range.is_empty() {
             continue;
         }
 
@@ -853,5 +892,116 @@ mod tests {
             scip_language_to_domain("", "src/main.ts"),
             Language::TypeScript
         );
+    }
+
+    // ── Definition roles ──────────────────────────────────────────────
+    //
+    // SCIP has two definition roles. `ForwardDefinition` (bit 64) marks a
+    // prototype: a C/C++ header declaration, a TypeScript `declare`, a PHP
+    // interface method signature. Treating one as a reference makes the
+    // prototype look like a caller of its own implementation.
+
+    fn occurrence(symbol: &str, roles: i32, line: i32) -> scip::types::Occurrence {
+        scip::types::Occurrence {
+            range: vec![line, 0, line, 10],
+            symbol: symbol.to_string(),
+            symbol_roles: roles,
+            ..Default::default()
+        }
+    }
+
+    fn document(path: &str, occurrences: Vec<scip::types::Occurrence>) -> scip::types::Document {
+        scip::types::Document {
+            language: "TypeScript".to_string(),
+            relative_path: path.to_string(),
+            occurrences,
+            ..Default::default()
+        }
+    }
+
+    fn index(documents: Vec<scip::types::Document>) -> scip::types::Index {
+        scip::types::Index {
+            documents,
+            ..Default::default()
+        }
+    }
+
+    const SYM: &str = "scip-typescript npm . . `api.ts`/handler().";
+
+    #[test]
+    fn forward_definition_is_not_imported_as_a_reference() {
+        let doc = document(
+            "api.d.ts",
+            vec![occurrence(SYM, ROLE_FORWARD_DEFINITION, 3)],
+        );
+        let refs = process_document(&doc, "repo1", Language::TypeScript, &HashMap::new());
+        assert!(
+            refs.is_empty(),
+            "a forward declaration is not a call and must not become a caller"
+        );
+    }
+
+    #[test]
+    fn real_definition_is_still_not_imported_as_a_reference() {
+        // Guards the pre-existing behaviour the wider mask must preserve.
+        let doc = document("api.ts", vec![occurrence(SYM, ROLE_DEFINITION, 3)]);
+        let refs = process_document(&doc, "repo1", Language::TypeScript, &HashMap::new());
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn plain_reference_is_still_imported() {
+        // The complement: widening the definition mask must not swallow real
+        // references.
+        let doc = document("caller.ts", vec![occurrence(SYM, 0, 7)]);
+        let refs = process_document(&doc, "repo1", Language::TypeScript, &HashMap::new());
+        assert_eq!(refs.len(), 1, "a non-definition occurrence is a reference");
+    }
+
+    #[test]
+    fn forward_definition_fills_a_gap_in_the_definition_map() {
+        // Symbol defined only by a declaration: without this it is absent from
+        // the map entirely, and its references fall back to the *referencing*
+        // file, degrading the cross-file edges the map exists to produce.
+        let idx = index(vec![document(
+            "api.d.ts",
+            vec![occurrence(SYM, ROLE_FORWARD_DEFINITION, 3)],
+        )]);
+        let map = build_definition_file_map(&idx);
+        assert_eq!(map.get(SYM), Some(&"api.d.ts".to_string()));
+    }
+
+    #[test]
+    fn real_definition_wins_over_a_forward_declaration() {
+        // Document order is not guaranteed, so the header is listed FIRST here:
+        // a first-wins map would resolve every reference to the prototype,
+        // which is worse than not recording it at all.
+        let idx = index(vec![
+            document(
+                "api.d.ts",
+                vec![occurrence(SYM, ROLE_FORWARD_DEFINITION, 3)],
+            ),
+            document("api.ts", vec![occurrence(SYM, ROLE_DEFINITION, 10)]),
+        ]);
+        let map = build_definition_file_map(&idx);
+        assert_eq!(
+            map.get(SYM),
+            Some(&"api.ts".to_string()),
+            "the implementation must win regardless of document order"
+        );
+    }
+
+    #[test]
+    fn occurrence_carrying_both_roles_counts_as_a_real_definition() {
+        let both = ROLE_DEFINITION | ROLE_FORWARD_DEFINITION;
+        let idx = index(vec![
+            document("impl.ts", vec![occurrence(SYM, both, 1)]),
+            document(
+                "other.d.ts",
+                vec![occurrence(SYM, ROLE_FORWARD_DEFINITION, 1)],
+            ),
+        ]);
+        let map = build_definition_file_map(&idx);
+        assert_eq!(map.get(SYM), Some(&"impl.ts".to_string()));
     }
 }
