@@ -388,6 +388,8 @@ impl CodesearchMcpServer {
     /// Performs a BFS through the call graph to find every symbol that directly or
     /// transitively calls (or depends on) the given symbol, grouped by hop depth.
     /// Requires the repository to have been indexed with call-graph support.
+    /// Returns `resolved: false` when the symbol is not present in the index; in
+    /// that case `total_affected: 0` means "not indexed", not "no callers".
     #[tool(name = "analyze_impact")]
     async fn analyze_impact(
         &self,
@@ -409,6 +411,8 @@ impl CodesearchMcpServer {
     /// calls (callees). Useful for understanding a symbol's role in the codebase
     /// before refactoring or debugging.
     /// Requires the repository to have been indexed with call-graph support.
+    /// Returns `resolved: false` when the symbol is not present in the index; in
+    /// that case empty caller/callee lists mean "not indexed", not "no callers".
     #[tool(name = "get_symbol_context")]
     async fn get_symbol_context(
         &self,

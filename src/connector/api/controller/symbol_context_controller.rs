@@ -53,6 +53,16 @@ impl<'a> SymbolContextController<'a> {
     }
 
     fn format_text(ctx: &SymbolContext) -> String {
+        // An unresolved symbol has no callers *and* no callees, which would
+        // otherwise render identically to an indexed, isolated symbol.
+        if !ctx.resolved {
+            return format!(
+                "Symbol '{}' was not found in the call graph.\n\
+                 Is this repository indexed with call-graph support? Try: codesearch index .\n",
+                ctx.symbol
+            );
+        }
+
         let mut out = format!(
             "Context for '{}'\n\
              ─────────────────────────────────────────\n",
