@@ -11,17 +11,15 @@ pub const RRF_K: f32 = 60.0;
 /// production code in search rankings.
 pub const TEST_FILE_PENALTY: f32 = 0.5;
 
-/// Minimum RRF score a result must reach to be included in the output.
-/// With RRF_K=60, scores range from 1/61 ≈ 0.0164 (rank 0, single list)
-/// up to ~0.13 (rank 0 in all 4 variants × 2 legs).
-/// This threshold drops results that appear only once and below rank ~15
-/// in their list (1/76 ≈ 0.0132), keeping only well-ranked or multi-list hits.
-pub const RRF_MIN_SCORE: f32 = 0.013;
-
 /// Returns `true` if the file path looks like a test file.
 ///
 /// Matches common conventions across languages:
-/// - Directory segments: `test`, `tests`, `spec`, `specs`, `__tests__`, `__test__`, `testdata`
+/// - Directory segments: `test`, `tests`, `__tests__`, `__test__`
+///
+/// Deliberately NOT matched: `spec/` (commonly API specifications —
+/// `spec/openapi.yaml` — and an RSpec idiom for a language not supported
+/// here) and `testdata/` (a Go convention for fixtures and golden files,
+/// frequently the very thing being searched for).
 /// - File-name dot-components: `.test.`, `.spec.` (e.g. `foo.test.ts`, `bar.spec.js`)
 /// - File-stem prefixes/suffixes: `test_foo`, `foo_test` (e.g. Python, Rust)
 pub fn is_test_file(path: &str) -> bool {
@@ -35,10 +33,7 @@ pub fn is_test_file(path: &str) -> bool {
         &[][..]
     };
     for dir in dir_parts {
-        if matches!(
-            *dir,
-            "test" | "tests" | "spec" | "specs" | "__tests__" | "__test__" | "testdata"
-        ) {
+        if matches!(*dir, "test" | "tests" | "__tests__" | "__test__") {
             return true;
         }
     }
@@ -74,8 +69,12 @@ pub fn is_test_file(path: &str) -> bool {
 /// search leg, two for a hybrid semantic + text search, or N for query
 /// expansion where each variant was searched independently.
 ///
-/// Results from test files are penalised by [`TEST_FILE_PENALTY`] before the
-/// final sort so that production code consistently ranks above test helpers.
+/// Pure fusion and location-dedup: no domain scoring, no admission control.
+/// The test-file penalty lives in [`apply_test_file_penalty`] because this
+/// function runs more than once on the graph-expansion path, and anything
+/// applied here would compound. Quality filtering belongs after reranking,
+/// where scores are comparable — RRF scores are rank-derived and occupy a
+/// narrow band, so an absolute floor here is a rank cutoff in disguise.
 pub fn rrf_fuse(lists: Vec<Vec<SearchResult>>, limit: usize) -> Vec<SearchResult> {
     let mut scores: HashMap<String, (SearchResult, f32)> = HashMap::new();
 
@@ -92,13 +91,6 @@ pub fn rrf_fuse(lists: Vec<Vec<SearchResult>>, limit: usize) -> Vec<SearchResult
 
     let mut fused: Vec<(SearchResult, f32)> = scores.into_values().collect();
 
-    // Apply test-file penalty before sorting so test results are ranked lower.
-    for (result, score) in &mut fused {
-        if is_test_file(result.chunk().file_path()) {
-            *score *= TEST_FILE_PENALTY;
-        }
-    }
-
     fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     // Deduplicate by physical location: if two chunks share the same
@@ -109,7 +101,6 @@ pub fn rrf_fuse(lists: Vec<Vec<SearchResult>>, limit: usize) -> Vec<SearchResult
 
     fused
         .into_iter()
-        .filter(|(_, score)| *score >= RRF_MIN_SCORE)
         .filter(|(r, _)| {
             let loc = (
                 r.chunk().repository_id().to_string(),
@@ -122,6 +113,27 @@ pub fn rrf_fuse(lists: Vec<Vec<SearchResult>>, limit: usize) -> Vec<SearchResult
         .take(limit)
         .map(|(r, score)| SearchResult::new(r.chunk().clone(), score))
         .collect()
+}
+
+/// Down-rank results from test files, once, after all fusion is complete.
+///
+/// Kept out of [`rrf_fuse`] deliberately: fusion runs more than once on the
+/// graph-expansion path, and applying the penalty inside it would compound
+/// (×0.5 per pass, so ×0.25 effective). This **reorders only** — it never
+/// removes a result, so a rank-0 test file stays reachable for queries that
+/// are *about* tests.
+pub fn apply_test_file_penalty(results: &mut [SearchResult]) {
+    for result in results.iter_mut() {
+        if is_test_file(result.chunk().file_path()) {
+            let penalised = result.score() * TEST_FILE_PENALTY;
+            *result = SearchResult::new(result.chunk().clone(), penalised);
+        }
+    }
+    results.sort_by(|a, b| {
+        b.score()
+            .partial_cmp(&a.score())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 }
 
 #[cfg(test)]
@@ -191,11 +203,8 @@ mod tests {
     fn test_directory_segments_are_matched() {
         assert!(is_test_file("tests/foo.rs"));
         assert!(is_test_file("test/foo.rs"));
-        assert!(is_test_file("spec/bar.js"));
-        assert!(is_test_file("specs/bar.js"));
         assert!(is_test_file("__tests__/baz.ts"));
         assert!(is_test_file("__test__/baz.ts"));
-        assert!(is_test_file("testdata/fixture.json"));
         assert!(is_test_file("src/module/tests/integration.rs"));
     }
 
@@ -220,43 +229,85 @@ mod tests {
         assert!(is_test_file("src\\module\\tests\\bar.rs"));
     }
 
-    // --- rrf_fuse with penalty ---
+    // --- test-file penalty ---
+    //
+    // The penalty reorders; it must never remove. An absolute score floor
+    // combined with it used to delete a rank-0 test hit outright, so a query
+    // *about* tests could return nothing at all.
 
     #[test]
-    fn test_file_score_is_penalised() {
-        // "prod" at rank 0 scores 1/61 ≈ 0.0164 — above RRF_MIN_SCORE.
-        // "test_result" at rank 0 scores 1/61 × TEST_FILE_PENALTY ≈ 0.0082 —
-        // below RRF_MIN_SCORE, so it is filtered out entirely.
+    fn production_code_outranks_test_code() {
         let semantic = vec![make_result_at("prod", "src/lib.rs")];
         let text = vec![make_result_at("test_result", "tests/foo.rs")];
-        let fused = rrf_fuse(vec![semantic, text], 10);
+        let mut fused = rrf_fuse(vec![semantic, text], 10);
+        apply_test_file_penalty(&mut fused);
 
-        assert_eq!(fused.len(), 1);
+        assert_eq!(fused.len(), 2, "both results survive; the penalty reorders");
         assert_eq!(fused[0].chunk().id(), "prod");
     }
 
     #[test]
-    fn test_file_penalty_drops_weak_result() {
-        // A single test-file result at rank 0: penalised score ≈ 0.0082 < RRF_MIN_SCORE.
-        // It should be filtered out entirely.
-        let fused = rrf_fuse(vec![vec![make_result_at("x", "tests/foo.rs")]], 10);
-        assert!(fused.is_empty());
+    fn test_file_is_ranked_lower_but_never_dropped() {
+        let mut fused = rrf_fuse(vec![vec![make_result_at("x", "tests/foo.rs")]], 10);
+        apply_test_file_penalty(&mut fused);
+        assert_eq!(fused.len(), 1, "a rank-0 test result must never be deleted");
+        assert!(fused[0].score() > 0.0);
     }
 
     #[test]
     fn test_file_in_both_lists_score_is_additive_then_penalized() {
         // Same test-file result at rank 0 in both legs:
         // raw score = 2 × 1/(RRF_K + 1), then multiplied by TEST_FILE_PENALTY.
-        let fused = rrf_fuse(
+        let mut fused = rrf_fuse(
             vec![
                 vec![make_result_at("x", "tests/foo.rs")],
                 vec![make_result_at("x", "tests/foo.rs")],
             ],
             10,
         );
+        apply_test_file_penalty(&mut fused);
         assert_eq!(fused.len(), 1);
         let expected = (2.0 / (RRF_K + 1.0)) * TEST_FILE_PENALTY;
         assert!((fused[0].score() - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn spec_and_fixture_dirs_are_not_test_files() {
+        // `spec/` is commonly API specifications, `testdata/` a Go fixture
+        // convention — both are frequently what a user is searching for.
+        assert!(!is_test_file("spec/openapi.yaml"));
+        assert!(!is_test_file("spec/asyncapi.yaml"));
+        assert!(!is_test_file("specs/schema.json"));
+        assert!(!is_test_file("src/testdata/table.rs"));
+    }
+
+    #[test]
+    fn penalty_is_not_compounded_by_refusion() {
+        // Regression guard: the graph-expansion path fuses already-fused
+        // output, which used to re-apply the penalty (×0.25 effective).
+        let mut once = rrf_fuse(vec![vec![make_result_at("t", "tests/a.rs")]], 10);
+        apply_test_file_penalty(&mut once);
+        let mut twice = rrf_fuse(vec![once.clone()], 10);
+        apply_test_file_penalty(&mut twice);
+        assert!(
+            (once[0].score() - twice[0].score()).abs() < 1e-6,
+            "re-fusing must not re-apply the test penalty: {} vs {}",
+            once[0].score(),
+            twice[0].score()
+        );
+    }
+
+    #[test]
+    fn a_low_ranked_lone_result_is_no_longer_deleted() {
+        // The score floor used to drop anything below rank ~15 that appeared
+        // in only one list, regardless of how few results existed overall.
+        // Distinct lines: location-dedup is correct and must stay, so the
+        // fixture must not accidentally exercise it instead.
+        let list: Vec<SearchResult> = (0..20)
+            .map(|i| make_result_at_line(&format!("r{i}"), "src/lib.rs", i + 1))
+            .collect();
+        let fused = rrf_fuse(vec![list], 50);
+        assert_eq!(fused.len(), 20, "limit truncates; no score floor does");
     }
 
     #[test]
