@@ -191,6 +191,35 @@ fn parse_remote_section(line: &str) -> Option<String> {
     }
 }
 
+/// Derive a per-repository namespace name for `root`.
+///
+/// Returns `owner/repo` — the normalised remote with its host stripped — so
+/// that two repositories sharing a short name under different owners do not
+/// collide. Falls back to the directory basename when there is no git remote
+/// (not a repository, or none configured), and to `None` when even that is
+/// unavailable, leaving the caller on [`crate::cli::DEFAULT_NAMESPACE`].
+///
+/// A `/` in the name is safe: the namespace is never used as a SQL identifier
+/// or a filename. Each namespace is backed by a generated `ns_<uuid>` schema
+/// token, and the user-facing name is only ever stored and matched as data
+/// via bound parameters.
+pub fn derive_namespace(root: &Path) -> Option<String> {
+    if let Some(remote) = detect_remote(root).as_deref().and_then(normalize_remote) {
+        // `normalize_remote` yields `host/owner/repo`; drop the host so the
+        // name reads as the project rather than where it happens to be hosted.
+        let without_host = remote.split_once('/').map(|(_, rest)| rest);
+        if let Some(path) = without_host.filter(|p| !p.is_empty()) {
+            return Some(path.to_string());
+        }
+        // A remote with a host but no path is not a useful name; fall through.
+    }
+
+    root.file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +332,93 @@ mod tests {
     fn detect_remote_none_outside_repo() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(detect_remote(dir.path()), None);
+    }
+}
+
+#[cfg(test)]
+mod derive_namespace_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    /// A directory with a git config declaring `remotes`, as `[name, url]`.
+    fn repo_with_remotes(remotes: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        let git = dir.path().join(".git");
+        fs::create_dir_all(&git).unwrap();
+        let mut config = String::from("[core]\n\trepositoryformatversion = 0\n");
+        for (name, url) in remotes {
+            config.push_str(&format!("[remote \"{name}\"]\n\turl = {url}\n"));
+        }
+        fs::write(git.join("config"), config).unwrap();
+        dir
+    }
+
+    #[test]
+    fn derives_owner_and_repo_from_origin() {
+        let dir = repo_with_remotes(&[("origin", "git@github.com:acme/widget.git")]);
+        assert_eq!(derive_namespace(dir.path()).as_deref(), Some("acme/widget"));
+    }
+
+    #[test]
+    fn host_is_dropped_so_clone_protocol_does_not_matter() {
+        // Every clone form of the same repo must derive the same namespace,
+        // or re-cloning over https would strand the index under a new name.
+        for url in [
+            "git@github.com:acme/widget.git",
+            "https://github.com/acme/widget.git",
+            "ssh://git@github.com:22/acme/widget",
+            "git://github.com/acme/widget.git",
+        ] {
+            let dir = repo_with_remotes(&[("origin", url)]);
+            assert_eq!(
+                derive_namespace(dir.path()).as_deref(),
+                Some("acme/widget"),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn derives_from_a_non_origin_remote_when_origin_is_absent() {
+        let dir = repo_with_remotes(&[("upstream", "git@gitlab.com:team/svc.git")]);
+        assert_eq!(derive_namespace(dir.path()).as_deref(), Some("team/svc"));
+    }
+
+    #[test]
+    fn same_repo_name_under_different_owners_does_not_collide() {
+        // The reason the owner is kept rather than using the bare repo name.
+        let a = repo_with_remotes(&[("origin", "git@github.com:one/api.git")]);
+        let b = repo_with_remotes(&[("origin", "git@github.com:two/api.git")]);
+        assert_ne!(derive_namespace(a.path()), derive_namespace(b.path()));
+    }
+
+    #[test]
+    fn falls_back_to_the_directory_basename_without_a_git_remote() {
+        let parent = tempdir().unwrap();
+        let repo = parent.path().join("standalone-project");
+        fs::create_dir_all(&repo).unwrap();
+        assert_eq!(
+            derive_namespace(&repo).as_deref(),
+            Some("standalone-project")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_basename_when_a_repo_has_no_remotes() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        fs::write(dir.path().join(".git/config"), "[core]\n").unwrap();
+        let expected = dir.path().file_name().unwrap().to_str().unwrap();
+        assert_eq!(derive_namespace(dir.path()).as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn derived_names_pass_namespace_validation() {
+        // A `/` is legal: the namespace is stored as data and backed by a
+        // generated `ns_<uuid>` schema token, never used as an identifier.
+        let dir = repo_with_remotes(&[("origin", "git@github.com:acme/widget.git")]);
+        let derived = derive_namespace(dir.path()).unwrap();
+        assert!(crate::cli::validate_namespace(&derived).is_ok());
     }
 }
