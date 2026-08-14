@@ -9,6 +9,7 @@
 //! Matching prefers the git remote (a stable, clone-independent key) and falls
 //! back to the canonical on-disk path.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::Duration;
@@ -202,4 +203,32 @@ fn find_namespace_config(
         Ok((Some(target), Some(model), Some(dims as usize)))
     })
     .ok()
+}
+
+/// Repository names grouped by namespace, read from the global `repositories`
+/// table.
+///
+/// Used by `codesearch namespaces` to show what each namespace contains.
+/// Opened read-only with the same retry as [`resolve`], and degrades to an
+/// empty map rather than failing: the namespace list is still useful without
+/// the repository breakdown.
+pub fn repositories_by_namespace(db_path: &Path) -> Option<HashMap<String, Vec<String>>> {
+    let conn = open_read_only_with_retry(db_path)?;
+    let mut stmt = conn
+        .prepare("SELECT namespace, name FROM repositories ORDER BY namespace, name")
+        .ok()?;
+    let rows = stmt
+        .query_map(params![], |row| {
+            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+        })
+        .ok()?;
+
+    let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
+    for row in rows.flatten() {
+        let (namespace, name) = row;
+        if let Some(ns) = namespace {
+            grouped.entry(ns).or_default().push(name);
+        }
+    }
+    Some(grouped)
 }

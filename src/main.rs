@@ -21,6 +21,65 @@ const DEFAULT_EMBEDDING_DIMENSIONS: usize = 384;
 /// JSON log file written inside the data directory (alongside `config.json`).
 const LOG_FILE: &str = "codesearch.log";
 
+/// Handle `codesearch namespaces`: enumerate every namespace with its
+/// embedding configuration and the repositories it contains.
+///
+/// Reads the global `namespace_config` and `repositories` tables directly, so
+/// no container is built and no embedding model is loaded. Succeeds with an
+/// empty list on a fresh install — callers use that as the signal that there
+/// is no namespace choice to make.
+fn list_namespaces(
+    db_path: &std::path::Path,
+    format: codesearch::cli::OutputFormatTextJson,
+) -> Result<String> {
+    use codesearch::cli::OutputFormatTextJson;
+
+    let namespaces = codesearch::DuckdbVectorRepository::list_namespaces(db_path)?;
+
+    // Repositories are stored globally with a `namespace` column, so one read
+    // groups them without opening each namespace's schema.
+    let repos_by_ns = codesearch::repositories_by_namespace(db_path).unwrap_or_default();
+
+    match format {
+        OutputFormatTextJson::Json => {
+            let payload: Vec<serde_json::Value> = namespaces
+                .iter()
+                .map(|ns| {
+                    serde_json::json!({
+                        "name": ns.name,
+                        "embedding_target": ns.embedding_target,
+                        "embedding_model": ns.embedding_model,
+                        "dimensions": ns.dimensions,
+                        "repositories": repos_by_ns.get(&ns.name).cloned().unwrap_or_default(),
+                    })
+                })
+                .collect();
+            Ok(serde_json::to_string_pretty(&payload)?)
+        }
+        OutputFormatTextJson::Text => {
+            if namespaces.is_empty() {
+                return Ok("No namespaces configured.".to_string());
+            }
+            let mut out = String::from("Namespaces:\n\n");
+            for ns in &namespaces {
+                out.push_str(&format!("  {}\n", ns.name));
+                out.push_str(&format!(
+                    "    Embeddings: {} ({}, {} dimensions)\n",
+                    ns.embedding_model, ns.embedding_target, ns.dimensions
+                ));
+                match repos_by_ns.get(&ns.name) {
+                    Some(repos) if !repos.is_empty() => {
+                        out.push_str(&format!("    Repositories: {}\n", repos.join(", ")));
+                    }
+                    _ => out.push_str("    Repositories: (none)\n"),
+                }
+                out.push('\n');
+            }
+            Ok(out)
+        }
+    }
+}
+
 /// Handle `codesearch create`: persist the namespace's embedding
 /// configuration without loading any embedding model.
 fn create_namespace(
@@ -313,6 +372,14 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // `namespaces` is a read-only survey of global tables — same reasoning as
+    // `create`: handle it before the container so no model is loaded.
+    if let Commands::Namespaces { format } = &cli.command {
+        let output = list_namespaces(&db_path, *format)?;
+        println!("{output}");
+        return Ok(());
+    }
+
     // `copilot` (login / models / status) only needs the data directory and the
     // `copilot` CLI — no index database, embeddings, or container. Handle it
     // before the container is built so it starts instantly and never loads ONNX.
@@ -353,16 +420,40 @@ async fn main() -> Result<()> {
                 Commands::Index { path, .. } => std::fs::canonicalize(path).ok(),
                 _ => std::env::current_dir().ok(),
             };
-            if let Some(ctx) =
-                repo_root.and_then(|root| codesearch::resolve_repo_context(&db_path, &root))
+            match repo_root
+                .as_ref()
+                .and_then(|root| codesearch::resolve_repo_context(&db_path, root))
             {
-                namespace = ctx.namespace.clone();
-                tracing::info!(
-                    "Using namespace '{}' (matched by {} for '{}') from indexed metadata",
-                    namespace,
-                    ctx.matched_by,
-                    ctx.repository_name
-                );
+                Some(ctx) => {
+                    namespace = ctx.namespace.clone();
+                    tracing::info!(
+                        "Using namespace '{}' (matched by {} for '{}') from indexed metadata",
+                        namespace,
+                        ctx.matched_by,
+                        ctx.repository_name
+                    );
+                }
+                // Not indexed yet. On a *first* index, derive a per-repo
+                // namespace instead of falling into the shared default: the
+                // choice is effectively immutable (a namespace's embedding
+                // model and dimensions are fixed by its first index), and
+                // unrelated repositories sharing one namespace dilute
+                // retrieval and reranking. Other commands keep the default —
+                // only indexing creates a namespace.
+                None => {
+                    if matches!(cli.command, Commands::Index { .. }) {
+                        if let Some(derived) = repo_root
+                            .as_deref()
+                            .and_then(codesearch::application::git_remote::derive_namespace)
+                        {
+                            namespace = derived;
+                            println!(
+                                "Indexing into namespace '{namespace}'.\n\
+                                 Use --namespace <name> to index into a shared namespace instead."
+                            );
+                        }
+                    }
+                }
             }
         }
 

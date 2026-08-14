@@ -241,6 +241,9 @@ impl<'a> Router<'a> {
             Commands::Create { .. } => Err(anyhow::anyhow!(
                 "create command is handled separately in main"
             )),
+            Commands::Namespaces { .. } => Err(anyhow::anyhow!(
+                "namespaces command is handled separately in main"
+            )),
             Commands::Mcp { .. } => {
                 Err(anyhow::anyhow!("MCP command is handled separately in main"))
             }

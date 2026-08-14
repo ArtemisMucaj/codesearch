@@ -362,7 +362,15 @@ pub enum Commands {
         no_embeddings: bool,
     },
 
-    /// Index a repository: parse, embed, and store its code for search
+    /// Index a repository: parse, embed, and store its code for search.
+    ///
+    /// On a repository's **first** index, the namespace is derived from its git
+    /// remote as `owner/repo` (falling back to the directory basename when
+    /// there is no remote) and created if needed, so unrelated repositories do
+    /// not share one index and dilute each other's search ranking. A repository
+    /// that is already indexed keeps its existing namespace — nothing is
+    /// migrated. Pass `--namespace` to deliberately share one namespace across
+    /// several repositories.
     Index {
         /// Path to the repository (or file) to index
         path: String,
@@ -404,6 +412,18 @@ pub enum Commands {
 
     /// List the repositories indexed in the current namespace
     List,
+
+    /// List every namespace in the database with its embedding configuration.
+    ///
+    /// Unlike `list`, which is scoped to the current namespace, this reads the
+    /// global `namespace_config` table, so a namespace created but never
+    /// indexed into is still reported. Succeeds with an empty list on a fresh
+    /// install.
+    Namespaces {
+        /// Output format: text or json.
+        #[arg(short = 'F', long, value_enum, default_value = "text")]
+        format: OutputFormatTextJson,
+    },
 
     /// Delete an indexed repository by its ID or path
     Delete {

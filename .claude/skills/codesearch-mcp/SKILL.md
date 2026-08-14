@@ -38,6 +38,31 @@ Follow these phases in order. Most tools take an optional repository argument;
 omit it to use the connected workspace's repository, and set it only when
 several repositories are indexed and you need to disambiguate.
 
+## Phase 0 — Is the repository indexed?
+
+Every tool below reads an existing index. If the repository has never been
+indexed, these tools return nothing — which reads exactly like "no matching
+code" and is easy to misread as a fact about the codebase.
+
+Indexing happens through the **CLI**, not MCP:
+
+```shell
+codesearch list          # already indexed? then skip this phase
+codesearch namespaces    # what namespaces exist
+codesearch index /path/to/repo
+```
+
+Two things matter before a first index:
+
+- **It creates a per-repo namespace** derived from the git remote. If other
+  namespaces already exist, ask the user which to use — the first index fixes
+  that namespace's embedding model and dimensions permanently.
+- **It is long-running.** A first index takes several minutes on a large repo.
+  Wait for it to finish; querying a half-built index gives empty or misleading
+  results. Subsequent indexes are incremental and fast.
+
+See the `codesearch-cli` skill (Phase 0) for the full first-index runbook.
+
 ## Phase 1 — Get the architecture overview
 
 Orient in the codebase before diving in. Start broad, then zoom in only if the
