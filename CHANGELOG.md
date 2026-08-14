@@ -22,6 +22,25 @@
 * unit tests for `InMemoryVectorRepository` hybrid paths: cosine vs RRF score ranges, dual-leg ranking, post-fusion `min_score` filtering, no early pruning, empty-term fallback, and limit enforcement
 * integration tests for end-to-end hybrid search: results returned with positive scores, keyword-matched chunk surfaces, special SQL characters (`%`, `_`, `!`) do not cause errors, and semantic-only baseline confirms the flag gates the BM25 leg
 
+## [2.4.0](https://github.com/ArtemisMucaj/codesearch/compare/v2.3.0...v2.4.0) (2026-08-14)
+
+
+### Features
+
+* **index:** derive a per-repo namespace on first index; add namespaces command ([#239](https://github.com/ArtemisMucaj/codesearch/issues/239)) ([8fd50ed](https://github.com/ArtemisMucaj/codesearch/commit/8fd50eda7cd9a977f32247b2771006e111a902c1)), closes [#232](https://github.com/ArtemisMucaj/codesearch/issues/232)
+* make explain concise and non-streaming ([#222](https://github.com/ArtemisMucaj/codesearch/issues/222)) ([2a5fe79](https://github.com/ArtemisMucaj/codesearch/commit/2a5fe79bf519c1bec9c0cc9bb3e296a2dca96603))
+
+
+### Bug Fixes
+
+* **clustering:** match kind_weight on ReferenceKind, not its string form ([#233](https://github.com/ArtemisMucaj/codesearch/issues/233)) ([a90dfe7](https://github.com/ArtemisMucaj/codesearch/commit/a90dfe72ab413028b3448ef910a00a0b6e5f8794)), closes [#226](https://github.com/ArtemisMucaj/codesearch/issues/226)
+* **impact:** distinguish an unresolved symbol from one with no callers ([#235](https://github.com/ArtemisMucaj/codesearch/issues/235)) ([d2f83bd](https://github.com/ArtemisMucaj/codesearch/commit/d2f83bdcdf16e4ec5c27735d99527f054e4b3901)), closes [#228](https://github.com/ArtemisMucaj/codesearch/issues/228)
+* **index:** stop deleting unreadable files from the index ([#234](https://github.com/ArtemisMucaj/codesearch/issues/234)) ([f591ab4](https://github.com/ArtemisMucaj/codesearch/commit/f591ab466b7c117a9d757edcd14fb68a803d118e)), closes [#227](https://github.com/ArtemisMucaj/codesearch/issues/227)
+* **scip:** treat ForwardDefinition as a definition, not a reference ([#236](https://github.com/ArtemisMucaj/codesearch/issues/236)) ([c8dbf9d](https://github.com/ArtemisMucaj/codesearch/commit/c8dbf9dabaff50b10300c0a76cfb11262d034f8a)), closes [#230](https://github.com/ArtemisMucaj/codesearch/issues/230)
+* **search:** stop RRF_MIN_SCORE deleting rank-0 results; apply test penalty once ([#238](https://github.com/ArtemisMucaj/codesearch/issues/238)) ([dc8c0c3](https://github.com/ArtemisMucaj/codesearch/commit/dc8c0c3acf4f9cadce7fdd9283683c070cba744d)), closes [#231](https://github.com/ArtemisMucaj/codesearch/issues/231)
+* **serve:** stop concurrent requests from re-naming the same communities ([#225](https://github.com/ArtemisMucaj/codesearch/issues/225)) ([4f2b5ae](https://github.com/ArtemisMucaj/codesearch/commit/4f2b5aee96011c5fe86456c66efec6792eeae33b))
+* **traversal:** walk only impact edges, not all twelve reference kinds ([#237](https://github.com/ArtemisMucaj/codesearch/issues/237)) ([f9cc818](https://github.com/ArtemisMucaj/codesearch/commit/f9cc81898fb9e942b9fb382bb1a17fffd933e703)), closes [#229](https://github.com/ArtemisMucaj/codesearch/issues/229)
+
 ## [2.3.0](https://github.com/ArtemisMucaj/codesearch/compare/v2.2.0...v2.3.0) (2026-08-10)
 
 
