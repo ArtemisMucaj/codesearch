@@ -10,7 +10,7 @@ use tracing::{info, warn};
 const MIN_RESULT_SCORE: f32 = 0.1;
 
 use crate::application::use_cases::graph_expansion::GraphExpansionUseCase;
-use crate::application::use_cases::rrf_fuse::rrf_fuse;
+use crate::application::use_cases::rrf_fuse::{apply_test_file_penalty, rrf_fuse};
 use crate::application::{EmbeddingService, QueryExpander, RerankingService, VectorRepository};
 use crate::domain::{DomainError, SearchQuery, SearchResult};
 
@@ -189,6 +189,12 @@ impl SearchCodeUseCase {
                 }
             }
         }
+
+        // Applied exactly once, after every fusion pass. Inside `rrf_fuse` it
+        // would compound on the graph-expansion path (×0.25 effective). Placed
+        // before reranking so the cross-encoder sees production code first
+        // while test hits remain in the candidate pool.
+        apply_test_file_penalty(&mut results);
 
         let mut reranked = false;
         if let Some(ref reranker) = self.reranking_service {
