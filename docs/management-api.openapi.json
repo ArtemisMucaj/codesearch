@@ -1091,6 +1091,53 @@
           }
         }
       }
+    },
+    "/api/llm/endpoints/{name}": {
+      "delete": {
+        "summary": "Remove a configured OpenAI-compatible LLM endpoint",
+        "description": "Also clears every reference to the endpoint: if it was the active one another registered endpoint is promoted (none if it was the last), and any per-usage binding naming it is dropped so that usage inherits the active endpoint again. A binding left behind would name a missing endpoint, which the resolver treats as unset while still reporting it as a deliberate choice.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Endpoint to remove"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Endpoint removed; the refreshed endpoint list is returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "active": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "Name of the active endpoint, null when none remain"
+                    },
+                    "endpoints": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No endpoint of that name is registered"
+          }
+        }
+      }
     }
   },
   "components": {

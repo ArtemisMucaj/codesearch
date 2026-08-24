@@ -251,6 +251,47 @@ pub async fn upsert_endpoint(
     list_endpoints(State(state)).await
 }
 
+/// `DELETE /api/llm/endpoints/{name}` — remove an endpoint.
+///
+/// Removing one has to clear every reference to it, not just the entry:
+/// `set_usage` already refuses to *create* a binding naming an unregistered
+/// endpoint ("the resolver treats a dangling name as unset and silently falls
+/// back, which reads as the setting being ignored"), and a delete that left
+/// bindings behind would reintroduce exactly that state from the other side.
+///
+/// So the active endpoint falls back to another registered one, and any usage
+/// bound to this endpoint is dropped entirely — dropping the whole binding
+/// rather than just its `endpoint` field, since a binding that kept its pinned
+/// `model` would apply that model to whichever endpoint it inherits next.
+pub async fn delete_endpoint(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<EndpointsResponse>> {
+    let data_dir = state.container.data_dir().to_string();
+    let mut cfg = CodesearchConfig::load_async(&data_dir).await?;
+
+    let openai = cfg.openai_mut();
+    if openai.endpoints.remove(&name).is_none() {
+        return Err(ApiError::not_found(format!(
+            "no LLM endpoint named '{name}'"
+        )));
+    }
+
+    // Promote another endpoint rather than leaving `active` naming the one just
+    // removed. BTreeMap iteration is ordered, so the choice is deterministic.
+    if openai.active.as_deref() == Some(name.as_str()) {
+        openai.active = openai.endpoints.keys().next().cloned();
+    }
+
+    // Usages bound to it fall back to inheriting the active endpoint.
+    cfg.usages
+        .retain(|_, binding| binding.endpoint.as_deref() != Some(name.as_str()));
+
+    cfg.save_async(&data_dir).await?;
+
+    list_endpoints(State(state)).await
+}
+
 /// Request body for `POST /api/llm/active`.
 #[derive(Debug, Deserialize)]
 pub struct SetActiveRequest {
