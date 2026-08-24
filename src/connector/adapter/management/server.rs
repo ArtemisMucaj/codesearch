@@ -114,7 +114,8 @@ pub fn routes(state: AppState) -> Router {
         .route("/api/llm/endpoints", get(handlers::llm::list_endpoints))
         .route(
             "/api/llm/endpoints/{name}",
-            axum::routing::put(handlers::llm::upsert_endpoint),
+            axum::routing::put(handlers::llm::upsert_endpoint)
+                .delete(handlers::llm::delete_endpoint),
         )
         .route("/api/llm/active", post(handlers::llm::set_active_endpoint))
         // Per-usage model selection: each LLM job can name its own backend +

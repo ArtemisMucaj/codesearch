@@ -975,3 +975,164 @@ async fn index_stream_rejects_an_invalid_namespace() {
 
     server.abort();
 }
+
+/// Adding an endpoint and removing it again round-trips through the API, and
+/// the removal reports the refreshed list rather than making the client re-read.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_an_llm_endpoint_removes_it_from_the_list() {
+    let (base_url, server, _dir) = spawn_management_server().await;
+    let client = reqwest::Client::new();
+
+    client
+        .put(format!("{base_url}/api/llm/endpoints/alpha"))
+        .json(&serde_json::json!({ "base_url": "http://127.0.0.1:9/v1" }))
+        .send()
+        .await
+        .expect("request to PUT /api/llm/endpoints/alpha failed");
+
+    let resp = client
+        .delete(format!("{base_url}/api/llm/endpoints/alpha"))
+        .send()
+        .await
+        .expect("request to DELETE /api/llm/endpoints/alpha failed");
+
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    let body: serde_json::Value = resp.json().await.expect("response body was not JSON");
+    assert_eq!(
+        body["endpoints"].as_array().map(Vec::len),
+        Some(0),
+        "the deleted endpoint must be gone from the returned list, got: {body}"
+    );
+
+    server.abort();
+}
+
+/// Removing the active endpoint promotes another registered one, and removing
+/// the last leaves nothing active — `active` must never name a missing endpoint.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_the_active_llm_endpoint_promotes_another() {
+    let (base_url, server, _dir) = spawn_management_server().await;
+    let client = reqwest::Client::new();
+
+    for name in ["alpha", "beta"] {
+        client
+            .put(format!("{base_url}/api/llm/endpoints/{name}"))
+            .json(&serde_json::json!({ "base_url": "http://127.0.0.1:9/v1" }))
+            .send()
+            .await
+            .expect("failed to register an endpoint");
+    }
+
+    // The first endpoint registered becomes active, so deleting it is the case
+    // that would otherwise leave `active` dangling.
+    let body: serde_json::Value = client
+        .delete(format!("{base_url}/api/llm/endpoints/alpha"))
+        .send()
+        .await
+        .expect("request to DELETE /api/llm/endpoints/alpha failed")
+        .json()
+        .await
+        .expect("response body was not JSON");
+
+    assert_eq!(
+        body["active"], "beta",
+        "the surviving endpoint must be promoted, got: {body}"
+    );
+
+    let body: serde_json::Value = client
+        .delete(format!("{base_url}/api/llm/endpoints/beta"))
+        .send()
+        .await
+        .expect("request to DELETE /api/llm/endpoints/beta failed")
+        .json()
+        .await
+        .expect("response body was not JSON");
+
+    assert!(
+        body["active"].is_null(),
+        "removing the last endpoint must leave nothing active, got: {body}"
+    );
+
+    server.abort();
+}
+
+/// A usage bound to a removed endpoint goes back to inheriting the active one.
+/// Leaving the binding would name an endpoint that no longer exists, which the
+/// resolver treats as unset while still reporting `inherited: false` — a
+/// deliberate-looking choice pointing at nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_an_llm_endpoint_clears_usages_bound_to_it() {
+    let (base_url, server, _dir) = spawn_management_server().await;
+    let client = reqwest::Client::new();
+
+    for name in ["alpha", "beta"] {
+        client
+            .put(format!("{base_url}/api/llm/endpoints/{name}"))
+            .json(&serde_json::json!({ "base_url": "http://127.0.0.1:9/v1" }))
+            .send()
+            .await
+            .expect("failed to register an endpoint");
+    }
+
+    client
+        .put(format!("{base_url}/api/llm/usages/explain_code"))
+        .json(&serde_json::json!({ "endpoint": "alpha", "model": "m-alpha" }))
+        .send()
+        .await
+        .expect("request to PUT /api/llm/usages/explain_code failed");
+
+    client
+        .delete(format!("{base_url}/api/llm/endpoints/alpha"))
+        .send()
+        .await
+        .expect("request to DELETE /api/llm/endpoints/alpha failed");
+
+    let body: serde_json::Value = client
+        .get(format!("{base_url}/api/llm/usages"))
+        .send()
+        .await
+        .expect("request to /api/llm/usages failed")
+        .json()
+        .await
+        .expect("response body was not JSON");
+
+    let explain = body["usages"]
+        .as_array()
+        .expect("usages must be an array")
+        .iter()
+        .find(|u| u["id"] == "explain_code")
+        .expect("explain_code must be listed");
+
+    assert_ne!(
+        explain["endpoint"], "alpha",
+        "a usage must not keep naming a removed endpoint, got: {explain}"
+    );
+    assert_eq!(
+        explain["inherited"], true,
+        "the binding must be cleared so the usage inherits the active endpoint, got: {explain}"
+    );
+    assert_ne!(
+        explain["model"], "m-alpha",
+        "the pinned model must go with the binding, got: {explain}"
+    );
+
+    server.abort();
+}
+
+/// Removing an endpoint that was never registered is a 404, matching what
+/// `PUT /api/llm/usages/{id}` reports for the same unknown name.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_an_unknown_llm_endpoint_is_not_found() {
+    let (base_url, server, _dir) = spawn_management_server().await;
+
+    let resp = reqwest::Client::new()
+        .delete(format!("{base_url}/api/llm/endpoints/nope"))
+        .send()
+        .await
+        .expect("request to DELETE /api/llm/endpoints/nope failed");
+
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    server.abort();
+}
